@@ -1,4 +1,4 @@
-// covers: cli/src/run.ts cli/src/commands.ts cli/src/auth.ts
+// covers: cli/src/run.ts cli/src/commands.ts cli/src/auth.ts mcp/src/server.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, statSync } from "node:fs";
 import { createServer, type RequestListener, type Server } from "node:http";
@@ -170,4 +170,16 @@ test("auth login signs in on the organization's own login, and the token is kept
   const after = io();
   assert.equal(await runCli(cli, ["my-orders", "--json"], after.channel), 0);
   assert.deepEqual(JSON.parse(after.out), { for: "user-7" });
+});
+
+// Tool argument tests cannot prove that the server receives CLI metadata outside arguments.
+test("CLI tool calls identify their command and send distinct idempotency keys", async () => {
+  const events: any[] = [];
+  const cli = acme(await serve({ tools: [listOrders, getOrder], events: [e => { events.push(e); }] }));
+  assert.equal(await runCli(cli, ["order", "view", "BL-1042", "--json"], io().channel), 0);
+  const start = events.find(e => e.type === "tool.start");
+  assert.equal(start.surface, "cli");
+  assert.equal(start.command, "order view");
+  assert.equal(start.client, "acme-cli");
+  assert.deepEqual(start.input, { order_id: "BL-1042" });
 });

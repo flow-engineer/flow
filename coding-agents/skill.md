@@ -447,3 +447,13 @@ skills outside those source paths.
 Formats checked 18 October 2026: [Agent Plugins 1.0.0](https://agent-plugins.org/specification),
 [OpenAI plugin packaging](https://developers.openai.com/plugins/build/plugins), and
 [Claude Code plugin reference](https://code.claude.com/docs/en/plugins-reference).
+
+MCP calls emit `tool.start`/`tool.end` with surface (`mcp`, `mcp-plugin`, `cli`), client name
+and version, session, person, duration, outcome and error. CLI calls send command and an
+idempotency key in `_meta`; a caller can reuse its key on a retry. `defineCli`'s `version`
+sets its client version (default `"1"`). Neither CLI arguments nor trace credentials go in `_meta`.
+`mcpServer` uses `CHINWAG_TRACES_*`, like chat agents, or explicit `traces` options;
+`traces: false` disables export without disabling your event sinks. `await handle.flushTraces()`
+flushes its bounded background queue. Each tool call is a root trace without a conversation;
+arguments and results require `CHINWAG_TRACES_CONTENT=1`. Legacy clients' initialization
+metadata is retained for up to 24 hours in at most 4,096 sessions; bearer tokens are never cached.

@@ -6,6 +6,7 @@
 // overwrite, and fixed exit codes. The commands come from the server's tools at run time, shaped by
 // the CLI file (commands.ts).
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { Client, InsufficientScopeError, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider } from "@modelcontextprotocol/client";
@@ -16,6 +17,7 @@ import {
   commandTable,
   flagKind,
   flagName,
+  findCommand,
   isCustom,
   skillFile,
   tokenEnvOf,
@@ -77,6 +79,10 @@ function connectionFlags(argv: string[]): { rest: string[]; server?: string; tok
   return { rest, server: found.server, token: found.token };
 }
 
+function callMeta(config: CliConfig, command: string): Record<string, string> {
+  return { "chinwag/surface": "cli", "chinwag/command": command, "chinwag/client-version": config.version ?? "1", "chinwag/idempotency-key": randomUUID() };
+}
+
 function envName(config: CliConfig, suffix: string): string {
   return `${config.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_${suffix}`;
 }
@@ -120,7 +126,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
     cli: {
       call: async (tool, input) => {
         if (!client) throw new CliExit(EXIT.unreachable, noServer(config));
-        return valueOf(await client.callTool({ name: tool, arguments: input }));
+        return valueOf(await client.callTool({ name: tool, arguments: input, _meta: callMeta(config, findCommand(commandTable(config, tools), rest)?.command.words.join(" ") ?? "custom") }));
       },
       print: (value, options = {}) => io.write(`${render(value, options)}\n`),
     },
@@ -161,7 +167,7 @@ function wordsKnown(words: string[], config: CliConfig, tools: ToolInfo[]): stri
 
 async function connect(config: CliConfig, server: string, token: string | undefined): Promise<Client> {
   const provider: AuthProvider | OAuthClientProvider | undefined = token ? { token: async () => token } : isSignedIn(config, server) ? storedProvider(config, server) : undefined;
-  const client = new Client({ name: `${config.name}-cli`, version: "1" });
+  const client = new Client({ name: `${config.name}-cli`, version: config.version ?? "1" });
   await client.connect(new StreamableHTTPClientTransport(new URL(server), provider ? { authProvider: provider } : {}));
   return client;
 }
@@ -282,7 +288,7 @@ function toolCommand(config: CliConfig, c: Command, client: Client | undefined, 
         if (!(await io.confirm(`${usage} may delete or overwrite. Go ahead?`))) throw new CliExit(EXIT.approval, "Stopped; nothing was sent.");
       }
       if (!client) throw new CliExit(EXIT.unreachable, noServer(config));
-      const result = await client.callTool({ name: tool.name, arguments: input }).catch((error: unknown) => {
+      const result = await client.callTool({ name: tool.name, arguments: input, _meta: callMeta(config, c.words.join(" ")) }).catch((error: unknown) => {
         throw needsSignIn(error) ? explain(config, "", error) : error;
       });
       if (result.isError) throw new CliExit(EXIT.failed, textOf(result.content as Block[]) || `${tool.name} failed.`);

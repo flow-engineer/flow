@@ -43,6 +43,8 @@ export type CommandConfig = ToolCommand | CustomCommand;
 export interface CliConfig {
   /** The command's name ("acme"): its help, its config folder (~/.config/<name>) and token variable. */
   name: string;
+  /** The CLI client version sent to the server (default "1"). */
+  version?: string;
   /** The organization's MCP endpoint. Else `--server` or <NAME>_SERVER. */
   server?: string;
   /** The variable a token is read from for CI and agents (default <NAME>_TOKEN). */

@@ -24,6 +24,7 @@ import {
 } from "@modelcontextprotocol/server";
 import { emitter, type EventSink } from "../../src/events.ts";
 import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, type AgentFiles } from "../../src/skills.ts";
+import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
 import { render, type Tool, type ToolContext } from "../../src/tools.ts";
 import { describe, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
 
@@ -67,6 +68,8 @@ export interface McpServerOptions {
   /** Add your own handlers (resources, prompts, ...) to each server the SDK makes; one level down. */
   extend?: (server: Server) => void;
   events?: EventSink[];
+  /** Traces from CHINWAG_TRACES_* by default; false disables them. */
+  traces?: TracesOptions | false;
 }
 
 export interface McpServerHandle {
@@ -78,6 +81,8 @@ export interface McpServerHandle {
   descriptors: McpToolDescriptor[];
   /** The tools-only plugin endpoint, unless disabled. */
   plugin?: { path: string; descriptors: McpToolDescriptor[] };
+  /** Wait for calls queued for tracing, for shutdown or short-lived servers. */
+  flushTraces(): Promise<void>;
 }
 
 const LOCAL = new Set(localhostAllowedHostnames());
@@ -98,13 +103,18 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   }
   if (pluginPath === path) throw new Error("chinwag/mcp: plugin and standalone paths must differ");
   const pluginDescriptors = descriptors.slice(0, options.tools.length);
-  const emit = emitter(options.events ?? []);
+  const traceOptions = options.traces === false ? undefined : options.traces ?? tracesFromEnv();
+  const trace = traceOptions ? traces(traceOptions, { service: options.name, kindOf: () => undefined }) : undefined;
+  const emit = emitter([...(options.events ?? []), ...(trace ? [trace.sink] : [])]);
 
+  // Legacy HTTP carries clientInfo only on initialize. Keep bounded metadata, never auth.
+  const sessions = new Map<string, { client: { name: string; version: string }; path: string; at: number }>();
+  const SESSION_TTL = 24 * 60 * 60 * 1000;
   function endpointHandler(plugin: boolean) {
     const instructions = options.instructions ?? (plugin ? "" : mcpInstructions(skills));
     const listed = plugin ? pluginDescriptors : descriptors;
     const available = plugin ? new Map(options.tools.map((t) => [t.name, t])) : byName;
-    return createMcpHandler(() => {
+    return createMcpHandler(({ requestInfo }) => {
     const server = new Server({ name: options.name, version: options.version }, { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) });
     server.setRequestHandler("tools/list", async () => ({ tools: listed }));
     server.setRequestHandler("tools/call", async (request, ctx) => {
@@ -114,20 +124,32 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
       if (!parsed.success) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Invalid arguments for ${t.name}: ${parsed.error.message}`);
       const identity = identityOf(ctx.http?.authInfo);
       const person = identity ? `key:${identity.key}` : "mcp:anonymous";
+      const meta = ctx.mcpReq._meta ?? {};
+      const sentKey = meta["chinwag/idempotency-key"];
+      const session = requestInfo?.headers.get("mcp-session-id") ?? undefined;
+      const host = server.getClientVersion() ?? (session ? sessions.get(session)?.client : undefined);
+      const detail = {
+        surface: meta["chinwag/surface"] === "cli" ? "cli" : plugin ? "mcp-plugin" : "mcp",
+        client: host?.name,
+        clientVersion: host?.version,
+        session: ctx.sessionId ?? session,
+        person,
+        command: typeof meta["chinwag/command"] === "string" ? meta["chinwag/command"] : undefined,
+      };
       const context: ToolContext = {
         conversationId: `mcp:${person}`,
         person,
         key: identity?.key ?? null,
         channel: "mcp",
         callId: randomUUID(),
-        // MCP has no turns: a retry by the host is a new request, so the key is per call.
-        idempotencyKey: randomUUID(),
+        // CLI retries can preserve a call key; other hosts get one per request.
+        idempotencyKey: typeof sentKey === "string" && sentKey.length > 0 && sentKey.length <= 256 ? sentKey : randomUUID(),
         signal: ctx.mcpReq?.signal ?? new AbortController().signal,
       };
       const started = Date.now();
-      emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input: parsed.data, surface: plugin ? "mcp-plugin" : "mcp" });
+      emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input: parsed.data, ...detail });
       const result = await callTool(t, parsed.data, context);
-      emit(context.conversationId, "tool.end", { callId: context.callId, tool: t.name, ms: Date.now() - started, ok: !result.isError, surface: plugin ? "mcp-plugin" : "mcp" });
+      emit(context.conversationId, "tool.end", { callId: context.callId, tool: t.name, ms: Date.now() - started, ok: !result.isError, output: result.structuredContent ?? result.content, error: result.isError ? result.content.filter(c => c.type === "text").map(c => c.text).join("\n") : undefined, ...detail });
       return result;
     });
     options.extend?.(server);
@@ -159,6 +181,9 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         : undefined;
     if (rejected) return rejected;
 
+    for (const [id, saved] of sessions) if (Date.now() - saved.at > SESSION_TTL) sessions.delete(id);
+    const session = request.headers.get("mcp-session-id");
+    if (session && sessions.get(session)?.path !== servedPath) return new Response("Session not found", { status: 404 });
     let authInfo: AuthInfo | undefined;
     const bearer = /^Bearer\s+(.+)$/i.exec(request.headers.get("authorization") ?? "")?.[1];
     if (options.auth && bearer) {
@@ -189,7 +214,24 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         }
       }
     }
-    return (plugin ? pluginHandler! : handler).fetch(request, { authInfo, parsedBody });
+    if (request.method === "DELETE" && session) {
+      sessions.delete(session);
+      return new Response(null, { status: 200 });
+    }
+    const response = await (plugin ? pluginHandler! : handler).fetch(request, { authInfo, parsedBody });
+    const init = parsedBody as { method?: string; params?: { clientInfo?: { name?: unknown; version?: unknown } } } | undefined;
+    if (response.ok && init?.method === "initialize") {
+      const client = init.params?.clientInfo;
+      if (typeof client?.name === "string" && typeof client.version === "string") {
+        const id = randomUUID();
+        sessions.set(id, { client: { name: client.name.slice(0, 256), version: client.version.slice(0, 256) }, path: servedPath, at: Date.now() });
+        if (sessions.size > 4096) sessions.delete(sessions.keys().next().value!);
+        const headers = new Headers(response.headers);
+        headers.set("mcp-session-id", id);
+        return new Response(response.body, { status: response.status, headers });
+      }
+    }
+    return response;
   }
 
   function resourceOf(url: URL, servedPath: string): string {
@@ -210,6 +252,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     fetch: serve,
     node: (req, res) => serveNode(serve, req, res),
     descriptors,
+    flushTraces: () => trace?.flush() ?? Promise.resolve(),
     ...(pluginPath ? { plugin: { path: pluginPath, descriptors: pluginDescriptors } } : {}),
   };
 }
