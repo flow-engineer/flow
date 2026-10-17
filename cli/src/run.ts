@@ -6,6 +6,7 @@
 // overwrite, and fixed exit codes. The commands come from the server's tools at run time, shaped by
 // the CLI file (commands.ts).
 
+import { runTerminal } from "./terminal.ts";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
@@ -38,6 +39,8 @@ export interface CliIO {
   writeError(text: string): void;
   /** Whether a person is at a terminal to answer a question. */
   interactive: boolean;
+  /** Lines from an interactive terminal; injectable for embedded CLIs and tests. */
+  lines?: () => AsyncIterable<string>;
   /** Ask a yes-or-no question (only when interactive). */
   confirm(question: string): Promise<boolean>;
 }
@@ -47,6 +50,10 @@ export function processIO(): CliIO {
     write: (text) => void process.stdout.write(text),
     writeError: (text) => void process.stderr.write(text),
     interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    async *lines() {
+      const rl = createInterface({ input: process.stdin, output: process.stderr });
+      try { for await (const line of rl) yield line; } finally { rl.close(); }
+    },
     async confirm(question) {
       const rl = createInterface({ input: process.stdin, output: process.stderr });
       try {
@@ -97,6 +104,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
   const { rest, server: given, token: givenToken } = connectionFlags(argv);
   const server = given ?? config.server ?? process.env[envName(config, "SERVER")];
   const token = givenToken ?? process.env[tokenEnvOf(config)];
+  if ((rest[0] === "ask" || rest[0] === "chat") && !config.commands?.[rest[0]]) return runTerminal(config, server, token, rest, io);
   const asksHelp = rest.length === 0 || rest[0] === "-h" || rest[0] === "--help";
 
   let client: Client | undefined;
@@ -238,7 +246,10 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
   for (const word of BUILT_IN) if (top[word]) throw new Error(`${config.name}: "${word}" is the CLI's own command; name yours something else.`);
   const notice = server ? `Server: ${server}` : noServer(config);
   return buildRouteMap({
-    routes: { ...top, tools: toolsCommand(tools, io), skill: skillCommand(config, tools, io), auth: authRoutes(config, server, io) },
+    routes: { ...top,
+      ask: top.ask ?? buildCommand({ docs: { brief: "Ask the agent one question (ask --help)" }, parameters: {}, func() {} }),
+      chat: top.chat ?? buildCommand({ docs: { brief: "Chat with the agent in a terminal (chat --help)" }, parameters: {}, func() {} }),
+      tools: toolsCommand(tools, io), skill: skillCommand(config, tools, io), auth: authRoutes(config, server, io) },
     docs: { brief: config.description ?? config.name, fullDescription: `${config.description ?? config.name}\n\n${notice}\n--server <url> and --token <token> work on every command.` },
   });
 }

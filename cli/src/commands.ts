@@ -47,6 +47,8 @@ export interface CliConfig {
   version?: string;
   /** The organization's MCP endpoint. Else `--server` or <NAME>_SERVER. */
   server?: string;
+  /** The agent terminal URL; default the server origin plus /agent/terminal. */
+  agent?: string;
   /** The variable a token is read from for CI and agents (default <NAME>_TOKEN). */
   tokenEnv?: string;
   description?: string;
@@ -212,6 +214,11 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     `Sign in once with \`${name} auth login\`, or set ${tokenEnvOf(config)} in CI.`,
     "",
     "Exit codes: 0 done, 1 the tool failed (its message on stderr), 2 wrong command or arguments, 3 sign-in needed, 4 needs --yes, 5 the server could not be reached.",
+    "",
+    "## Talking to the agent",
+    "",
+    `\`${name} ask "<question>" --json\` sends one message to the agent; \`${name} chat\` opens an interactive loop (Ctrl-D or /exit to leave). Both need sign-in.`,
+    "The CLI keeps its conversation reference in chat.json in its config folder; --new forgets that reference and preserves shared person history. chat without a terminal exits 2: use ask instead.",
     "",
     "## Commands",
   ];

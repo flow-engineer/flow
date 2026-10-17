@@ -457,3 +457,31 @@ sets its client version (default `"1"`). Neither CLI arguments nor trace credent
 flushes its bounded background queue. Each tool call is a root trace without a conversation;
 arguments and results require `CHINWAG_TRACES_CONTENT=1`. Legacy clients' initialization
 metadata is retained for up to 24 hours in at most 4,096 sessions; bearer tokens are never cached.
+
+### Terminal conversations
+
+`ask` and `chat` talk directly to the agent, using the same bearer as MCP, not a tool called
+"ask". `defineCli({ name: "acme", server, agent: "https://agent.example.com/agent/terminal" })`
+overrides the terminal URL; the default is the MCP server's origin plus `/agent/terminal`.
+`acme ask "Which orders are ready?" --json` prints one response; `acme chat` reads a TTY until
+Ctrl-D or `/exit`. Without a TTY use `ask` (chat exits 2); sign-in failures exit 3.
+`chat.json` is mode 600 and scoped by terminal endpoint. `--new` forgets the terminal's saved
+reference; the agent keeps its one-person history across channels. It does not erase a person's
+WhatsApp history. Teams can replace either command with their own Stricli command in `commands`.
+
+Mount the optional terminal handler beside MCP (no model or extra dependency in the CLI):
+
+```ts
+import { terminalServer } from "chinwag/mcp";
+const terminal = terminalServer({ agent: () => agent, auth });
+const agent = createAgent({ ...options, channels: [...channels, terminal.channel] });
+// Route terminal.path to terminal.fetch(request), and MCP's paths to mcp.fetch(request).
+```
+
+`terminalServer` accepts `path` and `channel` overrides. It verifies auth on every POST,
+serializes concurrent requests per person, and returns `{ conversationId, replies }` after the
+turn settles. The authenticated key becomes the same person that `resolve` returns on other
+channels. A body cannot choose its own person; a conversation reference from another person is
+refused. Its custom UI uses Markdown and exports turns as channel `cli`.
+For your own HTTP adapters, `agent.request({ channel, key, text, conversationId? })` exposes this
+without the handler. Supply a verified key and serialize calls for that channel and person.

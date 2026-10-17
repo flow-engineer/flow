@@ -19,6 +19,8 @@ export interface Channel {
   /** The agent's name for it; its send tool is always send_<name> (lowercase, other characters as _). "key" and "phone" are reserved. */
   name: string;
   kind: ChannelKind;
+  /** Override the trace channel classification, e.g. a terminal custom UI as cli. */
+  traceChannel?: string;
   info: ChannelInfo;
   /** Addresses are phone numbers the channel verified, so the same number on two channels is one person. */
   phone?: boolean;

@@ -1,4 +1,4 @@
-// covers: cli/src/run.ts cli/src/commands.ts cli/src/auth.ts mcp/src/server.ts
+// covers: cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/agent.ts src/channels.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, statSync } from "node:fs";
 import { createServer, type RequestListener, type Server } from "node:http";
@@ -7,8 +7,9 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { z } from "zod";
 import { defineCli, runCli, type CliConfig, type CliIO } from "../cli/src/index.ts";
-import { mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
-import { tool } from "../src/index.ts";
+import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
+import { scriptedModel, respond, call } from "./helpers.ts";
+import { createAgent, tool } from "../src/index.ts";
 
 const servers: Server[] = [];
 after(() => servers.forEach((s) => s.close()));
@@ -173,7 +174,7 @@ test("auth login signs in on the organization's own login, and the token is kept
 });
 
 // Tool argument tests cannot prove that the server receives CLI metadata outside arguments.
-test("CLI tool calls identify their command and send distinct idempotency keys", async () => {
+test("CLI tool calls identify their command without adding metadata to tool arguments", async () => {
   const events: any[] = [];
   const cli = acme(await serve({ tools: [listOrders, getOrder], events: [e => { events.push(e); }] }));
   assert.equal(await runCli(cli, ["order", "view", "BL-1042", "--json"], io().channel), 0);
@@ -182,4 +183,47 @@ test("CLI tool calls identify their command and send distinct idempotency keys",
   assert.equal(start.command, "order view");
   assert.equal(start.client, "acme-cli");
   assert.deepEqual(start.input, { order_id: "BL-1042" });
+});
+
+// MCP command tests never speak to an agent, so they cannot check auth, identity or chat state.
+test("ask and chat use the authenticated agent terminal, preserve identity and never call MCP", async (t) => {
+  const old = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "chinwag-terminal-"));
+  t.after(() => { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; });
+  const scripted = scriptedModel();
+  let agent: ReturnType<typeof createAgent>;
+  const terminal = terminalServer({ agent: () => agent, auth: { verify: token => token === "test" ? { key: "user-7" } : null } });
+  let seenKey: string | null = null;
+  const mine = tool({ name: "mine", description: "Who this is for.", input: z.object({}), run: (_i, ctx) => { seenKey = ctx.key; return "the test person's orders"; } });
+  agent = createAgent({ files: { "AGENTS.md": "Test agent" }, model: scripted.model, channels: [terminal.channel], tools: [mine], debounceMs: 0, scheduleCheckMs: 0 });
+  const base = await listen(async (req, res) => {
+    assert.equal(req.url, "/agent/terminal", "ask/chat must not fetch the MCP tools");
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    const result = await terminal.fetch(new Request(`${base}${req.url}`, { method: req.method, headers: req.headers as Record<string, string>, body: Buffer.concat(chunks) }));
+    res.writeHead(result.status, Object.fromEntries(result.headers)).end(await result.text());
+  });
+  const cli = defineCli({ name: "terminal-test", server: `${base}/mcp` });
+  const refused = io();
+  assert.equal(await runCli(cli, ["chat"], refused.channel), 2);
+  assert.match(refused.err, /use terminal-test ask/);
+  assert.equal(await runCli(cli, ["ask", "who am I?"], io().channel), 3);
+  const out = io();
+  const ask = runCli(cli, ["ask", "who am I?", "--json", "--token", "test"], out.channel);
+  (await Promise.race([scripted.nextCall(0), ask.then(code => { throw new Error(`ask finished before model call: ${code} ${out.err}`); })])).answer(respond(call("send_terminal", { text: "Checking." }), call("mine", {})));
+  (await scripted.nextCall(1)).answer(respond(call("send_terminal", { text: "Here are your orders." })));
+  assert.equal(await ask, 0);
+  assert.equal(seenKey, "user-7");
+  const first = JSON.parse(out.out);
+  assert.equal(first.replies.filter((r: any) => r.type === "message").at(-1).text, "Here are your orders.");
+  const interactive = io(true);
+  interactive.channel.lines = async function* () { yield "one"; yield "two"; yield "three"; yield "/exit"; };
+  const chat = runCli(cli, ["chat", "--json", "--token", "test"], interactive.channel);
+  for (let n = 0; n < 3; n++) (await scripted.nextCall(n + 2)).answer(respond(call("send_terminal", { text: `reply ${n}` })));
+  assert.equal(await chat, 0);
+  assert.deepEqual(interactive.out.trim().split("\n").map(line => JSON.parse(line).conversationId), [first.conversationId, first.conversationId, first.conversationId]);
+  assert.equal(statSync(join(process.env.XDG_CONFIG_HOME!, "terminal-test/chat.json")).mode & 0o777, 0o600);
+  const other = await terminal.fetch(new Request(`${base}/agent/terminal`, { method: "POST", headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ text: "stolen", conversationId: "another-person" }) }));
+  assert.equal(other.status, 500);
+  assert.match((await terminal.fetch(new Request(`${base}/agent/terminal`, { method: "POST" }))).status.toString(), /401/);
 });

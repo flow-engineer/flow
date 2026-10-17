@@ -284,6 +284,7 @@ export class Agent {
   /** Conversations in the store, known once resume() ran. */
   private readonly rows = new Map<string, ConversationRow>();
   private resumed = false;
+  private readonly requestReplies = new Map<string, Deliver>();
   private readonly arriving = new Map<string, Promise<unknown>>();
   /** Callers waiting for a queued nudge to settle: its first call, and any with the same key. */
   private readonly nudgeWaiters = new Map<string, Array<(result: NudgeState) => void>>();
@@ -315,7 +316,7 @@ export class Agent {
     if (options.defaultCountryCode !== undefined && !/^\+?[1-9]\d{0,2}$/.test(options.defaultCountryCode.trim())) throw new Error(`chinwag: defaultCountryCode is a calling code such as "+91", not "${options.defaultCountryCode}"`);
     this.countryCode = options.defaultCountryCode?.trim().replace(/^\+/, "");
     const tracing = options.traces ?? tracesFromEnv();
-    this.traces = tracing ? traces(tracing, { service: options.id ?? "chinwag", kindOf: (name) => this.channelsByName.get(name)?.kind }) : null;
+    this.traces = tracing ? traces(tracing, { service: options.id ?? "chinwag", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind }) : null;
     const sinks = [...(options.events ?? []), ...(this.traces ? [this.traces.sink] : [])];
     const emit = emitter(sinks);
     if ((options.dir === undefined) === (options.files === undefined)) throw new Error("chinwag: give an agent exactly one of dir or files");
@@ -382,6 +383,26 @@ export class Agent {
    */
   async message(input: { channel: string; from: string; message: string | Incoming; messageId?: string }): Promise<{ conversationId: string; messageId: string } | null> {
     return this.released(await this.take(this.channelOf(input.channel), { ...input, via: "provider" }));
+  }
+
+  /**
+   * A signed-in HTTP channel's request. `key` must come from verified auth, never the body.
+   * Uses the same person as resolve() on other channels. The caller serializes requests per key.
+   */
+  async request(input: { channel: string; key: string; text: string; conversationId?: string }): Promise<{ conversationId: string; replies: Outbound[] }> {
+    await this.settings.ready;
+    const adapter = this.channelOf(input.channel);
+    if (adapter.kind !== "custom") throw new Error("chinwag: request needs a custom UI channel");
+    const identity = await this.conversationFor(adapter, input.channel, input.key, undefined, input.key);
+    if (input.conversationId && input.conversationId !== identity.conversationId) throw new Error("chinwag: conversation does not belong to this person");
+    const replies: Outbound[] = [];
+    const address = viaKey(input.channel, input.key);
+    this.requestReplies.set(address, (reply) => { replies.push(reply); });
+    try {
+      await this.released(await this.take(adapter, { channel: input.channel, from: input.key, message: input.text, via: "provider", verifiedKey: input.key }));
+      await this.conversation(identity.conversationId)?.whenIdle();
+      return { conversationId: identity.conversationId, replies };
+    } finally { this.requestReplies.delete(address); }
   }
 
   /**
@@ -497,7 +518,7 @@ export class Agent {
 
   private async arrive(adapter: Channel, input: Arrival) {
     await this.settings.ready;
-    const identity = await this.conversationFor(adapter, input.channel, input.from, input.person);
+    const identity = await this.conversationFor(adapter, input.channel, input.from, input.person, input.verifiedKey);
     const conversationId = identity.conversationId;
     if (input.messageId !== undefined && (await this.store.inboundTaken(conversationId, input.channel, input.messageId))) {
       // The provider sent this message before (a webhook retried): it was taken then. Its id is
@@ -549,16 +570,19 @@ export class Agent {
   }
 
   /** The identity a message comes from, made (and linked to its person's conversation) the first time it writes. */
-  private async conversationFor(adapter: Channel, channel: string, address: string, testPerson?: TestPerson): Promise<IdentityRow> {
+  private async conversationFor(adapter: Channel, channel: string, address: string, testPerson?: TestPerson, verifiedKey?: string): Promise<IdentityRow> {
     const known = await this.store.identity(channel, address);
-    if (known) return known;
+    if (known) {
+      if (verifiedKey && (await this.store.conversation(known.conversationId))?.personKey !== `key:${verifiedKey}`) throw new Error("chinwag: channel identity belongs to a different person");
+      return known;
+    }
     let personKey: string;
     let verifiedBy: string;
     if (testPerson && !adapter.phone) {
       // Not a phone channel: their playground address joins the person their number is.
       [personKey, verifiedBy] = [await this.testPersonKey(testPerson, adapter), "test person"];
     } else {
-      const owner = await this.options.resolve?.({ channel, address });
+      const owner = verifiedKey ?? await this.options.resolve?.({ channel, address });
       const phone = adapter.phone ? normalizePhone(address, adapter.kind === "whatsapp" ? undefined : this.countryCode) : "";
       [personKey, verifiedBy] = owner ? [`key:${owner}`, "resolver"] : phone ? [`phone:${phone}`, "phone"] : [`${channel}:${address}`, "channel"];
     }
@@ -602,6 +626,8 @@ export class Agent {
   /** Sends to one identity: to the playground if it last wrote from there, else through the channel's provider. */
   private deliverer(adapter: Channel, address: string, conversationId: string): Deliver {
     return (outbound) => {
+      const reply = this.requestReplies.get(viaKey(adapter.name, address));
+      if (reply) return reply(outbound);
       if (this.via.get(viaKey(adapter.name, address)) !== "playground") return adapter.send(address, outbound);
       const phone = address.startsWith("test:") ? address.slice(5) : address;
       const person = this.testPerson(phone);
@@ -1010,6 +1036,7 @@ export class Agent {
 }
 
 interface Arrival {
+  verifiedKey?: string;
   channel: string;
   from: string;
   message: string | Incoming;
