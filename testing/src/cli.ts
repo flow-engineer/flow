@@ -22,6 +22,7 @@ import { request as httpsRequest } from "node:https";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
+import { PLUGIN_LINE, pluginCli } from "./plugin.ts";
 import { OBSERVE_URL } from "../../src/traces.ts";
 import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions } from "./client.ts";
 import { runPrinter } from "./print-run.ts";
@@ -96,9 +97,12 @@ Environment (also read from the agent folder's .env, or --dotenv; variables alre
   OPENROUTER_API_KEY       The agent's model key, or OPENAI_API_KEY, ANTHROPIC_API_KEY or
                            GEMINI_API_KEY: the first with a value is used`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
-const USAGE = `Usage:\n${NEW_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n  chinwag --version         Show the version\n\n${TEST_OPTIONS}`;
+const USAGE = `Usage:\n${NEW_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}
+${PLUGIN_LINE}\n  chinwag --version         Show the version\n\n${TEST_OPTIONS}`;
 
 checkNode(process.versions.node);
+
+if (process.argv[2] === "plugin") process.exit(pluginCli(process.argv.slice(3)));
 
 if (process.argv[2] === "check-endpoint") {
   // Its token may be in the agent folder's .env; no value is ever printed.

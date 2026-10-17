@@ -122,3 +122,38 @@ test("a tool that cannot be described exactly is refused when the server is made
   const dated = tool({ name: "book", description: "Book.", input: z.object({ when: z.date() }), run: () => "ok" });
   assert.throws(() => mcpServer({ name: "x", version: "1", tools: [dated] }), /input has no exact JSON Schema/);
 });
+
+// Plugin skills are native files; a host must not also receive their MCP copy.
+test("plugin paths deliver tools once, share sign-in, and advertise their own resource", async () => {
+  const events: unknown[] = [];
+  const status = tool({ name: "status", description: "Status.", input: z.object({}), run: () => "ready" });
+  const url = await serve({ name: "cafe", version: "1", tools: [status], files: { "skills/allergens/SKILL.md": "Allergy rules" }, events: [e => { events.push(e); }], auth: { issuer: "https://login.example.com", verify: token => token === "test" ? { key: "person" } : null } });
+  const c = await client(`${url}/plugin`, "test");
+  assert.deepEqual((await c.listTools()).tools.map(t => t.name), ["status"]);
+  assert.equal(c.getInstructions(), undefined);
+  await assert.rejects(c.callTool({ name: "read_skill", arguments: { name: "allergens" } }), /No tool named/);
+  await c.callTool({ name: "status", arguments: {} });
+  assert.ok(events.some(e => (e as any).surface === "mcp-plugin"));
+  await c.close();
+  const denied = await rpc(`${url}/plugin`, call("status"));
+  assert.equal(denied.status, 401);
+  const metadataUrl = denied.headers.get("www-authenticate")!.match(/resource_metadata="([^"]+)"/)![1]!;
+  assert.ok(metadataUrl.endsWith("/mcp/plugin"));
+  assert.equal((await (await fetch(metadataUrl)).json()).resource, `${url}/plugin`);
+  const standalone = await client(url);
+  assert.ok((await standalone.listTools()).tools.some(t => t.name === "read_skill"));
+  assert.match(standalone.getInstructions()!, /allergens/);
+  await standalone.close();
+});
+
+test("plugin routes can be moved or disabled and keep instruction overrides", async () => {
+  const handle = mcpServer({ name: "cafe", version: "1", tools: [], plugin: { path: "/native" }, instructions: "Our own rules" });
+  assert.equal(handle.plugin?.path, "/native");
+  const url = await serve({ name: "cafe", version: "1", tools: [], plugin: { path: "/native" }, instructions: "Our own rules" });
+  const c = await client(url.replace(/\/mcp$/, "/native"));
+  assert.equal(c.getInstructions(), "Our own rules");
+  await c.close();
+  const disabled = mcpServer({ name: "cafe", version: "1", tools: [], plugin: false });
+  assert.equal(disabled.plugin, undefined);
+  assert.equal((await disabled.fetch(new Request("http://127.0.0.1/mcp/plugin"))).status, 404);
+});

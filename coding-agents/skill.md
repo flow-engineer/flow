@@ -417,3 +417,33 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   with one name, a word that is both a command and a group, or one of the CLI's own words (`auth`,
   `tools`, `skill`) is an error; a tool no command names is a warning (it keeps its own name).
 
+
+### Native plugins and standalone MCP
+
+The standalone `/mcp` endpoint includes the skills list and `read_skill`. Native plugins
+copy the agent's `agent/skills/` folder and connect to `/mcp/plugin`, which serves tools only,
+so a host receives each skill once. Both paths share tools, auth and descriptor overrides.
+`mcpServer({ ..., plugin: false })` disables the plugin path; `plugin: { path: "/native" }`
+moves it. `handle.plugin` exposes its path and descriptors. Your `instructions` override
+applies to both endpoints, and `extend` can add SDK handlers on both.
+
+From the agent folder, run:
+
+```sh
+chinwag plugin --server https://agent.example.com/mcp --out plugins
+chinwag check --plugin plugins
+```
+
+`plugins/claude/` uses Claude Code's `.claude-plugin/plugin.json` and `.mcp.json` with
+`type: "http"`. `plugins/agent-plugins/` uses Agent Plugins 1.0.0 root `plugin.json` and
+`mcp.json` with `type: "streamable-http"`; Codex supports this portable format.
+Pass `--name` to override the package name. For a custom plugin route, pass its URL ending
+in `/plugin`, or edit the generated MCP config. No token is written into either package.
+Regenerate after changing a skill or its assets; `check --plugin` compares content hashes.
+Generated files remain plain files in your repository: customize manifests and add components
+alongside them. Regeneration rewrites manifests and source skill copies; keep hand-written
+skills outside those source paths.
+
+Formats checked 18 October 2026: [Agent Plugins 1.0.0](https://agent-plugins.org/specification),
+[OpenAI plugin packaging](https://developers.openai.com/plugins/build/plugins), and
+[Claude Code plugin reference](https://code.claude.com/docs/en/plugins-reference).

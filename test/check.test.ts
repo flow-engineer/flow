@@ -1,10 +1,11 @@
-// covers: testing/src/check.ts mcp/src/describe.ts cli/src/commands.ts
+// covers: testing/src/check.ts testing/src/plugin.ts mcp/src/describe.ts cli/src/commands.ts
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
+import { pluginProblems, writePlugins } from "../testing/src/plugin.ts";
 import { checkCli } from "../testing/src/check.ts";
 
 const chinwag = pathToFileURL(join(import.meta.dirname, "../src/index.ts")).href;
@@ -70,4 +71,32 @@ test("the CLI file is checked against the tools, and a tool it does not name is 
     "skill orders: names send_sms, which MCP hosts and the CLI do not have",
     `src/cli.ts: tool get_order has no command in the CLI file; it is reachable as "get-order"`,
   ]);
+});
+
+// Existing checks cover warnings on chat-only skill tools, but not native package generation.
+test("plugins preserve skill bytes and assets, use native transports, and detect stale sources", () => {
+  const dir = agentFolder(listOrders, undefined, "Check the order first.");
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "acme", version: "1.0.0" }));
+  const asset = join(dir, "agent/skills/orders/example.bin");
+  writeFileSync(asset, Buffer.from([0, 255, 42]));
+  const out = join(dir, "plugins");
+  writePlugins(dir, "http://127.0.0.1:8795/mcp", out);
+  for (const format of ["claude", "agent-plugins"]) {
+    assert.deepEqual(readFileSync(join(out, format, "skills/orders/SKILL.md")), readFileSync(join(dir, "agent/skills/orders/SKILL.md")));
+    assert.deepEqual(readFileSync(join(out, format, "skills/orders/example.bin")), Buffer.from([0, 255, 42]));
+  }
+  assert.deepEqual(JSON.parse(readFileSync(join(out, "claude/.mcp.json"), "utf8")), { mcpServers: { acme: { type: "http", url: "http://127.0.0.1:8795/mcp/plugin" } } });
+  assert.equal(JSON.parse(readFileSync(join(out, "agent-plugins/mcp.json"), "utf8")).mcpServers.acme.type, "streamable-http");
+  assert.equal(JSON.parse(readFileSync(join(out, "agent-plugins/plugin.json"), "utf8")).$schema, "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json");
+  assert.deepEqual(pluginProblems(dir, out), []);
+  writeFileSync(asset, "changed");
+  assert.match(pluginProblems(dir, out).join(), /stale/);
+  rmSync(asset);
+  writePlugins(dir, "http://127.0.0.1:8795/mcp", out);
+  assert.deepEqual(pluginProblems(dir, out), []);
+});
+
+test("plugin generation refuses a skill that depends on chat-only tools before writing", () => {
+  const dir = agentFolder(listOrders, undefined, "Use send_whatsapp.");
+  assert.throws(() => writePlugins(dir, "http://127.0.0.1:8795/mcp", join(dir, "plugins")), /send_whatsapp/);
 });

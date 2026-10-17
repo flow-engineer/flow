@@ -58,6 +58,8 @@ export interface McpServerOptions {
   auth?: McpAuth;
   /** Where the endpoint is mounted (default "/mcp"). */
   path?: string;
+  /** Native plugins deliver skills themselves. Default: tools only at `${path}/plugin`. */
+  plugin?: { path?: string } | false;
   /** Host names allowed in the Host header. Default: checked only for localhost, against DNS rebinding. */
   allowedHosts?: string[];
   /** Change the descriptor of any tool (default: exactly what `describe` makes). */
@@ -74,6 +76,8 @@ export interface McpServerHandle {
   node(req: IncomingMessage, res: ServerResponse): Promise<void>;
   /** The descriptors `tools/list` sends. */
   descriptors: McpToolDescriptor[];
+  /** The tools-only plugin endpoint, unless disabled. */
+  plugin?: { path: string; descriptors: McpToolDescriptor[] };
 }
 
 const LOCAL = new Set(localhostAllowedHostnames());
@@ -87,15 +91,24 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   const scopes = options.auth?.scopes;
   const byName = new Map(tools.map((t) => [t.name, t]));
   const descriptors = tools.map((t) => (options.descriptor ? options.descriptor(t, describe(t, scopes)) : describe(t, scopes)));
-  const instructions = options.instructions ?? mcpInstructions(skills);
   const path = options.path ?? "/mcp";
+  const pluginPath = options.plugin === false ? undefined : options.plugin?.path ?? `${path}/plugin`;
+  for (const endpoint of [path, pluginPath].filter((p): p is string => p !== undefined)) {
+    if (!endpoint.startsWith("/") || /[?#]/.test(endpoint)) throw new Error("chinwag/mcp: paths must be absolute URL paths");
+  }
+  if (pluginPath === path) throw new Error("chinwag/mcp: plugin and standalone paths must differ");
+  const pluginDescriptors = descriptors.slice(0, options.tools.length);
   const emit = emitter(options.events ?? []);
 
-  const handler = createMcpHandler(() => {
+  function endpointHandler(plugin: boolean) {
+    const instructions = options.instructions ?? (plugin ? "" : mcpInstructions(skills));
+    const listed = plugin ? pluginDescriptors : descriptors;
+    const available = plugin ? new Map(options.tools.map((t) => [t.name, t])) : byName;
+    return createMcpHandler(() => {
     const server = new Server({ name: options.name, version: options.version }, { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) });
-    server.setRequestHandler("tools/list", async () => ({ tools: descriptors }));
+    server.setRequestHandler("tools/list", async () => ({ tools: listed }));
     server.setRequestHandler("tools/call", async (request, ctx) => {
-      const t = byName.get(request.params.name);
+      const t = available.get(request.params.name);
       if (!t) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `No tool named ${request.params.name}.`);
       const parsed = t.input.safeParse(request.params.arguments ?? {});
       if (!parsed.success) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Invalid arguments for ${t.name}: ${parsed.error.message}`);
@@ -112,27 +125,33 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         signal: ctx.mcpReq?.signal ?? new AbortController().signal,
       };
       const started = Date.now();
-      emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input: parsed.data, surface: "mcp" });
+      emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input: parsed.data, surface: plugin ? "mcp-plugin" : "mcp" });
       const result = await callTool(t, parsed.data, context);
-      emit(context.conversationId, "tool.end", { callId: context.callId, tool: t.name, ms: Date.now() - started, ok: !result.isError, surface: "mcp" });
+      emit(context.conversationId, "tool.end", { callId: context.callId, tool: t.name, ms: Date.now() - started, ok: !result.isError, surface: plugin ? "mcp-plugin" : "mcp" });
       return result;
     });
     options.extend?.(server);
     return server;
-  });
+    });
+  }
+  const handler = endpointHandler(false);
+  const pluginHandler = pluginPath ? endpointHandler(true) : undefined;
 
   async function serve(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (request.method === "GET" && (url.pathname === "/.well-known/oauth-protected-resource" || url.pathname === `/.well-known/oauth-protected-resource${path}`)) {
+    const metadataPrefix = "/.well-known/oauth-protected-resource";
+    const plugin = pluginPath !== undefined && (url.pathname === pluginPath || url.pathname === `${metadataPrefix}${pluginPath}`);
+    const servedPath = plugin ? pluginPath! : path;
+    if (request.method === "GET" && (url.pathname === metadataPrefix || url.pathname === `${metadataPrefix}${servedPath}`)) {
       if (!options.auth) return new Response("Not found", { status: 404 });
       return Response.json({
-        resource: resourceOf(url),
+        resource: resourceOf(url, servedPath),
         authorization_servers: [options.auth.issuer].flat(),
         bearer_methods_supported: ["header"],
         ...(scopes && (scopes.read || scopes.write) ? { scopes_supported: [...new Set([scopes.read, scopes.write].filter(Boolean))] } : {}),
       });
     }
-    if (url.pathname !== path) return new Response("Not found", { status: 404 });
+    if (url.pathname !== servedPath) return new Response("Not found", { status: 404 });
     const rejected = options.allowedHosts
       ? hostHeaderValidationResponse(request, options.allowedHosts)
       : LOCAL.has(url.hostname)
@@ -144,7 +163,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     const bearer = /^Bearer\s+(.+)$/i.exec(request.headers.get("authorization") ?? "")?.[1];
     if (options.auth && bearer) {
       const identity = await options.auth.verify(bearer, request);
-      if (!identity) return challenge(url, 401, "invalid_token", "The token is not valid.", []);
+      if (!identity) return challenge(url, servedPath, 401, "invalid_token", "The token is not valid.", []);
       authInfo = { token: bearer, clientId: "", scopes: identity.scopes ?? [], extra: { key: identity.key } };
     }
     let parsedBody: unknown;
@@ -158,27 +177,31 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         for (const message of [parsedBody].flat()) {
           const call = message as { method?: unknown; params?: { name?: unknown } } | null;
           if (!call || call.method !== "tools/call" || typeof call.params?.name !== "string") continue;
-          const t = byName.get(call.params.name);
+          const t = plugin && call.params.name === "read_skill" ? undefined : byName.get(call.params.name);
           if (!t || signInOf(t) === "none") continue;
           const needed = scopesFor(t, scopes);
           if (!authInfo) {
-            if (signInOf(t) === "required") return challenge(url, 401, "invalid_token", `Sign in to use ${t.name}.`, needed);
+            if (signInOf(t) === "required") return challenge(url, servedPath, 401, "invalid_token", `Sign in to use ${t.name}.`, needed);
             continue;
           }
           const missing = needed.filter((s) => !authInfo!.scopes.includes(s));
-          if (missing.length) return challenge(url, 403, "insufficient_scope", `${t.name} needs ${missing.join(" ")}.`, [...new Set([...authInfo.scopes, ...needed])]);
+          if (missing.length) return challenge(url, servedPath, 403, "insufficient_scope", `${t.name} needs ${missing.join(" ")}.`, [...new Set([...authInfo.scopes, ...needed])]);
         }
       }
     }
-    return handler.fetch(request, { authInfo, parsedBody });
+    return (plugin ? pluginHandler! : handler).fetch(request, { authInfo, parsedBody });
   }
 
-  function resourceOf(url: URL): string {
-    return options.auth?.resource ?? `${url.origin}${path}`;
+  function resourceOf(url: URL, servedPath: string): string {
+    const resource = options.auth?.resource ?? `${url.origin}${path}`;
+    if (servedPath === path) return resource;
+    const pluginResource = new URL(resource);
+    pluginResource.pathname = servedPath;
+    return pluginResource.href;
   }
 
-  function challenge(url: URL, status: 401 | 403, error: string, description: string, scope: string[]): Response {
-    const metadata = `${new URL(resourceOf(url)).origin}/.well-known/oauth-protected-resource${path}`;
+  function challenge(url: URL, servedPath: string, status: 401 | 403, error: string, description: string, scope: string[]): Response {
+    const metadata = `${new URL(resourceOf(url, servedPath)).origin}/.well-known/oauth-protected-resource${servedPath}`;
     const header = `Bearer error="${error}", error_description="${description}", resource_metadata="${metadata}"${scope.length ? `, scope="${scope.join(" ")}"` : ""}`;
     return Response.json({ error, error_description: description }, { status, headers: { "WWW-Authenticate": header } });
   }
@@ -187,6 +210,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     fetch: serve,
     node: (req, res) => serveNode(serve, req, res),
     descriptors,
+    ...(pluginPath ? { plugin: { path: pluginPath, descriptors: pluginDescriptors } } : {}),
   };
 }
 

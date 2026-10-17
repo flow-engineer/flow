@@ -4,19 +4,24 @@
 // objectively wrong (errors, exit 1) or worth a look (warnings).
 
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { pluginProblems } from "./plugin.ts";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { cliProblems, type CliConfig } from "../../cli/src/commands.ts";
 import { CHAT_ONLY, describe, toolsProblems } from "../../mcp/src/describe.ts";
 import { loadSkills, readAgentFolder } from "../../src/skills.ts";
 import type { Tool } from "../../src/tools.ts";
 
-export const CHECK_LINE = `  chinwag check [--json]    Check the agent's tools, CLI file and skills for MCP and the CLI`;
+export const CHECK_LINE = `  chinwag check [--json] [--plugin <dir>]    Check the agent's tools, CLI file and skills for MCP and the CLI`;
 
 export async function checkCli(argv: string[], dir = process.cwd()): Promise<number> {
   const json = argv.includes("--json");
   const errors: string[] = [];
   const warnings: string[] = [];
+  const pluginAt = argv.indexOf("--plugin");
+  const pluginDir = pluginAt >= 0 ? argv[pluginAt + 1] : undefined;
+  if (pluginAt >= 0 && (!pluginDir || pluginDir.startsWith("--"))) errors.push("--plugin needs its generated folder");
+  if (pluginDir) errors.push(...pluginProblems(dir, resolve(dir, pluginDir)));
   const agentFile = join(dir, "src/agent.ts");
   if (!existsSync(agentFile)) {
     console.error(`No src/agent.ts in ${dir}. Run chinwag check from the agent's folder.`);
@@ -30,7 +35,7 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
   if (existsSync(join(dir, "agent"))) {
     for (const skill of loadSkills(readAgentFolder(join(dir, "agent")))) {
       const named = CHAT_ONLY.exec(skill.body);
-      if (named) warnings.push(`skill ${skill.name}: names ${named[1]}, which MCP hosts and the CLI do not have`);
+      if (named) (pluginAt >= 0 ? errors : warnings).push(`skill ${skill.name}: names ${named[1]}, which MCP hosts and the CLI do not have`);
     }
   }
 
