@@ -17,7 +17,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   if (command === "chat" && !io.interactive) { io.writeError(`chat needs a terminal; use ${config.name} ask "<question>" instead.\n`); return 2; }
   if (!server) { io.writeError("Pass --server <url> or configure the MCP server.\n"); return 5; }
   const stored = !token && isSignedIn(config, server);
-  try { if (stored) token = await storedAccessToken(config, server); }
+  try { if (stored) token = await storedAccessToken(config, server, false, io.signal); }
   catch { io.writeError(`Sign in again: ${config.name} auth login.\n`); return 3; }
   if (!token) { io.writeError(`Sign in first: ${config.name} auth login (or set ${tokenEnvOf(config)}).\n`); return 3; }
   const humanChat = command === "chat" && !flags.values.json;
@@ -28,14 +28,14 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   if (flags.values.new) delete saved[endpoint];
   async function send(text: string): Promise<number> {
     let response;
-    const clearStatus = humanChat && Boolean(process.stderr.isTTY) && process.env.TERM !== "dumb";
+    const clearStatus = humanChat && Boolean(process.stderr.isTTY) && (io.env ?? process.env).TERM !== "dumb";
     if (humanChat) io.writeError(`${styleText("dim", "  Waiting for reply…")}${clearStatus ? "" : "\n"}`);
-    const request = () => fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ text, ...(saved[endpoint] ? { conversationId: saved[endpoint] } : {}) }), signal: AbortSignal.timeout(10 * 60_000) });
+    const request = () => fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ text, ...(saved[endpoint] ? { conversationId: saved[endpoint] } : {}) }), signal: io.signal ? AbortSignal.any([io.signal, AbortSignal.timeout(10 * 60_000)]) : AbortSignal.timeout(10 * 60_000) });
     try {
       response = await request();
       if (response.status === 401 && stored) {
         await response.body?.cancel();
-        token = await storedAccessToken(config, server!, true);
+        token = await storedAccessToken(config, server!, true, io.signal);
         if (token) response = await request();
       }
     }
@@ -48,6 +48,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
     try { result = await response.json() as { conversationId: string; replies: Array<{ type: string; text?: string }> }; }
     catch { io.writeError("The agent returned invalid JSON.\n"); return 1; }
     if (typeof result.conversationId !== "string" || !Array.isArray(result.replies)) { io.writeError("The agent returned an invalid reply.\n"); return 1; }
+    io.signal?.throwIfAborted();
     saved[endpoint] = result.conversationId;
     mkdirSync(configDir(config), { recursive: true, mode: 0o700 });
     writeFileSync(file, `${JSON.stringify(saved)}\n`, { mode: 0o600 });

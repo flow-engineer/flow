@@ -662,6 +662,37 @@ flushes its bounded background queue. Each tool call is a root trace without a c
 arguments and results require `CHINWAG_TRACES_CONTENT=1`. Legacy clients' initialization
 metadata is retained for up to 24 hours in at most 4,096 sessions; bearer tokens are never cached.
 
+### Local playground CLI
+
+A local playground can run the team's actual CLI, including custom commands, OAuth, interactive
+chat, confirmations, stdout/stderr and exit codes. Opt in on the server that runs on your computer:
+
+```ts
+import { cli } from "./cli.ts"; // the team's defineCli configuration
+await play.listen(agent, 8790, { localCli: { channel: "terminal", config: cli } });
+// For a local agent mounting its playground under /playground:
+const handler = play.handler(agent, { token, base: "/playground", localCli: { channel: "terminal", config: cli } });
+```
+
+The named channel must be declared on the agent. Its tab opens the runner instead of simulated
+chat. Each browser gets an independent temporary sign-in and conversation directory; the test
+person picker does not grant it an account. Run `auth login`, open the sign-in link, then return
+to the runner. `chat` keeps reading input until `/exit`; reload reconnects to that session.
+**Clear output** clears the viewport; **New CLI session** ends the session and removes its local
+credentials, without clearing the account's agent history. Sessions expire after 30 minutes
+without browser activity, and a server restart starts fresh. Ending a session does not undo
+work already accepted by the agent.
+
+This runner accepts only direct loopback connections with a loopback Host and same-origin API
+requests, even if explicitly configured on a mounted handler. It is absent by default and is
+not enabled in the hosted test cloud. It invokes `runCli` in-process: no shell, arbitrary program
+execution, expansion or pipelines. Quoted arguments work. Its configured endpoints stay fixed;
+use the installed CLI for `--server`, `--token` or `skill --write`.
+
+Embedded clients can set `CliConfig.directory` to isolate credential/conversation files and
+`CliIO.env` to avoid inheriting process tokens; `CliIO.signal` cancels sign-in and terminal HTTP
+requests. Defaults retain the installed CLI's existing environment and config directory.
+
 ### Terminal conversations
 
 `ask` and `chat` talk directly to the agent, using the same bearer as MCP, not a tool called

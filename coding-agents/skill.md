@@ -459,6 +459,26 @@ flushes its bounded background queue. Each tool call is a root trace without a c
 arguments and results require `CHINWAG_TRACES_CONTENT=1`. Legacy clients' initialization
 metadata is retained for up to 24 hours in at most 4,096 sessions; bearer tokens are never cached.
 
+### Local playground CLI
+
+To exercise the real CLI on your computer, pass `localCli: { channel: "terminal", config: cli }`
+to `play.listen(agent, port, options)` or a locally mounted `play.handler(agent, options)`.
+`cli` is the team's existing `defineCli` configuration, with its server URL; the named channel
+must exist. This opens an independent CLI session in that tab, with real stdout/stderr, exit
+codes, interactive input and confirmation prompts. It does not use the selected test person's
+identity. Run `auth login`, open the login link and return, then use commands or `chat` (`/exit`
+leaves chat). Reload reconnects. New CLI session discards only this runner's temporary sign-in;
+server restart or 30 minutes without browser activity also ends it. Clear output keeps sign-in.
+An operation already accepted by the agent may still complete after its client session ends.
+
+Enable this only in local startup code. The runner is off by default, rejects non-loopback or
+forwarded connections, and is not part of the hosted test cloud. It calls the actual CLI runner
+without a shell: quoting works, pipelines/expansion do not. The browser cannot override server
+or token flags, or use `skill --write` to write onto the developer's computer.
+For other embedded clients, `CliConfig.directory` overrides credential/conversation storage;
+`CliIO.env` overrides the inherited process environment and `CliIO.signal` cancels sign-in and
+terminal HTTP requests. Installed CLI defaults stay unchanged.
+
 ### Terminal conversations
 
 `ask` and `chat` talk directly to the agent, using the same bearer as MCP, not a tool called

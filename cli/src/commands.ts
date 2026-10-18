@@ -51,6 +51,8 @@ export interface CliConfig {
   agent?: string;
   /** The variable a token is read from for CI and agents (default <NAME>_TOKEN). */
   tokenEnv?: string;
+  /** Override the local credential/conversation directory, e.g. for an isolated embedded session. */
+  directory?: string;
   description?: string;
   /** Commands by their words ("order place"): the first words are groups. Tools no command names keep their own name. */
   commands?: Record<string, CommandConfig>;

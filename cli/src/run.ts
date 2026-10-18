@@ -33,6 +33,10 @@ import {
 export const EXIT = { ok: 0, failed: 1, usage: 2, signIn: 3, approval: 4, unreachable: 5 } as const;
 
 export interface CliIO {
+  /** An embedded client's environment; omitted uses the local process environment. */
+  env?: Record<string, string | undefined>;
+  /** Cancels an embedded sign-in or terminal request when its session ends. */
+  signal?: AbortSignal;
   /** Write to stdout as is. */
   write(text: string): void;
   /** Write to stderr as is. */
@@ -106,10 +110,12 @@ function noServer(config: CliConfig): string {
 
 /** Run the CLI once; resolves with its exit code. */
 export async function runCli(config: CliConfig, argv: string[], io: CliIO = processIO()): Promise<number> {
+  io.signal?.throwIfAborted();
+  const env = io.env ?? process.env;
   const name = config.name;
   const { rest, server: given, token: givenToken } = connectionFlags(argv);
-  const server = given ?? config.server ?? process.env[envName(config, "SERVER")];
-  const token = givenToken ?? process.env[tokenEnvOf(config)];
+  const server = given ?? config.server ?? env[envName(config, "SERVER")];
+  const token = givenToken ?? env[tokenEnvOf(config)];
   if ((rest[0] === "ask" || rest[0] === "chat") && !config.commands?.[rest[0]]) return runTerminal(config, server, token, rest, io);
   const asksHelp = rest.length === 0 || rest[0] === "-h" || rest[0] === "--help";
 
@@ -118,12 +124,15 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
   let problem: CliExit | undefined;
   if (server && rest[0] !== "auth") {
     try {
-      client = await connect(config, server, token);
+      client = await connect(config, server, token, io.signal);
+      io.signal?.throwIfAborted();
       tools = await listTools(client);
     } catch (error) {
+      await client?.close(); client = undefined;
       problem = explain(config, server, error);
     }
   }
+  if (io.signal?.aborted) { await client?.close(); return EXIT.failed; }
   if (problem && !asksHelp) {
     io.writeError(`${problem.message}\n`);
     return problem.code;
@@ -132,7 +141,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
   const stricliProcess = {
     stdout: { write: (text: string) => io.write(text) },
     stderr: { write: (text: string) => io.writeError(text) },
-    env: { ...process.env, ...(process.env.NO_COLOR ? { STRICLI_NO_COLOR: "1" } : {}) },
+    env: { ...env, ...(env.NO_COLOR ? { STRICLI_NO_COLOR: "1" } : {}) },
     exitCode: undefined as number | string | null | undefined,
   };
   const context: CliContext = {
@@ -146,6 +155,8 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
     },
   };
 
+  const disconnect = () => { void client?.close(); };
+  io.signal?.addEventListener("abort", disconnect, { once: true });
   try {
     const app = buildApplication(routes(config, server, tools, client, io), {
       name,
@@ -154,6 +165,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
     });
     await runStricli(app, rest, { ...context, process: stricliProcess });
   } finally {
+    io.signal?.removeEventListener("abort", disconnect);
     await client?.close();
   }
   if (problem) io.writeError(`\n${problem.message}\n`);
@@ -179,10 +191,13 @@ function wordsKnown(words: string[], config: CliConfig, tools: ToolInfo[]): stri
   return known;
 }
 
-async function connect(config: CliConfig, server: string, token: string | undefined): Promise<Client> {
-  const provider: AuthProvider | OAuthClientProvider | undefined = token ? { token: async () => token } : isSignedIn(config, server) ? storedProvider(config, server) : undefined;
+async function connect(config: CliConfig, server: string, token: string | undefined, signal?: AbortSignal): Promise<Client> {
+  const provider: AuthProvider | OAuthClientProvider | undefined = token ? { token: async () => token } : isSignedIn(config, server) ? storedProvider(config, server, undefined, signal) : undefined;
   const client = new Client({ name: `${config.name}-cli`, version: config.version ?? "1" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(server), provider ? { authProvider: provider } : {}));
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL(server), provider ? { authProvider: provider } : {}));
+    signal?.throwIfAborted();
+  } catch (error) { await client.close(); throw error; }
   return client;
 }
 
@@ -399,7 +414,7 @@ function authRoutes(config: CliConfig, server: string | undefined, io: CliIO): R
         docs: { brief: "Sign in on the organization's own login page" },
         parameters: {},
         async func() {
-          await signIn(config, need());
+          await signIn(config, need(), io.signal);
           io.writeError(`Signed in to ${need()}.\n`);
         },
       }),
@@ -416,7 +431,7 @@ function authRoutes(config: CliConfig, server: string | undefined, io: CliIO): R
         parameters: { flags: { json: { kind: "boolean", brief: "Print JSON", optional: true, withNegated: false } } },
         func(flags) {
           const s = need();
-          const env = process.env[tokenEnvOf(config)];
+          const env = (io.env ?? process.env)[tokenEnvOf(config)];
           const source = env ? "env" : isSignedIn(config, s) ? "login" : null;
           if (flags.json) return void io.write(`${JSON.stringify({ server: s, signedIn: source !== null, source })}\n`);
           io.write(`${s}: ${env ? `using ${tokenEnvOf(config)}` : source ? "signed in" : "not signed in"}\n`);

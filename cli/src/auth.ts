@@ -30,7 +30,7 @@ interface Saved {
 }
 
 export function configDir(config: CliConfig): string {
-  return join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), config.name);
+  return config.directory ?? join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), config.name);
 }
 
 function authFile(config: CliConfig): string {
@@ -50,9 +50,10 @@ function writeAll(config: CliConfig, all: Record<string, Saved>): void {
 }
 
 /** An OAuth client provider whose state lives in the CLI's auth file, for one server. */
-export function storedProvider(config: CliConfig, server: string, redirectUrl?: string): OAuthClientProvider {
+export function storedProvider(config: CliConfig, server: string, redirectUrl?: string, signal?: AbortSignal): OAuthClientProvider {
   const read = (): Saved => readAll(config)[server] ?? {};
   const write = (change: Partial<Saved>) => {
+    signal?.throwIfAborted();
     const all = readAll(config);
     all[server] = { ...all[server], ...change };
     writeAll(config, all);
@@ -94,7 +95,8 @@ export function storedProvider(config: CliConfig, server: string, redirectUrl?: 
 }
 
 /** Terminal HTTP uses the same stored OAuth session as MCP, including refresh and issuer binding. */
-export async function storedAccessToken(config: CliConfig, server: string, forceRefresh = false): Promise<string | undefined> {
+export async function storedAccessToken(config: CliConfig, server: string, forceRefresh = false, signal?: AbortSignal): Promise<string | undefined> {
+  signal?.throwIfAborted();
   const saved = readAll(config)[server];
   if (!saved?.tokens) return undefined;
   const { tokens } = saved;
@@ -105,7 +107,7 @@ export async function storedAccessToken(config: CliConfig, server: string, force
   const issuer = info.authorizationServerMetadata?.issuer ?? String(info.authorizationServerUrl);
   if (tokens.issuer && tokens.issuer !== issuer) throw new Error("The authorization server changed; sign in again.");
   const fresh = await refreshAuthorization(info.authorizationServerUrl, { metadata: info.authorizationServerMetadata, clientInformation: config.clientId ? { client_id: config.clientId } : saved.client!, refreshToken: tokens.refresh_token, resource: info.resourceMetadata?.resource });
-  await storedProvider(config, server).saveTokens({ ...fresh, issuer });
+  await storedProvider(config, server, undefined, signal).saveTokens({ ...fresh, issuer });
   return fresh.access_token;
 }
 
@@ -120,14 +122,19 @@ export function signOut(config: CliConfig, server: string): void {
 }
 
 /** Sign in: the browser goes to the organization's own login, and comes back to a loopback port. */
-export async function signIn(config: CliConfig, server: string): Promise<void> {
+export async function signIn(config: CliConfig, server: string, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   const callback = createServer();
   await new Promise<void>((resolve, reject) => { callback.once("error", reject); callback.listen(config.redirectPort ?? 0, "127.0.0.1", resolve); });
   const { port } = callback.address() as { port: number };
   const redirectUrl = `http://127.0.0.1:${port}/callback`;
+  let cancel: (() => void) | undefined;
   try {
-    const provider = storedProvider(config, server, redirectUrl);
+    const provider = storedProvider(config, server, redirectUrl, signal);
     const code = new Promise<{ code: string; iss?: string }>((resolve, reject) => {
+      cancel = () => reject(new Error("Sign-in cancelled."));
+      signal?.addEventListener("abort", cancel, { once: true });
+      if (signal?.aborted) cancel();
       callback.on("request", (req, res) => {
         const url = new URL(req.url ?? "/", redirectUrl);
         if (url.pathname !== "/callback") return void res.writeHead(404).end();
@@ -142,11 +149,14 @@ export async function signIn(config: CliConfig, server: string): Promise<void> {
         else reject(new Error(`Sign-in failed: ${error ?? "no code came back"}.`));
       });
     });
+    // Cancellation may arrive while discovery or the authorization request is still in flight.
+    void code.catch(() => {});
     const first = await auth(provider, { serverUrl: server });
     if (first === "AUTHORIZED") return;
     const answer = await code;
     await auth(provider, { serverUrl: server, authorizationCode: answer.code, iss: answer.iss });
   } finally {
+    if (cancel) signal?.removeEventListener("abort", cancel);
     callback.close();
   }
 }

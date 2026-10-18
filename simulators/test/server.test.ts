@@ -1,11 +1,13 @@
-// covers: simulators/src/server.ts simulators/src/platforms.ts src/agent.ts src/conversation.ts src/channels.ts src/http.ts
+// covers: simulators/src/server.ts simulators/src/platforms.ts cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts src/agent.ts src/conversation.ts src/channels.ts src/http.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, sqlite, type ChannelInfo, type ChannelSummary, type Deliver, type Incoming, type Model, type TemplateDefinition } from "../../src/index.ts";
+import { z } from "zod";
+import { mcpServer } from "../../mcp/src/index.ts";
+import { createAgent, sqlite, tool, type ChannelInfo, type ChannelSummary, type Deliver, type Incoming, type Model, type TemplateDefinition } from "../../src/index.ts";
 import { WHATSAPP, call, gate, multi, respond } from "../../test/helpers.ts";
 import { simulators, type AgentConnection, type Line } from "../src/index.ts";
 
@@ -462,5 +464,122 @@ test("a turn's model error is printed on the terminal and reaches the playground
   } finally {
     console.error = error;
     await server.close();
+  }
+});
+
+
+// Channel simulators do not exercise argv, interactive CLI input, OAuth files or local-only access.
+test("the local runner uses the real CLI with isolated browser sign-in, prompts and chat", async (t) => {
+  let origin = "", writes = 0;
+  const chatRequests: any[] = [];
+  let mcp: ReturnType<typeof mcpServer>;
+  const backend = createServer(async (req, res) => {
+    const url = new URL(req.url!, origin);
+    const json = (value: unknown, status = 200) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
+    if (url.pathname === "/.well-known/oauth-authorization-server") return json({ issuer: origin, authorization_endpoint: `${origin}/authorize`, token_endpoint: `${origin}/token`, registration_endpoint: `${origin}/register`, response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"] });
+    if (["/register", "/token", "/agent/terminal"].includes(url.pathname)) {
+      let text = ""; for await (const chunk of req) text += chunk;
+      if (url.pathname === "/register") return json({ ...JSON.parse(text), client_id: "local-cli" }, 201);
+      if (url.pathname === "/token") return json({ access_token: "local-cli-token", token_type: "Bearer", expires_in: 3600 });
+      assert.equal(req.headers.authorization, "Bearer local-cli-token");
+      const input = JSON.parse(text); chatRequests.push(input);
+      return json({ conversationId: "own-chat", replies: [{ type: "message", text: `Reply: ${input.text}` }] });
+    }
+    if (url.pathname === "/authorize") {
+      const back = new URL(url.searchParams.get("redirect_uri")!);
+      back.searchParams.set("code", "test-code"); back.searchParams.set("state", url.searchParams.get("state")!); back.searchParams.set("iss", origin);
+      return res.writeHead(302, { location: back.href }).end();
+    }
+    await mcp.node(req, res);
+  });
+  await new Promise<void>(resolve => backend.listen(0, "127.0.0.1", resolve));
+  origin = `http://127.0.0.1:${(backend.address() as { port: number }).port}`;
+  mcp = mcpServer({ name: "runner", version: "1", auth: { issuer: origin, verify: token => token === "local-cli-token" ? { key: "account-1" } : null }, tools: [
+    tool({ name: "echo", description: "Echo literal input", input: z.object({ text: z.string() }), hints: { readOnly: true }, run: (input, ctx) => ({ ...input, key: ctx.key }) }),
+    tool({ name: "change", description: "A test write", input: z.object({}), run: () => ({ writes: ++writes }) }),
+  ] });
+  const h = multi({ channels: { terminal: { info: WHATSAPP } }, testPeople: [SAM] });
+  const server = await simulators().listen(h.agent, 0, { localCli: { channel: "terminal", config: { name: "runner", server: `${origin}/mcp` } } });
+  const api = (cookie: string, path: string, body?: object) => fetch(`${server.url}/api/cli${path}`, { method: body ? "POST" : "GET", headers: { cookie, "content-type": "application/json" }, ...(body ? { body: JSON.stringify(body) } : {}) });
+  const until = async (cookie: string, predicate: (state: any) => boolean) => {
+    for (;;) { t.signal.throwIfAborted(); const state = await (await api(cookie, "")).json(); if (predicate(state)) return state; }
+  };
+  const run = async (cookie: string, text: string) => {
+    const before = await (await api(cookie, "")).json();
+    assert.equal((await api(cookie, "/input", { text })).status, 202);
+    const state = await until(cookie, s => !s.running && s.seq > before.seq);
+    return state.events.filter((e: any) => e.seq > before.seq);
+  };
+  const output = (events: any[]) => events.filter(e => e.stream === "stdout" || e.stream === "stderr").map(e => e.text).join("");
+  const hostToken = process.env.RUNNER_TOKEN;
+  process.env.RUNNER_TOKEN = "inherited-token-must-not-be-used";
+  try {
+    assert.deepEqual((await (await fetch(`${server.url}/api/platforms`)).json()).localCli, { channel: "terminal", name: "runner" });
+    const first = (await api("", "")).headers.get("set-cookie")!.split(";")[0];
+    const second = (await api("", "")).headers.get("set-cookie")!.split(";")[0];
+    assert.notEqual(first, second);
+    assert.match(output(await run(first, "runner --help")), /USAGE/);
+    assert.match(output(await run(first, "auth status")), /not signed in/);
+    assert.equal((await run(first, "echo --text hello")).at(-1).text, "3");
+    assert.equal((await api(first, "/input", { text: "echo --text 'unfinished" })).status, 400);
+    assert.equal((await api(first, "/input", { text: "--server https://other.example echo" })).status, 400);
+    assert.equal((await api(first, "/input", { text: "auth login" })).status, 202);
+    const login = await until(first, s => s.events.some((e: any) => e.stream === "login"));
+    await fetch(login.events.find((e: any) => e.stream === "login").text);
+    await until(first, s => !s.running);
+    assert.match(output(await run(first, 'echo --text "hello world; $(never-a-shell)" --json')), /hello world; \$\(never-a-shell\)/);
+    assert.match(output(await run(second, "auth status")), /not signed in/, "another browser never inherits credentials");
+    assert.equal((await run(second, "echo --text nope")).at(-1).text, "3");
+    assert.equal((await api(first, "/input", { text: "change" })).status, 202);
+    await until(first, s => s.waiting);
+    assert.equal(writes, 0);
+    assert.equal((await api(first, "/input", { text: "n" })).status, 202);
+    await until(first, s => !s.running);
+    assert.equal(writes, 0, "the actual CliIO.confirm receives the browser's answer");
+    assert.equal((await api(first, "/input", { text: "chat" })).status, 202);
+    await until(first, s => s.waiting);
+    assert.equal((await api(first, "/input", { text: "hello" })).status, 202);
+    await until(first, s => s.waiting && output(s.events).includes("Reply: hello"));
+    assert.equal((await api(first, "/input", { text: "again" })).status, 202);
+    await until(first, s => s.waiting && output(s.events).includes("Reply: again"));
+    assert.deepEqual(chatRequests, [{ text: "hello" }, { text: "again", conversationId: "own-chat" }]);
+    assert.ok((await (await api(first, "?after=0")).json()).waiting, "reload reconnects to the same CLI");
+    const reset = await api(first, "/reset", {});
+    const fresh = reset.headers.get("set-cookie")!.split(";")[0];
+    assert.match(output(await run(fresh, "auth status")), /not signed in/, "reset cancels chat and discards credentials");
+    const discarded = await api(first, "");
+    assert.ok(discarded.headers.get("set-cookie"), "the old cookie receives a fresh isolated session");
+    assert.deepEqual((await discarded.json()).events, []);
+    assert.equal((await api(fresh, "/input", { text: "auth login" })).status, 202);
+    const pending = await until(fresh, s => s.events.some((e: any) => e.stream === "login"));
+    const callback = new URL(pending.events.find((e: any) => e.stream === "login").text).searchParams.get("redirect_uri")!;
+    await api(fresh, "/reset", {});
+    await assert.rejects(fetch(callback), "ending a pending sign-in closes its callback listener");
+    assert.equal((await raw(`${server.url}/api/cli`, { headers: { "sec-fetch-site": "cross-site" } })).status, 403);
+    assert.equal((await raw(`${server.url}/api/cli`, { headers: { "x-forwarded-for": "203.0.113.1" } })).status, 403);
+  } finally {
+    if (hostToken === undefined) delete process.env.RUNNER_TOKEN; else process.env.RUNNER_TOKEN = hostToken;
+    await server.close();
+    await new Promise<void>(resolve => backend.close(() => resolve()));
+  }
+});
+
+test("ordinary and hosted playgrounds expose no local CLI runner", async () => {
+  const h = multi({ channels: { terminal: { info: WHATSAPP } }, testPeople: [SAM] });
+  const ordinary = await simulators().listen(h.agent, 0);
+  const token = "local-runner-test-operator-token-00000000";
+  const hosted = createServer(simulators().handler(h.agent, { token, localCli: { channel: "terminal", config: { name: "runner" } } }));
+  await new Promise<void>(resolve => hosted.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${(hosted.address() as { port: number }).port}`;
+  try {
+    assert.equal((await fetch(`${ordinary.url}/api/cli`)).status, 404);
+    assert.equal((await (await fetch(`${ordinary.url}/api/platforms`)).json()).localCli, undefined);
+    const headers = { host: "hosted.example.com", authorization: `Bearer ${token}`, "sec-fetch-site": "same-origin" };
+    assert.equal((await raw(`${url}/api/cli`, { headers })).status, 403);
+    assert.equal(JSON.parse((await raw(`${url}/api/platforms`, { headers })).body).localCli, undefined);
+    assert.equal((await fetch(`${url}/api/cli`)).status, 401, "loopback still requires operator access");
+  } finally {
+    await ordinary.close();
+    await new Promise<void>(resolve => hosted.close(() => resolve()));
   }
 });

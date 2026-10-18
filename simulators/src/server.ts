@@ -30,7 +30,9 @@
 // The person's messages have the agent's ids (m1, m2, ...); the agent's messages get a1, a2, ...
 
 import { createHash, randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { TLSSocket } from "node:tls";
@@ -55,6 +57,8 @@ import {
   type TranscriptEntry,
 } from "../../src/index.ts";
 import type { Agent } from "../../src/agent.ts";
+import type { CliConfig } from "../../cli/src/commands.ts";
+import type { CliIO } from "../../cli/src/run.ts";
 import { requireToken, sameSecret, wrongTries } from "../../src/http.ts";
 import { PLATFORMS, channelOf, platform as platformOf, smsSegments, type Platform } from "./platforms.ts";
 
@@ -151,13 +155,132 @@ export interface LinkCard {
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 type Listening = { close(): Promise<void>; url: string };
 
+export interface LocalCliOptions {
+  /** The team's actual defineCli configuration. The browser cannot override its endpoints. */
+  config: CliConfig;
+  /** The channel tab that opens this runner, e.g. "terminal". */
+  channel: string;
+}
+
 export interface Playground {
   /** Pass to the agent's `events`: the trace and tool calls of test people's conversations. */
   events: EventSink;
   /** Serves the playground on 127.0.0.1 only; a token is optional there. */
-  listen(agent: PlaygroundAgent, port: number, options?: { token?: string }): Promise<Listening>;
+  listen(agent: PlaygroundAgent, port: number, options?: { token?: string; localCli?: LocalCliOptions }): Promise<Listening>;
   /** The playground as a request handler under `base`, for a deployed agent's own server: a token is required. */
-  handler(agent: PlaygroundAgent, options: { token: string; base?: string }): Handler;
+  handler(agent: PlaygroundAgent, options: { token: string; base?: string; localCli?: LocalCliOptions }): Handler;
+}
+
+/** Literal argv, with quoting and escaping, but no shell expansion, pipelines or execution. */
+function cliWords(text: string): string[] {
+  const words: string[] = [];
+  let word = "", quote = "", started = false, escape = false;
+  for (const ch of text) {
+    if (escape) { word += ch; escape = false; started = true; }
+    else if (ch === "\\" && quote !== "'") { escape = true; started = true; }
+    else if (quote) { if (ch === quote) quote = ""; else word += ch; }
+    else if (ch === '"' || ch === "'") { quote = ch; started = true; }
+    else if (/\s/.test(ch)) { if (started) words.push(word); word = ""; started = false; }
+    else { word += ch; started = true; }
+  }
+  if (quote || escape) throw new Error("Finish the quoted or escaped argument, then try again.");
+  if (started) words.push(word);
+  return words;
+}
+
+function localRequest(req: IncomingMessage): boolean {
+  const ip = req.socket.remoteAddress ?? "";
+  return loopback(req.headers.host) && (ip === "::1" || /^127\./.test(ip) || /^::ffff:127\./.test(ip)) && !req.headers["x-forwarded-host"] && !req.headers["x-forwarded-for"];
+}
+
+/** Only explicitly enabled local playgrounds instantiate a runner; the test cloud never does. */
+function localCliRunner(options: LocalCliOptions, base: string): Handler & { close(): void } {
+  type Output = { seq: number; stream: "stdout" | "stderr" | "input" | "exit" | "login"; text: string };
+  type Session = {
+    directory: string; config: CliConfig; output: Output[]; seq: number; size: number; touched: number;
+    running: boolean; waiting: boolean; abort: AbortController; accept?: (line: string | null) => void;
+  };
+  const sessions = new Map<string, Session>();
+  const dispose = (s: Session) => { s.abort.abort(); s.accept?.(null); rmSync(s.directory, { recursive: true, force: true }); };
+  const clean = () => { for (const [key, s] of sessions) if (Date.now() - s.touched > 30 * 60_000) { dispose(s); sessions.delete(key); } };
+  const timer = setInterval(clean, 60_000); timer.unref();
+  const close = () => { clearInterval(timer); for (const s of sessions.values()) dispose(s); sessions.clear(); process.removeListener("exit", close); };
+  process.once("exit", close);
+  const emit = (s: Session, stream: Output["stream"], text: string) => {
+    if (s.abort.signal.aborted) return;
+    // Keep a reconnectable tail, with a bounded amount of developer-visible output.
+    text = text.slice(-128 * 1024);
+    s.output.push({ seq: ++s.seq, stream, text }); s.size += text.length;
+    while (s.size > 128 * 1024 && s.output.length > 1) s.size -= s.output.shift()!.text.length;
+  };
+  const input = (s: Session) => new Promise<string | null>((resolve) => {
+    if (s.abort.signal.aborted) return resolve(null);
+    s.waiting = true;
+    s.accept = (line) => { s.waiting = false; s.accept = undefined; resolve(line); };
+  });
+  const handle: Handler = async (req, res) => {
+    if (!localRequest(req) || crossSite(req)) return forbid(res, "The CLI runner is available only on the local playground's own origin.");
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const path = inside(url, base);
+    clean();
+    const cookie = `chinwag_cli_${createHash("sha256").update(`${req.headers.host} ${base}`).digest("hex").slice(0, 12)}`;
+    let key = (req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(`${cookie}=`))?.slice(cookie.length + 1);
+    let s = key ? sessions.get(key) : undefined;
+    if (req.method === "POST" && path === "/api/cli/reset" && s) { dispose(s); sessions.delete(key!); s = undefined; }
+    if (!s) {
+      key = randomBytes(32).toString("base64url");
+      const directory = mkdtempSync(join(tmpdir(), "chinwag-cli-"));
+      s = { directory, config: { ...options.config, directory }, output: [], seq: 0, size: 0, touched: Date.now(), running: false, waiting: false, abort: new AbortController() };
+      const owned = s;
+      s.config.openUrl = (link) => emit(owned, "login", link);
+      sessions.set(key, s);
+      res.appendHeader("set-cookie", `${cookie}=${key}; HttpOnly; SameSite=Lax; Path=${base || "/"}`);
+    }
+    s.touched = Date.now();
+    if (req.method === "GET" && path === "/api/cli") {
+      const after = Math.max(0, Number(url.searchParams.get("after")) || 0);
+      return json(res, 200, { events: s.output.filter((e) => e.seq > after), seq: s.seq, running: s.running, waiting: s.waiting });
+    }
+    if (req.method === "POST" && path === "/api/cli/reset") return json(res, 200, { ok: true });
+    if (req.method === "POST" && path === "/api/cli/input") {
+      const body = await readBody(req, MAX_BODY);
+      const text = typeof body?.text === "string" ? body.text.slice(0, 4_000) : "";
+      if (!text.trim()) return json(res, 400, { error: "Enter a command or a reply." });
+      if (s.running) {
+        if (!s.accept) return json(res, 409, { error: "The CLI is still running. Wait for its input prompt." });
+        emit(s, "input", `${text}\n`); s.accept(text);
+        return json(res, 202, { ok: true });
+      }
+      let argv: string[];
+      try { argv = cliWords(text); } catch (error) { return json(res, 400, { error: (error as Error).message }); }
+      if (argv[0] === s.config.name) argv.shift();
+      if (argv.some((w) => /^--(server|token)(=|$)/.test(w))) return json(res, 400, { error: "This runner uses its configured server and its own sign-in. Use auth login." });
+      if (argv[0] === "skill" && argv.some((w) => /^--write(=|$)/.test(w))) return json(res, 400, { error: "Use the installed CLI to write a skill to your computer; this runner can display it with skill." });
+      emit(s, "input", `$ ${text}\n`);
+      s.running = true;
+      const owned = s;
+      const io: CliIO = {
+        env: { NO_COLOR: "1", TERM: "dumb" }, signal: s.abort.signal, interactive: true,
+        write: (text) => emit(owned, "stdout", text), writeError: (text) => emit(owned, "stderr", text),
+        async *lines(prompt) {
+          while (!owned.abort.signal.aborted) {
+            if (prompt) emit(owned, "stdout", prompt);
+            const line = await input(owned);
+            if (line === null) return;
+            yield line;
+          }
+        },
+        confirm: async (question) => { emit(owned, "stderr", `${question} [y/N] `); return /^y(es)?$/i.test((await input(owned)) ?? ""); },
+      };
+      void import("../../cli/src/run.ts").then(({ runCli }) => runCli(owned.config, argv, io)).then(
+        (code) => emit(owned, "exit", String(code)),
+        () => { emit(owned, "stderr", "The CLI could not finish this command.\n"); emit(owned, "exit", "1"); },
+      ).finally(() => { owned.running = false; owned.waiting = false; owned.accept = undefined; });
+      return json(res, 202, { ok: true });
+    }
+    res.writeHead(404).end();
+  };
+  return Object.assign(handle, { close });
 }
 
 export interface TestCloudSimulators {
@@ -643,7 +766,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     return t;
   }
 
-  async function handle(agent: PlaygroundAgent, req: IncomingMessage, res: ServerResponse, base: string, gate: Gate | null): Promise<void> {
+  async function handle(agent: PlaygroundAgent, req: IncomingMessage, res: ServerResponse, base: string, gate: Gate | null, cli?: { options: LocalCliOptions; handle: Handler }): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = inside(url, base);
     // Without a token, a page on another site (or a DNS name rebound to 127.0.0.1) must not run
@@ -651,6 +774,10 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     if (!gate && !loopback(req.headers.host)) return forbid(res, "This playground answers only on localhost or 127.0.0.1.");
     if (path.startsWith("/api/") && crossSite(req)) return forbid(res, "This playground's API answers only its own page.");
     if (gate && !gate.allows(req, res, url, base)) return;
+    if (path === "/api/cli" || path.startsWith("/api/cli/")) {
+      if (!cli) { res.writeHead(404).end(); return; }
+      return cli.handle(req, res);
+    }
 
     if (req.method === "GET" && path === "/") return html(res, page(playPage, base));
     if (req.method === "GET" && path === "/person") return html(res, page(personPage, base));
@@ -659,6 +786,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       const channels = agent.channels().map((c) => ({ name: c.name, kind: c.kind, platform: platformFor(c) }));
       return json(res, 200, {
         platforms: PLATFORMS, channels, people: agent.testPeople(), cards: options.cards ?? [], authentication: !!options.authentication,
+        ...(cli && localRequest(req) ? { localCli: { channel: cli.options.channel, name: cli.options.config.name } } : {}),
         templates: (agent.templates?.() ?? []).map((t) => ({ name: t.name, body: t.body })),
         panel: { person: !!(agent.contact && agent.outbox), nudge: !!agent.recordNudge, clock: !!(options.clock && agent.runDue) },
       });
@@ -816,16 +944,22 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
   const playground: Playground = {
     events: playgroundEvents,
-    listen: (agent, port, listenOptions = {}) => {
+    listen: async (agent, port, listenOptions = {}) => {
       const gate = listenOptions.token === undefined ? null : tokenGate(listenOptions.token);
       attach(agent);
-      return serve(guarded((req, res) => handle(agent, req, res, "", gate)), port);
+      const runner = listenOptions.localCli ? localCliRunner(listenOptions.localCli, "") : undefined;
+      const cli = runner ? { options: listenOptions.localCli!, handle: runner } : undefined;
+      try {
+        const listening = await serve(guarded((req, res) => handle(agent, req, res, "", gate, cli)), port);
+        return { ...listening, close: async () => { runner?.close(); await listening.close(); } };
+      } catch (error) { runner?.close(); throw error; }
     },
     handler: (agent, handlerOptions) => {
       const gate = tokenGate(handlerOptions?.token);
       attach(agent);
       const base = handlerOptions.base ?? "";
-      return guarded((req, res) => handle(agent, req, res, base, gate));
+      const cli = handlerOptions.localCli ? { options: handlerOptions.localCli, handle: localCliRunner(handlerOptions.localCli, base) } : undefined;
+      return guarded((req, res) => handle(agent, req, res, base, gate, cli));
     },
   };
   return playground;
