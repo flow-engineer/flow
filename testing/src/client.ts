@@ -43,6 +43,8 @@ export interface ConnectOptions {
   retryBudgetMs?: number;
   /** How long a lost stream keeps trying to resume, on a cloud that resumes (Opened.resume). Default 2 minutes, as long as the cloud holds its commands. */
   resumeWindowMs?: number;
+  /** The clock the resume window is measured on. Default Date.now; a test passes one it moves itself. */
+  now?: () => number;
   /** How often a resumable stream is replaced, before the tunnel's one-hour request cap. Default 50 minutes. */
   streamRefreshMs?: number;
   /** The longest Retry-After a busy cloud's refused open is sent again after, once. Default 60s. */
@@ -256,6 +258,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
   const retryBudgetMs = options.retryBudgetMs ?? RETRY_BUDGET_MS;
   const openRetryCapMs = options.openRetryCapMs ?? OPEN_RETRY_CAP_MS;
   const resumeWindowMs = options.resumeWindowMs ?? RESUME_WINDOW_MS;
+  const now = options.now ?? Date.now;
   const streamRefreshMs = options.streamRefreshMs ?? STREAM_REFRESH_MS;
   let idempotent = false;
   const base = options.cloud.replace(/\/$/, "");
@@ -553,20 +556,20 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
   /** The stream opened again after the last command handled, with backoff, until the resume window closes. */
   const reconnect = async (why: string): Promise<IncomingMessage> => {
     log(`stream ${why}; resuming after command ${lastId}`);
-    const deadline = Date.now() + resumeWindowMs;
+    const deadline = now() + resumeWindowMs;
     let last: unknown;
     for (let attempt = 0; ; attempt++) {
       const backoff = attempt === 0 ? 0 : Math.min(10_000, 250 * 2 ** attempt) * (0.8 + Math.random() * 0.4);
       const refused = last instanceof Error && last.cause instanceof PostError ? last.cause : undefined;
       const wait = Math.max(backoff, refused?.retryAfterMs ?? 0);
-      if (Date.now() + wait >= deadline) {
+      if (now() + wait >= deadline) {
         const detail = last instanceof Error ? `; last try: ${last.message}` : "";
         throw new StreamLost(`the stream did not resume within ${resumeWindowMs / 1000}s (${why})${detail}`);
       }
       await pause(wait, controller.signal);
       if (failure) throw failure;
       try {
-        return await openStream(streamUrl, { ...auth, "last-event-id": String(lastId) }, controller.signal, Math.max(1, Math.min(postTimeoutMs, deadline - Date.now())));
+        return await openStream(streamUrl, { ...auth, "last-event-id": String(lastId) }, controller.signal, Math.max(1, Math.min(postTimeoutMs, deadline - now())));
       } catch (error) {
         if (failure) throw failure;
         const cause = error instanceof Error && error.cause instanceof PostError ? error.cause : error;

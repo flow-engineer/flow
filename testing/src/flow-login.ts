@@ -9,8 +9,10 @@
 //   POST /cli/setup (bearer) {name, hostname, channels, have}
 //        -> {agent_id, cloud_key?, traces_key?, messaging_key?, join_code, account, app_id, dashboard_url, try_url,
 //            <channel>_sender?, <channel>_link? (telegram, whatsapp, imessage: each only while that shared sender
-//            is open), try_urls?, trial?, minted, next}; a 502 carries every field that worked too
-// Every error is flat: {"error": "<code>", "error_description": "<sentence>", "next": "<command or URL>"}.
+//            is open), try_urls?, trial?, minted, next}; a 502 carries every field that worked too;
+//        429 slow_down with Retry-After; 403 for a trial limit (sandbox_allowance_used, ...), its next prose
+//        Any answer may carry warnings: up to 20 strings to show the owner as they are.
+// Every error is flat: {"error": "<code>", "error_description": "<sentence>", "next": "<command, URL or sentence>"}.
 // The token is opaque (fcli_...), good only for /cli/*, and sent only to the server that issued it,
 // over https (http only to this machine). Every request gives up after REQUEST_TIMEOUT_MS at most.
 
@@ -164,11 +166,27 @@ export interface SetupAnswer {
   telegram_link?: string;
   /** The try page per channel with a sender: {telegram: ".../try/<code>?c=telegram", ...}. */
   try_urls?: Record<string, string>;
-  /** The account's free-trial counts per channel; limit null is unlimited. */
-  trial?: Record<string, { limit: number | null; used: number }>;
+  /** The account's free-trial counts per channel; limit null is unlimited. iMessage also counts the people it may reach. */
+  trial?: Record<string, { limit: number | null; used: number; contacts?: { limit: number; used: number } }>;
   /** The answer fields of the keys made in this call. */
   minted?: string[];
   next?: string[];
+  /** Up to 20 lines for the owner, shown as they are. */
+  warnings?: string[];
+}
+
+/** The answer's warnings: its strings only, at most 20. */
+export function warningsOf(body: Record<string, unknown>): string[] {
+  return Array.isArray(body.warnings) ? body.warnings.filter((w): w is string => typeof w === "string" && w !== "").slice(0, 20) : [];
+}
+
+/** Retry-After as seconds from now (delta-seconds or an HTTP date); undefined when absent or unreadable. */
+export function retryAfterSeconds(header: string | null, now = Date.now()): number | undefined {
+  if (!header) return undefined;
+  const value = header.trim();
+  if (/^\d+$/.test(value)) return Number(value);
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? undefined : Math.max(0, Math.ceil((at - now) / 1000));
 }
 
 /**
@@ -180,12 +198,15 @@ export class LoginRefused extends Error {
   readonly code: string;
   readonly next: string | undefined;
   readonly fields: Record<string, unknown>;
-  constructor(status: number, code: string, message: string, next?: string, fields: Record<string, unknown> = {}) {
+  /** Seconds the server asked to wait (Retry-After), for a 429. */
+  readonly retryAfter: number | undefined;
+  constructor(status: number, code: string, message: string, next?: string, fields: Record<string, unknown> = {}, retryAfter?: number) {
     super(message);
     this.status = status;
     this.code = code;
     this.next = next;
     this.fields = fields;
+    this.retryAfter = retryAfter;
   }
 }
 
@@ -198,7 +219,9 @@ export class TimedOut extends Error {
   }
 }
 
-async function call(url: string, path: string, options: { token?: string; body?: unknown; method?: string; timeoutMs?: number } = {}): Promise<{ status: number; body: Record<string, unknown> }> {
+interface Answer { status: number; body: Record<string, unknown>; retryAfter?: number }
+
+async function call(url: string, path: string, options: { token?: string; body?: unknown; method?: string; timeoutMs?: number } = {}): Promise<Answer> {
   if (!safeLoginUrl(url)) {
     throw new LoginRefused(0, "insecure_login_url", `${url} is not https: the sign-in and its token go only over https (http only to localhost).`, `set FLOW_FRAMEWORK_LOGIN_URL to an https address, or unset it to use ${LOGIN_URL}`);
   }
@@ -227,10 +250,10 @@ async function call(url: string, path: string, options: { token?: string; body?:
   } catch {
     if (response.ok) throw new LoginRefused(response.status, "bad_answer", `${url}${path} answered ${response.status} with no JSON.`);
   }
-  return { status: response.status, body };
+  return { status: response.status, body, retryAfter: retryAfterSeconds(response.headers.get("retry-after")) };
 }
 
-function refused(path: string, answer: { status: number; body: Record<string, unknown> }, url: string): LoginRefused {
+function refused(path: string, answer: Answer, url: string): LoginRefused {
   // A bare 404: this server has no CLI sign-in (an older one, or not flow.engineer at all).
   if (answer.status === 404 && typeof answer.body.error !== "string") {
     return new LoginRefused(404, "server_unsupported", `${url} has no ${path}, so it cannot sign in the Flow CLI: it is an older server, or not flow.engineer.`,
@@ -239,7 +262,8 @@ function refused(path: string, answer: { status: number; body: Record<string, un
   const code = typeof answer.body.error === "string" ? answer.body.error : answer.status === 401 ? "not_signed_in" : `http_${answer.status}`;
   const detail = typeof answer.body.error_description === "string" ? answer.body.error_description : typeof answer.body.message === "string" ? answer.body.message : "";
   const next = typeof answer.body.next === "string" && answer.body.next ? answer.body.next : undefined;
-  return new LoginRefused(answer.status, code, `${path} answered ${answer.status} ${code}${detail ? `: ${detail}` : ""}.`, next, answer.body);
+  const sentence = detail.endsWith(".") ? detail.slice(0, -1) : detail;
+  return new LoginRefused(answer.status, code, `${path} answered ${answer.status} ${code}${sentence ? `: ${sentence}` : ""}.`, next, answer.body, answer.retryAfter);
 }
 
 /** `clientName` and `hostname` are shown on the approval page. */

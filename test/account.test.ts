@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { currentToken, deleteCredentials, saveCredentials } from "../testing/src/flow-login.ts";
+import { currentToken, deleteCredentials, retryAfterSeconds, saveCredentials } from "../testing/src/flow-login.ts";
 
 const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
 const TOKEN = "fcli_secret_token_1234";
@@ -22,7 +22,7 @@ interface Seen { method: string; path: string; auth?: string; accept?: string; b
  * (a 502 carries what worked, as the real one does) and `options.setup` merged into its 200, the
  * try page as open for `options.tryOpen` (default Telegram), and records every request.
  */
-async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = [], setupStatus = 200, options: { setup?: Record<string, unknown>; tryOpen?: string[] } = {}) {
+async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = [], setupStatus = 200, options: { setup?: Record<string, unknown>; tryOpen?: string[]; setupError?: { status: number; body: Record<string, unknown>; headers?: Record<string, string> } } = {}) {
   const seen: Seen[] = [];
   const read = (req: IncomingMessage) => new Promise<string>((done) => { let b = ""; req.on("data", (c) => { b += c; }); req.on("end", () => done(b)); });
   const server = createServer(async (req, res) => {
@@ -47,6 +47,7 @@ async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => 
     if (req.url === "/cli/setup") {
       const have = new Set(body.have as string[]);
       const names: Record<string, string> = { cloud_key: "FLOW_FRAMEWORK_CLOUD_KEY", traces_key: "FLOW_FRAMEWORK_TRACES_KEY", messaging_key: "FLOW_MESSAGING_KEY" };
+      if (options.setupError) return void res.writeHead(options.setupError.status, { "content-type": "application/json", ...options.setupError.headers }).end(JSON.stringify(options.setupError.body));
       const keys = Object.fromEntries(Object.entries(KEYS).filter(([field]) => !have.has(names[field]!)));
       if (setupStatus !== 200) return send(setupStatus, { error: "messaging_failed", error_description: "Messaging is down.", next: "npx @flow-engineer/flow setup", agent_id: "agt_1", cloud_key: keys.cloud_key, traces_key: keys.traces_key });
       return send(200, {
@@ -526,4 +527,68 @@ test("link --channel whatsapp in a folder set up before it had a WhatsApp sender
   assert.equal(none.code, 3, none.err);
   assert.equal(none.lines.at(-1)!.error.code, "channel_not_open");
   assert.equal(none.lines.at(-1)!.error.next, "npx @flow-engineer/flow link");
+});
+
+test("a setup the server asks to wait on (429 slow_down) prints the wait and next, exits 4 like a waiting sign-in, and gives retry_after and the warnings in --json", async (t) => {
+  const flow = await flowServer([], 200, { setupError: { status: 429, headers: { "retry-after": "30" }, body: { error: "slow_down", error_description: "Too many setups from this account.", next: "npx @flow-engineer/flow setup", warnings: ["Setup was run 6 times in a minute."] } } });
+  t.after(flow.close);
+  const result = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(result.code, 4, result.err);
+  assert.deepEqual(result.lines.at(-1), {
+    error: { code: "slow_down", message: "/cli/setup answered 429 slow_down: Too many setups from this account. Wait 30 s before trying again.", next: "npx @flow-engineer/flow setup", retry_after: 30 },
+    warnings: ["Setup was run 6 times in a minute."],
+  });
+  assert.match(result.err, /^Setup was run 6 times in a minute\.$/m);
+  assert.match(result.err, /Wait 30 s before trying again\. Next: npx @flow-engineer\/flow setup$/m);
+
+  const human = await run(["setup"], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(human.code, 4);
+  assert.match(human.err, /Wait 30 s/);
+});
+
+test("Retry-After is read as seconds or as an HTTP date", () => {
+  assert.equal(retryAfterSeconds("12"), 12);
+  assert.equal(retryAfterSeconds(new Date(Date.UTC(2030, 0, 1, 0, 0, 45)).toUTCString(), Date.UTC(2030, 0, 1)), 45);
+  assert.equal(retryAfterSeconds(new Date(Date.UTC(2020, 0, 1)).toUTCString()), 0, "a date gone by is no wait");
+  assert.equal(retryAfterSeconds(null), undefined);
+  assert.equal(retryAfterSeconds("soon"), undefined);
+});
+
+test("a trial limit (403) whose next is a sentence prints that sentence as it came, on its own line, and exits 3", async (t) => {
+  const next = "You have used this account's free sandbox messages. Ask in the dashboard for more, or use your own sender.";
+  const flow = await flowServer([], 200, { setupError: { status: 403, body: { error: "sandbox_allowance_used", error_description: "The free trial's messages are used up.", next } } });
+  t.after(flow.close);
+  const result = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(result.code, 3, result.err);
+  assert.equal(result.lines.at(-1)!.error.code, "sandbox_allowance_used");
+  assert.equal(result.lines.at(-1)!.error.next, next);
+  assert.ok(!("retry_after" in result.lines.at(-1)!.error), "retry_after only for a 429");
+  assert.ok(result.err.split("\n").includes(next), "the sentence is a line of its own");
+  assert.ok(!result.err.includes("Next: You have used"), "a sentence is not given as a command");
+});
+
+test("setup prints each of the server's warnings on stderr (at most 20, strings only), gives them in --json, and shows iMessage's people", async (t) => {
+  const warnings = Array.from({ length: 25 }, (_, i) => `Warning ${i + 1}.`);
+  const trial = { telegram: { limit: null, used: 0 }, imessage: { limit: 100, used: 3, contacts: { limit: 2, used: 1 } } };
+  const flow = await flowServer([], 200, { setup: { warnings: [...warnings.slice(0, 2), 7, ...warnings.slice(2)], imessage_sender: "snd_im", trial } });
+  t.after(flow.close);
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  const result = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd: agentDir(), env });
+  assert.equal(result.code, 0, result.err);
+  assert.deepEqual(result.lines[0]!.warnings, warnings.slice(0, 20));
+  assert.deepEqual(result.lines[0]!.trial.imessage.contacts, { limit: 2, used: 1 });
+  for (const w of warnings.slice(0, 20)) assert.ok(result.err.split("\n").includes(w), w);
+  assert.ok(!result.err.includes("Warning 21."));
+  assert.match(result.err, /^iMessage: 1 of 2 people$/m);
+
+  const human = await run(["setup"], { url: flow.url, config: temp(), cwd: agentDir(), env });
+  assert.equal(human.code, 0, human.err);
+  assert.match(human.err, /^Warning 1\.$/m, "warnings go to stderr");
+  assert.ok(!human.out.includes("Warning 1."));
+  assert.match(human.out, /^iMessage: 1 of 2 people$/m);
+
+  const none = await flowServer();
+  t.after(none.close);
+  const plain = await run(["setup", "--json"], { url: none.url, config: temp(), cwd: agentDir(), env });
+  assert.deepEqual(plain.lines[0]!.warnings, []);
 });
