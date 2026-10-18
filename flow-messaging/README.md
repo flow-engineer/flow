@@ -1,15 +1,15 @@
 # Flow Messaging channels
 
-Put a Flow Framework (`npm i laminar-flow`) agent on real WhatsApp, Telegram and US SMS
-through [Flow Messaging](https://api.flow.engineer) (API version 2026-11-01). `laminar-flow/flow-messaging` gives you
+Put a Flow Framework (`npm i flowcore`) agent on real WhatsApp, Telegram and US SMS
+through [Flow Messaging](https://api.flow.engineer) (API version 2026-11-01). `flowcore/flow-messaging` gives you
 channels that send through Flow's senders, and a webhook that checks Flow's signed events and hands
 them to the agent. It needs nothing beyond the framework (it uses `fetch` and `node:crypto`).
 
 ```sh
-npm install laminar-flow
+npm install flowcore
 ```
 
-Node 22.18 or later. The adapter ships inside `laminar-flow`; import it from `laminar-flow/flow-messaging`.
+Node 22.18 or later. The adapter ships inside `flowcore`; import it from `flowcore/flow-messaging`.
 
 ## Quick start
 
@@ -36,8 +36,8 @@ sandbox contact your agent can talk to.
 ```ts
 // main.ts
 import { createServer } from "node:http";
-import { createAgent } from "laminar-flow";
-import { flowMessaging } from "laminar-flow/flow-messaging";
+import { createAgent } from "flowcore";
+import { flowMessaging } from "flowcore/flow-messaging";
 
 const fm = flowMessaging(); // reads FLOW_MESSAGING_KEY and FLOW_MESSAGING_WEBHOOK_SECRET
 
@@ -145,7 +145,7 @@ package yet.
 
 - Flow Messaging: https://api.flow.engineer
 - API reference: https://api.flow.engineer/openapi.yaml
-- Flow Framework: https://www.npmjs.com/package/laminar-flow
+- Flow Framework: https://www.npmjs.com/package/flowcore
 
 ## License
 

@@ -206,7 +206,7 @@ test("failures reach the agent as Not delivered: a permanent refusal once, untri
 
 test("after a restart, a nudge with no known Flow conversation starts one from the channel's sender (Telegram, Markdown)", async (t) => {
   const flow = await fakeFlow();
-  const database = join(mkdtempSync(join(tmpdir(), "laminar-flow-fm-db-")), "agent.db");
+  const database = join(mkdtempSync(join(tmpdir(), "flowcore-fm-db-")), "agent.db");
   flow.contacts.ct_tg = { address: { telegram_user_id: "777", username: "maya" } };
   const before = await liveAgent(flow, { database: sqlite(database) });
   await before.deliver(received(TG, "msg_1", { type: "text", text: "hi" }));

@@ -81,7 +81,7 @@ export async function fakeFlow() {
 
 /** An agent on the three Flow channels, with its webhook served, driven by a scripted model. */
 export async function liveAgent(flow: { url: string }, options: { database?: Database } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "laminar-flow-fm-"));
+  const dir = mkdtempSync(join(tmpdir(), "flowcore-fm-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const events: FlowEvent[] = [];

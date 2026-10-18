@@ -416,7 +416,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
   const guarded = (work: (req: IncomingMessage, res: ServerResponse) => Promise<void>): Handler => (req, res) =>
     work(req, res).catch((error) => {
-      console.warn("laminar-flow simulators:", error);
+      console.warn("flowcore simulators:", error);
       if (!res.headersSent) res.writeHead(500).end();
     });
 
@@ -569,7 +569,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
   const playgroundEvents: EventSink = (event) => {
     const person = people.get(event.conversationId);
     // A failed turn (a wrong or expired model key, say) on the terminal too, also for no known person.
-    if (event.type === "model.error") console.error(`laminar-flow: model error${person ? ` (${person.name})` : ""}: ${String(event.error)}`);
+    if (event.type === "model.error") console.error(`flowcore: model error${person ? ` (${person.name})` : ""}: ${String(event.error)}`);
     if (!person || !playing) return;
     for (const c of playing.channels()) show(threadKey(c.name, person), event);
   };
@@ -793,7 +793,7 @@ interface Gate {
  * `Authorization: Bearer`. Compared in constant time; wrong tokens are limited per address.
  */
 function tokenGate(token: string | undefined): Gate {
-  requireToken(token, "laminar-flow simulators: a deployed playground");
+  requireToken(token, "flowcore simulators: a deployed playground");
   // The cookie holds a value made from the token, not the token itself.
   const session = createHash("sha256").update(`chinwag-playground:${token}`).digest("hex");
   const tries = wrongTries();

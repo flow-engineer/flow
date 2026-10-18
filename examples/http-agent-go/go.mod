@@ -1,3 +1,3 @@
-module laminar-flow-cafe
+module flowcore-cafe
 
 go 1.22

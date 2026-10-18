@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publishes laminar-flow to npm from a clean, tagged commit whose tests pass.
+# Publishes flowcore to npm from a clean, tagged commit whose tests pass.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

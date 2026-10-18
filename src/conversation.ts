@@ -293,7 +293,7 @@ export class Conversation {
     this.builtins = new Map(builtins.map((t) => [t.name, t]));
     this.builtinSpecs = builtins.map(toSpec);
     this.loaded = settings.ready.then(() => (existing ? this.load() : settings.store.createConversation(id, personKey)));
-    this.writes = this.loaded.catch((error) => console.warn("laminar-flow: conversation %s did not load:", id, error));
+    this.writes = this.loaded.catch((error) => console.warn("flowcore: conversation %s did not load:", id, error));
   }
 
   /** Their time zone, as the business set it or they said it: schedules, quiet hours and the time line use it from now on. */
@@ -329,7 +329,7 @@ export class Conversation {
         try {
           if (declared) reads = fillTemplate(declared, template).body;
         } catch (error) {
-          return { error: error instanceof Error ? error.message.replace(/^laminar-flow: /, "") : String(error) };
+          return { error: error instanceof Error ? error.message.replace(/^flowcore: /, "") : String(error) };
         }
         const channel = this.owed.find((o) => o.windowClosed)?.channel ?? context.channel;
         const failure = await this.send(channel, { type: "template", ...template });
@@ -384,7 +384,7 @@ export class Conversation {
         const files = await this.readFiles(incoming.attachments ?? []);
         if (!this.closed) this.arrive(incoming, id, channel, options.messageId !== undefined, files);
       })
-      .catch((error) => console.warn("laminar-flow: a message in conversation %s could not be read:", this.id, error));
+      .catch((error) => console.warn("flowcore: a message in conversation %s could not be read:", this.id, error));
     this.preparing = ready;
     void ready.finally(() => {
       if (this.preparing !== ready) return;
@@ -663,7 +663,7 @@ export class Conversation {
     if (this.closed) return this.writes;
     const next = this.writes.then(work).then(
       () => undefined,
-      (error) => console.warn("laminar-flow: could not save conversation %s:", this.id, error),
+      (error) => console.warn("flowcore: could not save conversation %s:", this.id, error),
     );
     this.writes = next;
     return next;
@@ -907,7 +907,7 @@ export class Conversation {
         try {
           sink(event);
         } catch (error) {
-          console.warn("laminar-flow: an event sink failed:", error);
+          console.warn("flowcore: an event sink failed:", error);
         }
       }
     }

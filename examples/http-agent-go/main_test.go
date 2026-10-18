@@ -47,7 +47,7 @@ func TestPlaceOrderNumbersOrders(t *testing.T) {
 
 func post(t *testing.T, url, token, body string) (int, string) {
 	t.Helper()
-	req, _ := http.NewRequest("POST", url+"/laminar-flow", strings.NewReader(body))
+	req, _ := http.NewRequest("POST", url+"/flowcore", strings.NewReader(body))
 	req.Header.Set("content-type", "application/json")
 	if token != "" {
 		req.Header.Set("authorization", "Bearer "+token)

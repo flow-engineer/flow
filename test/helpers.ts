@@ -61,7 +61,7 @@ export const respond = (...toolCalls: ToolCall[]): ModelResponse => ({ text: nul
 export const WEB: ChannelInfo = { reactions: true, status: true };
 
 export function harness(tools = [] as ReturnType<typeof tool>[], deadlineMs = 50, channel: ChannelInfo = WEB, followUps: "auto" | "manual" = "auto") {
-  const dir = mkdtempSync(join(tmpdir(), "laminar-flow-"));
+  const dir = mkdtempSync(join(tmpdir(), "flowcore-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel({ followUps });
   const events: FlowEvent[] = [];
@@ -112,7 +112,7 @@ export function multi(options: {
   profile?: AgentOptions["profile"];
   fallbackTemplate?: AgentOptions["fallbackTemplate"];
 }) {
-  const dir = options.dir ?? mkdtempSync(join(tmpdir(), "laminar-flow-"));
+  const dir = options.dir ?? mkdtempSync(join(tmpdir(), "flowcore-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const database = options.database ?? sqlite();

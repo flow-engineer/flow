@@ -1,5 +1,5 @@
-// `laminar-flow new <name>`: makes ./<name>/, an agent of its own started from the café example (Pip),
-// that depends on the laminar-flow package. Its imports become "laminar-flow" and "laminar-flow/simulators", and
+// `flowcore new <name>`: makes ./<name>/, an agent of its own started from the café example (Pip),
+// that depends on the flowcore package. Its imports become "flowcore" and "flowcore/simulators", and
 // the coding-agent skills go in .claude/skills/, with an AGENTS.md (and a CLAUDE.md importing it)
 // pointing at them. Inside a clone, `npm run new -- <name>` makes agents/<name>/ instead.
 
@@ -14,12 +14,12 @@ export function checkName(name: string): void {
   if (!NAME.test(name)) throw new Error(`"${name}" is not a usable name: use lowercase letters, digits and dashes, such as my-agent.`);
 }
 
-/** The laminar-flow package's folder: the root of a clone, or the installed package. */
+/** The flowcore package's folder: the root of a clone, or the installed package. */
 export function packageRoot(from = dirname(fileURLToPath(import.meta.url))): string {
   for (let dir = from; ; dir = dirname(dir)) {
     const file = join(dir, "package.json");
-    if (existsSync(file) && JSON.parse(readFileSync(file, "utf8")).name === "laminar-flow") return dir;
-    if (dirname(dir) === dir) throw new Error("laminar-flow: can't find its own package.json");
+    if (existsSync(file) && JSON.parse(readFileSync(file, "utf8")).name === "flowcore") return dir;
+    if (dirname(dir) === dir) throw new Error("flowcore: can't find its own package.json");
   }
 }
 
@@ -53,26 +53,26 @@ GEMINI_API_KEY=
 # Optional. The model id for that provider; empty is that provider's default.
 # CAFE_MODEL=
 
-# The test cloud (npx laminar-flow test --synthetic) and traces. Sign in at https://flow.engineer/observe,
+# The test cloud (npx flowcore test --synthetic) and traces. Sign in at https://flow.engineer/observe,
 # add the agent, and on its Developers page make a CI key (oci_..., shown once); the trace key is
 # from the same site.
-LAMINAR_FLOW_CLOUD=https://flow.engineer/observe
-LAMINAR_FLOW_CLOUD_KEY=
-LAMINAR_FLOW_TRACES_URL=https://flow.engineer/observe
-LAMINAR_FLOW_TRACES_KEY=
+FLOWCORE_CLOUD=https://flow.engineer/observe
+FLOWCORE_CLOUD_KEY=
+FLOWCORE_TRACES_URL=https://flow.engineer/observe
+FLOWCORE_TRACES_KEY=
 `;
 
 const agentsMd = (name: string) => `# ${name}
 
-A chat agent on Flow Framework (https://github.com/flow-engineer/laminar-flow), started from its café example (Pip).
+A chat agent on Flow Framework (https://github.com/flow-engineer/flowcore), started from its café example (Pip).
 
-- Load the skills in \`.claude/skills/\` before changing it: \`laminar-flow\` to build the agent, \`laminar-flow-tools\`
-  for its tools and their test files, \`laminar-flow-tests\` for its test scenarios.
+- Load the skills in \`.claude/skills/\` before changing it: \`flowcore\` to build the agent, \`flowcore-tools\`
+  for its tools and their test files, \`flowcore-tests\` for its test scenarios.
 - \`agent/AGENTS.md\` is the agent's own prompt, not instructions for coding agents.
 - \`npm start\` runs it in the playground. The owner puts one model key in \`.env\` (never read or
   print it): \`OPENROUTER_API_KEY\`, \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`.
   \`npm run typecheck\` checks the types, \`npm test -- --synthetic\` runs the tests in the test
-  cloud at https://flow.engineer/observe with the owner's \`LAMINAR_FLOW_CLOUD_KEY\` (\`npx laminar-flow --help\`).
+  cloud at https://flow.engineer/observe with the owner's \`FLOWCORE_CLOUD_KEY\` (\`npx flowcore --help\`).
 `;
 
 /** Makes `<into>/<name>` (the current folder by default) and returns it. */
@@ -87,9 +87,9 @@ export function newStandalone(name: string, options: { into?: string; root?: str
   for (const file of readdirSync(join(dir, "src"), { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts"))) {
     const path = join(dir, "src", file);
     const source = readFileSync(path, "utf8")
-      .replace(/(["'])(\.\.\/)+src\/index\.ts\1/g, '"laminar-flow"')
-      .replace(/(["'])(\.\.\/)+simulators\/src\/index\.ts\1/g, '"laminar-flow/simulators"');
-    if (/["']\.\.\/\.\.\//.test(source)) throw new Error(`laminar-flow: ${file} imports a file outside the agent; only laminar-flow's public entries can be rewritten.`);
+      .replace(/(["'])(\.\.\/)+src\/index\.ts\1/g, '"flowcore"')
+      .replace(/(["'])(\.\.\/)+simulators\/src\/index\.ts\1/g, '"flowcore/simulators"');
+    if (/["']\.\.\/\.\.\//.test(source)) throw new Error(`flowcore: ${file} imports a file outside the agent; only flowcore's public entries can be rewritten.`);
     writeFileSync(path, source);
   }
 
@@ -101,13 +101,13 @@ export function newStandalone(name: string, options: { into?: string; root?: str
     description: `${name}: a Flow Framework agent, started from the café example.`,
     type: "module",
     engines: own.engines,
-    scripts: { start: "node --env-file-if-exists=.env src/main.ts", test: "laminar-flow test", typecheck: "tsc --noEmit" },
-    dependencies: { "laminar-flow": `^${own.version}` },
+    scripts: { start: "node --env-file-if-exists=.env src/main.ts", test: "flowcore test", typecheck: "tsc --noEmit" },
+    dependencies: { "flowcore": `^${own.version}` },
     devDependencies: { "@types/node": own.devDependencies["@types/node"], typescript: own.devDependencies.typescript },
   };
   writeFileSync(join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
   writeFileSync(join(dir, "tsconfig.json"), `${JSON.stringify(TSCONFIG, null, 2)}\n`);
-  writeFileSync(join(dir, ".gitignore"), "node_modules/\n.env\n.laminar-flow/\n");
+  writeFileSync(join(dir, ".gitignore"), "node_modules/\n.env\n.flowcore/\n");
   // npm install then refuses a Node older than the engines field says, before .ts files fail to load.
   writeFileSync(join(dir, ".npmrc"), "engine-strict=true\n");
   writeFileSync(join(dir, ".env.example"), ENV_EXAMPLE);
@@ -116,7 +116,7 @@ export function newStandalone(name: string, options: { into?: string; root?: str
   for (const file of readdirSync(skills).filter((f) => f.endsWith(".md"))) {
     const text = readFileSync(join(skills, file), "utf8");
     const skill = /^name:\s*(\S+)\s*$/m.exec(text)?.[1];
-    if (!skill) throw new Error(`laminar-flow: coding-agents/${file} has no name in its front matter.`);
+    if (!skill) throw new Error(`flowcore: coding-agents/${file} has no name in its front matter.`);
     mkdirSync(join(dir, ".claude", "skills", skill), { recursive: true });
     writeFileSync(join(dir, ".claude", "skills", skill, "SKILL.md"), text);
   }

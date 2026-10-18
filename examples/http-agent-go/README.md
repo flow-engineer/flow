@@ -11,7 +11,7 @@ FAKE_MODEL=1 go run .   # no key: every answer is a fixed greeting
 go run .                # with a model key from the table
 ```
 
-It listens on `http://localhost:3000/laminar-flow` (`PORT` to change it). The first key that is set picks the model:
+It listens on `http://localhost:3000/flowcore` (`PORT` to change it). The first key that is set picks the model:
 
 | Key | Default model |
 | --- | --- |
@@ -20,15 +20,15 @@ It listens on `http://localhost:3000/laminar-flow` (`PORT` to change it). The fi
 | `ANTHROPIC_API_KEY` | `claude-haiku-5-5` |
 | `GEMINI_API_KEY` | `gemini-3.8-flash` |
 
-`MODEL` overrides the model. Set `LAMINAR_FLOW_AGENT_TOKEN` on both sides to require `authorization: Bearer <token>`.
+`MODEL` overrides the model. Set `FLOWCORE_AGENT_TOKEN` on both sides to require `authorization: Bearer <token>`.
 
 ## Check it
 
 In another terminal, with no cloud, key or model call on Flow Framework's side:
 
 ```bash
-npx laminar-flow check-endpoint http://localhost:3000/laminar-flow
-node ../../testing/src/cli.ts check-endpoint http://localhost:3000/laminar-flow   # from a clone of this repo
+npx flowcore check-endpoint http://localhost:3000/flowcore
+node ../../testing/src/cli.ts check-endpoint http://localhost:3000/flowcore   # from a clone of this repo
 ```
 
 ## Test it
@@ -36,10 +36,10 @@ node ../../testing/src/cli.ts check-endpoint http://localhost:3000/laminar-flow 
 From this folder, with the agent running on a real model:
 
 ```bash
-npx laminar-flow test --agent-url http://localhost:3000/laminar-flow --synthetic
+npx flowcore test --agent-url http://localhost:3000/flowcore --synthetic
 ```
 
-A hosted test cloud takes its key in `LAMINAR_FLOW_CLOUD_KEY`. The agent's tools run here, for real, so the café's `tests/tools/*.yaml` simulators are not used, and what must be true is written as `judge` items in [`tests/scenarios/latte-correction.yaml`](tests/scenarios/latte-correction.yaml).
+A hosted test cloud takes its key in `FLOWCORE_CLOUD_KEY`. The agent's tools run here, for real, so the café's `tests/tools/*.yaml` simulators are not used, and what must be true is written as `judge` items in [`tests/scenarios/latte-correction.yaml`](tests/scenarios/latte-correction.yaml).
 
 ```bash
 go test ./...

@@ -191,7 +191,7 @@ test("a file sent from a simulator reaches the agent with its bytes, the message
 });
 
 test("the playground shows the person's conversation from the agent's store, also after a restart", async () => {
-  const path = join(mkdtempSync(join(tmpdir(), "laminar-flow-play-")), "chinwag.db");
+  const path = join(mkdtempSync(join(tmpdir(), "flowcore-play-")), "chinwag.db");
   const first = agentOn(sqlite(path));
   await first.agent.resume();
   const play = simulators();
@@ -348,7 +348,7 @@ test("WhatsApp shows a declared template as WhatsApp would, and one not declared
 });
 
 test("a turn's model error is printed on the terminal and reaches the playground's trace with its text", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "laminar-flow-"));
+  const dir = mkdtempSync(join(tmpdir(), "flowcore-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const play = simulators();
   // The model fails only once the message is taken, so the playground knows whose conversation it is.
@@ -367,7 +367,7 @@ test("a turn's model error is printed on the terminal and reaches the playground
     const sent = await fetch(`${server.url}/api/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "whatsapp", person: SAM.phone, text: "hi" }) });
     assert.equal(sent.status, 202);
     asked.open();
-    assert.equal(await printed.promise, "laminar-flow: model error (Sam): Error: 401 Incorrect API key");
+    assert.equal(await printed.promise, "flowcore: model error (Sam): Error: 401 Incorrect API key");
     await agent.conversation((await agent.testConversation(SAM.phone))!)!.whenIdle();
     const polled = (await (await fetch(`${server.url}/api/poll?${where}&after=${seq}`)).json()) as { events: Array<{ type: string; event?: { type: string; error?: string } }> };
     const traced = polled.events.flatMap((e) => (e.type === "trace" && e.event?.type === "model.error" ? [e.event.error] : []));

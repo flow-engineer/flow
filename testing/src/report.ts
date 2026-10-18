@@ -1,10 +1,10 @@
-// What `laminar-flow test --json` prints, how an error that stopped a session is classified into an
-// outcome and an exit status, and the pieces `laminar-flow test` and `laminar-flow show` share.
+// What `flowcore test --json` prints, how an error that stopped a session is classified into an
+// outcome and an exit status, and the pieces `flowcore test` and `flowcore show` share.
 
 import { existsSync } from "node:fs";
 import { CloudEnded, isTransportFailure, PostError, SessionStopped } from "./client.ts";
 
-/** How a `laminar-flow test` ended, one per exit status (0 passed; 1 failed, invalid; 2 errored, transport; 3 refused; 130 interrupted). */
+/** How a `flowcore test` ended, one per exit status (0 passed; 1 failed, invalid; 2 errored, transport; 3 refused; 130 interrupted). */
 export type Outcome = "passed" | "failed" | "errored" | "transport" | "refused" | "interrupted" | "invalid";
 
 export type Verdict = "passed" | "failed" | "errored" | "not_played";
@@ -33,13 +33,13 @@ export interface ReportRun {
   failedChecks: Array<{ kind: string; text: string; reason: string }>;
 }
 
-/** `laminar-flow test --json`: one document on stdout, whatever the exit. */
+/** `flowcore test --json`: one document on stdout, whatever the exit. */
 export interface JsonReport {
   version: 1;
   outcome: Outcome;
   exitCode: number;
   sessionId: string | null;
-  /** The cloud's id for the agent, which `laminar-flow show` reads runs under. */
+  /** The cloud's id for the agent, which `flowcore show` reads runs under. */
   agent: string | null;
   dashboard: string | null;
   suiteHash: string | null;

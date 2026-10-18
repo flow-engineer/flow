@@ -33,7 +33,7 @@ test("a run is printed once when it finishes, and not again with the summary", (
   assert.equal(passes.length, 1);
 });
 
-test("a run's line names its id, for laminar-flow show", () => {
+test("a run's line names its id, for flowcore show", () => {
   const lines: string[] = [];
   runPrinter((line) => lines.push(line))(run({ passed: false, runId: "trn_ABC", turns: 6 }));
   assert.match(lines[0], /^FAIL {2}s #1 \(sms\) trn_ABC: 6 turns, ended: goal_met;/);

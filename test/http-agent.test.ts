@@ -1,5 +1,5 @@
 // covers: testing/src/http-agent.ts spec/request.schema.json spec/response.schema.json
-// An agent on another framework, tested by its HTTP endpoint (laminar-flow test --agent-url): each of the
+// An agent on another framework, tested by its HTTP endpoint (flowcore test --agent-url): each of the
 // person's messages is one POST of the contract's JSON, its { replies } go to the platform after the
 // checks a Flow Framework agent's send gets, and a failed answer (a status, a timeout) ends only that turn,
 // saying why. The turn's events let the cloud know when the agent is done. Every request sent and
@@ -41,7 +41,7 @@ async function turn(answer: (res: ServerResponse) => void, incoming: Incoming, o
   let ended!: () => void;
   const done = new Promise<void>((resolve) => (ended = resolve));
   const agent = httpAgent({
-    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/laminar-flow`,
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/flowcore`,
     events: [(e) => (events.push(e), e.type === "turn.end" && ended())],
     log: (line) => logged.push(line),
     ...options,
@@ -97,7 +97,7 @@ test("a status other than 200 ends the turn with that status, without a reply", 
 test("an answer that never comes ends the turn at the timeout", async () => {
   const r = await turn(() => {}, { text: "hi" }, { timeoutMs: 50 });
   assert.deepEqual(r.delivered, []);
-  assert.match(String(r.events.find((e) => e.type === "model.error")?.error), /no answer from http:\/\/127\.0\.0\.1:\d+\/laminar-flow within 0\.05 s/);
+  assert.match(String(r.events.find((e) => e.type === "model.error")?.error), /no answer from http:\/\/127\.0\.0\.1:\d+\/flowcore within 0\.05 s/);
 });
 
 test("the token goes as a bearer header, --channel names the channel, files go as base64", async () => {

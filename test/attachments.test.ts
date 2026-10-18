@@ -10,7 +10,7 @@ import { createAgent, openAICompatible, sqlite, type Attachment, type ChatMessag
 import { gate, respond, say, scriptedModel } from "./helpers.ts";
 
 function agentWith(options: { reads?: Model["reads"]; transcribe?: Transcribe; database?: Database; dir?: string } = {}) {
-  const dir = options.dir ?? mkdtempSync(join(tmpdir(), "laminar-flow-"));
+  const dir = options.dir ?? mkdtempSync(join(tmpdir(), "flowcore-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   if (options.reads) scripted.model.reads = options.reads;
@@ -75,7 +75,7 @@ test("a voice note is read as its transcript, and a message sent while it is tra
 
 test("a voice note reports that it arrived before its transcript is ready", async () => {
   const transcribed = gate<string>();
-  const dir = mkdtempSync(join(tmpdir(), "laminar-flow-"));
+  const dir = mkdtempSync(join(tmpdir(), "flowcore-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const events: string[] = [];
@@ -135,7 +135,7 @@ test("a PDF reaches a model that reads them; other documents and files over the 
 });
 
 test("only the latest three photos are shown, and their bytes are never stored: after a restart they are named, not shown", async () => {
-  const path = join(mkdtempSync(join(tmpdir(), "laminar-flow-")), "agent.db");
+  const path = join(mkdtempSync(join(tmpdir(), "flowcore-")), "agent.db");
   const before = agentWith({ reads: { images: true }, database: sqlite(path) });
   await before.agent.resume();
   const photos = [1, 2, 3, 4].map((n) => file("image", "image/png", new Uint8Array([n])));
