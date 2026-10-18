@@ -424,7 +424,7 @@ npx flow test --synthetic                    # the whole suite once more before 
 
 ### Get a test cloud
 
-The quick way: `npx flow login`, then `npx flow setup` in the agent's folder, which
+The quick way: `npx flow login` (it opens the browser and waits up to 120 s; `npx flow login --wait` waits again for the same code, so a coding agent can run it), then `npx flow setup` in the agent's folder, which
 writes `FLOW_FRAMEWORK_CLOUD_KEY` (and the traces and Flow Messaging keys) into `.env`;
 `npx flow link` then prints a link to chat with the agent on Telegram. By hand:
 

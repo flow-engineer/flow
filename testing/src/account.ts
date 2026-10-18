@@ -3,24 +3,29 @@
 // The calls to flow.engineer are in testing/src/flow-login.ts. Every command takes --json: one JSON
 // object per line on stdout (login prints a "pending" line first, so a coding agent can show the
 // link while it waits), every human line on stderr. Errors are {"error":{code,message,next}}.
+// Nothing reads stdin or needs a terminal, so a coding agent can run every command. login opens the
+// browser itself and waits at most --timeout seconds; a code not approved by then stays in
+// ~/.config/flow-framework/pending.json for `login --wait`, which polls the same code again.
 // Exit status: 0 done, 1 usage or not signed in, 2 network, 3 the server refused (or the code was
-// denied or expired).
+// denied or expired), 4 the code is still waiting for approval.
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, join } from "node:path";
 import { parseArgs } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import {
-  currentToken, deleteCredentials, LoginRefused, loginUrl, pollToken, readCredentials, revoke, saveCredentials,
-  SETUP_ENV, setup, startDevice, tryLink, whoami, type Account, type SetupAnswer,
+  currentToken, deleteCredentials, deletePending, LoginRefused, loginUrl, pollToken, readCredentials, readPending, revoke, saveCredentials, savePending,
+  SETUP_ENV, setup, startDevice, tryLink, whoami, type Account, type PendingLogin, type SetupAnswer,
 } from "./flow-login.ts";
 
 export const ACCOUNT_COMMANDS = new Set(["login", "logout", "whoami", "setup", "link"]);
 
-export const ACCOUNT_LINES = `  flow login [--no-browser] [--json]
-                            Sign in to flow.engineer (opens the browser; prints the link and code too)
+export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] [--force] [--no-browser] [--json]
+                            Sign in to flow.engineer: opens the browser, prints the link and code,
+                            and waits up to --timeout (default 120) for approval; --wait goes on
+                            waiting for the same code, --no-wait returns at once
   flow logout [--json]      End this machine's sign-in and delete its token
   flow whoami [--json]      Show the account you are signed in as
   flow setup [--replace] [--ci] [--json]
@@ -32,11 +37,14 @@ const USAGE = `Usage:\n${ACCOUNT_LINES}
 The token is kept in ~/.config/flow-framework/credentials.json (mode 0600); FLOW_FRAMEWORK_TOKEN, when
 set, is used instead. setup never prints a key, only its last 4 characters, and keeps any value
 already in .env unless --replace. CI never signs in: setup --ci says how to give it the agent's key.
+Nothing asks for input. A code not approved in time is kept in ~/.config/flow-framework/pending.json
+(mode 0600) until it expires, for flow login --wait. Signed in already, login says so; --force signs in again.
 
-Exit status: 0 done, 1 usage or not signed in, 2 network, 3 refused, denied or expired.`;
+Exit status: 0 done, 1 usage or not signed in, 2 network, 3 refused, denied or expired,
+4 still waiting for approval (run flow login --wait).`;
 
 const NEXT = { login: "npx flow login", setup: "npx flow setup" };
-const EXIT = { ok: 0, usage: 1, network: 2, refused: 3 } as const;
+const EXIT = { ok: 0, usage: 1, network: 2, refused: 3, pending: 4 } as const;
 
 class Stop extends Error {
   readonly code: string;
@@ -52,7 +60,7 @@ class Stop extends Error {
 
 /** Runs one account command; resolves to the exit status. */
 export async function accountCli(command: string, args: string[]): Promise<number> {
-  let values: Record<string, boolean | undefined>;
+  let values: Record<string, boolean | string | undefined>;
   try {
     ({ values } = parseArgs({
       args,
@@ -60,7 +68,15 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
       options: {
         json: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
-        ...(command === "login" ? { "no-browser": { type: "boolean", default: false } } : {}),
+        ...(command === "login"
+          ? {
+              "no-browser": { type: "boolean", default: false },
+              wait: { type: "boolean", default: false },
+              "no-wait": { type: "boolean", default: false },
+              force: { type: "boolean", default: false },
+              timeout: { type: "string", default: "120" },
+            }
+          : {}),
         ...(command === "setup" ? { replace: { type: "boolean", default: false }, ci: { type: "boolean", default: false } } : {}),
       },
     }));
@@ -72,11 +88,19 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     console.log(USAGE);
     return EXIT.ok;
   }
+  const timeoutSeconds = Number(values.timeout);
+  if (command === "login" && (values.wait && values["no-wait"] || !(values.timeout !== "" && timeoutSeconds >= 0))) {
+    console.error(`flow login: ${values.wait && values["no-wait"] ? "--wait and --no-wait cannot go together" : "--timeout is a number of seconds, 0 or more"}.\n\n${USAGE}`);
+    return EXIT.usage;
+  }
   const json = values.json === true;
-  const out = (report: unknown) => process.stdout.write(`${JSON.stringify(report)}\n`);
-  const say = json ? (line: string) => console.error(line) : (line: string) => console.log(line);
+  // Straight to the file descriptors, never buffered: a coding agent's cut-off command keeps every line.
+  const out = (report: unknown) => writeAll(1, `${JSON.stringify(report)}\n`);
+  const say = (line: string) => writeAll(json ? 2 : 1, `${line}\n`);
   try {
-    if (command === "login") await login(values["no-browser"] === true, json, out, say);
+    if (command === "login") {
+      await login({ noBrowser: values["no-browser"] === true, wait: values.wait === true, noWait: values["no-wait"] === true, force: values.force === true, timeoutSeconds }, json, out, say);
+    }
     else if (command === "logout") await logout(json, out, say);
     else if (command === "whoami") await showAccount(json, out, say);
     else if (command === "setup") await setupEnv(values.replace === true, values.ci === true, json, out, say);
@@ -84,10 +108,16 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     return EXIT.ok;
   } catch (error) {
     const stop = asStop(error);
-    console.error(stop.next ? `${stop.message} Next: ${stop.next}` : stop.message);
-    if (json) out({ error: { code: stop.code, message: stop.message, next: stop.next ?? null } });
+    writeAll(2, `${stop.next ? `${stop.message} Next: ${stop.next}` : stop.message}\n`);
+    if (json) out(stop instanceof Pending ? stop.report : { error: { code: stop.code, message: stop.message, next: stop.next ?? null } });
     return stop.exit;
   }
+}
+
+/** Writes all of the text to the descriptor before going on. */
+function writeAll(fd: number, text: string): void {
+  let bytes = Buffer.from(text);
+  while (bytes.length) bytes = bytes.subarray(writeSync(fd, bytes));
 }
 
 type Out = (report: unknown) => void;
@@ -109,27 +139,65 @@ function signedIn(): string {
   return current.token;
 }
 
-async function login(noBrowser: boolean, json: boolean, out: Out, say: Say): Promise<void> {
+interface LoginOptions {
+  noBrowser: boolean;
+  wait: boolean;
+  noWait: boolean;
+  force: boolean;
+  /** How long this run polls before it stops with the code still pending (exit 4). */
+  timeoutSeconds: number;
+}
+
+const WAIT_NEXT = "approve in the browser, then run: npx flow login --wait";
+
+async function login(options: LoginOptions, json: boolean, out: Out, say: Say): Promise<void> {
   const url = loginUrl();
-  const start = await startDevice(url, hostname());
-  const page = start.verification_uri_complete || start.verification_uri;
-  const opened = !noBrowser && openBrowser(page);
-  if (json) out({ status: "pending", verification_uri: start.verification_uri, verification_uri_complete: page, user_code: start.user_code, expires_in: start.expires_in, opened_browser: opened });
-  say(`${opened ? "Opened your browser at" : "Open"} ${page}`);
-  say(`and check it shows the code ${start.user_code}, then approve. Waiting...`);
-  let interval = start.interval;
-  const deadline = Date.now() + start.expires_in * 1000;
+  if (!options.force && !options.wait) {
+    const already = await signedInAccount(url);
+    if (already) {
+      if (json) out({ status: "signed_in", already: true, account: already });
+      say(`Already signed in as ${already.email}. flow login --force signs in again.`);
+      return;
+    }
+  }
+  let pending = options.wait ? readPending() : undefined;
+  if (pending && (pending.url !== url || pending.expires_at <= Date.now())) {
+    say("The pending sign-in code has expired; starting a new sign-in.");
+    deletePending();
+    pending = undefined;
+  } else if (options.wait && !pending) say("No sign-in is waiting; starting a new one.");
+  const resumed = pending !== undefined;
+  let opened = false;
+  if (!pending) {
+    const start = await startDevice(url, hostname());
+    pending = { ...start, expires_at: Date.now() + start.expires_in * 1000, url };
+    savePending(pending);
+    opened = !options.noBrowser && (await openBrowser(pending.verification_uri_complete || pending.verification_uri));
+  }
+  const page = pending.verification_uri_complete || pending.verification_uri;
+  const expiresIn = Math.max(0, Math.round((pending.expires_at - Date.now()) / 1000));
+  // Written straight to the file descriptors, so a coding agent whose command is cut off still has them.
+  if (json) out({ status: "pending", verification_uri: pending.verification_uri, verification_uri_complete: page, user_code: pending.user_code, expires_in: expiresIn, opened_browser: opened, resumed, next: WAIT_NEXT });
+  if (resumed) say(`Still waiting for ${page} (code ${pending.user_code}).`);
+  else if (opened) say(`Opened your browser at ${page}`);
+  else say(`${options.noBrowser ? "Open" : "Could not open a browser here; open"} ${page}`);
+  if (!resumed) say(`and check it shows the code ${pending.user_code}, then approve.`);
+  if (options.noWait) throw stillPending(pending, null);
+
+  let interval = pending.interval;
+  const stopAt = Date.now() + options.timeoutSeconds * 1000;
   for (;;) {
-    await delay(interval * 1000);
-    if (Date.now() > deadline) throw expired();
-    const answer = await pollToken(url, start.device_code);
-    if (answer.status === "authorization_pending") continue;
-    if (answer.status === "slow_down") {
-      interval += 5; // RFC 8628: each slow_down adds 5 seconds for good
+    await delay(Math.max(0, Math.min(interval * 1000, stopAt - Date.now())));
+    if (Date.now() > pending.expires_at) throw expired();
+    const answer = await pollToken(url, pending.device_code);
+    if (answer.status === "slow_down") interval += 5; // RFC 8628: each slow_down adds 5 seconds for good
+    if (answer.status === "authorization_pending" || answer.status === "slow_down") {
+      if (Date.now() >= stopAt) throw stillPending(pending, options.timeoutSeconds);
       continue;
     }
+    deletePending();
     if (answer.status === "expired_token") throw expired();
-    if (answer.status === "access_denied") throw new Stop("access_denied", "The sign-in was denied in the browser.", NEXT.login, EXIT.refused);
+    if (answer.status !== "signed_in") throw new Stop("access_denied", "The sign-in was denied in the browser.", NEXT.login, EXIT.refused);
     const path = saveCredentials({ token: answer.token, ...(answer.expires_at ? { expires_at: answer.expires_at } : {}), url });
     const account = answer.account ?? (await whoami(url, answer.token));
     if (json) out({ status: "signed_in", account, token_path: path });
@@ -139,19 +207,62 @@ async function login(noBrowser: boolean, json: boolean, out: Out, say: Say): Pro
   }
 }
 
-const expired = () => new Stop("expired_token", "The code expired before it was approved.", NEXT.login, EXIT.refused);
-
-/** Opens the page in the default browser; false when there is no way to (it is printed anyway). */
-function openBrowser(page: string): boolean {
-  const [command, ...args] = process.platform === "darwin" ? ["open", page] : process.platform === "win32" ? ["cmd", "/c", "start", "", page] : ["xdg-open", page];
+/** The account of the token in use, or undefined when there is none or the server no longer takes it. */
+async function signedInAccount(url: string): Promise<Account | undefined> {
+  const current = currentToken();
+  if (!current) return undefined;
   try {
-    const child = spawn(command!, args, { detached: true, stdio: "ignore" });
-    child.on("error", () => {});
-    child.unref();
-    return true;
-  } catch {
-    return false;
+    return await whoami(url, current.token);
+  } catch (error) {
+    if (error instanceof LoginRefused && error.status === 401) return undefined;
+    throw error;
   }
+}
+
+/** Not approved yet: the code stays in pending.json for `flow login --wait`, and the exit is 4. */
+class Pending extends Stop {
+  readonly report: Record<string, unknown>;
+  /** `waited` is the seconds this run polled, null when it did not (--no-wait). */
+  constructor(pending: PendingLogin, waited: number | null) {
+    const page = pending.verification_uri_complete || pending.verification_uri;
+    super("pending", waited !== null ? `Not approved yet after ${waited} s; the code ${pending.user_code} still works at ${page}.` : `Approve the code ${pending.user_code} at ${page}.`, "npx flow login --wait", EXIT.pending);
+    this.report = { status: "pending", user_code: pending.user_code, verification_uri: pending.verification_uri, waited_s: waited ?? 0, next: WAIT_NEXT };
+  }
+}
+
+const stillPending = (pending: PendingLogin, waited: number | null) => new Pending(pending, waited);
+
+const expired = () => {
+  deletePending();
+  return new Stop("expired_token", "The code expired before it was approved.", NEXT.login, EXIT.refused);
+};
+
+/** The commands that open a page in the default browser here, in the order to try them. */
+function browserCommands(page: string): string[][] {
+  if (process.platform === "darwin") return [["open", page]];
+  if (process.platform === "win32") return [["cmd", "/c", "start", "", page]];
+  const wsl = Boolean(process.env.WSL_DISTRO_NAME) || (existsSync("/proc/version") && /microsoft/i.test(readFileSync("/proc/version", "utf8")));
+  if (wsl) return [["wslview", page], ["cmd.exe", "/c", "start", "", page]];
+  // xdg-open needs a display; without one (a server, a sandbox) there is no browser to open.
+  return process.env.DISPLAY || process.env.WAYLAND_DISPLAY ? [["xdg-open", page]] : [];
+}
+
+/** Opens the page in the default browser, never waiting for it; false when nothing here could (it is printed anyway). */
+async function openBrowser(page: string): Promise<boolean> {
+  for (const [command, ...args] of browserCommands(page)) {
+    const started = await new Promise<boolean>((done) => {
+      try {
+        const child = spawn(command!, args, { detached: true, stdio: "ignore" });
+        child.once("spawn", () => done(true));
+        child.once("error", () => done(false));
+        child.unref();
+      } catch {
+        done(false);
+      }
+    });
+    if (started) return true;
+  }
+  return false;
 }
 
 async function logout(json: boolean, out: Out, say: Say): Promise<void> {

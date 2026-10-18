@@ -301,18 +301,24 @@ message is logged with the person, channel, time and address.
 ## Put it on a phone
 
 To chat with the agent from a real phone (Telegram), with no key made by hand, run these from the
-agent's folder. `login` opens the owner's browser and prints a link and a code: show both to the
-owner and wait while they approve (with `--json` the first line is `{"status":"pending",...}`).
+agent's folder. Nothing asks for input or needs a terminal. `login` opens the owner's browser
+itself and prints the link and code at once (with `--json` the first line is
+`{"status":"pending","verification_uri":...,"user_code":...,"next":...}`); it waits at most 120 s
+(`--timeout <s>`), then exits 4 with the code kept for `--wait`. Signed in already, it says so and
+exits 0 (`--force` signs in again).
 
 ```sh
-npx flow login --json                # once per machine; the owner approves in the browser
+npx flow login --json                # opens the browser; returns pending (exit 4) after at most 120 s
+# tell the owner to approve the code shown in the browser (give them the link and code too)
+npx flow login --wait --json         # waits again for the same code: no new code or tab; repeat while it exits 4
 npx flow setup --json                # writes the test cloud, traces and Flow Messaging keys into .env
+npx flow link --json                 # the link; give its say_to_person to the owner
 npx flow test --synthetic            # the tests, on the key setup wrote
 npm start                            # the agent, with fm.telegram() from @flow-engineer/flow/flow-messaging
-npx flow link --json                 # the link; give its say_to_person to the owner
 ```
 
-`setup` prints names and last 4 characters only, keeps values already in `.env` (`--replace`
+`login --no-wait` opens the browser, prints the code and returns at once (exit 4). A code that
+expired before `--wait` is replaced by a new sign-in, and says so. `setup` prints names and last 4 characters only, keeps values already in `.env` (`--replace`
 takes the new ones), and is safe to run again. Wire the channel as `flow-messaging/README.md` says.
 Each error is `{"error":{"code","message","next"}}`: run its `next`. CI never logs in: `setup --ci`
 says how to give it the cloud key.

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, watch, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,8 +16,11 @@ const KEYS = { cloud_key: "oci_cloudsecretvalue9Qz1", traces_key: "otk_test_trac
 
 interface Seen { method: string; path: string; auth?: string; body: Record<string, unknown> }
 
-/** A flow.engineer that answers /cli/token from `tokenAnswers` in turn, and records every request. */
-async function flowServer(tokenAnswers: Array<Record<string, unknown>> = []) {
+/**
+ * A flow.engineer that answers /cli/token from `tokenAnswers` in turn (or from the function: null
+ * holds the request unanswered), and records every request.
+ */
+async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = []) {
   const seen: Seen[] = [];
   const read = (req: IncomingMessage) => new Promise<string>((done) => { let b = ""; req.on("data", (c) => { b += c; }); req.on("end", () => done(b)); });
   const server = createServer(async (req, res) => {
@@ -27,7 +30,10 @@ async function flowServer(tokenAnswers: Array<Record<string, unknown>> = []) {
     const send = (status: number, answer: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(answer)); };
     const bearer = req.headers.authorization?.startsWith("Bearer fcli_");
     if (req.url === "/cli/device") return send(200, { device_code: "fcd_1", user_code: "BCDF-GHJK", verification_uri: `${url}/cli/approve`, verification_uri_complete: `${url}/cli/approve?code=BCDF-GHJK`, interval: 0, expires_in: 600 });
-    if (req.url === "/cli/token") { const a = tokenAnswers.shift() ?? { error: "expired_token" }; return send(a.access_token ? 200 : 400, a); }
+    if (req.url === "/cli/token") {
+      const a = typeof tokenAnswers === "function" ? tokenAnswers() : (tokenAnswers.shift() ?? { error: "expired_token" });
+      return a ? send(a.access_token ? 200 : 400, a) : undefined;
+    }
     if (!bearer) return send(401, { error: "not_signed_in" });
     if (req.url === "/cli/whoami") return send(200, { email: "dev@example.com", account: "uid_1" });
     if (req.url === "/cli/revoke") return send(200, {});
@@ -41,13 +47,12 @@ async function flowServer(tokenAnswers: Array<Record<string, unknown>> = []) {
   });
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  return { url, seen, close: () => server.close() };
+  return { url, seen, close: () => { server.closeAllConnections(); server.close(); } };
 }
 
 /** Runs the CLI in `cwd` with its own config folder; resolves to its exit status, stdout and stderr. */
 function run(args: string[], options: { url: string; config: string; cwd: string; env?: Record<string, string> }) {
-  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: options.config, XDG_CONFIG_HOME: options.config, FLOW_FRAMEWORK_LOGIN_URL: options.url, ...options.env };
-  const child = spawn(process.execPath, [cli, ...args], { cwd: options.cwd, env });
+  const child = start(args, options);
   let out = "";
   let err = "";
   child.stdout.on("data", (c) => { out += c; });
@@ -55,6 +60,31 @@ function run(args: string[], options: { url: string; config: string; cwd: string
   return new Promise<{ code: number | null; out: string; err: string; lines: Array<Record<string, any>> }>((done) =>
     child.on("close", (code) => done({ code, out, err, lines: args.includes("--json") ? out.split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [] })),
   );
+}
+
+/** Starts the CLI with no terminal: stdin is a pipe left open and never written. */
+function start(args: string[], options: { url: string; config: string; cwd: string; env?: Record<string, string> }) {
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: options.config, XDG_CONFIG_HOME: options.config, FLOW_FRAMEWORK_LOGIN_URL: options.url, ...options.env };
+  return spawn(process.execPath, [cli, ...args], { cwd: options.cwd, env });
+}
+
+/**
+ * A folder for PATH holding a fake browser opener under every name login tries (open, xdg-open,
+ * wslview), each writing the page it was given to `log`; `opened` resolves once it has.
+ */
+function fakeOpener() {
+  const bin = temp();
+  const log = join(bin, "opened.log");
+  for (const name of ["open", "xdg-open", "wslview"]) {
+    writeFileSync(join(bin, name), `#!/bin/sh\necho "$1" >> "${log}"\n`);
+    chmodSync(join(bin, name), 0o755);
+  }
+  const opened = new Promise<string>((done) => {
+    const check = () => { if (existsSync(log) && readFileSync(log, "utf8").endsWith("\n")) { watcher.close(); done(readFileSync(log, "utf8")); } };
+    const watcher = watch(bin, check);
+    check();
+  });
+  return { env: { PATH: bin, DISPLAY: ":0" }, log, opened };
 }
 
 const temp = () => mkdtempSync(join(tmpdir(), "flow-account-"));
@@ -65,13 +95,103 @@ test("login prints the code as a pending line, waits through pending and slow_do
   const config = temp();
   const result = await run(["login", "--no-browser", "--json"], { url: flow.url, config, cwd: temp() });
   assert.equal(result.code, 0, result.err);
-  assert.deepEqual(result.lines[0], { status: "pending", verification_uri: `${flow.url}/cli/approve`, verification_uri_complete: `${flow.url}/cli/approve?code=BCDF-GHJK`, user_code: "BCDF-GHJK", expires_in: 600, opened_browser: false });
+  assert.deepEqual(result.lines[0], { status: "pending", verification_uri: `${flow.url}/cli/approve`, verification_uri_complete: `${flow.url}/cli/approve?code=BCDF-GHJK`, user_code: "BCDF-GHJK", expires_in: 600, opened_browser: false, resumed: false, next: WAIT_NEXT });
   const file = join(config, "flow-framework", "credentials.json");
   assert.deepEqual(result.lines[1], { status: "signed_in", account: { email: "dev@example.com", account: "uid_1" }, token_path: file });
   assert.equal(flow.seen.filter((r) => r.path === "/cli/token").length, 3);
   assert.equal(statSync(file).mode & 0o777, 0o600);
   assert.equal(JSON.parse(readFileSync(file, "utf8")).token, TOKEN);
   assert.ok(!result.out.includes(TOKEN) && !result.err.includes(TOKEN), "the token is never printed");
+});
+
+const WAIT_NEXT = "approve in the browser, then run: npx flow login --wait";
+
+test("with no terminal and CI=1, login opens the browser itself and prints the pending line before it waits", async (t) => {
+  const flow = await flowServer(() => null);
+  t.after(flow.close);
+  const opener = fakeOpener();
+  const child = start(["login", "--json"], { url: flow.url, config: temp(), cwd: temp(), env: { ...opener.env, CI: "1" } });
+  t.after(() => child.kill());
+  const first = await new Promise<Record<string, unknown>>((done) => {
+    let out = "";
+    child.stdout.on("data", (c) => { out += c; if (out.includes("\n")) done(JSON.parse(out.slice(0, out.indexOf("\n")))); });
+  });
+  assert.equal(first.status, "pending");
+  assert.equal(first.user_code, "BCDF-GHJK");
+  assert.equal(first.opened_browser, true);
+  assert.equal(first.next, WAIT_NEXT);
+  assert.equal(await opener.opened, `${flow.url}/cli/approve?code=BCDF-GHJK\n`);
+  assert.equal(child.exitCode, null, "it is still waiting, with the line already out");
+});
+
+test("--no-wait and a --timeout that runs out exit 4 with the code kept at 0600; --wait polls that same code, with no new code or browser tab", async (t) => {
+  let approved = false;
+  const flow = await flowServer(() => (approved ? { access_token: TOKEN } : { error: "authorization_pending" }));
+  t.after(flow.close);
+  const opener = fakeOpener();
+  const config = temp();
+  const pendingFile = join(config, "flow-framework", "pending.json");
+  const started = await run(["login", "--no-wait", "--json"], { url: flow.url, config, cwd: temp(), env: opener.env });
+  assert.equal(started.code, 4, started.err);
+  assert.equal(started.lines[0]!.opened_browser, true);
+  assert.deepEqual(started.lines.at(-1), { status: "pending", user_code: "BCDF-GHJK", verification_uri: `${flow.url}/cli/approve`, waited_s: 0, next: WAIT_NEXT });
+  assert.equal(flow.seen.filter((r) => r.path === "/cli/token").length, 0, "--no-wait returns before polling");
+  assert.equal(statSync(pendingFile).mode & 0o777, 0o600);
+  await opener.opened;
+
+  const timedOut = await run(["login", "--wait", "--timeout", "0", "--json"], { url: flow.url, config, cwd: temp(), env: opener.env });
+  assert.equal(timedOut.code, 4, timedOut.err);
+  assert.equal(timedOut.lines[0]!.resumed, true);
+  assert.equal(timedOut.lines.at(-1)!.status, "pending");
+  assert.match(timedOut.err, /Not approved yet after 0 s.*Next: npx flow login --wait/);
+  assert.ok(existsSync(pendingFile));
+
+  approved = true;
+  const done = await run(["login", "--wait", "--json"], { url: flow.url, config, cwd: temp(), env: opener.env });
+  assert.equal(done.code, 0, done.err);
+  assert.deepEqual({ resumed: done.lines[0]!.resumed, opened: done.lines[0]!.opened_browser }, { resumed: true, opened: false });
+  assert.equal(done.lines.at(-1)!.status, "signed_in");
+  assert.equal(flow.seen.filter((r) => r.path === "/cli/device").length, 1, "one code for all three runs");
+  assert.ok(flow.seen.filter((r) => r.path === "/cli/token").every((r) => r.body.device_code === "fcd_1"));
+  assert.equal(readFileSync(opener.log, "utf8").split("\n").filter(Boolean).length, 1, "one browser tab");
+  assert.ok(!existsSync(pendingFile), "the used code is forgotten");
+});
+
+test("--wait on an expired pending code says so and starts a new sign-in", async (t) => {
+  const flow = await flowServer([{ access_token: TOKEN }]);
+  t.after(flow.close);
+  const config = temp();
+  mkdirSync(join(config, "flow-framework"));
+  writeFileSync(join(config, "flow-framework", "pending.json"), JSON.stringify({ device_code: "fcd_old", user_code: "OLDC-ODEX", verification_uri: `${flow.url}/cli/approve`, interval: 0, expires_in: 600, expires_at: Date.now() - 1000, url: flow.url }));
+  const result = await run(["login", "--wait", "--no-browser", "--json"], { url: flow.url, config, cwd: temp() });
+  assert.equal(result.code, 0, result.err);
+  assert.match(result.err, /pending sign-in code has expired; starting a new sign-in/);
+  assert.deepEqual({ code: result.lines[0]!.user_code, resumed: result.lines[0]!.resumed }, { code: "BCDF-GHJK", resumed: false });
+  assert.deepEqual(flow.seen.filter((r) => r.path === "/cli/token").map((r) => r.body.device_code), ["fcd_1"]);
+});
+
+test("with no browser opener here, login says so and goes on to sign in", async (t) => {
+  const flow = await flowServer([{ access_token: TOKEN }]);
+  t.after(flow.close);
+  const result = await run(["login", "--json"], { url: flow.url, config: temp(), cwd: temp(), env: { PATH: temp(), DISPLAY: ":0" } });
+  assert.equal(result.code, 0, result.err);
+  assert.equal(result.lines[0]!.opened_browser, false);
+  assert.match(result.err, /Could not open a browser here; open http/);
+});
+
+test("signed in already, login says so and exits 0 without a code; --force signs in again", async (t) => {
+  const flow = await flowServer([{ access_token: TOKEN }]);
+  t.after(flow.close);
+  const config = temp();
+  const env = { FLOW_FRAMEWORK_TOKEN: "fcli_from_env" };
+  const again = await run(["login", "--json"], { url: flow.url, config, cwd: temp(), env });
+  assert.equal(again.code, 0, again.err);
+  assert.deepEqual(again.lines[0], { status: "signed_in", already: true, account: { email: "dev@example.com", account: "uid_1" } });
+  assert.equal(flow.seen.filter((r) => r.path === "/cli/device").length, 0);
+  const forced = await run(["login", "--force", "--no-browser", "--json"], { url: flow.url, config, cwd: temp(), env });
+  assert.equal(forced.code, 0, forced.err);
+  assert.equal(forced.lines.at(-1)!.status, "signed_in");
+  assert.equal(flow.seen.filter((r) => r.path === "/cli/device").length, 1);
 });
 
 test("a code denied in the browser, or one that expired, exits 3 with its error and saves nothing", async (t) => {

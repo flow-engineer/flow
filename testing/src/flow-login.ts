@@ -72,6 +72,39 @@ export function deleteCredentials(env: NodeJS.ProcessEnv = process.env): boolean
   return true;
 }
 
+/** A device code started by `flow login` and not approved yet, kept for `flow login --wait`. */
+export interface PendingLogin extends DeviceStart {
+  /** When the code expires, in ms since the epoch. */
+  expires_at: number;
+  /** The server that issued it. */
+  url: string;
+}
+
+/** ~/.config/flow-framework/pending.json, written at mode 0600 and deleted once the code is used or expired. */
+export function pendingPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(configDir(env), "pending.json");
+}
+
+export function readPending(env: NodeJS.ProcessEnv = process.env): PendingLogin | undefined {
+  try {
+    const saved = JSON.parse(readFileSync(pendingPath(env), "utf8")) as PendingLogin;
+    return typeof saved.device_code === "string" && typeof saved.expires_at === "number" ? saved : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function savePending(pending: PendingLogin, env: NodeJS.ProcessEnv = process.env): void {
+  const path = pendingPath(env);
+  mkdirSync(join(path, ".."), { recursive: true, mode: 0o700 });
+  writeFileSync(path, `${JSON.stringify(pending, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(path, 0o600);
+}
+
+export function deletePending(env: NodeJS.ProcessEnv = process.env): void {
+  rmSync(pendingPath(env), { force: true });
+}
+
 export interface DeviceStart {
   device_code: string;
   user_code: string;
@@ -137,7 +170,7 @@ function refused(path: string, answer: { status: number; body: Record<string, un
 }
 
 export async function startDevice(url: string, hostname: string): Promise<DeviceStart> {
-  const answer = await call(url, "/cli/device", { body: { client_name: "@flow-engineer/flow", hostname } });
+  const answer = await call(url, "/cli/device", { body: { client_name: "flow", hostname } });
   if (answer.status !== 200 || typeof answer.body.device_code !== "string") throw refused("/cli/device", answer);
   return answer.body as unknown as DeviceStart;
 }
