@@ -7,7 +7,7 @@ import type { ToolSpec } from "./types.ts";
 export interface ToolContext {
   conversationId: string;
   /**
-   * Who the person is, as Chinwag verified it, in one of three forms: `key:<resolve's value>` when
+   * Who the person is, as Flow Framework verified it, in one of three forms: `key:<resolve's value>` when
    * the owner's `resolve` knew them, else `phone:<E.164>` (`phone:+15551234567`) for a number a
    * phone channel verified, else `<channel>:<address>`. It is the stable id to key a person's data
    * by, never an id the model passed. To look them up in your own backend, use `key`.

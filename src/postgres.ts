@@ -1,5 +1,5 @@
-// Chinwag's state in Postgres, over a connection pool the app already has (node-postgres's Pool, or
-// anything shaped like it). Chinwag takes no Postgres dependency: the app brings the client.
+// Flow Framework's state in Postgres, over a connection pool the app already has (node-postgres's Pool, or
+// anything shaped like it). Flow Framework takes no Postgres dependency: the app brings the client.
 //
 //   import pg from "pg";
 //   const database = postgres(new pg.Pool({ connectionString: process.env.DATABASE_URL }));
@@ -16,7 +16,7 @@ export interface PostgresPool extends Queryable {
 }
 
 /**
- * Postgres behind Chinwag's Database. SQL written with `?` reaches Postgres as `$1`, `$2`, ...; a
+ * Postgres behind Flow Framework's Database. SQL written with `?` reaches Postgres as `$1`, `$2`, ...; a
  * transaction runs BEGIN ... COMMIT on one connection taken from the pool for it, and a connection
  * whose ROLLBACK failed is given back broken, so the pool closes it instead of reusing it.
  */

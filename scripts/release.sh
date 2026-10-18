@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Publishes chinwag to npm from a clean, tagged commit whose tests pass.
+# Publishes laminar-flow to npm from a clean, tagged commit whose tests pass.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -16,5 +16,6 @@ fi
 
 npm test
 npm test --prefix simulators
+npm test --prefix flow-messaging
 
 npm publish --access public

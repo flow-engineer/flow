@@ -1,20 +1,20 @@
 #!/usr/bin/env node
-// The chinwag command. `chinwag new <name>` makes ./<name>/, an agent started from the café example
-// (testing/src/new.ts). `chinwag test`, or `chinwag` with flags, runs an agent's tests in the cloud,
+// The laminar-flow command. `laminar-flow new <name>` makes ./<name>/, an agent started from the café example
+// (testing/src/new.ts). `laminar-flow test`, or `laminar-flow` with flags, runs an agent's tests in the cloud,
 // from the agent's folder:
-//   chinwag test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--json]
+//   laminar-flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--json]
 // A hosted cloud (any --cloud off this machine, the default included) needs the
-// agent's CI key in CHINWAG_CLOUD_KEY and --synthetic, the attestation that the test files hold no real
+// agent's CI key in LAMINAR_FLOW_CLOUD_KEY and --synthetic, the attestation that the test files hold no real
 // customer or member data. --agent-version (else GITHUB_SHA), --ref (else GitHub's branch) and
 // --environment (staging or production) are kept with the session.
 // The agent's src/agent.ts exports buildAgent({ model, events, tools }) and its tools; its tests are
 // in tests/scenarios and tests/tools. An agent built on anything else is tested through its HTTP
 // endpoint instead, with --agent-url (testing/src/http-agent.ts): its own tools run for real.
-// `chinwag check-endpoint <url>` checks such an endpoint against spec/ first (testing/src/check-endpoint.ts).
-// Once a session has opened, its results go to .chinwag/last-session.json in the agent's folder
+// `laminar-flow check-endpoint <url>` checks such an endpoint against spec/ first (testing/src/check-endpoint.ts).
+// Once a session has opened, its results go to .laminar-flow/last-session.json in the agent's folder
 // (what each run ended as and the judge's reasons, never the messages), and --failed runs again the
 // scenarios that did not pass. --json prints one report (testing/src/report.ts) on stdout at every exit,
-// and `chinwag show <run>` prints one run's record from the cloud (testing/src/show.ts).
+// and `laminar-flow show <run>` prints one run's record from the cloud (testing/src/show.ts).
 
 import { mkdirSync, existsSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -22,31 +22,31 @@ import { request as httpsRequest } from "node:https";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
-import { OBSERVE_URL } from "../../src/traces.ts";
+import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions } from "./client.ts";
 import { runPrinter } from "./print-run.ts";
 import { checkEndpointCli } from "./check-endpoint.ts";
 import { httpAgent } from "./http-agent.ts";
 import { newStandalone, packageRoot } from "./new.ts";
 import { EXIT, finishedOutcome, loadEnv, networkCode, reportError, runVerdict, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type Verdict } from "./report.ts";
-import { LAST_SESSION, SHOW_LINE, showCli, type LastSession } from "./show.ts";
+import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
 import type { RunSummary } from "./protocol.ts";
 
-const NEW_LINE = "  chinwag new <name>        Make ./<name>/, a new agent started from the café example";
-const TEST_LINE = `  chinwag test [options]    Run the agent's tests in a test cloud, from the agent's folder
+const NEW_LINE = "  laminar-flow new <name>   Make ./<name>/, a new agent started from the café example";
+const TEST_LINE = `  laminar-flow test [options]    Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
                             the tests are in tests/scenarios and tests/tools)`;
-const CHECK_LINE = `  chinwag check-endpoint <url> [--token-env NAME] [--json]
+const CHECK_LINE = `  laminar-flow check-endpoint <url> [--token-env NAME] [--json]
                             Check an agent's HTTP endpoint against the contract, for --agent-url
-                            (chinwag check-endpoint --help)`;
+                            (laminar-flow check-endpoint --help)`;
 const NEW_USAGE = `Usage:\n${NEW_LINE}\n\n  -h, --help                Show this help`;
 const TEST_OPTIONS = `Options for test:
-  --cloud <url>            The test cloud (default: CHINWAG_CLOUD, else https://flow.engineer/observe)
+  --cloud <url>            The test cloud (default: LAMINAR_FLOW_CLOUD, else https://flow.engineer/observe)
   --runs <n>               Runs per scenario (default: 1)
   --only <ids>             Only these scenarios, comma-separated (file names without .yaml)
   --failed                 Only the scenarios that failed, errored or never played in the last
-                           session (.chinwag/last-session.json), on every channel each plays.
+                           session (.laminar-flow/last-session.json), on every channel each plays.
                            Goes with --runs, not with --only
   --synthetic              Attest the test files hold no real customer data (a hosted cloud needs it)
   --json                   Print one JSON report on stdout when it ends, whatever the exit; every
@@ -67,7 +67,7 @@ const TEST_OPTIONS = `Options for test:
 Exit status:
   0    Every run passed
   1    A run failed. Or nothing was sent: a wrong flag, a test file that does not parse,
-       no CHINWAG_CLOUD_KEY. The message is printed on its own
+       no LAMINAR_FLOW_CLOUD_KEY. The message is printed on its own
   2    The connection, the tunnel or the stream failed (before or after the session opened),
        the cloud answered 5xx or no JSON, the cloud ended the session for its own failure, or
        runs errored (the cloud could not play or judge them) and none failed. After the open:
@@ -78,20 +78,21 @@ Exit status:
   130  Interrupted (Ctrl-C). The same partial report as exit 2. The cloud keeps
        playing until it is stopped from the dashboard
 
-Results: once the session has opened, every exit writes .chinwag/last-session.json in the agent's
+Results: once the session has opened, every exit writes .laminar-flow/last-session.json in the agent's
 folder: the session id, the cloud's agent id, dashboard link, suite hash and time, and per run its
 scenario, channel, number, run id, verdict (passed, failed, errored or not_played) and failed checks
 with the judge's reasons. Never the messages. The folder is git-ignored and the suite synthetic.
 
-Environment (also read from the agent folder's .env, or --dotenv; variables already set win):
-  CHINWAG_CLOUD            The test cloud, when --cloud is not given
-  CHINWAG_CLOUD_KEY        The agent's CI key, for a hosted cloud (oci_...: make one at
+Environment (also read from the agent folder's .env, or --dotenv; variables already set win;
+the CHINWAG_ names from before the rename still work):
+  LAMINAR_FLOW_CLOUD       The test cloud, when --cloud is not given
+  LAMINAR_FLOW_CLOUD_KEY   The agent's CI key, for a hosted cloud (oci_...: make one at
                            https://flow.engineer/observe, your agent, Developers)
-  CHINWAG_AGENT_TOKEN      With --agent-url: sent to it as authorization: Bearer <token>
+  LAMINAR_FLOW_AGENT_TOKEN With --agent-url: sent to it as authorization: Bearer <token>
   OPENROUTER_API_KEY       The agent's model key, or OPENAI_API_KEY, ANTHROPIC_API_KEY or
                            GEMINI_API_KEY: the first with a value is used`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
-const USAGE = `Usage:\n${NEW_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n  chinwag --version         Show the version\n\n${TEST_OPTIONS}`;
+const USAGE = `Usage:\n${NEW_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n  laminar-flow --version    Show the version\n\n${TEST_OPTIONS}`;
 
 checkNode(process.versions.node);
 
@@ -107,7 +108,7 @@ const TEST_FLAGS = {
   runs: { type: "string", default: "1" },
   /** Only these scenarios (file names without .yaml, comma-separated); every tool file still goes. */
   only: { type: "string" },
-  /** Only the scenarios that did not pass in .chinwag/last-session.json. */
+  /** Only the scenarios that did not pass in .laminar-flow/last-session.json. */
   failed: { type: "boolean", default: false },
   synthetic: { type: "boolean", default: false },
   json: { type: "boolean", default: false },
@@ -140,7 +141,7 @@ if (command === "new") {
   try {
     newStandalone(name);
   } catch (error) {
-    console.error(name ? (error as Error).message : "Usage: chinwag new <name>");
+    console.error(name ? (error as Error).message : "Usage: laminar-flow new <name>");
     process.exit(1);
   }
   console.log(`Made ./${name}/ from the café example (Pip). Next:
@@ -151,7 +152,7 @@ if (command === "new") {
   process.exit(0);
 }
 
-/** Every human line of `chinwag test`: stdout, or stderr with --json, where stdout is the report. */
+/** Every human line of `laminar-flow test`: stdout, or stderr with --json, where stdout is the report. */
 const say = values.json ? (line: string) => console.error(line) : (line: string) => console.log(line);
 
 // What the report says; filled in as the command gets that far.
@@ -163,14 +164,14 @@ let dashboard = "";
 let agentId = "";
 const seen: RunSummary[] = [];
 
-if (command !== undefined && (command !== "test" || rest.length)) invalid(`chinwag: unknown command "${positionals.join(" ")}".\n\n${USAGE}`);
+if (command !== undefined && (command !== "test" || rest.length)) invalid(`laminar-flow: unknown command "${positionals.join(" ")}".\n\n${USAGE}`);
 
 const envProblem = loadEnv(values.dotenv);
 if (envProblem) invalid(envProblem);
 
 const runs = checkRuns(values.runs);
-const cloud = values.cloud || process.env.CHINWAG_CLOUD || OBSERVE_URL;
-const ciKey = process.env.CHINWAG_CLOUD_KEY || undefined;
+const cloud = values.cloud || setting("CLOUD") || OBSERVE_URL;
+const ciKey = setting("CLOUD_KEY") || undefined;
 
 let openHeaders: Record<string, string> = {};
 try {
@@ -200,16 +201,16 @@ const title = existsSync(prompt) ? /^#\s+(.+)$/m.exec(readFileSync(prompt, "utf8
 let agent: Pick<ConnectOptions, "tools" | "build">;
 if (agentUrl) {
   const timeout = Number(values["agent-timeout"]);
-  if (!/^https?:\/\/[^/]/.test(agentUrl) || !URL.canParse(agentUrl)) invalid("--agent-url must be an http:// or https:// URL, such as http://localhost:3000/chinwag.");
+  if (!/^https?:\/\/[^/]/.test(agentUrl) || !URL.canParse(agentUrl)) invalid("--agent-url must be an http:// or https:// URL, such as http://localhost:3000/laminar-flow.");
   if (!(timeout > 0)) invalid("--agent-timeout must be a number of seconds above 0.");
-  const token = process.env.CHINWAG_AGENT_TOKEN || undefined;
+  const token = setting("AGENT_TOKEN") || undefined;
   agent = { tools: [], build: ({ events }) => httpAgent({ url: agentUrl, token, channel: values.channel, timeoutMs: timeout * 1000, events }) };
 } else {
   if (!existsSync(join(dir, "src/agent.ts"))) {
-    invalid(`No src/agent.ts in ${dir}. Run chinwag test from your agent's folder, where src/agent.ts exports buildAgent({ model, events, tools }) and tools, or pass --agent-url to test an agent on another framework by its HTTP endpoint.`);
+    invalid(`No src/agent.ts in ${dir}. Run laminar-flow test from your agent's folder, where src/agent.ts exports buildAgent({ model, events, tools }) and tools, or pass --agent-url to test an agent on another framework by its HTTP endpoint.`);
   }
-  // Chinwag runs the agent here, so its traces are marked as a test's (src/traces.ts).
-  process.env.CHINWAG_RUN_KIND = "test";
+  // Flow Framework runs the agent here, so its traces are marked as a test's (src/traces.ts).
+  process.env.LAMINAR_FLOW_RUN_KIND = "test";
   const module = await import(pathToFileURL(join(dir, "src/agent.ts")).href);
   if (typeof module.buildAgent !== "function" || !Array.isArray(module.tools)) {
     invalid("src/agent.ts must export buildAgent({ model, events, tools }) and tools, or pass --agent-url to test an agent by its HTTP endpoint.");
@@ -221,7 +222,7 @@ if (agentUrl) {
 function forUrl(files: ReturnType<typeof loadSuite>) {
   if (!agentUrl) return files;
   const toolFiles = files.filter((f) => f.path.startsWith("tools/"));
-  if (toolFiles.length) console.warn(`Not sent: ${toolFiles.map((f) => f.path).join(", ")}. Tool simulators play a Chinwag agent's tools; your agent's own tools run for real.`);
+  if (toolFiles.length) console.warn(`Not sent: ${toolFiles.map((f) => f.path).join(", ")}. Tool simulators play a Flow Framework agent's tools; your agent's own tools run for real.`);
   for (const f of files.filter((f) => f.path.startsWith("scenarios/"))) {
     const scenario = parseScenario(f); // checkSuite has read it already
     if (scenario.world || scenario.expect.outcome?.length) {
@@ -277,7 +278,7 @@ try {
     log: say,
     verbose: values.verbose,
     onRun: (run) => { seen.push(run); printRun(run); },
-    onDashboard: (url, id, cloudAgent) => { dashboard = url; sessionId = id; agentId = cloudAgent ?? agentId; process.env.CHINWAG_TEST_SESSION = id; },
+    onDashboard: (url, id, cloudAgent) => { dashboard = url; sessionId = id; agentId = cloudAgent ?? agentId; process.env.LAMINAR_FLOW_TEST_SESSION = id; },
   });
 } catch (error) {
   const reason = stoppedReason(error, cloud);
@@ -394,7 +395,7 @@ function saveSession(ended: Ended, received: RunSummary[], link: string, print: 
     print(`Could not write ${LAST_SESSION}: ${(error as Error).message}`);
     return;
   }
-  print(`Results: ${LAST_SESSION} (chinwag test --failed runs again what did not pass)`);
+  print(`Results: ${LAST_SESSION} (laminar-flow test --failed runs again what did not pass)`);
 }
 
 /** Exits with the outcome's status, printing the JSON report on stdout first with --json. */
@@ -455,26 +456,26 @@ function writeAll(text: string): void {
 /** The scenarios that did not pass in the last session, or exits: 0 when nothing failed, 1 when there is no last session. */
 function failedLastTime(suite: ReturnType<typeof loadSuite>): Set<string> {
   if (values.only) invalid("--failed picks its scenarios from the last session and does not go with --only: run one or the other.");
-  const path = join(dir, LAST_SESSION);
-  if (!existsSync(path)) invalid(`No ${LAST_SESSION} in ${dir}: run chinwag test first, then chinwag test --failed runs again what did not pass.`);
+  const path = lastSessionIn(dir);
+  if (!existsSync(path)) invalid(`No ${LAST_SESSION} in ${dir}: run laminar-flow test first, then laminar-flow test --failed runs again what did not pass.`);
   let last: LastSession;
   try {
     last = JSON.parse(readFileSync(path, "utf8")) as LastSession;
     if (!Array.isArray(last.runs)) throw new Error("it has no runs");
   } catch (error) {
-    invalid(`${LAST_SESSION} could not be read (${(error as Error).message}): run chinwag test again.`);
+    invalid(`${LAST_SESSION} could not be read (${(error as Error).message}): run laminar-flow test again.`);
   }
   const ids = [...new Set(last.runs.filter((r) => r.verdict !== "passed").map((r) => r.scenario))];
   if (!ids.length) {
     say(`Nothing failed in the last session (${last.sessionId}).`);
-    if (last.only) say(`It ran only ${last.only.join(", ")}: run chinwag test for the whole suite.`);
+    if (last.only) say(`It ran only ${last.only.join(", ")}: run laminar-flow test for the whole suite.`);
     end("passed");
   }
   const have = new Set(suite.filter((f) => f.path.startsWith("scenarios/")).map((f) => f.path.slice("scenarios/".length, -".yaml".length)));
   const gone = ids.filter((id) => !have.has(id));
   const kept = ids.filter((id) => have.has(id));
   if (gone.length) console.warn(`No longer in tests/scenarios, skipped: ${gone.join(", ")}.`);
-  if (!kept.length) invalid(`None of the scenarios that did not pass in session ${last.sessionId} are still in tests/scenarios: run chinwag test.`);
+  if (!kept.length) invalid(`None of the scenarios that did not pass in session ${last.sessionId} are still in tests/scenarios: run laminar-flow test.`);
   say(`Running again what did not pass in session ${last.sessionId}, on every channel each plays: ${kept.join(", ")}.`);
   return new Set(kept);
 }
@@ -507,7 +508,7 @@ function parseCommandLine() {
     const { code, message } = error as NodeJS.ErrnoException;
     const unknown = code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" ? /'([^']+)'/.exec(message)?.[1] : undefined;
     const usage = isNew ? NEW_USAGE : process.argv[2] === "test" ? TEST_USAGE : USAGE;
-    console.error(`chinwag: ${unknown ? `unknown option ${unknown}` : message.split(". ")[0]}\n\n${usage}`);
+    console.error(`laminar-flow: ${unknown ? `unknown option ${unknown}` : message.split(". ")[0]}\n\n${usage}`);
     process.exit(1);
   }
 }
@@ -550,10 +551,10 @@ async function checkAgentReachable(url: string): Promise<void> {
   invalid(`Could not reach your agent at ${url}: ${problem}. Start it first, or check --agent-url.`);
 }
 
-/** Chinwag runs agents' TypeScript as it is, which needs Node 22.18 or newer. */
+/** Flow Framework runs agents' TypeScript as it is, which needs Node 22.18 or newer. */
 function checkNode(version: string): void {
   const [major = 0, minor = 0] = version.split(".").map(Number);
   if (major > 22 || (major === 22 && minor >= 18)) return;
-  console.error(`Chinwag needs Node 22.18 or newer (you have ${version}).`);
+  console.error(`Flow Framework needs Node 22.18 or newer (you have ${version}).`);
   process.exit(1);
 }

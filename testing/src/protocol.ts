@@ -7,7 +7,7 @@
 //        Last-Event-ID: N                                    a resume: the commands after N
 //   POST /api/sessions/:id/outbound    { conversationId, outbound } → { ok } | 409 { error }
 //   POST /api/sessions/:id/tool-calls  ToolCallRequest → ToolCallResult   held open while the tool is simulated
-//   POST /api/sessions/:id/events      { seq, events: ChinwagEvent[] }
+//   POST /api/sessions/:id/events      { seq, events: FlowEvent[] }
 //
 // Every POST after the open sends Idempotency-Key. An older cloud ignores it. When Opened
 // says idempotency, a repeat of a key is the stored answer and the client may send it again.

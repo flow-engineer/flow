@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, type ChinwagEvent, type EventSink } from "../src/index.ts";
+import { createAgent, type FlowEvent, type EventSink } from "../src/index.ts";
 import { scriptedModel, respond, say } from "./helpers.ts";
 import { runInCloud, SessionStopped, type AgentUnderTest } from "../testing/src/client.ts";
 import type { Command, Receipt } from "../testing/src/protocol.ts";
@@ -150,9 +150,9 @@ test("drained authentication failure rejects explicitly and cleans up the stream
 test("platform_refused reaches the real agent's recovery loop; message.in carries the command ID before turn.end and final drain", { timeout: 10_000 }, async () => {
   const scripted = scriptedModel();
   const ended = gate();
-  const received: ChinwagEvent[] = [];
+  const received: FlowEvent[] = [];
   const outbound: string[] = [];
-  const dir = mkdtempSync(join(tmpdir(), "chinwag-receipts-"));
+  const dir = mkdtempSync(join(tmpdir(), "laminar-flow-receipts-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const cloud = await tunnel((path, body, res) => {
     if (path.endsWith("/outbound")) {

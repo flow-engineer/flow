@@ -1,17 +1,17 @@
 ---
-name: chinwag-tools
-description: Write or change a Chinwag agent's tools and their test files (tests/tools/*.yaml). Load when adding a tool to a Chinwag agent, changing what a tool returns, or describing how a tool behaves in tests.
+name: laminar-flow-tools
+description: Write or change a Flow Framework agent's tools and their test files (tests/tools/*.yaml). Load when adding a tool to a Flow Framework agent, changing what a tool returns, or describing how a tool behaves in tests.
 ---
 
-# Writing tools for a Chinwag agent
+# Writing tools for a Flow Framework agent
 
-Read the `chinwag` skill (`skill.md`) first if you haven't. Tests that use these tool files are
-in the `chinwag-tests` skill (`test-skill.md`).
+Read the `laminar-flow` skill (`skill.md`) first if you haven't. Tests that use these tool files are
+in the `laminar-flow-tests` skill (`test-skill.md`).
 
 ## The tool
 
 ```ts
-import { tool, z } from "chinwag";
+import { tool, z } from "laminar-flow";
 
 export const findSlots = tool({
   name: "find_session_slots",
@@ -26,12 +26,12 @@ export const findSlots = tool({
 
 - The name and description are what the model reads to choose the tool: say what it does and
   what it returns, in one line.
-- `input` is a zod schema; Chinwag checks the model's input against it before `run` is called and
+- `input` is a zod schema; Flow Framework checks the model's input against it before `run` is called and
   sends the model the error if it doesn't fit.
 - `run` returns any JSON-able value; throw to report a failure (the agent sees `Failed: <message>`).
 - Don't make tools for talking to the person (send_<channel>, react, share_updates), for reminders
-  or scheduled messages, or for opting out of messages: Chinwag has them.
-- Key a person's data by `context.person` (who Chinwag verified they are) or `context.conversationId`,
+  or scheduled messages, or for opting out of messages: Flow Framework has them.
+- Key a person's data by `context.person` (who Flow Framework verified they are) or `context.conversationId`,
   never by an id the model passed. `context.person` is `key:<resolve's value>`, else
   `phone:<E.164>` (`phone:+15550100100`), else `<channel>:<address>`. To look the person up in the
   owner's backend use `context.key`: exactly what `resolve` returned (`customer-7`), or null when
@@ -83,7 +83,7 @@ responses:
   personal data removed); otherwise write realistic ones in exactly the shape `run` returns.
 - Examples show the shape, not the answer: the simulator takes ids, names and dates from the
   scenario's world, the call's input and what the agent already said. Write dates as placeholders
-  for the test's clock (`{{now + 10m}}`, `{{now + 2d | date}}`; see the `chinwag-tests` skill),
+  for the test's clock (`{{now + 10m}}`, `{{now + 2d | date}}`; see the `laminar-flow-tests` skill),
   never as written dates, which go stale.
 - Latency lives only here. Scenarios describe situations ("the point of sale is slow this
   morning"); the simulator picks the matching response and latency on each call.

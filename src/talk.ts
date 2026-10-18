@@ -74,7 +74,7 @@ export function sendInput(channel: ChannelInfo, several = false, params: Record<
       .optional()
       .describe(`A list of up to ${channel.lists.maxRows} options the person picks one of; their pick comes back as their message`);
   }
-  // Every channel takes a link: where there is no link button, Chinwag puts its URL after the text.
+  // Every channel takes a link: where there is no link button, Flow Framework puts its URL after the text.
   shape.link = z
     .object({ label: z.string().min(1).max(channel.linkButton?.labelMax ?? 20), url: https })
     .optional()
@@ -129,7 +129,7 @@ const updateTool = tool({
 export interface TalkSettings {
   /** Live status on channels that can show it (web and app UIs). Default on. */
   shareUpdates: boolean;
-  /** The owner's own guidance for when and what to share; replaces Chinwag's default line. */
+  /** The owner's own guidance for when and what to share; replaces Flow Framework's default line. */
   shareUpdatesInstructions?: string;
 }
 

@@ -1,13 +1,14 @@
-// The café's agent, Pip, in Go with no dependencies, behind Chinwag's agent endpoint
+// The café's agent, Pip, in Go with no dependencies, behind Flow Framework's agent endpoint
 // (spec/agent-endpoint.openapi.yaml): one POST per message from the person, answered with the
 // replies to send. Its model is any OpenAI-compatible API; its tools run here, for real.
 //
-//	FAKE_MODEL=1 go run .     listens on http://localhost:3000/chinwag (PORT to change it), no key
-//	npx chinwag test --agent-url http://localhost:3000/chinwag --synthetic     from this folder
+//	FAKE_MODEL=1 go run .     listens on http://localhost:3000/laminar-flow (PORT to change it), no key
+//	npx laminar-flow test --agent-url http://localhost:3000/laminar-flow --synthetic     from this folder
 package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -78,7 +79,7 @@ func fakeModel(context.Context, []chatMessage) (chatMessage, error) {
 	return chatMessage{Role: "assistant", Content: fakeReply}, nil
 }
 
-// The first key that is set picks the provider, as in Chinwag's own agents (src/model.ts).
+// The first key that is set picks the provider, as in Flow Framework's own agents (src/model.ts).
 var providers = []struct{ env, baseURL, model string }{
 	{"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", "anthropic/claude-haiku-5.5"},
 	{"OPENAI_API_KEY", "https://api.openai.com/v1", "gpt-6-luna"},
@@ -146,23 +147,23 @@ func newAgent(m model, system, token string) *agent {
 }
 
 func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost || r.URL.Path != "/chinwag" {
+	if r.Method != http.MethodPost || r.URL.Path != "/laminar-flow" {
 		http.NotFound(w, r)
 		return
 	}
-	// Set CHINWAG_AGENT_TOKEN on both sides to require it.
+	// Set LAMINAR_FLOW_AGENT_TOKEN on both sides to require it.
 	if a.token != "" && r.Header.Get("authorization") != "Bearer "+a.token {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ConversationID == "" {
-		http.Error(w, "bad request: expected a Chinwag message as JSON", http.StatusBadRequest)
+		http.Error(w, "bad request: expected a Flow Framework message as JSON", http.StatusBadRequest)
 		return
 	}
 	text, err := a.turn(r.Context(), req)
 	if err != nil {
-		// Chinwag fails this turn and shows the reason.
+		// Flow Framework fails this turn and shows the reason.
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -259,6 +260,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Listening on http://localhost:%s/chinwag\n", port)
-	log.Fatal(http.Serve(listener, newAgent(m, string(system), os.Getenv("CHINWAG_AGENT_TOKEN"))))
+	fmt.Printf("Listening on http://localhost:%s/laminar-flow\n", port)
+	log.Fatal(http.Serve(listener, newAgent(m, string(system), cmp.Or(os.Getenv("LAMINAR_FLOW_AGENT_TOKEN"), os.Getenv("CHINWAG_AGENT_TOKEN")))))
 }

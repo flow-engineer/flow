@@ -1,5 +1,5 @@
 // covers: testing/src/check-endpoint.ts testing/src/http-agent.ts spec/agent-endpoint.openapi.yaml spec/request.schema.json spec/response.schema.json
-// `chinwag check-endpoint`: a conforming endpoint passes every case, and the requests it gets follow
+// `laminar-flow check-endpoint`: a conforming endpoint passes every case, and the requests it gets follow
 // the spec; each way an answer can break the contract fails its case, saying why; the command exits
 // 0 or 1, prints JSON with --json and sends the token it is told to. The spec itself is kept in step
 // with the code: the response schema accepts and refuses what the platform check does, and its
@@ -35,7 +35,7 @@ async function endpoint(answer: Answer) {
   });
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   return {
-    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/chinwag`,
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/laminar-flow`,
     seen,
     close: () => (server.closeAllConnections(), server.close()),
   };
@@ -92,7 +92,7 @@ test("the command exits 0 or 1, prints JSON with --json, and sends the token it 
   const out = JSON.parse(lines.join("\n"));
   assert.equal(out.passed, true);
   assert.equal(out.cases.length, 5);
-  assert.equal(await checkEndpointCli([e.url], { CHINWAG_AGENT_TOKEN: "tok_1" }, print), 0);
+  assert.equal(await checkEndpointCli([e.url], { LAMINAR_FLOW_AGENT_TOKEN: "tok_1" }, print), 0);
   assert.equal(await checkEndpointCli([e.url, "--token-env", "MY_TOKEN"], {}, print, print), 1);
   assert.equal(lines.at(-1), "MY_TOKEN is not set.");
   e.close();

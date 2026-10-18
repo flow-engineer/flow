@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: Chinwag nudges over HTTP
+  title: Flow Framework nudges over HTTP
   version: 0.1.0
   license:
     name: MIT

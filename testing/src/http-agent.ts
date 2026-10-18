@@ -1,14 +1,14 @@
-// An agent you already have, on any framework, tested through its HTTP endpoint: `chinwag test
-// --agent-url <url>`. This plays the part of a Chinwag Agent on the developer's machine: each of the
+// An agent you already have, on any framework, tested through its HTTP endpoint: `laminar-flow test
+// --agent-url <url>`. This plays the part of a Flow Framework Agent on the developer's machine: each of the
 // person's messages is one POST to the URL from here (so the agent never has to be reachable from
-// the internet), and the replies it answers go to the test cloud as a Chinwag agent's would. Its own
+// the internet), and the replies it answers go to the test cloud as a Flow Framework agent's would. Its own
 // tools run on its side, for real.
 //
 //   POST <url>  { conversationId, messageId, channel, message: { text, attachments?: [{ kind, mime, name?, data }] } }
 //   200         { replies: Outbound[] }        (data is base64; [] is no reply)
 //
 // A conversation's messages go one at a time, in order: the next is sent once the last one's answer
-// is in. Each reply is checked against what the run's platform can show, as a Chinwag agent's send
+// is in. Each reply is checked against what the run's platform can show, as a Flow Framework agent's send
 // is. Agents that answer later (through a callback) are not supported yet.
 
 import { Buffer } from "node:buffer";
@@ -18,7 +18,7 @@ import { sendInput, sendRefusal } from "../../src/talk.ts";
 
 export interface HttpAgentOptions {
   url: string;
-  /** Sent as `authorization: Bearer <token>` (CHINWAG_AGENT_TOKEN). */
+  /** Sent as `authorization: Bearer <token>` (LAMINAR_FLOW_AGENT_TOKEN). */
   token?: string;
   /** The channel every message names; default the platform the run plays (whatsapp, sms, imessage, telegram, web). */
   channel?: string;
@@ -85,7 +85,7 @@ export async function postMessage(options: Pick<HttpAgentOptions, "url" | "token
   return answer.data.replies;
 }
 
-/** The reply as the platform takes it, or why it cannot go: the checks a Chinwag agent's send gets. */
+/** The reply as the platform takes it, or why it cannot go: the checks a Flow Framework agent's send gets. */
 export function checkReply(reply: unknown, info: ChannelInfo): { outbound: Outbound } | { refused: string } {
   const type = (reply as { type?: unknown } | null)?.type;
   if (type !== "message") {

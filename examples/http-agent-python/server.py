@@ -1,8 +1,8 @@
-# The café's agent, Pip, in Python with no dependencies, for `chinwag test --agent-url`: one POST
+# The café's agent, Pip, in Python with no dependencies, for `laminar-flow test --agent-url`: one POST
 # per message from the person, answered with the replies to send. Its model is any
 # OpenAI-compatible API; its tools run here, for real.
 #
-#   python3 server.py               listens on http://localhost:3000/chinwag (PORT to change it)
+#   python3 server.py               listens on http://localhost:3000/laminar-flow (PORT to change it)
 #   FAKE_MODEL=1 python3 server.py  the same, with a fixed reply instead of a model call
 
 import itertools
@@ -118,7 +118,7 @@ def person_text(message_id, message):
     return " ".join(part for part in [f"[{', '.join(tags)}]", message["text"], *notes] if part)
 
 
-# Each conversation's messages, as your agent keeps them per phone number. Chinwag sends one
+# Each conversation's messages, as your agent keeps them per phone number. Flow Framework sends one
 # conversation's messages one at a time, so a conversation is never in two threads at once.
 histories = {}
 
@@ -138,10 +138,10 @@ def turn(conversation_id, text):
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        if self.path != "/chinwag":
+        if self.path != "/laminar-flow":
             return self.answer(404)
-        # Set CHINWAG_AGENT_TOKEN on both sides to require it.
-        token = os.environ.get("CHINWAG_AGENT_TOKEN")
+        # Set LAMINAR_FLOW_AGENT_TOKEN on both sides to require it.
+        token = os.environ.get("LAMINAR_FLOW_AGENT_TOKEN", os.environ.get("CHINWAG_AGENT_TOKEN"))
         if token and self.headers.get("authorization") != f"Bearer {token}":
             return self.answer(401)
         try:
@@ -151,7 +151,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.answer(400, f"Bad request: {error}")
         try:
             reply = turn(conversation_id, text)
-        except ModelError as error:  # Chinwag fails this turn and shows the reason
+        except ModelError as error:  # Flow Framework fails this turn and shows the reason
             return self.answer(502, str(error))
         self.answer(200, json.dumps({"replies": [{"type": "message", "text": reply}] if reply else []}), "application/json")
 
@@ -172,5 +172,5 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     server = ThreadingHTTPServer(("", port), Handler)
-    print(f"Listening on http://localhost:{port}/chinwag", flush=True)
+    print(f"Listening on http://localhost:{port}/laminar-flow", flush=True)
     server.serve_forever()
