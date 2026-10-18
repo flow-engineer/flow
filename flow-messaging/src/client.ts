@@ -38,9 +38,21 @@ export class FlowMessagingError extends Error {
   }
 }
 
+/**
+ * One of Flow's object IDs as a URL path segment: `<prefix>_` and letters, digits, `_` or `-` (Flow
+ * makes `<prefix>_<ULID>`). IDs come from inbound events and callers, and every request carries the
+ * key, so anything else (a `/`, `..`, `?`) is refused rather than sent to another path.
+ */
+export function idSegment(prefix: string, id: unknown): string {
+  if (typeof id !== "string" || !new RegExp(`^${prefix}_[A-Za-z0-9_-]+$`).test(id)) {
+    throw new Error(`not a Flow Messaging ${prefix}_ id: ${JSON.stringify(String(id)).slice(0, 80)}`);
+  }
+  return encodeURIComponent(id);
+}
+
 export class Client {
   private readonly apiKey: string;
-  private readonly baseUrl: string;
+  readonly baseUrl: string;
 
   constructor(options: { apiKey: string; baseUrl: string }) {
     this.apiKey = options.apiKey;
@@ -55,8 +67,9 @@ export class Client {
 
   /** A file's bytes: GET /v1/files/{id} answers them or redirects to a signed URL, which fetch follows without the key. */
   async download(fileId: string): Promise<Uint8Array> {
+    const path = `/v1/files/${idSegment("file", fileId)}`;
     if (!this.apiKey) throw new Error("set FLOW_MESSAGING_KEY (or pass apiKey) to reach Flow Messaging");
-    const response = await fetch(`${this.baseUrl}/v1/files/${fileId}`, { headers: { authorization: `Bearer ${this.apiKey}`, "flow-version": API_VERSION }, signal: AbortSignal.timeout(60_000) });
+    const response = await fetch(this.baseUrl + path, { headers: { authorization: `Bearer ${this.apiKey}`, "flow-version": API_VERSION }, signal: AbortSignal.timeout(60_000) });
     if (!response.ok) throw await errorOf(response);
     return new Uint8Array(await response.arrayBuffer());
   }

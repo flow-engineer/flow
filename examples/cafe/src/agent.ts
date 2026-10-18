@@ -2,13 +2,15 @@
 // model, events and (simulated) tools.
 
 import { fileURLToPath } from "node:url";
-import { createAgent, customUI, openAICompatible, sms, whatsapp, type AgentOptions, type EventSink, type Model, type Tool } from "../../../src/index.ts";
+import { createAgent, customUI, openAICompatible, sms, whatsapp, type AgentOptions, type Channel, type EventSink, type Model, type Tool } from "../../../src/index.ts";
 import { tools as cafeTools } from "./tools.ts";
 
 export interface BuildOptions {
   model?: Model;
   events?: EventSink[];
   tools?: Tool[];
+  /** Channels that are connected, such as Telegram through Flow Messaging (main.ts adds them when .env has its key); one named whatsapp replaces the unconnected one. */
+  channels?: Channel[];
   /** Where Pip runs, for a host with no file system (Cloudflare): its files as text, its database, no schedule timer. */
   host?: Pick<AgentOptions, "files" | "database" | "scheduleCheckMs">;
 }
@@ -23,12 +25,14 @@ const notConnected = async () => {
 const provider = { sendMessage: notConnected, react: notConnected, typing: notConnected, markRead: notConnected, status: notConnected };
 
 export function buildAgent(options: BuildOptions = {}) {
+  const connected = options.channels ?? [];
+  const unconnected = [whatsapp(provider), sms(provider), customUI("web", provider)].filter((c) => !connected.some((k) => k.name === c.name));
   return createAgent({
     ...(options.host ?? { dir: fileURLToPath(new URL("../agent", import.meta.url)) }),
     model: options.model ?? openAICompatible({ model: process.env.CAFE_MODEL }),
     tools: options.tools ?? cafeTools,
     events: options.events ?? [],
-    channels: [whatsapp(provider), sms(provider), customUI("web", provider)],
+    channels: [...unconnected, ...connected],
     testPeople: [
       { name: "Maria", phone: "+15555550101" },
       { name: "Sam", phone: "+15555550102" },

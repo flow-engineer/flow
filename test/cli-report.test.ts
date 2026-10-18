@@ -164,7 +164,7 @@ test("what is wrong on this machine is said before the cloud is called, an addre
   assert.equal(named.code, 2);
   assert.match(named.out, /^Could not reach http:\/\/127\.0\.0\.1:9: ECONNREFUSED\.$/m);
   // No cloud named: the hosted one, which needs a key before anything is sent.
-  assert.match((await cliOutput(["test"], good)).out, /^A hosted cloud needs the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY\. Make a key at https:\/\/flow\.engineer\/observe: your agent, Developers\.$/m);
+  assert.match((await cliOutput(["test"], good)).out, /^A hosted cloud needs the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY\. Run npx @flow-engineer\/flow login, then npx @flow-engineer\/flow setup, to get one into \.env\.$/m);
 });
 
 test("Ctrl-C prints the same partial report, keeps what finished, and exits 130", { timeout: 15_000 }, async () => {

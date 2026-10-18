@@ -298,6 +298,38 @@ Open `/playground/?token=...` once (it becomes an HttpOnly cookie and leaves the
 with `Authorization: Bearer <token>`. Wrong tokens are limited per address, and every simulated
 message is logged with the person, channel, time and address.
 
+## Put it on a phone
+
+To chat with the agent from the owner's phone, with no tunnel and no key made by hand, run these
+from the agent's folder (`npx @flow-engineer/flow init` makes a starter in an empty one). Only
+`chat` reads stdin; nothing else asks for input or needs a terminal.
+
+```sh
+printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # locally, no account: one message per line, replies printed
+npx @flow-engineer/flow link --json          # signs in and runs setup when needed, then the link; give its say_to_person to the owner
+npx @flow-engineer/flow test --synthetic     # the tests, on the key setup wrote
+npm start                                    # the agent; the owner texts it while it runs
+```
+
+`link` runs `login` first when not signed in: it opens the owner's browser itself and prints the
+link and code at once (with `--json` the first line is `{"status":"pending","verification_uri":...,
+"user_code":...,"next":...}`), waits at most 120 s (`--timeout <s>`), then exits 4 with the code
+kept: give the owner the link and code, and run `link` again (it polls the same code). Then it runs
+`setup`, which writes the test cloud, traces and Flow Messaging keys into `.env`, prints names and
+last 4 characters only, keeps values already there (`--replace` takes the new ones), and is safe to
+run again. `--channel telegram|whatsapp|imessage` picks the channel; a channel flow.engineer cannot
+open yet exits 3 with its `next`. `login`, `setup` and `link` also run on their own.
+
+In `src/main.ts`, put `fm.telegram()` from `@flow-engineer/flow/flow-messaging` in the agent's
+channels and call `fm.start(agent, { cursorFile: ".flow/flow-messaging-cursor" })`: with no webhook
+secret it opens Flow Messaging's event stream, an outbound connection, so the laptop needs no public
+URL, and the cursor file lets messages sent while it was stopped arrive when it starts again. The
+starter does this when `.env` has `FLOW_MESSAGING_KEY`. Each error is
+`{"error":{"code","message","next"}}`: run its `next`. Exit codes: 0 done, 1 usage or not signed in,
+2 network, 3 refused, 4 sign-in waiting. Never ask the owner to paste a key into the chat. Always
+name the package (`npx @flow-engineer/flow ...`): `npx flow` on its own fetches another npm package.
+CI never logs in: `setup --ci` says how to give it the cloud key.
+
 ## Send traces to a dashboard
 
 Every turn can go to a traces endpoint as an OTLP/JSON trace, posted to `<url>/v1/traces`, so
