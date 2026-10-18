@@ -1,16 +1,18 @@
 // Flow Framework channels on Flow Messaging (api.flow.engineer), Flow's unified messaging API: WhatsApp,
-// Telegram and US SMS from senders Flow hosts. Events reach the agent one of two ways: the live
+// Telegram, iMessage and US SMS from senders Flow hosts. Events reach the agent one of two ways: the live
 // stream (an outbound WebSocket, so a laptop needs no public URL or tunnel) or a webhook that checks
 // Flow's signature. Both hand each event to the same handler.
 //
 //   const fm = flowMessaging();                    // FLOW_MESSAGING_KEY (and FLOW_MESSAGING_WEBHOOK_SECRET for a webhook)
-//   const agent = createAgent({ ..., channels: [fm.whatsapp(), fm.telegram(), fm.sms()] });
+//   const agent = createAgent({ ..., channels: [fm.whatsapp(), fm.telegram(), fm.imessage(), fm.sms()] });
 //   fm.start(agent);                               // the stream, or the webhook on PORT when a webhook secret is set
 //
 // Addresses are what Flow Framework joins people by: the phone number on WhatsApp and SMS, the numeric
-// user id on Telegram. A reply goes into the Flow conversation the person last wrote in; with none
-// known yet (a nudge, or after a restart) it starts one from the channel's sender, which Flow puts
-// into the open conversation if there is one. What this process learns (conversations, contacts,
+// user id on Telegram, the phone number on iMessage, else the email address that is the person's
+// handle there. A reply goes into the Flow conversation the person last wrote in; with none known
+// yet (a nudge, or after a restart) it starts one from the channel's sender, which Flow puts into the
+// open conversation if there is one. On Flow's shared iMessage sender, as on WhatsApp after 24
+// hours, the agent can only answer someone who wrote first: a start to anyone else fails. What this process learns (conversations, contacts,
 // event ids) is kept in memory only.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -33,12 +35,12 @@ export interface FlowMessagingOptions {
 export interface FlowChannelOptions {
   /** The Flow sender (`snd_...`) this channel starts conversations from. Default: FLOW_MESSAGING_<CHANNEL>_SENDER. */
   sender?: string;
-  /** The agent's name for the channel. Default: whatsapp, telegram or sms. */
+  /** The agent's name for the channel. Default: whatsapp, telegram, imessage or sms. */
   name?: string;
   instructions?: string;
 }
 
-type Kind = "whatsapp" | "telegram" | "sms";
+type Kind = "whatsapp" | "telegram" | "imessage" | "sms";
 interface Route {
   kind: Kind;
   name: string;
@@ -82,6 +84,22 @@ export const TELEGRAM: ChannelInfo = {
   linkButton: { labelMax: 20 },
   images: { captionMax: 1024 },
   readReceipts: false,
+};
+
+/**
+ * iMessage as Flow sends it: plain text up to 9999 characters, photos, inline replies, tapbacks
+ * (other emoji go as emoji reactions), typing and read receipts (the whole conversation). No buttons,
+ * lists or templates. No reply window is set: the line only answers people who wrote to it, and a
+ * send it will not deliver comes back as Not delivered (outside_window).
+ */
+export const IMESSAGE: ChannelInfo = {
+  reactions: true,
+  status: false,
+  formatting: "plain",
+  maxLength: 9999,
+  replies: true,
+  images: { captionMax: 1024 },
+  readReceipts: true,
 };
 
 /** Flow sends a list as buttons, whose labels take at most 20 characters, and has no row descriptions. */
@@ -146,6 +164,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   function recipient(kind: Kind, to: string): Record<string, string> {
     if (to.startsWith("ct_")) return { contact: to };
     if (kind === "telegram") return { telegram_user_id: to };
+    if (kind === "imessage" && !/^\+?[0-9]{7,15}$/.test(to)) return { handle: to }; // an email address
     return { phone: to.startsWith("+") ? to : `+${to}` };
   }
 
@@ -248,12 +267,25 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   /** A Telegram bot connected to Flow. Flow Framework has no Telegram kind yet, so it is a custom channel. */
   function telegram(o: FlowChannelOptions = {}): Channel {
-    const route = register("telegram", o);
+    return custom(register("telegram", o), TELEGRAM, o);
+  }
+
+  /**
+   * An iMessage line connected to Flow (Flow's shared one by default). Flow Framework has no iMessage
+   * kind yet, so it is a custom channel. Its addresses are not marked as phone numbers, since a handle
+   * may be an email address: the person on iMessage is their own, not joined with their WhatsApp or SMS.
+   */
+  function imessage(o: FlowChannelOptions = {}): Channel {
+    return custom(register("imessage", o), IMESSAGE, o);
+  }
+
+  /** A Flow channel Flow Framework has no kind for: text, quotes, buttons and links as `info` allows, photos, reactions, typing, read receipts. */
+  function custom(route: Route, info: ChannelInfo, o: FlowChannelOptions): Channel {
     const p = provider(route);
     return {
       name: route.name,
       kind: "custom",
-      info: TELEGRAM,
+      info,
       instructions: o.instructions,
       send: (to, outbound) => {
         switch (outbound.type) {
@@ -261,17 +293,19 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
             return p.sendMessage(to, {
               text: outbound.text,
               ...(outbound.replyTo ? { replyTo: outbound.replyTo } : {}),
-              ...(outbound.buttons ? { buttons: outbound.buttons } : {}),
-              ...(outbound.link ? { link: outbound.link } : {}),
-              ...(outbound.image ? { image: outbound.image } : {}),
+              ...(outbound.buttons && info.buttons ? { buttons: outbound.buttons } : {}),
+              ...(outbound.link && info.linkButton ? { link: outbound.link } : {}),
+              ...(outbound.image && info.images ? { image: outbound.image } : {}),
             });
           case "reaction":
             return p.react(to, outbound.messageId, outbound.emoji);
           case "typing":
             return p.typing(to, outbound.on);
+          case "read":
+            return info.readReceipts ? p.markRead(to, outbound.messageIds) : undefined; // Telegram bots cannot send them
           case "template":
-            throw new Error("Telegram has no templates");
-          // read: Telegram bots cannot send read receipts; status: Telegram has no status line.
+            throw new Error(`${route.kind === "telegram" ? "Telegram" : "iMessage"} has no templates`);
+          // status: neither has a status line.
         }
       },
     };
@@ -288,8 +322,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   async function addressOf(route: { kind: Kind }, contactId: string): Promise<string> {
     const known = contacts.get(contactId);
     if (known) return known;
-    const contact = await client.get<{ address?: { phone?: string; telegram_user_id?: string } }>(`/v1/contacts/${contactId}`);
-    const address = (route.kind === "telegram" ? contact.address?.telegram_user_id : contact.address?.phone) ?? contactId;
+    const contact = await client.get<{ address?: { phone?: string; telegram_user_id?: string; handle?: string } }>(`/v1/contacts/${contactId}`);
+    const a = contact.address;
+    const address = (route.kind === "telegram" ? a?.telegram_user_id : route.kind === "imessage" ? (a?.phone ?? a?.handle) : a?.phone) ?? contactId;
     contacts.set(contactId, address);
     return address;
   }
@@ -561,7 +596,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     return { mode: "webhook", stopped: new Promise<StreamStop>(() => {}), close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
   }
 
-  return { whatsapp, telegram, sms, webhook, receive, stream, start };
+  return { whatsapp, telegram, imessage, sms, webhook, receive, stream, start };
 }
 
 function readCursor(file: string): string | undefined {

@@ -1,6 +1,6 @@
 # Flow Messaging channels
 
-Put a Flow Framework (`npm i @flow-engineer/flow`) agent on real WhatsApp, Telegram and US SMS
+Put a Flow Framework (`npm i @flow-engineer/flow`) agent on real WhatsApp, Telegram, iMessage and US SMS
 through [Flow Messaging](https://api.flow.engineer) (API version 2026-11-01). `@flow-engineer/flow/flow-messaging` gives you
 channels that send through Flow's senders, and two ways to receive Flow's events: the live event
 stream, an outbound WebSocket that needs no public URL, and a webhook that checks Flow's
@@ -30,7 +30,8 @@ Each sender has an ID (`snd_...`), a link to open on your phone, and a join code
 
 The sandbox has Telegram today. WhatsApp and iMessage come as they open. A sandbox key lasts 7 days
 and covers one contact. Live keys (`fk_live_...`) and your own WhatsApp, Telegram or
-SMS senders are set up from the dashboard at https://api.flow.engineer.
+SMS senders are set up from the dashboard at https://api.flow.engineer. iMessage lines, Flow's
+shared one included, are arranged with the Flow team.
 
 Open the Telegram sandbox sender's link on your phone and send its join code. You are now the
 sandbox contact your agent can talk to.
@@ -48,7 +49,7 @@ const agent = createAgent({
   dir: "./agent", // your agent's folder (AGENTS.md, ...)
   model: yourModel,
   // only the channels you have senders for
-  channels: [fm.telegram(), fm.whatsapp(), fm.sms()],
+  channels: [fm.telegram(), fm.whatsapp(), fm.imessage(), fm.sms()],
 });
 await agent.resume();
 
@@ -111,23 +112,23 @@ On a laptop there is no public URL: use the event stream instead.
 |---|---|
 | `FLOW_MESSAGING_KEY` | Your app's API key, `fk_test_...` or `fk_live_...`. Keep it on your server. |
 | `FLOW_MESSAGING_WEBHOOK_SECRET` | The webhook endpoint's signing secret, `whsec_...`. While you rotate it, give both, comma-separated. Without it, `fm.start` uses the event stream. |
-| `FLOW_MESSAGING_TELEGRAM_SENDER`, `FLOW_MESSAGING_WHATSAPP_SENDER`, `FLOW_MESSAGING_SMS_SENDER` | Each channel's sender, `snd_...`. Needed to start conversations (nudges, templates) and to tell senders apart. Replies to people who wrote first work without it. |
+| `FLOW_MESSAGING_TELEGRAM_SENDER`, `FLOW_MESSAGING_WHATSAPP_SENDER`, `FLOW_MESSAGING_IMESSAGE_SENDER`, `FLOW_MESSAGING_SMS_SENDER` | Each channel's sender, `snd_...`. Needed to start conversations (nudges, templates) and to tell senders apart. Replies to people who wrote first work without it. |
 | `FLOW_MESSAGING_BASE_URL` | Optional. Default `https://api.flow.engineer`. |
 
 Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret, baseUrl })`, and
-`fm.telegram({ sender, name, instructions })` (the same for `whatsapp` and `sms`).
+`fm.telegram({ sender, name, instructions })` (the same for `whatsapp`, `imessage` and `sms`).
 
 ## What it maps
 
 **Out (agent to person):**
 
-- Text: Markdown on Telegram, plain text on WhatsApp and SMS.
+- Text: Markdown on Telegram, plain text on WhatsApp, iMessage and SMS.
 - Reply buttons and lists, sent as Flow `buttons`. WhatsApp shows up to 3 reply buttons, or a list
-  for 4 to 10. Telegram shows an inline keyboard.
-- A link: one URL button (WhatsApp's call-to-action button).
+  for 4 to 10. Telegram shows an inline keyboard. iMessage has none, so the agent is not offered them.
+- A link: one URL button (WhatsApp's call-to-action button); on iMessage, the URL on its own line.
 - A photo: a media message with the text as its caption. Flow's button messages have no image
   header, so a photo with buttons or a link goes just before them.
-- Quotes (`reply_to`), reactions, typing, and read receipts (WhatsApp).
+- Quotes (`reply_to`), reactions (tapbacks on iMessage), typing, and read receipts (WhatsApp, iMessage).
 - WhatsApp templates, by name or `tpl_` ID, with their header (text, or media by URL or file ID),
   body values (`{{1}}`, `{{2}}`, ...) and button values (URL suffixes, quick-reply payloads).
 
@@ -163,15 +164,21 @@ What it remembers (conversations, contacts, event IDs) is kept in memory, except
 first send to someone starts from the channel's sender, and Flow puts it into the open conversation
 if there is one.
 
-The framework has no Telegram channel kind yet, so Telegram is a custom channel. iMessage is not in this
-package yet.
+The framework has no Telegram or iMessage channel kind yet, so both are custom channels. On iMessage
+a person is their phone number, or their email address when that is their handle; they are not joined
+with the same number on WhatsApp or SMS.
+
+**iMessage replies only.** On Flow's shared iMessage sender (as on WhatsApp after 24 hours) the agent
+can only answer someone who wrote first. A nudge or scheduled message to anyone else fails, and
+reaches the agent as "Not delivered" (`outside_window`). Ask people to write first with the line's
+opt-in link. Text takes up to 9999 characters; there are no buttons, lists or templates.
 
 ## Also exported
 
 - `verifySignature(body, header, secrets)`: checks a `Flow-Signature` header yourself.
 - `FlowMessagingError`: the API's typed error (`status`, `type`, `channelCode`, `retryAfter`).
 - `API_VERSION`: the API version every request asks for, `2026-11-01`.
-- `TELEGRAM`: the Telegram channel's limits, as a framework `ChannelInfo`.
+- `TELEGRAM`, `IMESSAGE`: the Telegram and iMessage channels' limits, as framework `ChannelInfo`s.
 
 ## Links
 
