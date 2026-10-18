@@ -2,13 +2,15 @@
 // model, events and (simulated) tools.
 
 import { fileURLToPath } from "node:url";
-import { createAgent, customUI, openAICompatible, sms, whatsapp, type AgentOptions, type EventSink, type Model, type Tool } from "../../../src/index.ts";
+import { createAgent, customUI, openAICompatible, sms, whatsapp, type AgentOptions, type Channel, type EventSink, type Model, type Tool } from "../../../src/index.ts";
 import { tools as cafeTools } from "./tools.ts";
 
 export interface BuildOptions {
   model?: Model;
   events?: EventSink[];
   tools?: Tool[];
+  /** Channels that are connected, such as Telegram through Flow Messaging (main.ts adds it when .env has its key). */
+  channels?: Channel[];
   /** Where Pip runs, for a host with no file system (Cloudflare): its files as text, its database, no schedule timer. */
   host?: Pick<AgentOptions, "files" | "database" | "scheduleCheckMs">;
 }
@@ -28,7 +30,7 @@ export function buildAgent(options: BuildOptions = {}) {
     model: options.model ?? openAICompatible({ model: process.env.CAFE_MODEL }),
     tools: options.tools ?? cafeTools,
     events: options.events ?? [],
-    channels: [whatsapp(provider), sms(provider), customUI("web", provider)],
+    channels: [whatsapp(provider), sms(provider), customUI("web", provider), ...(options.channels ?? [])],
     testPeople: [
       { name: "Maria", phone: "+15555550101" },
       { name: "Sam", phone: "+15555550102" },

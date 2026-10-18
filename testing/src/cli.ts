@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// The flow command. `flow new <name>` makes ./<name>/, an agent started from the café example
-// (testing/src/new.ts). `flow test`, or `flow` with flags, runs an agent's tests in the cloud,
+// The flow command. `flow new <name>` makes ./<name>/, an agent started from the café example, and
+// `flow init` the same agent in the current folder (testing/src/new.ts). `flow chat` talks to the
+// agent in this folder from the terminal (testing/src/chat.ts). `flow test`, or `flow` with flags, runs an agent's tests in the cloud,
 // from the agent's folder:
 //   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--json]
 // A hosted cloud (any --cloud off this machine, the default included) needs the
@@ -29,14 +30,16 @@ import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions } from ".
 import { runPrinter } from "./print-run.ts";
 import { checkEndpointCli } from "./check-endpoint.ts";
 import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
+import { CHAT_LINE, chatCli } from "./chat.ts";
 import { httpAgent } from "./http-agent.ts";
-import { newStandalone, packageRoot } from "./new.ts";
+import { initHere, newStandalone, packageRoot } from "./new.ts";
 import { EXIT, finishedOutcome, loadEnv, networkCode, reportError, runVerdict, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
 import type { RunSummary } from "./protocol.ts";
 
-const NEW_LINE = "  flow new <name>           Make ./<name>/, a new agent started from the café example";
+const NEW_LINE = `  flow new <name>           Make ./<name>/, a new agent started from the café example
+  flow init                 Make that agent in the current folder, named after it`;
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
                             the tests are in tests/scenarios and tests/tools)`;
@@ -96,7 +99,13 @@ the CHINWAG_ names from before the rename still work):
   OPENROUTER_API_KEY       The agent's model key, or OPENAI_API_KEY, ANTHROPIC_API_KEY or
                            GEMINI_API_KEY: the first with a value is used`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
-const USAGE = `Usage:\n${NEW_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${ACCOUNT_LINES}\n  flow --version            Show the version\n\n${TEST_OPTIONS}`;
+const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${ACCOUNT_LINES}\n  flow --version            Show the version\n\n${TEST_OPTIONS}`;
+
+const NEXT_STEPS = `  2. Add one model key: cp .env.example .env; the file says where to make one
+  3. npx @flow-engineer/flow chat, and type to it (or npm start for the playground)
+  4. npx @flow-engineer/flow link: signs in, writes the other keys, prints the link for your phone;
+     keep npm start running and text it
+  5. Tell your coding agent what to build: its skills are in .claude/skills/`;
 
 checkNode(process.versions.node);
 
@@ -106,6 +115,7 @@ if (process.argv[2] === "check-endpoint") {
   process.exit(await checkEndpointCli(process.argv.slice(3)));
 }
 if (process.argv[2] === "show") process.exit(await showCli(process.argv.slice(3)));
+if (process.argv[2] === "chat") process.exit(await chatCli(process.argv.slice(3)));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) process.exit(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
 const TEST_FLAGS = {
@@ -137,7 +147,7 @@ if (values.version) {
   process.exit(0);
 }
 if (values.help || process.argv.length <= 2) {
-  console.log(command === "new" ? NEW_USAGE : command === "test" ? TEST_USAGE : USAGE);
+  console.log(command === "new" || command === "init" ? NEW_USAGE : command === "test" ? TEST_USAGE : USAGE);
   process.exit(0);
 }
 
@@ -151,9 +161,22 @@ if (command === "new") {
   }
   console.log(`Made ./${name}/ from the café example (Pip). Next:
   1. cd ${name} && npm install
-  2. Add one model key: cp .env.example .env; the file says where to make one
-  3. npm start, then open the link it prints
-  4. Tell your coding agent what to build: its skills are in .claude/skills/`);
+${NEXT_STEPS}`);
+  process.exit(0);
+}
+
+if (command === "init") {
+  let name: string;
+  try {
+    if (rest.length) throw new Error("Usage: flow init (it makes the agent in the current folder; flow new <name> makes a folder for it)");
+    name = initHere();
+  } catch (error) {
+    console.error((error as Error).message);
+    process.exit(1);
+  }
+  console.log(`Made ${name}, started from the café example (Pip), in this folder. Next:
+  1. npm install
+${NEXT_STEPS}`);
   process.exit(0);
 }
 
@@ -505,7 +528,7 @@ function stoppedReason(error: unknown, cloud: string): string {
 
 /** The command's flags, or exits 1 with what is wrong and that command's usage. */
 function parseCommandLine() {
-  const isNew = process.argv[2] === "new";
+  const isNew = process.argv[2] === "new" || process.argv[2] === "init";
   const options = isNew ? { help: TEST_FLAGS.help, version: TEST_FLAGS.version } : TEST_FLAGS;
   try {
     return parseArgs({ allowPositionals: true, strict: true, options: options as typeof TEST_FLAGS });

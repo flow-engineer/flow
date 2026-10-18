@@ -1,10 +1,11 @@
 // Flow Framework channels on Flow Messaging (api.flow.engineer), Flow's unified messaging API: WhatsApp,
-// Telegram and US SMS from senders Flow hosts, and a webhook that turns Flow's signed events into
-// messages for the agent.
+// Telegram and US SMS from senders Flow hosts. Events reach the agent one of two ways: the live
+// stream (an outbound WebSocket, so a laptop needs no public URL or tunnel) or a webhook that checks
+// Flow's signature. Both hand each event to the same handler.
 //
-//   const fm = flowMessaging();                    // FLOW_MESSAGING_KEY, FLOW_MESSAGING_WEBHOOK_SECRET
+//   const fm = flowMessaging();                    // FLOW_MESSAGING_KEY (and FLOW_MESSAGING_WEBHOOK_SECRET for a webhook)
 //   const agent = createAgent({ ..., channels: [fm.whatsapp(), fm.telegram(), fm.sms()] });
-//   http.createServer(fm.webhook(agent)).listen(8080);
+//   fm.start(agent);                               // the stream, or the webhook on PORT when a webhook secret is set
 //
 // Addresses are what Flow Framework joins people by: the phone number on WhatsApp and SMS, the numeric
 // user id on Telegram. A reply goes into the Flow conversation the person last wrote in; with none
@@ -12,7 +13,9 @@
 // into the open conversation if there is one. What this process learns (conversations, contacts,
 // event ids) is kept in memory only.
 
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { dirname } from "node:path";
 import { sms as smsChannel, whatsapp as whatsappChannel, type Agent, type Attachment, type Channel, type ChannelInfo, type Incoming, type Message, type Template, type WhatsAppFeature } from "../../src/index.ts";
 import { Client, FlowMessagingError, verifySignature } from "./client.ts";
 
@@ -41,8 +44,32 @@ interface Route {
   name: string;
   sender?: string;
 }
-/** What the webhook needs of an agent. */
+/** What the webhook and the stream need of an agent. */
 export type WebhookAgent = Pick<Agent, "message" | "reacted" | "undelivered">;
+
+export interface StreamOptions {
+  /**
+   * A file that keeps the ID of the last event the agent handled, so a restart resumes after it and
+   * Flow replays what arrived while the agent was away (for as long as the plan keeps events, 30 days
+   * by default). Without it the cursor is in memory: a dropped stream still resumes, a restart starts from now.
+   */
+  cursorFile?: string;
+}
+
+/** Why the stream stopped for good: Flow refused the key or the request, so reconnecting cannot help. */
+export interface StreamStop {
+  /** The WebSocket close code, such as 4401 (authentication) or 4403 (permission). */
+  code: number;
+  type: string;
+  message: string;
+}
+
+export interface StreamHandle {
+  /** Closes the stream and waits for the event being handled. */
+  close(): Promise<void>;
+  /** Resolves when Flow refused the stream for good (a bad or revoked key, say); never after close(). */
+  stopped: Promise<StreamStop>;
+}
 
 /** Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos, Markdown, no read receipts for bots. */
 export const TELEGRAM: ChannelInfo = {
@@ -62,6 +89,14 @@ const LIST_TITLE_MAX = 20;
 const MAX_BODY_BYTES = 1_000_000;
 /** Event ids remembered to drop Flow's redeliveries (deliveries are at least once). */
 const SEEN_MAX = 10_000;
+/** The events the handler acts on; the stream asks for only these. */
+const HANDLED = ["message.received", "message.failed", "reaction.added", "contact.deleted"];
+/** The longest wait between two tries to reconnect the stream (ms). */
+const STREAM_BACKOFF_MAX = 30_000;
+/** Tries of one event before the stream gives up on it and goes on to the next. */
+const STREAM_EVENT_TRIES = 5;
+/** Close codes after which reconnecting unchanged fails again: authentication, permission, a bad request. */
+const STREAM_FINAL = new Set([4401, 4403, 4400]);
 
 interface FlowMessage {
   id: string;
@@ -338,6 +373,22 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     }
   }
 
+  /** Hands one event to the agent once: a redelivery (or the same event by webhook and stream) is dropped. */
+  async function once(agent: WebhookAgent, event: FlowEvent): Promise<void> {
+    if (seen.has(event.id)) return;
+    let handled = handling.get(event.id);
+    if (!handled) {
+      handled = handle(agent, event).finally(() => handling.delete(event.id));
+      handling.set(event.id, handled);
+    }
+    await handled;
+    seen.add(event.id);
+    if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value!);
+  }
+
+  const failed = (event: FlowEvent, error: unknown) =>
+    console.warn(`@flow-engineer/flow/flow-messaging: event ${event.id} (${event.type}) failed: ${error instanceof FlowMessagingError ? error.type : error instanceof Error ? error.name : "error"}`);
+
   /**
    * One delivery: checks Flow-Signature, drops a redelivered event, hands the event to the agent.
    * 2xx tells Flow it arrived; a failure answers 500, so Flow delivers it again.
@@ -356,22 +407,12 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       return { status: 400, body: '{"error":"not JSON"}' };
     }
     if (typeof event?.id !== "string" || typeof event.type !== "string") return { status: 400, body: '{"error":"not an event"}' };
-    if (seen.has(event.id)) return { status: 200, body: "{}" };
-    let handled = handling.get(event.id);
-    if (!handled) {
-      handled = handle(agent, event);
-      handling.set(event.id, handled);
-    }
     try {
-      await handled;
-      seen.add(event.id);
-      if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value!);
+      await once(agent, event);
       return { status: 200, body: "{}" };
     } catch (error) {
-      console.warn(`@flow-engineer/flow/flow-messaging: event ${event.id} (${event.type}) failed: ${error instanceof FlowMessagingError ? error.type : error instanceof Error ? error.name : "error"}`);
+      failed(event, error);
       return { status: 500, body: '{"error":"failed"}' };
-    } finally {
-      handling.delete(event.id);
     }
   }
 
@@ -393,7 +434,148 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     };
   }
 
-  return { whatsapp, telegram, sms, webhook, receive };
+  // ---- the stream ----
+
+  /**
+   * The live event stream (GET /v1/stream): an outbound WebSocket, so the agent needs no public URL.
+   * Events are handled one at a time, in log order, by the webhook's handler. There is no ack frame
+   * for events: the stream resumes from `after`, so an event counts as acknowledged once the agent
+   * has handled it and the cursor (in memory, or `cursorFile`) has moved past it. A failed event, a
+   * dropped socket or Flow's `reconnect` frame reconnects from that cursor, and Flow replays what
+   * came after it: at once the first time, then with a backoff up to 30 s, or after Flow's
+   * retry_after. An event that fails 5 times in a row is passed over, so it cannot hold up every
+   * later one. A refused key or request stops the stream (`stopped`). Replies go over HTTP
+   * (with Idempotency-Keys), so they do not depend on the stream being up.
+   */
+  function stream(agent: WebhookAgent, o: StreamOptions = {}): StreamHandle {
+    if (!apiKey) throw new Error("@flow-engineer/flow/flow-messaging: set FLOW_MESSAGING_KEY (or pass apiKey) to open the stream");
+    let cursor = o.cursorFile ? readCursor(o.cursorFile) : undefined;
+    let socket: WebSocket | undefined;
+    let timer: NodeJS.Timeout | undefined;
+    let closed = false;
+    let tries = 0;
+    let failing: { id: string; times: number } | undefined;
+    let generation = 0;
+    let queue = Promise.resolve();
+    let stop!: (reason: StreamStop) => void;
+    const stopped = new Promise<StreamStop>((resolve) => (stop = resolve));
+
+    const moveCursor = (id: string | undefined) => {
+      cursor = id;
+      if (o.cursorFile) writeCursor(o.cursorFile, id);
+    };
+
+    function connect(): void {
+      const mine = ++generation;
+      const url = new URL(`${client.baseUrl.replace(/^http/, "ws")}/v1/stream`);
+      if (cursor) url.searchParams.set("after", cursor);
+      for (const type of HANDLED) url.searchParams.append("type", type);
+      // Node's WebSocket cannot set headers: the key goes as a subprotocol beside "flow", which Flow selects.
+      const ws = new WebSocket(url, ["flow", `flow.key.${apiKey}`]);
+      socket = ws;
+      let refusal: { type?: string; message?: string; param?: string; retry_after?: number } | undefined;
+      ws.onopen = () => {
+        if (!failing) tries = 0; // a failing event keeps its backoff across reconnects
+      };
+      ws.onmessage = (message) => {
+        let frame: { type?: string; event?: FlowEvent; error?: typeof refusal; ref?: string };
+        try {
+          frame = JSON.parse(String(message.data));
+        } catch {
+          return;
+        }
+        if (frame.type === "event" && frame.event && typeof frame.event.id === "string") {
+          const event = frame.event;
+          queue = queue.then(() => take(event, mine, ws));
+        } else if (frame.type === "error" && !frame.ref) refusal = frame.error ?? {};
+      };
+      ws.onerror = () => {}; // a close always follows
+      ws.onclose = ({ code, reason }) => {
+        if (socket === ws) socket = undefined;
+        if (closed || mine !== generation) return;
+        if (STREAM_FINAL.has(code)) {
+          if (code === 4400 && refusal?.param === "after" && cursor) {
+            // The cursor's event has left Flow's log (past retention): start again from now.
+            console.warn("@flow-engineer/flow/flow-messaging: the last handled event is no longer in Flow's log; the stream starts again from now");
+            moveCursor(undefined);
+            return void later(0);
+          }
+          closed = true;
+          const type = refusal?.type ?? (code === 4401 ? "authentication" : code === 4403 ? "permission" : "invalid_request");
+          const why = refusal?.message ?? reason ?? "Flow Messaging refused the stream.";
+          console.warn(`@flow-engineer/flow/flow-messaging: the stream stopped: ${type} (${code})`);
+          return void stop({ code, type, message: why });
+        }
+        // 1012 follows a reconnect frame: at once. 4429 and 45xx say when (retry_after). Else back off.
+        if (code === 1012) return void later(0);
+        if (refusal?.retry_after !== undefined) return void later(refusal.retry_after * 1000);
+        later(Math.min(STREAM_BACKOFF_MAX, tries === 0 ? 0 : 1000 * 2 ** (tries - 1)));
+        tries++;
+      };
+    }
+
+    function later(ms: number): void {
+      if (closed) return;
+      timer = setTimeout(connect, ms);
+    }
+
+    /** Handles one event of connection `mine`; one that fails makes the stream reconnect from the cursor. */
+    async function take(event: FlowEvent, mine: number, ws: WebSocket): Promise<void> {
+      if (closed || mine !== generation) return; // a newer connection replays it from the cursor
+      try {
+        await once(agent, event);
+      } catch (error) {
+        failed(event, error);
+        const times = failing?.id === event.id ? failing.times + 1 : 1;
+        if (times < STREAM_EVENT_TRIES) {
+          failing = { id: event.id, times };
+          if (mine === generation) ws.close(1000, "event failed; resuming");
+          return;
+        }
+        console.warn(`@flow-engineer/flow/flow-messaging: event ${event.id} failed ${times} times; going on without it (it stays in Flow's log, GET /v1/events)`);
+      }
+      failing = undefined;
+      tries = 0;
+      moveCursor(event.id);
+    }
+
+    connect();
+    return {
+      stopped,
+      async close() {
+        closed = true;
+        clearTimeout(timer);
+        socket?.close(1000, "closing");
+        await queue;
+      },
+    };
+  }
+
+  /**
+   * Starts receiving events: the webhook on `port` (default PORT, else 8080) when a webhook secret is
+   * set, which means Flow posts to a public URL; otherwise the stream, which needs no URL.
+   */
+  function start(agent: WebhookAgent, o: StreamOptions & { port?: number } = {}): StreamHandle & { mode: "webhook" | "stream" } {
+    if (!secrets.length) return { mode: "stream", ...stream(agent, o) };
+    const server = createServer(webhook(agent)).listen(o.port ?? Number(process.env.PORT ?? 8080));
+    return { mode: "webhook", stopped: new Promise<StreamStop>(() => {}), close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+  }
+
+  return { whatsapp, telegram, sms, webhook, receive, stream, start };
+}
+
+function readCursor(file: string): string | undefined {
+  try {
+    const id = readFileSync(file, "utf8").trim();
+    return /^evt_[A-Za-z0-9_]+$/.test(id) ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeCursor(file: string, id: string | undefined): void {
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, id ? `${id}\n` : "");
 }
 
 /** The text of a message's content, as the agent knew it. */

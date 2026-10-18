@@ -42,6 +42,7 @@
     "examples/cafe/tests",
     "examples/http-agent",
     "flow-messaging/README.md",
+    "docs/agents.md",
     "coding-agents",
     "spec",
     "README.md",

@@ -40,7 +40,7 @@ export class FlowMessagingError extends Error {
 
 export class Client {
   private readonly apiKey: string;
-  private readonly baseUrl: string;
+  readonly baseUrl: string;
 
   constructor(options: { apiKey: string; baseUrl: string }) {
     this.apiKey = options.apiKey;

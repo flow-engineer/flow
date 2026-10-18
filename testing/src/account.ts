@@ -1,5 +1,6 @@
 // `flow login | logout | whoami | setup | link`: sign in to flow.engineer once, then get the
-// agent's keys into .env and a link to chat with it from a phone (Telegram), with no key made by hand.
+// agent's keys into .env and a link to chat with it from a phone, with no key made by hand. `link`
+// alone does it all: it signs in and runs setup first when this folder has not been set up.
 // The calls to flow.engineer are in testing/src/flow-login.ts. Every command takes --json: one JSON
 // object per line on stdout (login prints a "pending" line first, so a coding agent can show the
 // link while it waits), every human line on stderr. Errors are {"error":{code,message,next}}, the
@@ -33,8 +34,9 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
   flow whoami [--json]      Show the account you are signed in as
   flow setup [--replace] [--ci] [--json]
                             Write this agent's keys (test cloud, traces, Flow Messaging) into ./.env
-  flow link [--channel telegram] [--json]
-                            Print the link that opens a chat with this agent on Telegram`;
+  flow link [--channel telegram|whatsapp|imessage] [--timeout <s>] [--no-browser] [--json]
+                            Print the link that opens a chat with this agent from a phone; signs in
+                            and runs setup first when this folder is not set up yet`;
 
 const USAGE = `Usage:\n${ACCOUNT_LINES}
 
@@ -48,6 +50,7 @@ Exit status: 0 done, 1 usage or not signed in, 2 network, 3 refused, denied or e
 4 still waiting for approval (run ${RUN} login --wait).`;
 
 const NEXT = { login: `${RUN} login`, wait: `${RUN} login --wait`, setup: `${RUN} setup`, link: `${RUN} link` };
+const CHANNELS = ["telegram", "whatsapp", "imessage"];
 const EXIT = { ok: 0, usage: 1, network: 2, refused: 3, pending: 4 } as const;
 
 class Stop extends Error {
@@ -72,13 +75,12 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
       options: {
         json: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
+        ...(command === "login" || command === "link" ? { "no-browser": { type: "boolean", default: false }, timeout: { type: "string", default: "120" } } : {}),
         ...(command === "login"
           ? {
-              "no-browser": { type: "boolean", default: false },
               wait: { type: "boolean", default: false },
               "no-wait": { type: "boolean", default: false },
               force: { type: "boolean", default: false },
-              timeout: { type: "string", default: "120" },
             }
           : {}),
         ...(command === "setup" ? { replace: { type: "boolean", default: false }, ci: { type: "boolean", default: false } } : {}),
@@ -94,12 +96,13 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     return EXIT.ok;
   }
   const timeoutSeconds = Number(values.timeout);
-  if (command === "login" && (values.wait && values["no-wait"] || !(values.timeout !== "" && timeoutSeconds >= 0))) {
-    console.error(`flow login: ${values.wait && values["no-wait"] ? "--wait and --no-wait cannot go together" : "--timeout is a number of seconds, 0 or more"}.\n\n${USAGE}`);
+  if ((command === "login" || command === "link") && (values.wait && values["no-wait"] || !(values.timeout !== "" && timeoutSeconds >= 0))) {
+    console.error(`flow ${command}: ${values.wait && values["no-wait"] ? "--wait and --no-wait cannot go together" : "--timeout is a number of seconds, 0 or more"}.\n\n${USAGE}`);
     return EXIT.usage;
   }
-  if (command === "link" && values.channel !== "telegram") {
-    console.error(`flow link: --channel takes telegram, the only channel with a link so far.\n\n${USAGE}`);
+  const channel = String(values.channel);
+  if (command === "link" && !CHANNELS.includes(channel)) {
+    console.error(`flow link: --channel takes ${CHANNELS.join(", ")}.\n\n${USAGE}`);
     return EXIT.usage;
   }
   const json = values.json === true;
@@ -113,7 +116,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     else if (command === "logout") await logout(json, out, say);
     else if (command === "whoami") await showAccount(json, out, say);
     else if (command === "setup") await setupEnv(values.replace === true, values.ci === true, json, out, say);
-    else link(json, out, say);
+    else await link({ channel, noBrowser: values["no-browser"] === true, timeoutSeconds }, json, out, say);
     return EXIT.ok;
   } catch (error) {
     const stop = asStop(error);
@@ -155,6 +158,8 @@ interface LoginOptions {
   force: boolean;
   /** How long this run polls before it stops with the code still pending (exit 4). */
   timeoutSeconds: number;
+  /** For `link`: polls a pending code if there is one, else starts one, and names `then` as the next step. */
+  resume?: { then: string };
 }
 
 const WAIT_NEXT = `approve in the browser, then run: ${NEXT.wait}`;
@@ -169,12 +174,13 @@ async function login(options: LoginOptions, json: boolean, out: Out, say: Say): 
       return;
     }
   }
-  let pending = options.wait ? readPending() : undefined;
+  let pending = options.wait || options.resume ? readPending() : undefined;
   if (pending && (pending.url !== url || pending.expires_at <= Date.now())) {
     say("The pending sign-in code has expired; starting a new sign-in.");
     deletePending();
     pending = undefined;
   } else if (options.wait && !pending) say("No sign-in is waiting; starting a new one.");
+  const waitNext = options.resume ? `approve in the browser, then run: ${options.resume.then}` : WAIT_NEXT;
   const resumed = pending !== undefined;
   let opened = false;
   if (!pending) {
@@ -186,12 +192,12 @@ async function login(options: LoginOptions, json: boolean, out: Out, say: Say): 
   const page = pending.verification_uri_complete || pending.verification_uri;
   const expiresIn = Math.max(0, Math.round((pending.expires_at - Date.now()) / 1000));
   // Written straight to the file descriptors, so a coding agent whose command is cut off still has them.
-  if (json) out({ status: "pending", verification_uri: pending.verification_uri, verification_uri_complete: page, user_code: pending.user_code, expires_in: expiresIn, opened_browser: opened, resumed, next: WAIT_NEXT });
+  if (json) out({ status: "pending", verification_uri: pending.verification_uri, verification_uri_complete: page, user_code: pending.user_code, expires_in: expiresIn, opened_browser: opened, resumed, next: waitNext });
   if (resumed) say(`Still waiting for ${page} (code ${pending.user_code}).`);
   else if (opened) say(`Opened your browser at ${page}`);
   else say(`${options.noBrowser ? "Open" : "Could not open a browser here; open"} ${page}`);
   if (!resumed) say(`and check it shows the code ${pending.user_code}, then approve.`);
-  if (options.noWait) throw stillPending(pending, null);
+  if (options.noWait) throw new Pending(pending, null, waitNext, options.resume?.then);
 
   let interval = pending.interval;
   const stopAt = Date.now() + options.timeoutSeconds * 1000;
@@ -201,7 +207,7 @@ async function login(options: LoginOptions, json: boolean, out: Out, say: Say): 
     const answer = await pollToken(url, pending.device_code);
     if (answer.status === "slow_down") interval += 5; // RFC 8628: each slow_down adds 5 seconds for good
     if (answer.status === "authorization_pending" || answer.status === "slow_down") {
-      if (Date.now() >= stopAt) throw stillPending(pending, options.timeoutSeconds);
+      if (Date.now() >= stopAt) throw new Pending(pending, options.timeoutSeconds, waitNext, options.resume?.then);
       continue;
     }
     deletePending();
@@ -211,7 +217,7 @@ async function login(options: LoginOptions, json: boolean, out: Out, say: Say): 
     const account = answer.account ?? (await whoami(url, answer.token));
     if (json) out({ status: "signed_in", account, token_path: path });
     say(`Signed in as ${account.email}. The token is in ${path}.`);
-    say(`Next, from your agent's folder: ${NEXT.setup}`);
+    if (!options.resume) say(`Next, from your agent's folder: ${NEXT.setup}`);
     return;
   }
 }
@@ -228,18 +234,16 @@ async function signedInAccount(url: string): Promise<Account | undefined> {
   }
 }
 
-/** Not approved yet: the code stays in pending.json for `flow login --wait`, and the exit is 4. */
+/** Not approved yet: the code stays in pending.json for `flow login --wait` (or `flow link` again), and the exit is 4. */
 class Pending extends Stop {
   readonly report: Record<string, unknown>;
   /** `waited` is the seconds this run polled, null when it did not (--no-wait). */
-  constructor(pending: PendingLogin, waited: number | null) {
+  constructor(pending: PendingLogin, waited: number | null, next = WAIT_NEXT, command = NEXT.wait) {
     const page = pending.verification_uri_complete || pending.verification_uri;
-    super("pending", waited !== null ? `Not approved yet after ${waited} s; the code ${pending.user_code} still works at ${page}.` : `Approve the code ${pending.user_code} at ${page}.`, NEXT.wait, EXIT.pending);
-    this.report = { status: "pending", user_code: pending.user_code, verification_uri: pending.verification_uri, waited_s: waited ?? 0, next: WAIT_NEXT };
+    super("pending", waited !== null ? `Not approved yet after ${waited} s; the code ${pending.user_code} still works at ${page}.` : `Approve the code ${pending.user_code} at ${page}.`, command, EXIT.pending);
+    this.report = { status: "pending", user_code: pending.user_code, verification_uri: pending.verification_uri, waited_s: waited ?? 0, next };
   }
 }
-
-const stillPending = (pending: PendingLogin, waited: number | null) => new Pending(pending, waited);
 
 const expired = () => {
   deletePending();
@@ -308,7 +312,7 @@ function envValues(lines: string[]): Map<string, string> {
   return values;
 }
 
-async function setupEnv(replace: boolean, ci: boolean, json: boolean, out: Out, say: Say): Promise<void> {
+async function setupEnv(replace: boolean, ci: boolean, json: boolean, out: Out, say: Say, forLink?: { channel: string }): Promise<void> {
   if (ci) {
     const steps = [
       `CI never signs in. It runs the tests with the agent's test cloud key, ${SETUP_ENV.cloud_key}, as a secret.`,
@@ -334,7 +338,7 @@ async function setupEnv(replace: boolean, ci: boolean, json: boolean, out: Out, 
   const have = Object.values(SETUP_ENV).filter((n) => n !== SETUP_ENV.try_url && before.get(n));
   let answer: SetupAnswer;
   try {
-    answer = await setup(loginUrl(), token, { name, hostname: hostname(), channels: ["telegram"], have });
+    answer = await setup(loginUrl(), token, { name, hostname: hostname(), channels: [forLink?.channel ?? "telegram"], have });
   } catch (error) {
     // A product failed: the keys that were minted anyway are not shown again, so they go into .env first.
     if (error instanceof LoginRefused && error.status === 502) {
@@ -355,7 +359,7 @@ async function setupEnv(replace: boolean, ci: boolean, json: boolean, out: Out, 
   say(`Agent ${answer.agent_id}. In .env:`);
   for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}${w.action === "kept" ? " (yours differs; --replace takes the new one)" : ""}`);
   if (answer.dashboard_url) say(`Its dashboard: ${answer.dashboard_url}`);
-  say(`Next: ${next.join(", then ")}`);
+  if (!forLink) say(`Next: ${next.join(", then ")}`);
 }
 
 type Written = { name: string; action: "added" | "unchanged" | "kept" | "replaced"; value: string };
@@ -384,18 +388,64 @@ function writeEnv(file: string, lines: string[], before: Map<string, string>, fi
   return written;
 }
 
-function link(json: boolean, out: Out, say: Say): void {
+interface LinkOptions {
+  channel: string;
+  noBrowser: boolean;
+  timeoutSeconds: number;
+}
+
+/** The names set in ./.env, with what the environment sets winning. */
+function dotenvValue(): (name: string) => string | undefined {
   const file = join(process.cwd(), ".env");
   const saved = existsSync(file) ? envValues(readFileSync(file, "utf8").split("\n")) : new Map<string, string>();
-  const value = (name: string) => process.env[name] || saved.get(name);
+  return (name) => process.env[name] || saved.get(name);
+}
+
+/**
+ * The phone link for this folder's join code. Not set up yet (no join code or no Flow Messaging key
+ * in .env): it signs in first when it has to (the same login, resuming a code already waiting) and
+ * runs setup, then asks flow.engineer for the channel's page, so a channel that is not open yet
+ * answers with the server's next step instead of a link that does not work.
+ */
+async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Promise<void> {
+  const again = `${NEXT.link}${options.channel === "telegram" ? "" : ` --channel ${options.channel}`}`;
+  let value = dotenvValue();
+  if (!value(SETUP_ENV.join_code) || !value(SETUP_ENV.messaging_key)) {
+    if (!(await signedInAccount(loginUrl()))) {
+      say("Not signed in to flow.engineer yet: signing in first.");
+      await login({ noBrowser: options.noBrowser, wait: false, noWait: false, force: true, timeoutSeconds: options.timeoutSeconds, resume: { then: again } }, json, out, say);
+    }
+    say("Setting up this agent's keys in .env.");
+    await setupEnv(false, false, json, out, say, { channel: options.channel });
+    value = dotenvValue();
+  }
   const joinCode = value(SETUP_ENV.join_code);
-  if (!joinCode) throw new Stop("no_join_code", `No ${SETUP_ENV.join_code} in .env.`, NEXT.setup, EXIT.usage);
-  // The server's own try_url when setup kept one for this join code, else the same page built here.
+  if (!joinCode) throw new Stop("no_join_code", `Setup wrote no ${SETUP_ENV.join_code} into .env.`, NEXT.setup, EXIT.refused);
+  // The server's own try_url when setup kept one for this join code and channel, else the same page built here.
   const fromServer = value(SETUP_ENV.try_url);
-  const url = fromServer?.includes(`/try/${encodeURIComponent(joinCode)}?`) ? fromServer : tryLink(loginUrl(), joinCode, "telegram");
-  const sayToPerson = `Open this on your phone and send the message Telegram fills in: ${url}`;
-  if (json) out({ url, channel: "telegram", join_code: joinCode, say_to_person: sayToPerson });
+  const url = fromServer?.includes(`/try/${encodeURIComponent(joinCode)}?`) && URL.parse(fromServer)?.searchParams.get("c") === options.channel ? fromServer : tryLink(loginUrl(), joinCode, options.channel);
+  await checkTryPage(url);
+  const what = options.channel === "telegram" ? "Telegram" : options.channel === "whatsapp" ? "WhatsApp" : "iMessage";
+  const sayToPerson = `Open this on your phone and send the message ${what} fills in: ${url}`;
+  if (json) out({ url, channel: options.channel, join_code: joinCode, say_to_person: sayToPerson });
   say(url);
-  say("Open it on a phone with Telegram: it opens Flow's test bot with your join code filled in. Send it, and");
-  say("from then on that phone chats with this agent while it runs (npm start). The link lasts as long as the app.");
+  say(`Open it on a phone with ${what} and send the message it fills in, with your join code. From then on`);
+  say("that phone chats with this agent while it runs (npm start), with no public URL or tunnel.");
+}
+
+/**
+ * Asks flow.engineer for the try page as JSON: a channel it cannot open yet (or a join code it does
+ * not know) answers {"error", "error_description", "next"}, which stops here with that next step.
+ */
+async function checkTryPage(url: string): Promise<void> {
+  const response = await fetch(url, { headers: { accept: "application/json" } });
+  if (response.ok) return void (await response.body?.cancel());
+  const text = await response.text();
+  let body: Record<string, unknown> = {};
+  try {
+    body = JSON.parse(text) as Record<string, unknown>;
+  } catch {}
+  const code = typeof body.error === "string" ? body.error : `http_${response.status}`;
+  const detail = typeof body.error_description === "string" ? body.error_description : `${url} answered ${response.status}.`;
+  throw new Stop(code, detail, typeof body.next === "string" && body.next ? body.next : undefined, EXIT.refused);
 }

@@ -14,7 +14,7 @@ const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
 const TOKEN = "fcli_secret_token_1234";
 const KEYS = { cloud_key: "oci_cloudsecretvalue9Qz1", traces_key: "otk_test_tracesecret7Lm2", messaging_key: "fk_test_messagingsecretk4Tt" };
 
-interface Seen { method: string; path: string; auth?: string; body: Record<string, unknown> }
+interface Seen { method: string; path: string; auth?: string; accept?: string; body: Record<string, unknown> }
 
 /**
  * A flow.engineer as flow-mono's docs/cli-login.md has it, that answers /cli/token from `tokenAnswers`
@@ -27,8 +27,13 @@ async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => 
   const server = createServer(async (req, res) => {
     const text = await read(req);
     const body = text ? JSON.parse(text) : {};
-    seen.push({ method: req.method!, path: req.url!, auth: req.headers.authorization, body });
+    seen.push({ method: req.method!, path: req.url!, auth: req.headers.authorization, ...(req.url!.startsWith("/try/") ? { accept: req.headers.accept } : {}), body });
     const send = (status: number, answer: unknown) => { res.writeHead(status, { "content-type": "application/json" }); res.end(JSON.stringify(answer)); };
+    // The try page: Telegram is open; another channel answers the server's error with its next step.
+    if (req.url!.startsWith("/try/")) {
+      if (new URL(req.url!, url).searchParams.get("c") === "telegram") return void res.writeHead(200, { "content-type": "text/html" }).end("<p>Open in Telegram</p>");
+      return send(404, { error: "channel_not_open", error_description: "WhatsApp is not open on the sandbox yet.", next: "npx @flow-engineer/flow link --channel telegram" });
+    }
     const bearer = req.headers.authorization?.startsWith("Bearer fcli_");
     if (req.url === "/cli/device") return send(200, { device_code: "fcd_1", user_code: "BCDF-GHJK", verification_uri: `${url}/cli/approve`, verification_uri_complete: `${url}/cli/approve?code=BCDF-GHJK`, interval: 0, expires_in: 600 });
     if (req.url === "/cli/token") {
@@ -273,20 +278,46 @@ test("setup merges the keys into .env, keeps the owner's lines and values, print
   assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_MESSAGING_TELEGRAM_SENDER=snd_tg$/m);
 });
 
-test("link prints the server's try_url for the join code in .env (built here when setup kept none), and without a join code says to run setup", async (t) => {
+test("link in a folder not set up signs in, resuming a code already waiting, runs setup for the channel, checks the try page and prints the link", async (t) => {
+  let approved = false;
+  const flow = await flowServer(() => (approved ? { access_token: TOKEN } : { error: "authorization_pending" }));
+  t.after(flow.close);
+  const config = temp();
+  const cwd = temp();
+  const waiting = await run(["link", "--no-browser", "--timeout", "0", "--json"], { url: flow.url, config, cwd });
+  assert.equal(waiting.code, 4, waiting.err);
+  assert.equal(waiting.lines.at(-1)!.next, "approve in the browser, then run: npx @flow-engineer/flow link");
+  assert.match(waiting.err, /Next: npx @flow-engineer\/flow link$/m);
+
+  approved = true;
+  const result = await run(["link", "--no-browser", "--json"], { url: flow.url, config, cwd });
+  assert.equal(result.code, 0, result.err);
+  assert.deepEqual(result.lines.map((l) => l.status ?? (l.agent ? "setup" : "link")), ["pending", "signed_in", "setup", "link"]);
+  assert.equal(result.lines[0]!.resumed, true);
+  assert.equal(flow.seen.filter((r) => r.path === "/cli/device").length, 1, "the waiting code was used, not a new one");
+  assert.deepEqual(flow.seen.find((r) => r.path === "/cli/setup")!.body.channels, ["telegram"]);
+  assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_FRAMEWORK_JOIN_CODE=brave-otter-1$/m);
+  assert.deepEqual(result.lines.at(-1), { url: `${flow.url}/try/brave-otter-1?c=telegram`, channel: "telegram", join_code: "brave-otter-1", say_to_person: `Open this on your phone and send the message Telegram fills in: ${flow.url}/try/brave-otter-1?c=telegram` });
+  assert.equal(flow.seen.at(-1)!.accept, "application/json", "the try page is asked for JSON, so a refusal comes with its next step");
+  for (const key of Object.values(KEYS)) assert.ok(!result.out.includes(key) && !result.err.includes(key), "no key is printed");
+});
+
+test("link in a folder set up already needs no sign-in: it prints the server's try_url for that channel, else builds one, and a channel the server cannot open yet exits 3 with its next step", async (t) => {
   const flow = await flowServer();
   t.after(flow.close);
   const cwd = temp();
-  const missing = await run(["link", "--json"], { url: flow.url, config: temp(), cwd });
-  assert.equal(missing.code, 1);
-  assert.equal(missing.lines[0]!.error.next, "npx @flow-engineer/flow setup");
-  writeFileSync(join(cwd, ".env"), "FLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\n");
-  const result = await run(["link", "--channel", "telegram", "--json"], { url: flow.url, config: temp(), cwd });
-  assert.equal(result.code, 0, result.err);
-  assert.equal(result.lines[0]!.url, `${flow.url}/try/brave-otter-1?c=telegram`);
-  writeFileSync(join(cwd, ".env"), "FLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\nFLOW_FRAMEWORK_TRY_URL=https://try.example/try/brave-otter-1?c=telegram\n");
+  writeFileSync(join(cwd, ".env"), `FLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\nFLOW_FRAMEWORK_TRY_URL=${flow.url}/try/brave-otter-1?c=telegram&from=setup\n`);
   const served = await run(["link", "--json"], { url: flow.url, config: temp(), cwd });
-  assert.equal(served.lines[0]!.url, "https://try.example/try/brave-otter-1?c=telegram");
+  assert.equal(served.code, 0, served.err);
+  assert.equal(served.lines[0]!.url, `${flow.url}/try/brave-otter-1?c=telegram&from=setup`);
+  assert.equal(flow.seen.filter((r) => r.path.startsWith("/cli/")).length, 0, "no sign-in and no setup");
+
+  const refused = await run(["link", "--channel", "whatsapp", "--json"], { url: flow.url, config: temp(), cwd });
+  assert.equal(refused.code, 3, refused.err);
+  assert.equal(flow.seen.at(-1)!.path, "/try/brave-otter-1?c=whatsapp");
+  assert.deepEqual(refused.lines[0], { error: { code: "channel_not_open", message: "WhatsApp is not open on the sandbox yet.", next: "npx @flow-engineer/flow link --channel telegram" } });
+  assert.match(refused.err, /Next: npx @flow-engineer\/flow link --channel telegram/);
+  assert.equal((await run(["link", "--channel", "sms"], { url: flow.url, config: temp(), cwd })).code, 1, "an unknown channel is a usage error");
 });
 
 test("a setup that fails in one product still writes the keys it minted, then exits 3 with the server's next step", async (t) => {
@@ -307,7 +338,7 @@ test("every next step and hint the account commands print names the package, nev
   const config = temp();
   const printed = [
     await run(["whoami", "--json"], { url: flow.url, config, cwd: temp() }),
-    await run(["link", "--json"], { url: flow.url, config, cwd: temp() }),
+    await run(["link", "--no-browser", "--timeout", "0", "--json"], { url: flow.url, config, cwd: temp() }),
     await run(["setup", "--ci", "--json"], { url: flow.url, config, cwd: temp() }),
     await run(["login", "--no-browser", "--timeout", "0", "--json"], { url: flow.url, config, cwd: temp() }),
     await run(["setup", "--json"], { url: flow.url, config, cwd: temp(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } }),
