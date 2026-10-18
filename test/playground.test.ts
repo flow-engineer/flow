@@ -68,6 +68,54 @@ test("a fresh authenticated browser keeps its address when account history is re
   assert.deepEqual(seen, ["new-browser"]);
 });
 
+// Visitor-message tests never finish a login before the next inbound message, or send a callback acknowledgment.
+test("a verified login links the original channel and sends one confirmation without a model turn", async () => {
+  const database = sqlite();
+  const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true, keywords: { stop: ["STOP"], start: ["START"], help: [] } }, imessage: { info: WEB_APP, phone: true } }, database });
+  const original = await h.message("whatsapp", SAM.phone, "let me sign in");
+  (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Please sign in" })));
+  await h.agent.conversation(original!.conversationId)!.whenIdle();
+  const connected = await h.agent.linkIdentity({ channel: "whatsapp", address: SAM.phone, key: "account-a" });
+  assert.notEqual(connected.conversationId, original!.conversationId, "anonymous history is not merged into account history");
+  const confirmation = { to: { channel: "whatsapp", address: SAM.phone }, text: "You're signed in—continue here.", idempotencyKey: "login:completion-1", respectQuietHours: false };
+  const results = await Promise.all([h.agent.nudge(confirmation), h.agent.nudge(confirmation)]);
+  assert.ok(results.every(r => r.status === "sent"));
+  assert.deepEqual(h.texts("whatsapp"), ["Please sign in", confirmation.text]);
+  assert.equal(h.calls.length, 1, "confirmation needs no model call");
+  const same = await h.agent.linkIdentity({ channel: "imessage", address: SAM.phone, key: "account-a" });
+  assert.equal(same.conversationId, connected.conversationId);
+  await h.agent.nudge({ ...confirmation, to: { channel: "imessage", address: SAM.phone }, idempotencyKey: "login:completion-2" });
+  assert.deepEqual(h.texts("imessage"), [confirmation.text], "a new connection confirms on its own originating channel");
+  await assert.rejects(h.agent.linkIdentity({ channel: "whatsapp", address: SAM.phone, key: "account-b" }), /belongs to a different person/);
+  assert.ok((await h.agent.transcript(connected.conversationId)).some(e => e.kind === "out" && e.text === confirmation.text));
+  const store = new Store(database, "default");
+  assert.equal((await store.identity("whatsapp", SAM.phone))!.conversationId, connected.conversationId);
+  assert.ok((await store.identity("whatsapp", SAM.phone))!.lastMessageAt, "login preserves the channel's inbound window");
+  const stopped = "+15555550103";
+  await h.message("whatsapp", stopped, "STOP");
+  await h.agent.linkIdentity({ channel: "whatsapp", address: stopped, key: "account-stopped" });
+  assert.equal((await h.agent.nudge({ ...confirmation, to: { channel: "whatsapp", address: stopped }, idempotencyKey: "login:completion-3" })).status, "dropped", "signing in preserves a sender's no-contact rules");
+});
+
+// A single address cannot catch sending a login result to another session on the same channel.
+test("a playground login confirmation targets its original address and survives a restart without duplication", async () => {
+  const database = sqlite();
+  const h = multi({ channels: { app: { info: WEB_APP } }, database });
+  await h.agent.linkIdentity({ channel: "app", address: "browser-a", key: "account-a", via: "playground" });
+  await h.agent.linkIdentity({ channel: "app", address: "browser-b", key: "account-a", via: "provider" });
+  const shown: Array<{ key?: string; text: string }> = [];
+  h.agent.attachPlayground(({ person, outbound }) => { if (outbound.type === "message") shown.push({ key: person.key, text: outbound.text }); });
+  const input = { to: { channel: "app", address: "browser-a" }, text: "You're signed in—continue here.", idempotencyKey: "login:completion-1", respectQuietHours: false };
+  assert.equal((await h.agent.nudge(input)).status, "sent");
+  assert.deepEqual(shown, [{ key: "account-a", text: input.text }]);
+  assert.deepEqual(h.out.filter(o => o.outbound.type === "message"), [], "the confirmation never goes to the other session through its provider");
+  const next = multi({ channels: { app: { info: WEB_APP } }, database });
+  next.agent.attachPlayground(() => assert.fail("completed acknowledgment must not be delivered again"));
+  await next.agent.resume();
+  assert.equal((await next.agent.nudge(input)).status, "sent");
+  assert.deepEqual(next.out, []);
+});
+
 test("a test person who switches channels resumes the same conversation", async () => {
   const h = playground();
   const a = await h.agent.simulate({ person: SAM.phone, channel: "whatsapp", message: "hi" });

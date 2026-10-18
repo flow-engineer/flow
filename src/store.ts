@@ -262,6 +262,26 @@ export class Store {
     );
   }
 
+  /** Bind verified login proof; an identity already owned by another account cannot move. */
+  async linkIdentity(conversationId: string, channel: string, address: string): Promise<boolean> {
+    return this.db.transaction(async tx => {
+      const lock = this.db.dialect === "postgres" ? " FOR UPDATE" : "";
+      const [previous] = await tx.query(`SELECT conversation_id FROM identities WHERE agent_id = ? AND channel = ? AND address = ?${lock}`, [this.agentId, channel, address]);
+      const rows = await tx.query(`INSERT INTO identities (agent_id, channel, address, conversation_id, verified_by)
+        VALUES (?, ?, ?, ?, 'resolver') ON CONFLICT (agent_id, channel, address) DO UPDATE SET
+        conversation_id = excluded.conversation_id, verified_by = excluded.verified_by
+        WHERE identities.conversation_id = excluded.conversation_id OR EXISTS (
+          SELECT 1 FROM conversations c WHERE c.agent_id = identities.agent_id
+          AND c.id = identities.conversation_id AND c.person_key NOT LIKE 'key:%') RETURNING conversation_id`,
+      [this.agentId, channel, address, conversationId]);
+      if (rows.length && previous && previous.conversation_id !== conversationId) {
+        // Signing in must not undo an anonymous sender's STOP or other no-contact preferences.
+        await tx.run("UPDATE no_contact SET conversation_id = ? WHERE agent_id = ? AND conversation_id = ?", [conversationId, this.agentId, previous.conversation_id]);
+      }
+      return rows.length > 0;
+    });
+  }
+
   async touchIdentity(channel: string, address: string, at: number): Promise<void> {
     await this.db.run("UPDATE identities SET last_message_at = ? WHERE agent_id = ? AND channel = ? AND address = ?", [at, this.agentId, channel, address]);
   }

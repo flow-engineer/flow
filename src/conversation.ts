@@ -197,6 +197,8 @@ interface Note {
 
 /** Sent without the model: a fixed-text scheduled message, or a text or template nudge. */
 interface Direct {
+  /** A fixed nudge targets the address it was requested for, even if another session wrote later. */
+  address?: string;
   inbox?: number;
   channel: string;
   /** A held nudge released because they just wrote: their window is open. */
@@ -586,7 +588,7 @@ export class Conversation {
           ? `[Nudge from the business, not from the person, ${held}${p.prompt}] Tell them now in your own words. Others held with it come in this turn too: cover them all in one short message, not a text each, and answer anything they just asked first.`
           : `[Nudge from the business, not from the person: ${p.prompt}] Write it to them now in your own words, or send nothing if it does not fit what they asked not to be messaged about.`;
         this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel } });
-      } else this.direct.push({ inbox: row.id, channel: p.channel, text: p.text, template: p.template, nudge: p.nudge, ...(p.theyWrote ? { theyWrote: true } : {}) });
+      } else this.direct.push({ inbox: row.id, channel: p.channel, address: p.address, text: p.text, template: p.template, nudge: p.nudge, ...(p.theyWrote ? { theyWrote: true } : {}) });
     }
     if (!this.running && this.hasWork()) this.schedule(0);
   }
@@ -1213,7 +1215,7 @@ export class Conversation {
       this.settle(d, status, reason);
       this.flush([d]);
     };
-    const link = this.channels.get(d.channel);
+    const link = d.address === undefined ? this.channels.get(d.channel) : (await this.settings.links(this.id)).find(l => l.name === d.channel && l.address === d.address);
     if (!link) return settle("failed", `no way to reach them on ${d.channel} right now`);
     if (!d.template && !d.theyWrote && windowClosed(link, this.settings.now())) return settle("refused", "outside_window");
     // Every direct send is one the business starts (a nudge, or its scheduled text): the person's rules apply.
@@ -1233,7 +1235,9 @@ export class Conversation {
     }
     if (covered) return settle("dropped", `no-contact rule ${covered.id}: ${covered.rule}`);
     const outbound: Outbound = d.template ? { type: "template", ...d.template } : { type: "message", text: d.text ?? "" };
-    const failure = await this.send(d.channel, outbound);
+    let failure: string | null = null;
+    if (this.closed) return settle("failed", "this person was forgotten");
+    try { await link.deliver(outbound); } catch (error) { failure = errorText(error); }
     if (failure) return settle("failed", failure);
     if (d.template) {
       // A declared template's text, so the agent knows what the person read (and tapped a reply to).

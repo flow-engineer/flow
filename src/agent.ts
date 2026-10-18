@@ -437,6 +437,38 @@ export class Agent {
     return this.released(await this.take(this.channelOf(input.channel), { channel: input.channel, from: input.key ? input.address : `visitor:${input.address}`, message: input.message, via: "playground", verifiedKey: input.key ?? undefined, visitor: input.key ? undefined : input.address }));
   }
 
+  /**
+   * A completed server-verified login. Bind its channel address to the account before sending a
+   * confirmation with recordNudge/nudge. Never take key from a browser body or model input.
+   * Anonymous history stays separate; an identity belonging to another account is refused.
+   */
+  async linkIdentity(input: { channel: string; address: string; key: string; via?: "provider" | "playground" }): Promise<{ conversationId: string }> {
+    if (!input.address || !input.key) throw new Error("chinwag: linking needs a verified account and channel address");
+    const adapter = this.channelOf(input.channel);
+    const lock = viaKey(input.channel, input.address);
+    const work = (this.arriving.get(lock) ?? Promise.resolve()).then(async () => {
+      await this.settings.ready;
+      const personKey = `key:${input.key}`;
+      let row = await this.store.conversationByKey(personKey);
+      if (!row) {
+        await this.store.createConversation(`p_${randomUUID().slice(0, 12)}`, personKey);
+        row = await this.store.conversationByKey(personKey);
+      }
+      if (!row) throw new Error("chinwag: could not open the verified account conversation");
+      if (!await this.store.linkIdentity(row.id, input.channel, input.address)) throw new Error("chinwag: channel identity belongs to a different person");
+      const identity = (await this.store.identity(input.channel, input.address))!;
+      const via = input.via ?? identity.via;
+      if (identity.via !== via) await this.store.setIdentityVia(input.channel, input.address, via);
+      this.via.set(lock, via);
+      if (via === "playground") this.playgroundVisitors.set(lock, { key: input.key });
+      this.rows.set(row.id, row);
+      this.open(row.id).link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: input.address, deliver: this.deliverer(adapter, input.address, row.id), lastMessageAt: identity.lastMessageAt });
+      return { conversationId: row.id };
+    });
+    this.arriving.set(lock, work.catch(() => undefined));
+    return work;
+  }
+
   /** A verified playground visitor's account history, including messages on other interfaces. */
   async visitorConversation(key: string | null, identity?: { channel: string; address: string }): Promise<string | null> {
     await this.settings.ready;
@@ -895,7 +927,7 @@ export class Agent {
       const added = await add({ ...record, body: { text: input.text, prompt: input.prompt, at: input.at }, status: "scheduled" }, schedule);
       return typeof added === "number" ? { id, status: "scheduled" } : added;
     }
-    const body = input.template ? { template: input.template } : input.text !== undefined ? { text: input.text } : { prompt: input.prompt };
+    const body = { address: input.to.address, ...(input.template ? { template: input.template } : input.text !== undefined ? { text: input.text } : { prompt: input.prompt }) };
     const now = this.now();
     const quietEnds = input.respectQuietHours === false ? null : await this.quietEnd(conversationId, now);
     if (quietEnds !== null) {

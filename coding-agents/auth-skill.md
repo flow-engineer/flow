@@ -114,6 +114,19 @@ For Firebase the app’s function validates the signed-in user’s Firebase sess
 
 A custom login implements the same boundary. Do not make every brand adopt one identity provider or copy an OAuth server into its agent repository.
 
+After a verified OAuth callback has saved the chat client's connection, call
+`await agent.linkIdentity({ channel, address, key })` with server-verified proof, then
+`await agent.recordNudge({ to: { channel, address }, text: "You're signed in—continue here.",
+idempotencyKey: "login:" + connectionId, respectQuietHours: false })`. This binds the account and
+queues an ordinary chat message without a browser redirect. Exact text needs no model call
+except an existing no-contact-rule check. Signing in preserves those rules, including STOP. Use a stable, unique
+completion ID so callback retries queue it once. The message targets the originating address,
+even when the account has another session on that channel. Keep anonymous history separate and
+refuse to rebind an address already owned by a different account. For a playground connection,
+pass `via: "playground"` to `linkIdentity`; confirmation delivery stays in the simulator. Persist
+pending completion events and retry queueing after a process restart; do not rely on the browser
+staying open. Providers can still fail delivery, so monitor the recorded nudge's outcome.
+
 ## Exercise sign-in in the playground
 
 Pass `authentication` to `simulators` to add **New user · signed out** to the person picker. Existing declared test people retain their current identities. The hook receives the `channel` and an opaque `visitor` issued by the playground server, and returns `{ key?, address?, label?, signInUrl? }`. Resolve that visitor's connection with the application's normal auth adapter and return the canonical account `key` only after authentication. A phone-primary brand can resolve a simulated provider-verified phone immediately; other interfaces can return the application's OAuth connection URL. Never take the key or verified phone proof from request bodies, and keep credentials out of the result.
