@@ -53,7 +53,7 @@ GEMINI_API_KEY=
 # Optional. The model id for that provider; empty is that provider's default.
 # CAFE_MODEL=
 
-# The test cloud (npx flow test --synthetic) and traces. Sign in at https://flow.engineer/observe,
+# The test cloud (npx @flow-engineer/flow test --synthetic) and traces. Sign in at https://flow.engineer/observe,
 # add the agent, and on its Developers page make a CI key (oci_..., shown once); the trace key is
 # from the same site.
 FLOW_FRAMEWORK_CLOUD=https://flow.engineer/observe
@@ -72,7 +72,7 @@ A chat agent on Flow Framework (https://github.com/flow-engineer/flow), started 
 - \`npm start\` runs it in the playground. The owner puts one model key in \`.env\` (never read or
   print it): \`OPENROUTER_API_KEY\`, \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`.
   \`npm run typecheck\` checks the types, \`npm test -- --synthetic\` runs the tests in the test
-  cloud at https://flow.engineer/observe with the owner's \`FLOW_FRAMEWORK_CLOUD_KEY\` (\`npx flow --help\`).
+  cloud at https://flow.engineer/observe with the owner's \`FLOW_FRAMEWORK_CLOUD_KEY\` (\`npx @flow-engineer/flow --help\`).
 `;
 
 /** Makes `<into>/<name>` (the current folder by default) and returns it. */

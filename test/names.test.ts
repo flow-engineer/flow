@@ -47,5 +47,5 @@ test("the chinwag command says it was renamed on stderr, then runs flow as it is
   const now = run("cli.ts");
   assert.equal(old.status, now.status);
   assert.equal(old.stdout, now.stdout);
-  assert.equal(old.stderr, `chinwag is now Flow Framework (@flow-engineer/flow): run npx flow, and npm i @flow-engineer/flow.\n${now.stderr}`);
+  assert.equal(old.stderr, `chinwag is now Flow Framework (@flow-engineer/flow): run npx @flow-engineer/flow, and npm i @flow-engineer/flow.\n${now.stderr}`);
 });

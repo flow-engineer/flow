@@ -189,7 +189,7 @@ try {
     environment: values.environment,
   });
 } catch (error) {
-  const where = !ciKey && cloud.replace(/\/+$/, "") === OBSERVE_URL ? " Run npx flow login, then npx flow setup, to get one into .env." : "";
+  const where = !ciKey && cloud.replace(/\/+$/, "") === OBSERVE_URL ? " Run npx @flow-engineer/flow login, then npx @flow-engineer/flow setup, to get one into .env." : "";
   invalid(`${(error as Error).message}${where}`);
 }
 

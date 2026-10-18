@@ -1,12 +1,15 @@
 // The flow.engineer side of `flow login`, `logout`, `whoami` and `setup`: every call to it, and
-// where the Flow CLI token is kept. Only this file knows the server's routes and field names.
-//   POST /cli/device {client_name, hostname}  -> {device_code, user_code, verification_uri, verification_uri_complete?, interval, expires_in}
-//   POST /cli/token {device_code}             -> {access_token, expires_at, account?}, or {error} as RFC 8628 has it:
-//                                                authorization_pending, slow_down, expired_token, access_denied
-//   POST /cli/revoke (bearer)                 ends this token
-//   GET  /cli/whoami (bearer)                 -> {email, account}
+// where the Flow CLI token is kept. Only this file knows the server's routes and field names
+// (flow-mono's docs/cli-login.md).
+//   POST /cli/device {client_name, hostname}  -> {device_code, user_code, verification_uri, verification_uri_complete, interval, expires_in}
+//   POST /cli/token {device_code}             -> {access_token, expires_at, account}, or 400 {error} as RFC 8628 has it:
+//                                                authorization_pending, slow_down, expired_token, access_denied, invalid_grant
+//   POST /cli/revoke (bearer) {}              ends this token
+//   GET  /cli/whoami (bearer)                 -> {account, email, token}
 //   POST /cli/setup (bearer) {name, hostname, channels, have}
-//        -> {agent_id, cloud_key?, traces_key?, messaging_key?, telegram_sender?, join_code}
+//        -> {agent_id, cloud_key?, traces_key?, messaging_key?, telegram_sender, join_code, account, app_id,
+//            dashboard_url, try_url, telegram_link, minted, next}; a 502 carries every field that worked too
+// Every error is flat: {"error": "<code>", "error_description": "<sentence>", "next": "<command or URL>"}.
 // The token is opaque (fcli_...), good only for /cli/*, and never sent to any other host.
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -125,22 +128,38 @@ export interface Account {
 
 export interface SetupAnswer {
   agent_id: string;
-  /** Only the keys the request said it lacks come back. */
+  /** Only the keys minted in this call come back (those the request did not say it has). */
   cloud_key?: string;
   traces_key?: string;
   messaging_key?: string;
-  telegram_sender?: string;
+  telegram_sender: string;
   join_code: string;
+  account?: Account;
+  app_id?: string;
+  dashboard_url?: string;
+  /** The flow.engineer page that opens Telegram with the join message filled in. */
+  try_url?: string;
+  telegram_link?: string;
+  /** The answer fields of the keys made in this call. */
+  minted?: string[];
+  next?: string[];
 }
 
-/** The server answered with an error status; `code` is its `error` field when it gave one. */
+/**
+ * The server answered with an error status; `code` is its `error` field when it gave one, `next` its
+ * next step, and `fields` the whole answer (a failed setup carries the keys it minted anyway).
+ */
 export class LoginRefused extends Error {
   readonly status: number;
   readonly code: string;
-  constructor(status: number, code: string, message: string) {
+  readonly next: string | undefined;
+  readonly fields: Record<string, unknown>;
+  constructor(status: number, code: string, message: string, next?: string, fields: Record<string, unknown> = {}) {
     super(message);
     this.status = status;
     this.code = code;
+    this.next = next;
+    this.fields = fields;
   }
 }
 
@@ -166,11 +185,13 @@ async function call(url: string, path: string, options: { token?: string; body?:
 function refused(path: string, answer: { status: number; body: Record<string, unknown> }): LoginRefused {
   const code = typeof answer.body.error === "string" ? answer.body.error : answer.status === 401 ? "not_signed_in" : `http_${answer.status}`;
   const detail = typeof answer.body.error_description === "string" ? answer.body.error_description : typeof answer.body.message === "string" ? answer.body.message : "";
-  return new LoginRefused(answer.status, code, `${path} answered ${answer.status} ${code}${detail ? `: ${detail}` : ""}.`);
+  const next = typeof answer.body.next === "string" && answer.body.next ? answer.body.next : undefined;
+  return new LoginRefused(answer.status, code, `${path} answered ${answer.status} ${code}${detail ? `: ${detail}` : ""}.`, next, answer.body);
 }
 
-export async function startDevice(url: string, hostname: string): Promise<DeviceStart> {
-  const answer = await call(url, "/cli/device", { body: { client_name: "flow", hostname } });
+/** `clientName` and `hostname` are shown on the approval page. */
+export async function startDevice(url: string, clientName: string, hostname: string): Promise<DeviceStart> {
+  const answer = await call(url, "/cli/device", { body: { client_name: clientName, hostname } });
   if (answer.status !== 200 || typeof answer.body.device_code !== "string") throw refused("/cli/device", answer);
   return answer.body as unknown as DeviceStart;
 }
@@ -206,16 +227,17 @@ export async function setup(url: string, token: string, request: { name: string;
   return answer.body as unknown as SetupAnswer;
 }
 
-/** The agent's .env names for what setup hands back. */
+/** The agent's .env names for what setup hands back; only the keys' and the join's names are sent as `have`. */
 export const SETUP_ENV = {
   cloud_key: "FLOW_FRAMEWORK_CLOUD_KEY",
   traces_key: "FLOW_FRAMEWORK_TRACES_KEY",
   messaging_key: "FLOW_MESSAGING_KEY",
   telegram_sender: "FLOW_MESSAGING_TELEGRAM_SENDER",
   join_code: "FLOW_FRAMEWORK_JOIN_CODE",
+  try_url: "FLOW_FRAMEWORK_TRY_URL",
 } as const satisfies Partial<Record<keyof SetupAnswer, string>>;
 
-/** The phone link for a join code: a flow.engineer page that opens the channel with the join message filled in. */
+/** The phone link for a join code, built as the server builds its try_url, for a .env from before setup kept it. */
 export function tryLink(url: string, joinCode: string, channel: string): string {
   return `${url}/try/${encodeURIComponent(joinCode)}?c=${encodeURIComponent(channel)}`;
 }

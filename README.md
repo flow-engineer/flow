@@ -67,7 +67,7 @@ echo "OPENROUTER_API_KEY=sk-or-..." > .env
 node --env-file=.env src/main.ts
 ```
 
-Tests run with `npx flow test` (see [Testing](#testing)); `npx flow --help` lists everything the command does.
+Tests run with `npx @flow-engineer/flow test` (see [Testing](#testing)); `npx @flow-engineer/flow --help` lists everything the command does.
 
 ## How a turn works
 
@@ -356,7 +356,7 @@ expect:
 `expect.calls` and `expect.never` name tools that must or must not be called, checked by code from the recorded calls. `now` and `timezone` set the test's clock, and dates in test files are written against it (`{{now + 1d | date}}`), so they never go stale ([coding-agents/test-skill.md](coding-agents/test-skill.md)). `tests/tools/*.yaml` describe how each tool behaves (normal, slow, each error). Run the suite from the agent's folder:
 
 ```bash
-npx flow test --cloud https://flow.engineer/observe --synthetic --runs 3 --only latte-correction
+npx @flow-engineer/flow test --cloud https://flow.engineer/observe --synthetic --runs 3 --only latte-correction
 ```
 
 Your agent stays on your machine with its own model and key; the test cloud ([get one](#get-a-test-cloud)) plays the person and the tools and judges each run. The cloud is a hosted service, not part of this package. The command prints pass or fail per run, with the judge's reasons, the cost, and a link to watch each conversation. Before anything is sent it reads every test file as the cloud does, and a mistake stops it with the file and line (`tests/scenarios/latte-correction.yaml:3: person.goal: missing`).
@@ -415,24 +415,25 @@ Each run's line carries its id (`FAIL  latte-correction #1 (whatsapp) trn_…: 6
 `--failed` runs again only the scenarios that did not pass in that file (failed, errored or not played), on every channel each plays: a scenario's channels are part of its file, so one channel cannot be picked alone. It goes with `--runs`; with `--only` it stops and says to pick one, since the two would each pick the scenarios. With nothing to run again it prints `Nothing failed in the last session (<id>).` and exits 0 (and says when that session ran only some scenarios); with no file it says to run `flow test` first and exits 1. The loop, for you or a coding agent:
 
 ```bash
-npx flow test --synthetic                    # the whole suite
+npx @flow-engineer/flow test --synthetic           # the whole suite
 # fix what failed
-npx flow show last                           # why: the judge's reasons, the conversation and the tool calls
-npx flow test --synthetic --failed           # only what did not pass; again until it exits 0
-npx flow test --synthetic                    # the whole suite once more before you finish
+npx @flow-engineer/flow show last                  # why: the judge's reasons, the conversation and the tool calls
+npx @flow-engineer/flow test --synthetic --failed  # only what did not pass; again until it exits 0
+npx @flow-engineer/flow test --synthetic           # the whole suite once more before you finish
 ```
 
 ### Get a test cloud
 
-The quick way: `npx flow login` (it opens the browser and waits up to 120 s; `npx flow login --wait` waits again for the same code, so a coding agent can run it), then `npx flow setup` in the agent's folder, which
-writes `FLOW_FRAMEWORK_CLOUD_KEY` (and the traces and Flow Messaging keys) into `.env`;
-`npx flow link` then prints a link to chat with the agent on Telegram. By hand:
+The quick way: `npx @flow-engineer/flow login` (it opens the browser and waits up to 120 s; `npx @flow-engineer/flow login --wait` waits again for the same code, so a coding agent can run it), then `npx @flow-engineer/flow setup` in the agent's folder, which
+writes `FLOW_FRAMEWORK_CLOUD_KEY` (and the traces and Flow Messaging keys, the join code and its
+`FLOW_FRAMEWORK_TRY_URL`) into `.env`; `npx @flow-engineer/flow link` then prints that link to chat with the agent on Telegram.
+Always name the package: `npx flow` on its own fetches another npm package. By hand:
 
 1. Sign in at https://flow.engineer/observe (Google, GitHub or an email link).
 2. Workspace → New agent.
 3. On the agent's Developers page, "Make a CI key". It starts with `oci_` and is shown once.
 4. Put it in the agent's `.env` as `FLOW_FRAMEWORK_CLOUD_KEY` (never on the command line).
-5. `npx flow test --cloud https://flow.engineer/observe --synthetic` from the agent's folder (`--cloud` is that address by default).
+5. `npx @flow-engineer/flow test --cloud https://flow.engineer/observe --synthetic` from the agent's folder (`--cloud` is that address by default).
 
 Your agent runs on your machine with your own model key. The cloud's person simulator, tool simulator and judge are free up to $5 a day per workspace, with 2 sessions at once; test data only (`--synthetic`), and records are deleted after 30 days.
 
@@ -586,7 +587,7 @@ Flow Framework was published as `chinwag` up to 0.1.13; from 0.2.0 it is `@flow-
 
 1. `npm uninstall chinwag && npm i @flow-engineer/flow`
 2. Imports: `chinwag` becomes `@flow-engineer/flow`, `chinwag/simulators` becomes `@flow-engineer/flow/simulators`, `chinwag/testing` becomes `@flow-engineer/flow/testing`. The type `ChinwagEvent` is now `FlowEvent` (the old name still works, deprecated).
-3. The command: `npx chinwag ...` becomes `npx flow ...` (in `package.json` scripts too). `chinwag` still runs for this release and says it was renamed.
+3. The command: `npx chinwag ...` becomes `npx @flow-engineer/flow ...`, and `chinwag ...` in `package.json` scripts becomes `flow ...`. `chinwag` still runs for this release and says it was renamed.
 4. Environment: `CHINWAG_CLOUD`, `CHINWAG_CLOUD_KEY`, `CHINWAG_AGENT_TOKEN`, `CHINWAG_TRACES_KEY`, `CHINWAG_TRACES_URL` and `CHINWAG_TRACES_CONTENT` are now `FLOW_FRAMEWORK_CLOUD`, `FLOW_FRAMEWORK_CLOUD_KEY`, and so on. The old names still work; a new name wins when both are set.
 5. Test results now go to `.flow/last-session.json`; `--failed` and `show last` still read `.chinwag/last-session.json` until the first run writes the new one. Add `.flow/` to `.gitignore`. Files the command keeps on this machine (such as a sign-in) go to `~/.config/flow-framework/`; `~/.config/chinwag/` is still read until then.
 6. Coding-agent skills are now `flow-framework`, `flow-framework-tools` and `flow-framework-tests`: copy them again from `node_modules/@flow-engineer/flow/coding-agents/`.

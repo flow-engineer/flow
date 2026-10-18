@@ -17,10 +17,11 @@ const KEYS = { cloud_key: "oci_cloudsecretvalue9Qz1", traces_key: "otk_test_trac
 interface Seen { method: string; path: string; auth?: string; body: Record<string, unknown> }
 
 /**
- * A flow.engineer that answers /cli/token from `tokenAnswers` in turn (or from the function: null
- * holds the request unanswered), and records every request.
+ * A flow.engineer as flow-mono's docs/cli-login.md has it, that answers /cli/token from `tokenAnswers`
+ * in turn (or from the function: null holds the request unanswered), /cli/setup with `setupStatus`
+ * (a 502 carries what worked, as the real one does), and records every request.
  */
-async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = []) {
+async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = [], setupStatus = 200) {
   const seen: Seen[] = [];
   const read = (req: IncomingMessage) => new Promise<string>((done) => { let b = ""; req.on("data", (c) => { b += c; }); req.on("end", () => done(b)); });
   const server = createServer(async (req, res) => {
@@ -34,14 +35,19 @@ async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => 
       const a = typeof tokenAnswers === "function" ? tokenAnswers() : (tokenAnswers.shift() ?? { error: "expired_token" });
       return a ? send(a.access_token ? 200 : 400, a) : undefined;
     }
-    if (!bearer) return send(401, { error: "not_signed_in" });
+    if (!bearer) return send(401, { error: "invalid_token", error_description: "Sign in again.", next: "npx @flow-engineer/flow login" });
     if (req.url === "/cli/whoami") return send(200, { email: "dev@example.com", account: "uid_1" });
     if (req.url === "/cli/revoke") return send(200, {});
     if (req.url === "/cli/setup") {
       const have = new Set(body.have as string[]);
       const names: Record<string, string> = { cloud_key: "FLOW_FRAMEWORK_CLOUD_KEY", traces_key: "FLOW_FRAMEWORK_TRACES_KEY", messaging_key: "FLOW_MESSAGING_KEY" };
       const keys = Object.fromEntries(Object.entries(KEYS).filter(([field]) => !have.has(names[field]!)));
-      return send(200, { agent_id: "agt_1", ...keys, telegram_sender: "snd_tg", join_code: "brave-otter-1" });
+      if (setupStatus !== 200) return send(setupStatus, { error: "messaging_failed", error_description: "Messaging is down.", next: "npx @flow-engineer/flow setup", agent_id: "agt_1", cloud_key: keys.cloud_key, traces_key: keys.traces_key });
+      return send(200, {
+        agent_id: "agt_1", ...keys, telegram_sender: "snd_tg", join_code: "brave-otter-1", account: { account: "uid_1", email: "dev@example.com" }, app_id: "app_1",
+        dashboard_url: `${url}/dashboard/agents/agt_1/overview`, try_url: `${url}/try/brave-otter-1?c=telegram`, telegram_link: "https://t.me/FlowSandboxBot?start=brave-otter-1",
+        minted: Object.keys(keys), next: ["npx @flow-engineer/flow link --channel telegram"],
+      });
     }
     send(404, {});
   });
@@ -99,12 +105,13 @@ test("login prints the code as a pending line, waits through pending and slow_do
   const file = join(config, "flow-framework", "credentials.json");
   assert.deepEqual(result.lines[1], { status: "signed_in", account: { email: "dev@example.com", account: "uid_1" }, token_path: file });
   assert.equal(flow.seen.filter((r) => r.path === "/cli/token").length, 3);
+  assert.match(String(flow.seen[0]!.body.client_name), /^flow \d+\.\d+\.\d+/, "the approval page shows the version");
   assert.equal(statSync(file).mode & 0o777, 0o600);
   assert.equal(JSON.parse(readFileSync(file, "utf8")).token, TOKEN);
   assert.ok(!result.out.includes(TOKEN) && !result.err.includes(TOKEN), "the token is never printed");
 });
 
-const WAIT_NEXT = "approve in the browser, then run: npx flow login --wait";
+const WAIT_NEXT = "approve in the browser, then run: npx @flow-engineer/flow login --wait";
 
 test("with no terminal and CI=1, login opens the browser itself and prints the pending line before it waits", async (t) => {
   const flow = await flowServer(() => null);
@@ -143,7 +150,7 @@ test("--no-wait and a --timeout that runs out exit 4 with the code kept at 0600;
   assert.equal(timedOut.code, 4, timedOut.err);
   assert.equal(timedOut.lines[0]!.resumed, true);
   assert.equal(timedOut.lines.at(-1)!.status, "pending");
-  assert.match(timedOut.err, /Not approved yet after 0 s.*Next: npx flow login --wait/);
+  assert.match(timedOut.err, /Not approved yet after 0 s.*Next: npx @flow-engineer\/flow login --wait/);
   assert.ok(existsSync(pendingFile));
 
   approved = true;
@@ -202,7 +209,7 @@ test("a code denied in the browser, or one that expired, exits 3 with its error 
     const result = await run(["login", "--no-browser", "--json"], { url: flow.url, config, cwd: temp() });
     assert.equal(result.code, 3);
     assert.deepEqual(result.lines.at(-1)!.error.code, error);
-    assert.equal(result.lines.at(-1)!.error.next, "npx flow login");
+    assert.equal(result.lines.at(-1)!.error.next, "npx @flow-engineer/flow login");
     assert.ok(!existsSync(join(config, "flow-framework", "credentials.json")));
   }
 });
@@ -213,7 +220,7 @@ test("whoami uses FLOW_FRAMEWORK_TOKEN over the file, and without either says to
   const config = temp();
   const none = await run(["whoami", "--json"], { url: flow.url, config, cwd: temp() });
   assert.equal(none.code, 1);
-  assert.deepEqual(none.lines[0], { error: { code: "not_signed_in", message: "Not signed in to flow.engineer.", next: "npx flow login" } });
+  assert.deepEqual(none.lines[0], { error: { code: "not_signed_in", message: "Not signed in to flow.engineer.", next: "npx @flow-engineer/flow login" } });
   const result = await run(["whoami", "--json"], { url: flow.url, config, cwd: temp(), env: { FLOW_FRAMEWORK_TOKEN: "fcli_from_env" } });
   assert.equal(result.code, 0, result.err);
   assert.deepEqual(result.lines[0], { email: "dev@example.com", account: "uid_1" });
@@ -243,20 +250,22 @@ test("setup merges the keys into .env, keeps the owner's lines and values, print
   assert.equal(first.code, 0, first.err);
   assert.deepEqual(flow.seen.at(-1)!.body, { name: "cafe", hostname: flow.seen.at(-1)!.body.hostname, channels: ["telegram"], have: ["FLOW_MESSAGING_TELEGRAM_SENDER"] });
   const dotenv = readFileSync(join(cwd, ".env"), "utf8");
-  assert.equal(dotenv, `OPENROUTER_API_KEY=sk-mine\nFLOW_MESSAGING_TELEGRAM_SENDER=snd_mine\nFLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}\nFLOW_FRAMEWORK_TRACES_KEY=${KEYS.traces_key}\nFLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\n`);
+  assert.equal(dotenv, `OPENROUTER_API_KEY=sk-mine\nFLOW_MESSAGING_TELEGRAM_SENDER=snd_mine\nFLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}\nFLOW_FRAMEWORK_TRACES_KEY=${KEYS.traces_key}\nFLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\nFLOW_FRAMEWORK_TRY_URL=${flow.url}/try/brave-otter-1?c=telegram\n`);
   assert.deepEqual(first.lines[0]!.env_written[".env"], [
     { name: "FLOW_FRAMEWORK_CLOUD_KEY", action: "added", value: "oci_…9Qz1" },
     { name: "FLOW_FRAMEWORK_TRACES_KEY", action: "added", value: "otk_test_…7Lm2" },
     { name: "FLOW_MESSAGING_KEY", action: "added", value: "fk_test_…k4Tt" },
     { name: "FLOW_MESSAGING_TELEGRAM_SENDER", action: "kept", value: "snd_mine" },
     { name: "FLOW_FRAMEWORK_JOIN_CODE", action: "added", value: "brave-otter-1" },
+    { name: "FLOW_FRAMEWORK_TRY_URL", action: "added", value: `${flow.url}/try/brave-otter-1?c=telegram` },
   ]);
+  assert.deepEqual(first.lines[0]!.next, ["npx @flow-engineer/flow test --synthetic", "npm start", "npx @flow-engineer/flow link --channel telegram"], "the server's next step");
   for (const key of Object.values(KEYS)) assert.ok(!first.out.includes(key) && !first.err.includes(key), "no key is printed");
 
   const second = await run(["setup", "--json"], { url: flow.url, config, cwd, env });
   assert.equal(second.code, 0, second.err);
   assert.equal((flow.seen.at(-1)!.body.have as string[]).length, 5, "every name already in .env is said, so no new key is made");
-  assert.deepEqual(second.lines[0]!.env_written[".env"].map((w: { action: string }) => w.action), ["kept", "unchanged"]);
+  assert.deepEqual(second.lines[0]!.env_written[".env"].map((w: { action: string }) => w.action), ["kept", "unchanged", "unchanged"]);
   assert.equal(readFileSync(join(cwd, ".env"), "utf8"), dotenv);
 
   const replaced = await run(["setup", "--replace"], { url: flow.url, config, cwd, env });
@@ -264,17 +273,48 @@ test("setup merges the keys into .env, keeps the owner's lines and values, print
   assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_MESSAGING_TELEGRAM_SENDER=snd_tg$/m);
 });
 
-test("link prints the Telegram try link for the join code in .env, and without one says to run setup", async (t) => {
+test("link prints the server's try_url for the join code in .env (built here when setup kept none), and without a join code says to run setup", async (t) => {
   const flow = await flowServer();
   t.after(flow.close);
   const cwd = temp();
   const missing = await run(["link", "--json"], { url: flow.url, config: temp(), cwd });
   assert.equal(missing.code, 1);
-  assert.equal(missing.lines[0]!.error.next, "npx flow setup");
+  assert.equal(missing.lines[0]!.error.next, "npx @flow-engineer/flow setup");
   writeFileSync(join(cwd, ".env"), "FLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\n");
-  const result = await run(["link", "--json"], { url: flow.url, config: temp(), cwd });
+  const result = await run(["link", "--channel", "telegram", "--json"], { url: flow.url, config: temp(), cwd });
   assert.equal(result.code, 0, result.err);
   assert.equal(result.lines[0]!.url, `${flow.url}/try/brave-otter-1?c=telegram`);
+  writeFileSync(join(cwd, ".env"), "FLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\nFLOW_FRAMEWORK_TRY_URL=https://try.example/try/brave-otter-1?c=telegram\n");
+  const served = await run(["link", "--json"], { url: flow.url, config: temp(), cwd });
+  assert.equal(served.lines[0]!.url, "https://try.example/try/brave-otter-1?c=telegram");
+});
+
+test("a setup that fails in one product still writes the keys it minted, then exits 3 with the server's next step", async (t) => {
+  const flow = await flowServer([], 502);
+  t.after(flow.close);
+  const cwd = temp();
+  const result = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(result.code, 3);
+  assert.deepEqual(result.lines.at(-1)!.error.code, "messaging_failed");
+  assert.equal(result.lines.at(-1)!.error.next, "npx @flow-engineer/flow setup");
+  assert.equal(readFileSync(join(cwd, ".env"), "utf8"), `FLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}\nFLOW_FRAMEWORK_TRACES_KEY=${KEYS.traces_key}\n`);
+  assert.ok(!result.out.includes(KEYS.cloud_key) && !result.err.includes(KEYS.cloud_key), "no key is printed");
+});
+
+test("every next step and hint the account commands print names the package, never a bare npx flow (another npm package)", async (t) => {
+  const flow = await flowServer(() => ({ error: "authorization_pending" }));
+  t.after(flow.close);
+  const config = temp();
+  const printed = [
+    await run(["whoami", "--json"], { url: flow.url, config, cwd: temp() }),
+    await run(["link", "--json"], { url: flow.url, config, cwd: temp() }),
+    await run(["setup", "--ci", "--json"], { url: flow.url, config, cwd: temp() }),
+    await run(["login", "--no-browser", "--timeout", "0", "--json"], { url: flow.url, config, cwd: temp() }),
+    await run(["setup", "--json"], { url: flow.url, config, cwd: temp(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } }),
+    await run(["login", "--help"], { url: flow.url, config, cwd: temp() }),
+  ].map((r) => r.out + r.err).join("\n");
+  assert.doesNotMatch(printed, /npx flow\b/);
+  for (const command of ["login", "login --wait", "setup", "link", "test --synthetic"]) assert.ok(printed.includes(`npx @flow-engineer/flow ${command}`), command);
 });
 
 test("a sign-in under ~/.config/chinwag is read and deleted while ~/.config/flow-framework has none; a new one goes to flow-framework", () => {
