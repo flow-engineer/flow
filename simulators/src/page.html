@@ -408,7 +408,6 @@
     for (const b of document.querySelectorAll(".tab")) b.setAttribute("aria-pressed", String(b.dataset.id === tab));
     signedIn = !isVisitor();
     $("authState").hidden = !isVisitor();
-    $("clear").hidden = isVisitor();
     void refreshPerson();
     $("phone").className = "phone p-" + current.id;
     $("avatar").textContent = title.trim().charAt(0).toUpperCase();
@@ -1031,7 +1030,6 @@
     }
     const option = $("who").querySelector('option[value="visitor"]');
     if (option) option.textContent = signedIn ? "Connected user" : "New user · signed out";
-    $("clear").hidden = true;
   }
   $("signIn").addEventListener("click", () => { try { sessionStorage.setItem(draftKey(), $("text").value); } catch {} });
   $("startSignedOut").addEventListener("click", async () => {
@@ -1096,11 +1094,13 @@
   });
   $("cancelReply").addEventListener("click", () => setReply(null));
   $("reset").addEventListener("click", () => fetch(BASE + "/api/reset" + query(), { method: "POST" }));
-  $("clear").addEventListener("click", () => {
-    const who = people.find((p) => p.phone === person);
-    if (who && confirm(`Forget ${who.name}? Their history, schedules and everything the agent kept about them go, on every channel.`)) {
-      fetch(BASE + "/api/clear" + query(), { method: "POST" });
-    }
+  $("clear").addEventListener("click", async () => {
+    const name = isVisitor() ? (signedIn ? "this account" : "this visitor") : people.find((p) => p.phone === person)?.name;
+    if (!name || !confirm(`Forget ${name}? Their history, schedules and everything the agent kept about them go, on every channel.`)) return;
+    try {
+      const response = await fetch(BASE + "/api/clear" + query(), { method: "POST" });
+      if (!response.ok) throw new Error("clear failed");
+    } catch { sysnote("Could not clear this conversation. Try again.", true); }
   });
   document.addEventListener("click", (e) => {
     if (!e.target.closest(".picker") && !e.target.closest(".actions")) document.querySelectorAll(".picker").forEach((p) => p.remove());

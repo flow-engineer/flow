@@ -177,6 +177,20 @@ test("visitors chat signed out, join verified account history after login, and i
     const fresh = seen.at(-1)!;
     signedIn.set(fresh, "account-2");
     assert.deepEqual((await (await api("transcript", freshCookie)).json()).lines, [], "a different login cannot inherit the previous account's history");
+    // Auth/reset deliberately preserves history; it cannot protect the separate Clear history action.
+    assert.equal((await api("messages", freshCookie, "POST", { text: "a different account" })).status, 202);
+    (await h.nextCall(2)).answer(respond(call("send_web", { text: "Other account" })));
+    const other = (await h.agent.visitorConversation("account-2"))!;
+    await h.agent.conversation(other)!.whenIdle();
+    assert.equal((await api("clear", cookie, "POST", { key: "account-2" })).status, 200);
+    assert.deepEqual((await (await api("transcript", cookie)).json()).lines, [], "Clear history resets the selected signed-in account");
+    assert.equal((await (await api("auth", cookie)).json()).signedIn, true, "clearing history keeps its OAuth connection");
+    assert.ok((await h.agent.transcript(other)).length, "another account's history is not cleared");
+    signedIn.delete(visitor);
+    assert.ok((await (await api("transcript", cookie)).json()).lines.length, "this browser's anonymous history is separate");
+    assert.equal((await api("clear", cookie, "POST")).status, 200);
+    assert.deepEqual((await (await api("transcript", cookie)).json()).lines, [], "Clear history also works while signed out");
+    assert.ok((await h.agent.transcript(other)).length);
   } finally { await server.close(); }
 });
 
