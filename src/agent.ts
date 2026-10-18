@@ -15,7 +15,7 @@
 
 import { randomUUID } from "node:crypto";
 import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
-import { Conversation, PROFILE_TOOL, profileTool, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
+import { Conversation, PROFILE_TOOL, profileTool, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
 import { businessSchedule, claimDue, summary } from "./schedules.ts";
@@ -467,6 +467,46 @@ export class Agent {
     });
     this.arriving.set(lock, work.catch(() => undefined));
     return work;
+  }
+
+  /** Wake the agent after verified sign-in; a repeated completion queues one internal event. */
+  async signInCompleted(input: { channel: string; address: string; key: string; idempotencyKey: string; conversationId?: string; via?: "provider" | "playground" }): Promise<NudgeState> {
+    await this.settings.ready;
+    if (!input.idempotencyKey) throw new Error("chinwag: sign-in completion needs an idempotency key");
+    const earlier = await this.store.nudgeByKey(input.idempotencyKey);
+    if (earlier) {
+      const linked = await this.linkIdentity(input);
+      if (earlier.conversationId !== linked.conversationId || earlier.channel !== input.channel || earlier.body.address !== input.address) throw new Error("chinwag: sign-in completion belongs to a different identity");
+      return this.result(earlier.id, earlier.status, earlier.reason);
+    }
+    const known = await this.store.identity(input.channel, input.address);
+    const anonymous = await this.store.identity(input.channel, `visitor:${input.address}`);
+    let source: { conversationId: string } | null = input.conversationId ? [known, anonymous].find(i => i?.conversationId === input.conversationId) ?? null : known ?? anonymous;
+    if (input.conversationId && !source) {
+      // A previous attempt may have linked this address before the internal event could be queued.
+      const row = await this.store.conversation(input.conversationId);
+      const adapter = this.channelOf(input.channel);
+      const phone = adapter.phone ? normalizePhone(input.address, adapter.kind === "whatsapp" ? undefined : this.countryCode) : "";
+      const allowed = [`key:${input.key}`, `${input.channel}:${input.address}`, `${input.channel}:visitor:${input.address}`, ...(phone ? [`phone:${phone}`] : [])];
+      if (!row || !allowed.includes(row.personKey)) throw new Error("chinwag: sign-in context does not belong to this channel address");
+      source = { conversationId: row.id };
+    }
+    const history = source ? await this.transcript(source.conversationId) : [];
+    const latest = history.findLastIndex(e => e.kind === "in" && e.channel === input.channel);
+    const request = latest >= 0 ? history[latest] : undefined;
+    const after = history.slice(latest + 1);
+    const blocked = request?.kind === "in" && after.some(e => e.kind === "out" && e.channel === input.channel && e.authentication) && after.some(e => {
+      if (e.kind !== "tool") return false;
+      try { const output = JSON.parse(e.output); return output.error === "sign_in_required" && output.executed === false; }
+      catch { return false; }
+    });
+    const { conversationId } = await this.linkIdentity(input);
+    const account = source?.conversationId === conversationId ? history : await this.transcript(conversationId);
+    const newer = request && account.some(e => e.kind === "in" && e.at > request.at);
+    return this.recordNudge({ to: { channel: input.channel, address: input.address },
+      prompt: signInNotice(input.channel, blocked && !newer && request?.kind === "in" ? request.text : undefined),
+      idempotencyKey: input.idempotencyKey, respectQuietHours: false,
+    });
   }
 
   /** A verified playground visitor's account history, including messages on other interfaces. */

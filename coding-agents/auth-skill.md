@@ -115,17 +115,18 @@ For Firebase the app’s function validates the signed-in user’s Firebase sess
 A custom login implements the same boundary. Do not make every brand adopt one identity provider or copy an OAuth server into its agent repository.
 
 After a verified OAuth callback has saved the chat client's connection, call
-`await agent.linkIdentity({ channel, address, key })` with server-verified proof, then
-`await agent.recordNudge({ to: { channel, address }, text: "You're signed in—continue here.",
-idempotencyKey: "login:" + connectionId, respectQuietHours: false })`. This binds the account and
-queues an ordinary chat message without a browser redirect. Exact text needs no model call
-except an existing no-contact-rule check. Signing in preserves those rules, including STOP. Use a stable, unique
-completion ID so callback retries queue it once. The message targets the originating address,
-even when the account has another session on that channel. Keep anonymous history separate and
-refuse to rebind an address already owned by a different account. For a playground connection,
-pass `via: "playground"` to `linkIdentity`; confirmation delivery stays in the simulator. Persist
-pending completion events and retry queueing after a process restart; do not rely on the browser
-staying open. Providers can still fail delivery, so monitor the recorded nudge's outcome.
+`await agent.signInCompleted({ channel, address, key, idempotencyKey: "login:" + connectionId })`.
+This links the verified identity and queues an internal prompt to the agent, not a fixed user-facing
+reply. The agent continues a request blocked by sign-in, or acknowledges naturally if nothing is
+waiting. It does not automatically replay executed tools or unrelated failures. An anonymous
+request blocked at the auth boundary is carried forward as user text; anonymous history stays
+separate. Pass the originating `conversationId` when the login challenge was created inside a
+conversation; it must belong to that channel address. The prompt targets that address even if
+another session on the same channel wrote later. Signing in preserves no-contact rules, including
+STOP. Use a stable unique completion ID so retries and restarts do not queue another event.
+For playground connections pass `via: "playground"`; replies stay in the simulator. Persist pending
+completion events and retry queueing after restart instead of relying on the browser staying open.
+`linkIdentity` and `recordNudge` remain available for custom completion behavior.
 
 ## Exercise sign-in in the playground
 

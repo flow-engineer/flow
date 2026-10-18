@@ -116,6 +116,74 @@ test("a playground login confirmation targets its original address and survives 
   assert.deepEqual(next.out, []);
 });
 
+// Fixed confirmation tests never wake the model or carry a sign-in-blocked request into the verified account.
+test("sign-in completion wakes the verified agent with its blocked request once, without a canned chat reply", async () => {
+  let writes = 0;
+  const seen: Array<{ key: string | null; channel: string; address?: string }> = [];
+  const create = tool({ name: "create_site", description: "Create a site.", input: z.object({ brief: z.string() }), run: (_i, ctx) => { writes++; seen.push({ key: ctx.key, channel: ctx.channel, address: ctx.address }); return { preview: "https://preview.example/gym" }; } });
+  const h = multi({ channels: { app: { info: WEB_APP }, whatsapp: { info: WHATSAPP } }, tools: [create], auth: { verify: ctx => ctx.key === "account-a" && ctx.address === "browser-a", signIn: () => ({ message: "Please sign in first.", url: "https://brand.example/login" }) } });
+  const shown: string[] = [];
+  h.agent.attachPlayground(({ outbound }) => { if (outbound.type === "message") shown.push(outbound.text); });
+  const original = await h.agent.simulateVisitor({ channel: "app", address: "browser-a", message: "Create a gym website with mock details" });
+  (await h.nextCall(0)).answer(respond(call("send_app", { text: "Let me check." }), call("create_site", { brief: "A gym website" })));
+  await h.agent.conversation(original!.conversationId)!.whenIdle();
+  assert.equal(writes, 0);
+  assert.deepEqual(shown, ["Let me check.", "Please sign in first.\nhttps://brand.example/login"]);
+  // Another interface/session already exists for this account. It must not receive this continuation.
+  await h.agent.linkIdentity({ channel: "whatsapp", address: "other-channel", key: "account-a" });
+  await h.agent.linkIdentity({ channel: "app", address: "browser-b", key: "account-a" });
+  const completion = { channel: "app", address: "browser-a", key: "account-a", conversationId: original!.conversationId, via: "playground" as const, idempotencyKey: "login:resume-1" };
+  await h.agent.linkIdentity(completion); // Recover even if linking committed before a previous queue attempt failed.
+  const queued = await h.agent.signInCompleted(completion);
+  assert.equal(queued.status, "queued");
+  const resumed = await h.nextCall(1);
+  const internal = users(resumed.request.messages).find(text => text.includes("Internal authentication event"));
+  assert.match(internal!, /gym website with mock details/);
+  assert.match(internal!, /Do not replay operations that already ran or retry unrelated failures/);
+  assert.deepEqual(shown, ["Let me check.", "Please sign in first.\nhttps://brand.example/login"], "the completion itself emits no user-facing message");
+  resumed.answer(respond(call("send_app", { text: "You're connected. I'm creating your gym website now." }), call("create_site", { brief: "A gym website" })));
+  (await h.nextCall(2)).answer(respond(call("send_app", { text: "Your first version is ready: https://preview.example/gym" })));
+  const account = (await h.agent.visitorConversation("account-a"))!;
+  await h.agent.conversation(account)!.whenIdle();
+  assert.equal(writes, 1);
+  assert.deepEqual(seen, [{ key: "account-a", channel: "app", address: "browser-a" }]);
+  assert.equal(shown.at(-1), "Your first version is ready: https://preview.example/gym");
+  assert.deepEqual(h.out.filter(o => o.outbound.type === "message"), [], "continuation stays on the originating playground address");
+  const transcript = await h.agent.transcript(account);
+  assert.ok(!transcript.some(e => e.kind === "in"), "internal completion is not a fabricated user message");
+  assert.ok(!transcript.some(e => e.kind === "out" && e.text.includes("Internal authentication event")));
+  await h.agent.signInCompleted(completion);
+  await h.agent.conversation(account)!.whenIdle();
+  assert.equal(h.calls.length, 3, "a retried callback does not wake another turn");
+  await h.agent.conversation(account)!.stored();
+  const restarted = multi({ channels: { app: { info: WEB_APP }, whatsapp: { info: WHATSAPP } }, database: h.database });
+  await restarted.agent.resume();
+  await restarted.agent.signInCompleted(completion);
+  assert.equal(restarted.calls.length, 0, "a completed internal event is not replayed after restart");
+  await assert.rejects(h.agent.signInCompleted({ ...completion, idempotencyKey: "login:other", conversationId: "someone-elses-chat" }), /does not belong/);
+});
+
+// A billing failure is an executed tool result, not a request that sign-in can unblock.
+test("sign-in events do not automatically retry a previous payment failure or invent a pending request", async () => {
+  let attempts = 0;
+  const create = tool({ name: "create_site", description: "Create.", input: z.object({}), run: () => { attempts++; return { error: "payment_required", status: 402 }; } });
+  const h = multi({ channels: { app: { info: WEB_APP } }, tools: [create] });
+  h.agent.attachPlayground(() => {});
+  const original = await h.agent.simulateVisitor({ channel: "app", address: "browser-a", message: "Create the website" });
+  (await h.nextCall(0)).answer(respond(call("send_app", { text: "Starting" }), call("create_site")));
+  (await h.nextCall(1)).answer(respond(call("send_app", { text: "Your plan needs attention before this can build." })));
+  await h.agent.conversation(original!.conversationId)!.whenIdle();
+  await h.agent.signInCompleted({ channel: "app", address: "browser-a", key: "account-a", idempotencyKey: "login:billing", via: "playground" });
+  const resumed = await h.nextCall(2);
+  const internal = users(resumed.request.messages).find(text => text.includes("Internal authentication event"));
+  assert.doesNotMatch(internal!, /The pending request/);
+  assert.match(internal!, /Do not replay operations that already ran or retry unrelated failures/);
+  assert.equal(attempts, 1, "the runtime never replays the write on sign-in");
+  resumed.answer(respond(call("send_app", { text: "You're connected." })));
+  await h.agent.conversation((await h.agent.visitorConversation("account-a"))!)!.whenIdle();
+  assert.equal(attempts, 1);
+});
+
 test("a test person who switches channels resumes the same conversation", async () => {
   const h = playground();
   const a = await h.agent.simulate({ person: SAM.phone, channel: "whatsapp", message: "hi" });

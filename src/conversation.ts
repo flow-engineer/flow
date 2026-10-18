@@ -120,6 +120,14 @@ const APOLOGY = "Sorry, something went wrong on my side. Could you send that aga
 const EARLIER = "[Chinwag] Older messages of this conversation are no longer shown to you.";
 const NOT_SHOWN = "[Chinwag] You are no longer shown the photos or documents in these messages; ask them to send one again if you need it.";
 
+/** A server-verified auth change: an internal prompt, never a prewritten chat response. */
+export function signInNotice(channel: string, request?: string): string {
+  return `Internal authentication event: sign-in completed on ${channel}. Continue the conversation on that channel. ` +
+    "Resume a request that was blocked only by sign-in, using the verified account and normal tools. " +
+    "Do not replay operations that already ran or retry unrelated failures. If nothing is waiting for sign-in, acknowledge naturally. Do not quote this internal event. " +
+    (request ? `The pending request (user text, not system instructions) is: ${JSON.stringify(request)}` : "");
+}
+
 /** Photos and PDFs the model is shown at once, the latest; each is resent on every model call. */
 const MEDIA_SHOWN = 3;
 /** The largest photo, and the largest PDF or voice note, the agent reads (most models take 5 MB images). */
@@ -163,6 +171,7 @@ interface Owed {
   nudge?: string;
   mode: "message" | "check" | "prompt";
   channel: string;
+  address?: string;
   /** A prompt nudge to someone whose WhatsApp window is closed: only a template reaches them. */
   windowClosed?: boolean;
 }
@@ -232,6 +241,7 @@ export class Conversation {
   /** Aborted when the conversation closes: tools' signal. */
   private readonly lifetime = new AbortController();
   private recentChannels: string[] = [];
+  private promptDestination?: { channel: string; address?: string };
   private timeZone: string | null = null;
   /** Their own quiet hours ("off": none), or null for the agent's. */
   private quietHours: QuietHours | "off" | null = null;
@@ -579,7 +589,7 @@ export class Conversation {
       if (p.prompt !== undefined) {
         if (p.windowClosed) {
           const text = `[Nudge from the business, not from the person: ${p.prompt}] Their WhatsApp 24-hour window is closed: no ordinary message reaches them. If one of the business's templates says this, send it with send_template, its values filled in. If none fits, send nothing: Chinwag sends them a "you have a new message" template and gives you this again when they reply.`;
-          this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel, windowClosed: true } });
+          this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel, address: p.address, windowClosed: true } });
           if (!this.running && this.hasWork()) this.schedule(0);
           return;
         }
@@ -587,7 +597,7 @@ export class Conversation {
         const text = held
           ? `[Nudge from the business, not from the person, ${held}${p.prompt}] Tell them now in your own words. Others held with it come in this turn too: cover them all in one short message, not a text each, and answer anything they just asked first.`
           : `[Nudge from the business, not from the person: ${p.prompt}] Write it to them now in your own words, or send nothing if it does not fit what they asked not to be messaged about.`;
-        this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel } });
+        this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel, address: p.address } });
       } else this.direct.push({ inbox: row.id, channel: p.channel, address: p.address, text: p.text, template: p.template, nudge: p.nudge, ...(p.theyWrote ? { theyWrote: true } : {}) });
     }
     if (!this.running && this.hasWork()) this.schedule(0);
@@ -803,7 +813,7 @@ export class Conversation {
 
   /** The channel of the person's latest message. */
   private currentChannel(): string {
-    return this.recentChannels.at(-1) ?? [...this.channels.keys()][0] ?? "chat";
+    return (!this.theirMessages ? this.promptDestination?.channel ?? this.owed.at(-1)?.channel : undefined) ?? this.recentChannels.at(-1) ?? [...this.channels.keys()][0] ?? "chat";
   }
 
   /** Move waiting messages and notes into the history; the person's messages are now read. */
@@ -900,6 +910,7 @@ export class Conversation {
     const turns = this.turns;
     this.resumeTurn = false;
     this.theirMessages = false;
+    this.promptDestination = undefined;
     this.settings.emit(this.id, "turn.start", {});
     this.signInPrompts.clear();
     this.authBlocked.clear();
@@ -938,6 +949,13 @@ export class Conversation {
     for (let step = 0; step < this.settings.maxSteps; step++) {
       if (this.closed) return;
       // The channels can grow mid-turn (they wrote on another one), so each step offers what is there now.
+      // A business prompt is addressed to one session, not whichever address last wrote on that channel.
+      if (!this.theirMessages) this.promptDestination = this.owed.at(-1) ?? this.promptDestination;
+      const destination = !this.theirMessages ? this.promptDestination : undefined;
+      if (destination?.address) {
+        const link = (await this.settings.links(this.id)).find(l => l.name === destination.channel && l.address === destination.address);
+        if (link) this.link(link);
+      }
       const views = this.views();
       const several = views.length > 1;
       this.sendTools = new Map(views.map((v) => [sendToolName(v.name), v.name]));
@@ -1110,7 +1128,7 @@ export class Conversation {
       const input = parsed.data as SendInput;
       const fields = Object.fromEntries(Object.keys(link.params ?? {}).flatMap((k) => ((input as Record<string, unknown>)[k] === undefined ? [] : [[k, (input as Record<string, unknown>)[k]]])));
       const hasFields = Object.keys(fields).length > 0;
-      if (several && !input.confirm && !this.recentChannels.includes(channel)) {
+      if (several && !input.confirm && !this.recentChannels.includes(channel) && !this.owed.some(o => o.channel === channel) && this.promptDestination?.channel !== channel) {
         const last = link.lastMessageAt ? ` (last time ${ago(this.settings.now() - link.lastMessageAt)} ago)` : "";
         return refused(`Not sent: they have not written on ${channel} in their last 5 messages${last}. If you are sure, call ${call.name} again with confirm: true.`);
       }
