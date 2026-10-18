@@ -300,9 +300,10 @@ To demo what your backend does (an order ships), send the nudge it would send fr
 On a deployed agent, mount it in your own server with a token of at least 32 characters, from a
 secret: `const playground = play.handler(agent, { token: process.env.PLAYGROUND_TOKEN!, base: "/playground" })`,
 and hand it the requests under `/playground` (`if (url.pathname.startsWith("/playground")) return playground(req, res)`).
-Open `/playground/?token=...` once (it becomes an HttpOnly cookie and leaves the URL) or call the API
-with `Authorization: Bearer <token>`. Wrong tokens are limited per address, and every simulated
-message is logged with the person, channel, time and address.
+Open `/playground/?token=...` once (it becomes an HttpOnly, SameSite=Lax cookie and leaves the URL) or call the API
+with `Authorization: Bearer <token>`. The cookie survives a top-level return from sign-in on another site;
+the API still accepts only requests from the playground’s own origin. Wrong tokens are limited per address,
+and every simulated message is logged with the person, channel, time and address.
 
 ## Send traces to a dashboard
 

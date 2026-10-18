@@ -838,8 +838,8 @@ interface Gate {
 
 /**
  * The playground's lock on a deployed agent. The token comes once as `?token=` (swapped for an
- * HttpOnly, SameSite=Strict cookie, and dropped from the URL) or on every API call as
- * `Authorization: Bearer`. Compared in constant time; wrong tokens are limited per address.
+ * HttpOnly, SameSite=Lax cookie, and dropped from the URL) or on every API call as
+ * `Authorization: Bearer`. Lax lets sign-in return from another site. Compared in constant time; wrong tokens are limited per address.
  */
 function tokenGate(token: string | undefined): Gate {
   requireToken(token, "chinwag simulators: a deployed playground");
@@ -858,6 +858,8 @@ function tokenGate(token: string | undefined): Gate {
         refuse(res, 401);
         return false;
       };
+      const secure = (req.socket as TLSSocket).encrypted || req.headers["x-forwarded-proto"] === "https";
+      const sessionCookie = `${cookieName}=${session}; Path=${base || "/"}; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
       const query = url.searchParams.get("token");
       const bearer = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];
       if ((query !== null || bearer !== undefined) && blocked) {
@@ -867,15 +869,17 @@ function tokenGate(token: string | undefined): Gate {
       if (query !== null) {
         if (req.method !== "GET" || !sameSecret(query, token)) return fail();
         url.searchParams.delete("token");
-        const secure = (req.socket as TLSSocket).encrypted || req.headers["x-forwarded-proto"] === "https";
-        const cookie = `${cookieName}=${session}; Path=${base || "/"}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
         const rest = url.searchParams.toString();
-        res.writeHead(303, { "set-cookie": cookie, location: url.pathname + (rest ? `?${rest}` : ""), "cache-control": "no-store" }).end();
+        res.writeHead(303, { "set-cookie": sessionCookie, location: url.pathname + (rest ? `?${rest}` : ""), "cache-control": "no-store" }).end();
         return false;
       }
       if (bearer !== undefined) return sameSecret(bearer, token) ? true : fail();
       const cookie = (req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
-      if (cookie !== undefined && sameSecret(cookie, session)) return true;
+      if (cookie !== undefined && sameSecret(cookie, session)) {
+        // Renew on page visits so existing Strict cookies also survive the next sign-in round trip.
+        if (req.method === "GET" && ["/", "/person"].includes(inside(url, base))) res.setHeader("set-cookie", sessionCookie);
+        return true;
+      }
       refuse(res, 401);
       return false;
     },

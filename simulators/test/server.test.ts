@@ -203,9 +203,14 @@ test("a deployed playground lets in only its token, from its own pages, then onl
     assert.equal(opened.headers.get("location"), "/play/?channel=whatsapp", "the token leaves the URL");
     const cookie = opened.headers.get("set-cookie")!;
     assert.match(cookie, /HttpOnly/);
-    assert.match(cookie, /SameSite=Strict/);
+    assert.match(cookie, /SameSite=Lax/, "the browser sends access on a top-level return from sign-in");
     assert.doesNotMatch(cookie, new RegExp(token), "the cookie does not hold the token");
-    assert.equal((await fetch(`${url}/`, { headers: { cookie: cookie.split(";")[0] } })).status, 200);
+    const returned = await fetch(`${url}/`, { headers: { cookie: cookie.split(";")[0], "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate" } });
+    assert.equal(returned.status, 200, "sign-in can return to the page from another site");
+    assert.match(returned.headers.get("set-cookie")!, /SameSite=Lax/, "page visits renew older Strict cookies before the next sign-in");
+    const browser = { cookie: cookie.split(";")[0], "sec-fetch-site": "cross-site" };
+    assert.equal((await raw(`${url}/api/platforms`, { headers: browser })).status, 403, "another site's API reads stay refused even with a cookie");
+    assert.equal((await raw(`${url}/api/messages`, { method: "POST", headers: { ...browser, "content-type": "application/json" }, body: JSON.stringify({ channel: "whatsapp", person: SAM.phone, text: "hi" }) })).status, 403, "another site's API writes stay refused even with a cookie");
     assert.equal((await fetch(`${url}/api/platforms`, { headers: { authorization: `Bearer ${token}` } })).status, 200);
     const deployed = { host: "agent.example.com", authorization: `Bearer ${token}` };
     assert.equal((await raw(`${url}/api/platforms`, { headers: { ...deployed, "sec-fetch-site": "same-origin" } })).status, 200, "deployed, the Host is the agent's own");
