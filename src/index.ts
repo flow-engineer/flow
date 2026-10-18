@@ -26,7 +26,7 @@ export { Conversation, type Profile, type TranscriptEntry } from "./conversation
 export { nudgeHandler, peopleHandler, type NudgeHandlerOptions, type PeopleHandlerOptions } from "./http.ts";
 export { sqlite, type Database } from "./db.ts";
 export { postgres, type PostgresPool } from "./postgres.ts";
-export { jsonlSink, type EventSink, type ChinwagEvent } from "./events.ts";
+export { jsonlSink, type EventSink, type FlowEvent, type ChinwagEvent } from "./events.ts";
 export { openAICompatible, type OpenAICompatibleOptions } from "./model.ts";
 export { Store, type StoreApi } from "./store.ts";
 export type { AgentFiles } from "./skills.ts";

@@ -1,9 +1,9 @@
-// `chinwag check-endpoint <url>`: checks an agent's HTTP endpoint against the contract in spec/
+// `flow check-endpoint <url>`: checks an agent's HTTP endpoint against the contract in spec/
 // (agent-endpoint.openapi.yaml, request.schema.json, response.schema.json) before any test run. It
-// POSTs a fixed set of synthetic messages, as `chinwag test --agent-url` would, and checks each
+// POSTs a fixed set of synthetic messages, as `flow test --agent-url` would, and checks each
 // answer: the status and body (the same rules a run applies, testing/src/http-agent.ts), the
 // response schema, what WhatsApp can show, and that every id a reply names is one of the person's
-// messages. No cloud, no key and no model call on Chinwag's side: whatever the agent does with the
+// messages. No cloud, no key and no model call on Flow Framework's side: whatever the agent does with the
 // messages (its own model, its tools) runs on its side.
 
 import { randomBytes } from "node:crypto";
@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { WHATSAPP, z } from "../../src/index.ts";
+import { setting } from "../../src/traces.ts";
 import { checkReply, postMessage, TurnError, type HttpAgentRequest } from "./http-agent.ts";
 import { packageRoot } from "./new.ts";
 
@@ -125,13 +126,13 @@ export async function checkEndpoint(options: { url: string; token?: string; time
   return results;
 }
 
-const USAGE = `Usage: chinwag check-endpoint <url> [--token-env NAME] [--agent-timeout <s>] [--json]
+const USAGE = `Usage: flow check-endpoint <url> [--token-env NAME] [--agent-timeout <s>] [--json]
 
-Checks an agent's HTTP endpoint against Chinwag's contract (spec/agent-endpoint.openapi.yaml) with
-a fixed set of synthetic messages. No cloud, no key, no model call on Chinwag's side.
+Checks an agent's HTTP endpoint against Flow Framework's contract (spec/agent-endpoint.openapi.yaml) with
+a fixed set of synthetic messages. No cloud, no key, no model call on Flow Framework's side.
 
   --token-env NAME     Send the value of NAME as authorization: Bearer <value>
-                       (default: CHINWAG_AGENT_TOKEN, when it is set)
+                       (default: FLOW_FRAMEWORK_AGENT_TOKEN, when it is set)
   --agent-timeout <s>  How long one message waits for its answer (default: 60)
   --json               Print the results as JSON
 
@@ -153,7 +154,7 @@ export async function checkEndpointCli(args: string[], env: Record<string, strin
   }
   const url = positionals.length === 1 ? positionals[0]! : "";
   if (!/^https?:\/\/[^/]/.test(url) || !URL.canParse(url)) {
-    printError(`check-endpoint takes one http:// or https:// URL, such as http://localhost:3000/chinwag.\n\n${USAGE}`);
+    printError(`check-endpoint takes one http:// or https:// URL, such as http://localhost:3000/flow.\n\n${USAGE}`);
     return 1;
   }
   const timeout = Number(values["agent-timeout"]);
@@ -162,7 +163,7 @@ export async function checkEndpointCli(args: string[], env: Record<string, strin
     return 1;
   }
   const tokenEnv = values["token-env"];
-  const token = (tokenEnv ? env[tokenEnv] : env.CHINWAG_AGENT_TOKEN) || undefined;
+  const token = (tokenEnv ? env[tokenEnv] : setting("AGENT_TOKEN", env)) || undefined;
   if (tokenEnv && !token) {
     printError(`${tokenEnv} is not set.`);
     return 1;

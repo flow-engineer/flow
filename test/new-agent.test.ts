@@ -8,7 +8,7 @@ import { newAgent } from "../scripts/new-agent.ts";
 import { newStandalone } from "../testing/src/new.ts";
 
 test("npm run new copies the café under its name, renamed, and refuses bad or taken names", () => {
-  const agents = mkdtempSync(join(tmpdir(), "chinwag-agents-"));
+  const agents = mkdtempSync(join(tmpdir(), "flow-agents-"));
   const dir = newAgent("my-agent", { agents });
   assert.equal(dir, join(agents, "my-agent"));
   assert.ok(existsSync(join(dir, "src", "agent.ts")));
@@ -18,37 +18,37 @@ test("npm run new copies the café under its name, renamed, and refuses bad or t
   for (const bad of ["", "My-Agent", "my_agent", "../up", "-x", "a--b"]) assert.throws(() => newAgent(bad, { agents }), /not a usable name/, bad);
 });
 
-test("chinwag new makes an agent of its own: chinwag imports, a package on this version that npm refuses to install on an older Node, and the skills", () => {
-  const into = mkdtempSync(join(tmpdir(), "chinwag-new-"));
+test("flow new makes an agent of its own: @flow-engineer/flow imports, a package on this version that npm refuses to install on an older Node, and the skills", () => {
+  const into = mkdtempSync(join(tmpdir(), "flow-new-"));
   const dir = newStandalone("my-agent", { into });
   assert.equal(dir, join(into, "my-agent"));
   const main = readFileSync(join(dir, "src", "main.ts"), "utf8");
-  assert.match(main, /from "chinwag\/simulators"/);
-  assert.match(readFileSync(join(dir, "src", "agent.ts"), "utf8"), /from "chinwag"/);
-  assert.match(readFileSync(join(dir, "src", "mcp.ts"), "utf8"), /from "chinwag\/mcp"/);
+  assert.match(main, /from "@flow-engineer\/flow\/simulators"/);
+  assert.match(readFileSync(join(dir, "src", "agent.ts"), "utf8"), /from "@flow-engineer\/flow"/);
+  assert.match(readFileSync(join(dir, "src", "mcp.ts"), "utf8"), /from "@flow-engineer\/flow\/mcp"/);
   const cli = readFileSync(join(dir, "src", "cli.ts"), "utf8");
-  assert.match(cli, /from "chinwag\/cli"/);
+  assert.match(cli, /from "@flow-engineer\/flow\/cli"/);
   assert.match(cli, /name: "my-agent"/, "the CLI is named after the agent");
   assert.doesNotMatch(main + readFileSync(join(dir, "src", "tools.ts"), "utf8"), /\.\.\/\.\.\//);
   const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
   const own = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(pkg.name, "my-agent");
-  assert.equal(pkg.dependencies.chinwag, `^${own.version}`);
+  assert.equal(pkg.dependencies["@flow-engineer/flow"], `^${own.version}`);
   assert.equal(pkg.dependencies["@modelcontextprotocol/server"], own.peerDependencies["@modelcontextprotocol/server"], "the MCP SDK at the version chinwag pins");
-  assert.equal(pkg.scripts.test, "chinwag test");
+  assert.equal(pkg.scripts.test, "flow test");
   assert.deepEqual(pkg.bin, { "my-agent": "src/cli.ts" }, "installed, the CLI is a command of its own");
   assert.equal(pkg.engines.node, own.engines.node);
   assert.equal(readFileSync(join(dir, ".npmrc"), "utf8"), "engine-strict=true\n");
-  // The key and each test session's results (.chinwag/last-session.json) stay out of git.
-  assert.deepEqual(readFileSync(join(dir, ".gitignore"), "utf8").split("\n").filter(Boolean), ["node_modules/", ".env", ".chinwag/"]);
+  // The key and each test session's results (.flow/last-session.json) stay out of git.
+  assert.deepEqual(readFileSync(join(dir, ".gitignore"), "utf8").split("\n").filter(Boolean), ["node_modules/", ".env", ".flow/"]);
   assert.equal(JSON.parse(readFileSync(join(dir, "tsconfig.json"), "utf8")).extends, undefined);
-  for (const skill of ["chinwag", "chinwag-tools", "chinwag-tests", "chinwag-context", "chinwag-auth"]) assert.ok(existsSync(join(dir, ".claude", "skills", skill, "SKILL.md")), skill);
+  for (const skill of ["flow-framework", "flow-framework-tools", "flow-framework-tests", "flow-framework-context", "flow-framework-auth"]) assert.ok(existsSync(join(dir, ".claude", "skills", skill, "SKILL.md")), skill);
   assert.equal(readFileSync(join(dir, "CLAUDE.md"), "utf8"), "@AGENTS.md\n");
   assert.ok(existsSync(join(dir, "tests", "scenarios")));
   const env = readFileSync(join(dir, ".env.example"), "utf8");
-  for (const key of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "CHINWAG_CLOUD_KEY", "CHINWAG_TRACES_KEY"]) assert.match(env, new RegExp(`^${key}=$`, "m"), key);
-  assert.match(env, /^CHINWAG_CLOUD=https:\/\/flow\.engineer\/observe$/m);
-  assert.match(env, /^CHINWAG_TRACES_URL=https:\/\/flow\.engineer\/observe$/m);
+  for (const key of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "FLOW_FRAMEWORK_CLOUD_KEY", "FLOW_FRAMEWORK_TRACES_KEY"]) assert.match(env, new RegExp(`^${key}=$`, "m"), key);
+  assert.match(env, /^FLOW_FRAMEWORK_CLOUD=https:\/\/flow\.engineer\/observe$/m);
+  assert.match(env, /^FLOW_FRAMEWORK_TRACES_URL=https:\/\/flow\.engineer\/observe$/m);
   assert.throws(() => newStandalone("my-agent", { into }), /already exists/);
   assert.throws(() => newStandalone("My_Agent", { into }), /not a usable name/);
 });

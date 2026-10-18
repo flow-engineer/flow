@@ -1,37 +1,37 @@
 ---
-name: chinwag
-description: Build or change a chat agent on Chinwag (WhatsApp, SMS, iMessage, Telegram, web), and serve its tools as an MCP server for Claude and ChatGPT or as a CLI. Load when creating a Chinwag agent, editing its prompt or skills, wiring it into the playground, adding MCP or a CLI, or when code imports chinwag. Also load the chinwag-tools skill (tools-skill.md) before writing tools and chinwag-tests (test-skill.md) before writing tests.
+name: flow-framework
+description: Build or change a chat agent on Flow Framework (WhatsApp, SMS, iMessage, Telegram, web), and serve its tools as an MCP server for Claude and ChatGPT or as a CLI. Load when creating a Flow Framework agent, editing its prompt or skills, wiring it into the playground, adding MCP or a CLI, or when code imports @flow-engineer/flow. Also load the flow-framework-tools skill (tools-skill.md) before writing tools and flow-framework-tests (test-skill.md) before writing tests.
 ---
 
-# Building an agent on Chinwag
+# Building an agent on Flow Framework
 
-Chinwag runs chat agents that feel like a person texting back: it folds double texts into one
+Flow Framework runs chat agents that feel like a person texting back: it folds double texts into one
 reply, acknowledges people fast, runs tools in parallel and waits for them, moving one to the
 background only when the person writes again or it passes its limit.
-You write the agent's prompt, skills and tools; Chinwag handles the conversation.
+You write the agent's prompt, skills and tools; Flow Framework handles the conversation.
 
-More skills go with this one: `chinwag-tools` (`tools-skill.md`) before writing or changing a
-tool, `chinwag-tests` (`test-skill.md`) before writing or changing a test, `chinwag-context`
+More skills go with this one: `flow-framework-tools` (`tools-skill.md`) before writing or changing a
+tool, `flow-framework-tests` (`test-skill.md`) before writing or changing a test, `flow-framework-context`
 (`context-skill.md`) before writing tools for a company that already has an app, API or database,
-and `chinwag-auth` (`auth-skill.md`) when tools need to know who the person is.
+and `flow-framework-auth` (`auth-skill.md`) when tools need to know who the person is.
 
 ## Start a new agent
 
-`npx chinwag new <name>` (lowercase letters, digits and dashes) makes `./<name>/` from the café
-example: a complete agent with tools and tests that depends on the `chinwag` package and imports
-`chinwag` and `chinwag/simulators`, with these skills in `.claude/skills/`. Run `npm install` there.
+`npx @flow-engineer/flow new <name>` (lowercase letters, digits and dashes) makes `./<name>/` from the café
+example: a complete agent with tools and tests that depends on the `@flow-engineer/flow` package and imports
+`@flow-engineer/flow` and `@flow-engineer/flow/simulators`, with these skills in `.claude/skills/`. Run `npm install` there.
 Build in it, changing Pip's prompt, skills, tools and tests into yours. The owner copies
-`.env.example` to `.env` and puts one model key in it (never read or print it). Chinwag does not
+`.env.example` to `.env` and puts one model key in it (never read or print it). Flow Framework does not
 issue that key; it is made at the provider: `OPENROUTER_API_KEY` at https://openrouter.ai/keys,
 `OPENAI_API_KEY` at https://platform.openai.com/api-keys, `ANTHROPIC_API_KEY` at
 https://console.anthropic.com/settings/keys, or `GEMINI_API_KEY` at https://aistudio.google.com/apikey.
 The first one with a value is used, and `CAFE_MODEL` sets the café's model id. Then `npm start`
 opens the playground; `npm run typecheck` checks the types.
 
-Inside a clone of Chinwag itself, `npm run new -- <name>` copies the café to `agents/<name>/`
+Inside a clone of Flow Framework itself, `npm run new -- <name>` copies the café to `agents/<name>/`
 instead (git-ignored, so it never collides with a pull). Its imports of `../../../src/` and
-`../../../simulators/src/` stay as they are, so changes to Chinwag show at once; the key goes in
-`agents/<name>/.env`. The snippets below import `chinwag` and `chinwag/simulators`; in a clone's
+`../../../simulators/src/` stay as they are, so changes to Flow Framework show at once; the key goes in
+`agents/<name>/.env`. The snippets below import `@flow-engineer/flow` and `@flow-engineer/flow/simulators`; in a clone's
 agent, keep its relative imports.
 
 ## Layout
@@ -52,7 +52,7 @@ my-agent/
 ```
 
 `agent/AGENTS.md` is the agent's prompt, not instructions for coding agents. Keep it short: what
-the agent is for, what it may and may not do. Don't explain messaging in it: Chinwag adds how to
+the agent is for, what it may and may not do. Don't explain messaging in it: Flow Framework adds how to
 talk to the person (send_<channel>, react, acknowledging first, channel formatting) on its own.
 
 A skill's `SKILL.md` starts with `name` and `description`; the agent sees every description and
@@ -66,7 +66,7 @@ drift apart. Tests pass their own model, events and simulated tools:
 
 ```ts
 import { fileURLToPath } from "node:url";
-import { createAgent, openAICompatible, type EventSink, type Model, type Tool } from "chinwag";
+import { createAgent, openAICompatible, type EventSink, type Model, type Tool } from "@flow-engineer/flow";
 import { tools as myTools } from "./tools.ts";
 
 export const tools = myTools;
@@ -85,7 +85,7 @@ Other `createAgent` options: `files` replaces `dir` on hosts with no file system
 text by path: `{ "AGENTS.md": ..., "skills/<name>/SKILL.md": ... }`); `profile({ conversationId, person, channel })` is what the business knows about
 the person, offered as the built-in tool `get_user_profile` and run only when the agent calls it (put
 lookups here, not in `context`); `context(conversationId)` adds small facts to the system prompt at
-every turn, before every reply, so it must not call APIs; Chinwag already tells the agent the time; `intercept(conversationId, text, message)` answers a
+every turn, before every reply, so it must not call APIs; Flow Framework already tells the agent the time; `intercept(conversationId, text, message)` answers a
 message without the model (return the reply, `""` for silence, or `null` to let the agent answer;
 the message and the reply are kept in the history, so the next turn knows, and in the transcript,
 and are `message.in`/`message.out` events marked `answered: true`);
@@ -103,13 +103,13 @@ Which model: recommend Claude Haiku 5.5 (`anthropic/claude-haiku-5.5`, the defau
 GPT-6.1 Sol (`openai/gpt-6.1-sol`, about 3x the cost, the most exact). If the owner asks for Luna
 (`~openai/gpt-luna-latest`, `openai/gpt-6-luna`), advise against it before using it: with tools
 that run in the background it repeats tool calls, sends extra "on it" messages and answers twice,
-where Haiku and Sol send one acknowledgement and one answer (measured on Chinwag's own checks, 12 Oct
+where Haiku and Sol send one acknowledgement and one answer (measured on Flow Framework's own checks, 12 Oct
 2026). Use it only if they still want it.
 
 ## Channels, people and the database
 
 In production, give the agent its channels once and hand it each incoming message. Each channel
-is a definition in its own file; Chinwag knows the platform (WhatsApp's limits, SMS segments), your
+is a definition in its own file; Flow Framework knows the platform (WhatsApp's limits, SMS segments), your
 provider only says how to send:
 
 ```ts
@@ -136,12 +136,12 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
 ```
 
 - Several processes or machines need Postgres, not a SQLite file: `database: postgres(pool)`
-  with the app's own node-postgres `Pool` (Chinwag adds no Postgres dependency). An agent that must
+  with the app's own node-postgres `Pool` (Flow Framework adds no Postgres dependency). An agent that must
   not hold database credentials gets `store` instead of `database`: any object with Store's
   methods (`StoreApi`), such as a client that forwards each call to a service running `new
   Store(postgres(pool), agentId)`.
 - Every send tool can carry a `link` ({ label, url }, https): a URL button where the channel has
-  one (`linkButton`, WhatsApp's cta_url), else Chinwag puts the URL on a line after the text. Channels
+  one (`linkButton`, WhatsApp's cta_url), else Flow Framework puts the URL on a line after the text. Channels
   with `images` also offer an `image` ({ url }, https), the text its caption; elsewhere the text
   goes alone. WhatsApp's rules hold everywhere: a link never with buttons or a list, an image never
   with a list. A provider without them says so (`features: { links: false, images: false }`) and
@@ -174,7 +174,7 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   model when it reads them (`openAICompatible({ images, pdfs })`: images default on, PDFs on with
   OpenRouter; set `images: false` for a text-only model). Voice notes need
   `createAgent({ transcribe: async ({ mime, data }) => text })` with the speech-to-text the owner
-  picks; Chinwag has none. Anything the agent can't read reaches it named, with why, so it asks
+  picks; Flow Framework has none. Anything the agent can't read reaches it named, with why, so it asks
   for text. The latest 3 photos and PDFs stay shown; their bytes are never stored.
 
 Built in, so don't build them as tools: what the business knows about the person (`profile`, as
@@ -188,8 +188,8 @@ no model call, until START; set the replies with `keywords: { replies: { stop, s
 and `message.channel` (the channel's name in `channels`, on every message): an agent with its own
 opt-out flag sets it there
 (`if (message.keyword === "stop") optedOut.add(conversationId)`; only on SMS:
-`message.channel === "sms" && ...`). Chinwag keeps or lifts the STOP
-whatever the hook returns or throws; a reply it returns goes instead of Chinwag's, never both.
+`message.channel === "sms" && ...`). Flow Framework keeps or lifts the STOP
+whatever the hook returns or throws; a reply it returns goes instead of Flow Framework's, never both.
 SMS takes only STOP by default; the words carriers or regulators expect differ by country, so
 check the market's rules (`keywords: US_CARRIER_KEYWORDS` adds STOPALL, UNSUBSCRIBE, CANCEL, END
 and QUIT, as some US carrier rules expect; `keywords: { stop: [...] }` sets your own).
@@ -204,7 +204,7 @@ agent may send a fitting template itself (`send_template`), and `template.missin
 messages want one. Held nudges (quiet hours, a closed window) settle as `held`, then `sent` or `expired`.
 
 When the owner's backend is a separate service, mount `nudgeHandler(agent, { token })` (from
-`chinwag`; a token of at least 32 characters, from a secret; `base` is `/nudges` by default) in the
+`@flow-engineer/flow`; a token of at least 32 characters, from a secret; `base` is `/nudges` by default) in the
 agent's server rather than writing a route: `POST /nudges` takes the same fields with
 `idempotency_key` and `at` in ms since the epoch, and answers `202 { id, status }` once recorded,
 before any send or turn (`queued`, or `refused`/`dropped`/`scheduled` decided then: still a 202);
@@ -212,7 +212,7 @@ before any send or turn (`queued`, or `refused`/`dropped`/`scheduled` decided th
 `spec/nudges.openapi.yaml`.
 
 Templates are WhatsApp only. Declare the ones the owner set up with Meta beside `testPeople`, so
-Chinwag checks each send against them and the playground shows them as WhatsApp does:
+Flow Framework checks each send against them and the playground shows them as WhatsApp does:
 
 ```ts
 createAgent({
@@ -275,7 +275,7 @@ each with that platform's real rules, on the agent's own `channels` (declare the
 that is not connected yet if the numbers are not ready: test people never reach it):
 
 ```ts
-import { simulators } from "chinwag/simulators";
+import { simulators } from "@flow-engineer/flow/simulators";
 import { buildAgent } from "./agent.ts";
 
 const play = simulators({ title: "My agent" });
@@ -309,34 +309,34 @@ and every simulated message is logged with the person, channel, time and address
 
 Every turn can go to a traces endpoint as an OTLP/JSON trace, posted to `<url>/v1/traces`, so
 playground and real chats show up in a dashboard and can be graded. No code: set these in the
-agent's environment. The address is https://flow.engineer/observe unless `CHINWAG_TRACES_URL`
+agent's environment. The address is https://flow.engineer/observe unless `FLOW_FRAMEWORK_TRACES_URL`
 names another; the trace key is made on that same site (never print it):
 
 ```sh
-CHINWAG_TRACES_KEY=...
-CHINWAG_TRACES_URL=https://flow.engineer/observe   # the default; set it only to send them elsewhere
-CHINWAG_TRACES_CONTENT=1                           # send what was written; without it, metadata only
+FLOW_FRAMEWORK_TRACES_KEY=...
+FLOW_FRAMEWORK_TRACES_URL=https://flow.engineer/observe  # the default; set it only to send them elsewhere
+FLOW_FRAMEWORK_TRACES_CONTENT=1                          # send what was written; without it, metadata only
 ```
 
-Without `CHINWAG_TRACES_CONTENT=1` the dashboard
+Without `FLOW_FRAMEWORK_TRACES_CONTENT=1` the dashboard
 gets ids, timing, model calls and tool names but no messages, so nothing to show or grade. Or in
 code: `createAgent({ ..., traces: { url, key, content: true, version: "v3" } })`. Traces are sent in the
 background after each turn and a failed send is dropped (logged once), so a dashboard outage never
 touches a chat; call `await agent.flushTraces()` before the process exits. Tests run under
-`node --test` never send from the environment. Under `chinwag test` the traces say they are a test's
+`node --test` never send from the environment. Under `flow test` the traces say they are a test's
 (`chinwag.run_kind` is "test", else "production", and each turn names the test session as
 `chinwag.test.session`), so the dashboard keeps them apart from real conversations.
 
 ## Serve the tools over MCP
 
 The same tools and skills go to Claude, ChatGPT and any MCP host as an MCP server. Install the
-SDK it runs on (`npm i @modelcontextprotocol/server@2.3.1`, the version Chinwag pins) and add
+SDK it runs on (`npm i @modelcontextprotocol/server@2.3.1`, the version Flow Framework pins) and add
 `src/mcp.ts`:
 
 ```ts
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
-import { mcpServer } from "chinwag/mcp";
+import { mcpServer } from "@flow-engineer/flow/mcp";
 import { tools } from "./tools.ts";
 
 export const mcp = mcpServer({
@@ -344,7 +344,7 @@ export const mcp = mcpServer({
   version: "1.0.0",
   tools,
   dir: fileURLToPath(new URL("../agent", import.meta.url)),   // its skills; AGENTS.md is not sent
-  // auth: { issuer, resource, scopes, verify }               // sign-in: the chinwag-auth skill
+  // auth: { issuer, resource, scopes, verify }               // sign-in: the flow-framework-auth skill
 });
 createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamable HTTP at /mcp
 ```
@@ -354,13 +354,13 @@ createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamabl
   or store.
 - Hosts get the skills as the server's instructions (each one's description) and read one with the
   `read_skill` tool. A skill that tells the chat agent to use `send_*` or `share_updates` makes
-  no sense to a host: `chinwag check` warns about it.
+  no sense to a host: `flow check` warns about it.
 - Every part can be changed: `instructions` replaces the instructions, `descriptor(tool, generated)`
   changes any tool's MCP descriptor, `extend(server)` adds handlers of your own (resources,
   prompts) to the SDK's server, `path` moves the endpoint, `allowedHosts` checks the Host header.
 - Try it locally with `claude mcp add --transport http acme http://localhost:8790/mcp`.
-- Run `npx chinwag check` from the agent's folder before serving: it refuses tools that cannot be
-  described exactly (the `chinwag-tools` skill lists the rules).
+- Run `npx flow check` from the agent's folder before serving: it refuses tools that cannot be
+  described exactly (the `flow-framework-tools` skill lists the rules).
 
 ## A CLI for the organization
 
@@ -368,12 +368,12 @@ The same tools as commands, over the organization's MCP server, with the same si
 It runs on Stricli (`@stricli/core`, the framework Sentry's CLI is built on). Every tool is already a
 command under its own name (`place_order` is `acme place-order`); a CLI file adds what needs
 judgement. Install `@modelcontextprotocol/client@2.3.1` and `@stricli/core@1.3.0` (the versions
-Chinwag pins) and write `src/cli.ts`:
+Flow Framework pins) and write `src/cli.ts`:
 
 ```ts
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url";
-import { defineCli, runCli } from "chinwag/cli";
+import { defineCli, runCli } from "@flow-engineer/flow/cli";
 
 export const cli = defineCli({
   name: "acme",
@@ -412,8 +412,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   every command. `acme auth login` signs in on the organization's own login (tokens in
   `~/.config/acme/`, mode 600), `ACME_TOKEN` is for CI, `acme tools` lists every tool and schema, and
   `acme skill --write ~/.claude/skills` installs the CLI's SKILL.md, made from the tools and the CLI
-  file, for coding agents. For any MCP server without a CLI file, `npx chinwag cli --server <url> -h`.
-- `npx chinwag check` checks the CLI file against the tools: a command naming a tool that does not
+  file, for coding agents. For any MCP server without a CLI file, `npx flow cli --server <url> -h`.
+- `npx flow check` checks the CLI file against the tools: a command naming a tool that does not
   exist, an `args` field the input lacks, a `columns` or `view` field the output lacks, two commands
   with one name, a word that is both a command and a group, or one of the CLI's own words (`auth`,
   `tools`, `skill`) is an error; a tool no command names is a warning (it keeps its own name).
@@ -431,8 +431,8 @@ applies to both endpoints, and `extend` can add SDK handlers on both.
 From the agent folder, run:
 
 ```sh
-chinwag plugin --server https://agent.example.com/mcp --out plugins
-chinwag check --plugin plugins
+flow plugin --server https://agent.example.com/mcp --out plugins
+flow check --plugin plugins
 ```
 
 `plugins/claude/` uses Claude Code's `.claude-plugin/plugin.json` and `.mcp.json` with
@@ -453,10 +453,10 @@ MCP calls emit `tool.start`/`tool.end` with surface (`mcp`, `mcp-plugin`, `cli`)
 and version, session, person, duration, outcome and error. CLI calls send command and an
 idempotency key in `_meta`; a caller can reuse its key on a retry. `defineCli`'s `version`
 sets its client version (default `"1"`). Neither CLI arguments nor trace credentials go in `_meta`.
-`mcpServer` uses `CHINWAG_TRACES_*`, like chat agents, or explicit `traces` options;
+`mcpServer` uses `FLOW_FRAMEWORK_TRACES_*`, like chat agents, or explicit `traces` options;
 `traces: false` disables export without disabling your event sinks. `await handle.flushTraces()`
 flushes its bounded background queue. Each tool call is a root trace without a conversation;
-arguments and results require `CHINWAG_TRACES_CONTENT=1`. Legacy clients' initialization
+arguments and results require `FLOW_FRAMEWORK_TRACES_CONTENT=1`. Legacy clients' initialization
 metadata is retained for up to 24 hours in at most 4,096 sessions; bearer tokens are never cached.
 
 ### Local playground CLI
@@ -498,7 +498,7 @@ WhatsApp history. Teams can replace either command with their own Stricli comman
 Mount the optional terminal handler beside MCP (no model or extra dependency in the CLI):
 
 ```ts
-import { terminalServer } from "chinwag/mcp";
+import { terminalServer } from "@flow-engineer/flow/mcp";
 const terminal = terminalServer({ agent: () => agent, auth });
 const agent = createAgent({ ...options, channels: [...channels, terminal.channel] });
 // Route terminal.path to terminal.fetch(request), and MCP's paths to mcp.fetch(request).

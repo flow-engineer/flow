@@ -1,4 +1,4 @@
-// The shapes every part of Chinwag shares: chat history, the model contract, what a channel is sent.
+// The shapes every part of Flow Framework shares: chat history, the model contract, what a channel is sent.
 
 export interface ToolCall {
   id: string;
@@ -14,7 +14,7 @@ export type ChatMessage =
 
 /**
  * One of the person's messages in a history entry, kept beside its text (never sent to the model):
- * its id (the provider's, or Chinwag's m1, m2, ...), its channel, and what they wrote or tapped.
+ * its id (the provider's, or Flow Framework's m1, m2, ...), its channel, and what they wrote or tapped.
  */
 export interface PersonMessage {
   id: string;
@@ -60,7 +60,7 @@ export interface ModelResponse {
   model?: string;
 }
 
-/** Any model behind Chinwag. `complete` must reject promptly when `signal` aborts. */
+/** Any model behind Flow Framework. `complete` must reject promptly when `signal` aborts. */
 export interface Model {
   complete(request: ModelRequest): Promise<ModelResponse>;
   /** Its context window in tokens, when known: each call is kept well within it (see `history`). */
@@ -88,7 +88,7 @@ export type Outbound =
       buttons?: string[];
       /** A list the person picks one row from. */
       list?: { button: string; rows: ListRow[] };
-      /** A button that opens this https page; only on channels with linkButton (elsewhere Chinwag puts the URL in the text). */
+      /** A button that opens this https page; only on channels with linkButton (elsewhere Flow Framework puts the URL in the text). */
       link?: { label: string; url: string };
       /** A photo by https URL, the text its caption; only on channels with images (elsewhere the text goes alone). */
       image?: { url: string };
@@ -97,7 +97,7 @@ export type Outbound =
     }
   /** The agent has picked these messages up (WhatsApp's blue ticks). */
   | { type: "read"; messageIds: string[] }
-  /** A reaction on one of the person's messages, by the id Chinwag gave it. */
+  /** A reaction on one of the person's messages, by the id Flow Framework gave it. */
   | { type: "reaction"; emoji: string; messageId: string }
   /** A template the owner set up with the channel (WhatsApp), sent as is, even outside its window. */
   | ({ type: "template" } & Template)
@@ -122,7 +122,7 @@ export interface Template {
 
 /**
  * A WhatsApp template as the owner set it up with Meta, declared in `createAgent({ templates })`:
- * Chinwag checks every send of it against this, and the playground shows it as WhatsApp would.
+ * Flow Framework checks every send of it against this, and the playground shows it as WhatsApp would.
  */
 export interface TemplateDefinition {
   name: string;

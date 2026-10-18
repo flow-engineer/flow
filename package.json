@@ -1,13 +1,13 @@
 {
-  "name": "chinwag",
-  "version": "0.1.13",
+  "name": "@flow-engineer/flow",
+  "version": "0.2.0",
   "description": "An open-source runtime for chat agents that feel like a person texting back.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/flow-engineer/chinwag.git"
+    "url": "git+https://github.com/flow-engineer/flow.git"
   },
-  "homepage": "https://github.com/flow-engineer/chinwag",
+  "homepage": "https://github.com/flow-engineer/flow",
   "type": "module",
   "engines": {
     "node": ">=22.18"
@@ -20,6 +20,10 @@
     "./simulators": {
       "types": "./dist/simulators/src/index.d.ts",
       "default": "./dist/simulators/src/index.js"
+    },
+    "./flow-messaging": {
+      "types": "./dist/flow-messaging/src/index.d.ts",
+      "default": "./dist/flow-messaging/src/index.js"
     },
     "./testing": {
       "types": "./dist/testing/src/index.d.ts",
@@ -36,7 +40,8 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "chinwag": "dist/testing/src/cli.js"
+    "flow": "dist/testing/src/cli.js",
+    "chinwag": "dist/testing/src/chinwag.js"
   },
   "files": [
     "dist",
@@ -44,6 +49,7 @@
     "examples/cafe/src",
     "examples/cafe/tests",
     "examples/http-agent",
+    "flow-messaging/README.md",
     "coding-agents",
     "spec",
     "README.md",

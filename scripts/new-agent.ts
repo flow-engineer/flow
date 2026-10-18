@@ -19,7 +19,7 @@ export function newAgent(name: string, options: { source?: string; agents?: stri
   const file = join(dir, "package.json");
   const pkg = JSON.parse(readFileSync(file, "utf8"));
   pkg.name = name;
-  pkg.description = `${name}: a Chinwag agent, started from the café example.`;
+  pkg.description = `${name}: a Flow Framework agent, started from the café example.`;
   writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`);
   return dir;
 }

@@ -1,4 +1,4 @@
-// Channels: where people reach an agent. Chinwag knows each platform (what WhatsApp can show, its
+// Channels: where people reach an agent. Flow Framework knows each platform (what WhatsApp can show, its
 // limits, its 24-hour window); a provider only says how to send through its own API. A provider
 // implements one sendMessage, which gets everything the agent's send tool carries, plus the
 // optional actions that are not messages (react, typing, markRead, sendTemplate). A feature the
@@ -286,7 +286,7 @@ export interface FilledTemplate {
  */
 export function fillTemplate(definition: TemplateDefinition, template: Template): FilledTemplate {
   const fail = (problem: string): never => {
-    throw new Error(`chinwag: template "${definition.name}" (${definition.language}) ${problem}`);
+    throw new Error(`flow: template "${definition.name}" (${definition.language}) ${problem}`);
   };
   if (template.body && template.variables) fail("got both body and variables: give one");
   const values = template.body ?? numbered(template.variables);

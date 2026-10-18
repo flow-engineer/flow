@@ -1,14 +1,14 @@
 ---
-name: chinwag-context
-description: Build the context pack (OpenAPI spec, overlay, workflows, business, data model, access rules, examples) from an organization's existing codebase, before writing a Chinwag agent's tools. Load when starting an agent for a company that already has an app, API or database, when asked for an OpenAPI spec or "the spec", or when the tools need facts nobody has written down.
+name: flow-framework-context
+description: Build the context pack (OpenAPI spec, overlay, workflows, business, data model, access rules, examples) from an organization's existing codebase, before writing a Flow Framework agent's tools. Load when starting an agent for a company that already has an app, API or database, when asked for an OpenAPI spec or "the spec", or when the tools need facts nobody has written down.
 ---
 
 # The context pack
 
-Tools are only as good as what you know when you write them. Before writing a Chinwag agent's
-tools (the `chinwag-tools` skill), gather everything about the organization's systems into one
+Tools are only as good as what you know when you write them. Before writing a Flow Framework agent's
+tools (the `flow-framework-tools` skill), gather everything about the organization's systems into one
 folder in the agent's repository, `context/`. It is the input for every later step: the tools,
-the agent's skills, the sign-in (the `chinwag-auth` skill), the tests and the CLI.
+the agent's skills, the sign-in (the `flow-framework-auth` skill), the tests and the CLI.
 
 Work from the organization's own code and documents. Never invent: anything you cannot find goes
 in `context/README.md` under "Questions for the team", phrased so someone can answer it in a line.
@@ -74,7 +74,7 @@ Look at the repository's routes, its framework and its dependencies first, then 
   `signed_out`, `signed_in`, `signed_in_write` or `approval` (the person confirms each time), and
   `staff` when only the team's staff may do it. This is what the tools' `signIn` and `hints` say.
 - **Examples:** from support tickets, chat logs or the team's own words, with personal data
-  removed. They become test scenarios (the `chinwag-tests` skill).
+  removed. They become test scenarios (the `flow-framework-tests` skill).
 - **Environments:** a sandbox or test server and how to get test accounts, the rate limits, how
   the API pages results, and whether writes take an idempotency key. In `README.md`.
 
@@ -91,4 +91,4 @@ Ask for what the code cannot tell you. The usual ones:
 7. Which tasks customers may do themselves, which need their approval each time, and which are
    staff only.
 
-Then go on to the `chinwag-auth` skill (sign-in) and the `chinwag-tools` skill (the tools).
+Then go on to the `flow-framework-auth` skill (sign-in) and the `flow-framework-tools` skill (the tools).

@@ -1,11 +1,11 @@
 ---
-name: chinwag-auth
+name: flow-framework-auth
 description: Set up verified-phone sign-in, a brand’s OAuth server or its existing login, with one account across chat, MCP and the CLI and backend credentials kept in tool code.
 ---
 
-# Sign-in for a Chinwag agent’s tools
+# Sign-in for a Flow Framework agent’s tools
 
-Read `chinwag-context` first: `context/access.yaml` describes the brand’s accounts and how its users sign in. Keep that account system. Every interface resolves to the same stable brand user id; a phone number, provider login and CLI connection are ways to reach it, not separate accounts.
+Read `flow-framework-context` first: `context/access.yaml` describes the brand’s accounts and how its users sign in. Keep that account system. Every interface resolves to the same stable brand user id; a phone number, provider login and CLI connection are ways to reach it, not separate accounts.
 
 ## Token authority and custody: the app mints, everyone else carries
 

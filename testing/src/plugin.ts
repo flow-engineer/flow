@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 import { CHAT_ONLY } from "../../mcp/src/describe.ts";
 import { loadSkills, readAgentFolder } from "../../src/skills.ts";
 
-export const PLUGIN_LINE = "  chinwag plugin --server <url> --out <dir>  Write Claude Code and Agent Plugins packages";
+export const PLUGIN_LINE = "  flow plugin --server <url> --out <dir>  Write Claude Code and Agent Plugins packages";
 const STAMP = ".chinwag-skills.json";
 
 function skillFiles(dir: string): Record<string, Buffer> {
@@ -34,15 +34,15 @@ export function pluginProblems(dir: string, out: string): string[] {
   const expected = hashes(skillFiles(dir));
   try {
     const recorded = JSON.parse(readFileSync(join(out, STAMP), "utf8"));
-    if (JSON.stringify(recorded) !== JSON.stringify(expected)) return ["plugin skills are stale; run chinwag plugin again"];
+    if (JSON.stringify(recorded) !== JSON.stringify(expected)) return ["plugin skills are stale; run flow plugin again"];
     for (const format of ["claude", "agent-plugins"]) {
       if (JSON.stringify(hashes(Object.fromEntries(Object.keys(expected).map((p) => [p, readFileSync(join(out, format, p))])))) !== JSON.stringify(expected)) {
-        return [`${format} plugin skills differ from agent/skills; run chinwag plugin again`];
+        return [`${format} plugin skills differ from agent/skills; run flow plugin again`];
       }
     }
     return [];
   } catch {
-    return ["plugin skills are missing or unreadable; run chinwag plugin again"];
+    return ["plugin skills are missing or unreadable; run flow plugin again"];
   }
 }
 
@@ -92,7 +92,7 @@ export function pluginCli(argv: string[], dir = process.cwd()): number {
     if (values.help) { console.log(PLUGIN_LINE.trim()); return 0; }
     if (!values.server || !values.out) throw new Error(PLUGIN_LINE.trim());
     writePlugins(dir, values.server, resolve(dir, values.out), values.name);
-    console.log(`Wrote ${values.out}/claude and ${values.out}/agent-plugins. Check: chinwag check --plugin ${values.out}`);
+    console.log(`Wrote ${values.out}/claude and ${values.out}/agent-plugins. Check: flow check --plugin ${values.out}`);
     return 0;
   } catch (error) {
     console.error((error as Error).message);

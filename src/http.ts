@@ -93,7 +93,7 @@ const Body = z
   .refine((b) => [b.text, b.prompt, b.template].filter((v) => v !== undefined).length === 1, { message: "give exactly one of text, prompt or template" })
   .refine((b) => !(b.template && b.at !== undefined), { message: "a template nudge cannot be scheduled yet: leave out at" });
 
-/** What the handler needs from an agent; Chinwag's Agent is one. */
+/** What the handler needs from an agent; Flow Framework's Agent is one. */
 export type NudgeAgent = Pick<Agent, "recordNudge" | "nudgeState" | "channels" | "templates">;
 
 /**
@@ -103,7 +103,7 @@ export type NudgeAgent = Pick<Agent, "recordNudge" | "nudgeState" | "channels" |
  * an HTTP error.
  */
 export function nudgeHandler(agent: NudgeAgent, options: NudgeHandlerOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  requireToken(options?.token, "chinwag nudges");
+  requireToken(options?.token, "flow nudges");
   const token = options.token;
   const base = withoutTrailingSlashes(options.base ?? "/nudges");
   const tries = wrongTries();
@@ -161,7 +161,7 @@ export function nudgeHandler(agent: NudgeAgent, options: NudgeHandlerOptions): (
 
   return (req, res) =>
     handle(req, res).catch((error) => {
-      console.warn("chinwag nudges:", error);
+      console.warn("flow nudges:", error);
       if (!res.headersSent) json(res, 500, { error: "the nudge could not be recorded" });
     });
 }
@@ -203,7 +203,7 @@ const QuietHoursBody = z.object({ to: To, quiet_hours: z.union([Hours, z.literal
  * Someone who never wrote is 404 `{ status: "refused", reason: "unknown_person" }`.
  */
 export function peopleHandler(agent: Pick<Agent, "setTimeZone" | "setQuietHours" | "contact" | "channels">, options: PeopleHandlerOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  requireToken(options?.token, "chinwag people");
+  requireToken(options?.token, "flow people");
   const token = options.token;
   const base = withoutTrailingSlashes(options.base ?? "/people");
   const tries = wrongTries();
@@ -240,14 +240,14 @@ export function peopleHandler(agent: Pick<Agent, "setTimeZone" | "setQuietHours"
     try {
       result = route === "time-zone" ? await agent.setTimeZone({ to: body.to, timeZone: body.time_zone! }) : await agent.setQuietHours({ to: body.to, quietHours: body.quiet_hours ?? null });
     } catch (error) {
-      return json(res, 400, { error: error instanceof Error ? error.message.replace(/^chinwag: /, "") : String(error) });
+      return json(res, 400, { error: error instanceof Error ? error.message.replace(/^flow: /, "") : String(error) });
     }
     return json(res, result.status === "set" ? 200 : 404, result);
   }
 
   return (req, res) =>
     handle(req, res).catch((error) => {
-      console.warn("chinwag people:", error);
+      console.warn("flow people:", error);
       if (!res.headersSent) json(res, 500, { error: "that could not be done" });
     });
 }

@@ -72,7 +72,7 @@ export interface McpServerOptions {
   /** Add your own handlers (resources, prompts, ...) to each server the SDK makes; one level down. */
   extend?: (server: Server) => void;
   events?: EventSink[];
-  /** Traces from CHINWAG_TRACES_* by default; false disables them. */
+  /** Traces from FLOW_FRAMEWORK_TRACES_* (or legacy CHINWAG_TRACES_*) by default; false disables them. */
   traces?: TracesOptions | false;
 }
 
@@ -92,20 +92,20 @@ export interface McpServerHandle {
 const LOCAL = new Set(localhostAllowedHostnames());
 
 export function mcpServer(options: McpServerOptions): McpServerHandle {
-  if (options.dir !== undefined && options.files !== undefined) throw new Error("chinwag/mcp: give dir or files, not both");
+  if (options.dir !== undefined && options.files !== undefined) throw new Error("@flow-engineer/flow/mcp: give dir or files, not both");
   const skills = options.dir !== undefined || options.files !== undefined ? loadSkills(options.files ?? readAgentFolder(options.dir!)) : [];
   const tools = [...options.tools, ...(skills.length ? [readSkillTool(skills)] : [])];
   const problems = toolsProblems(tools);
-  if (problems.length) throw new Error(`chinwag/mcp: these tools cannot be served as declared:\n- ${problems.join("\n- ")}`);
+  if (problems.length) throw new Error(`@flow-engineer/flow/mcp: these tools cannot be served as declared:\n- ${problems.join("\n- ")}`);
   const scopes = options.auth?.scopes;
   const byName = new Map(tools.map((t) => [t.name, t]));
   const descriptors = tools.map((t) => (options.descriptor ? options.descriptor(t, describe(t, scopes)) : describe(t, scopes)));
   const path = options.path ?? "/mcp";
   const pluginPath = options.plugin === false ? undefined : options.plugin?.path ?? `${path}/plugin`;
   for (const endpoint of [path, pluginPath].filter((p): p is string => p !== undefined)) {
-    if (!endpoint.startsWith("/") || /[?#]/.test(endpoint)) throw new Error("chinwag/mcp: paths must be absolute URL paths");
+    if (!endpoint.startsWith("/") || /[?#]/.test(endpoint)) throw new Error("@flow-engineer/flow/mcp: paths must be absolute URL paths");
   }
-  if (pluginPath === path) throw new Error("chinwag/mcp: plugin and standalone paths must differ");
+  if (pluginPath === path) throw new Error("@flow-engineer/flow/mcp: plugin and standalone paths must differ");
   const pluginDescriptors = descriptors.slice(0, options.tools.length);
   const traceOptions = options.traces === false ? undefined : options.traces ?? tracesFromEnv();
   const trace = traceOptions ? traces(traceOptions, { service: options.name, kindOf: () => undefined }) : undefined;

@@ -40,7 +40,7 @@ import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { declaredTemplate, fillTemplate, fitMessage } from "./channels.ts";
-import type { ChinwagEvent, Emit, EventSink } from "./events.ts";
+import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { scheduleTools } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
@@ -87,7 +87,7 @@ export interface ConversationSettings {
   quietHours?: QuietHours | false;
   /** The WhatsApp templates the owner declared: a sent one's text goes in the history. */
   templates: TemplateDefinition[];
-  /** The declared template Chinwag sends when no other one fits a closed window (createAgent's fallbackTemplate). */
+  /** The declared template Flow Framework sends when no other one fits a closed window (createAgent's fallbackTemplate). */
   fallbackTemplate?: string;
   /** Tag every message with its channel (the agent has several), even for a person on one so far. */
   tagChannels: boolean;
@@ -190,7 +190,7 @@ interface Pending {
   answer?: Answer;
 }
 
-/** What a message answered with no model call got back ("" for nothing), and Chinwag's line about it (a STOP's). */
+/** What a message answered with no model call got back ("" for nothing), and Flow Framework's line about it (a STOP's). */
 interface Answer {
   reply: string;
   note?: string;
@@ -313,7 +313,7 @@ export class Conversation {
     this.builtins = new Map(builtins.map((t) => [t.name, t]));
     this.builtinSpecs = builtins.map(toSpec);
     this.loaded = settings.ready.then(() => (existing ? this.load() : settings.store.createConversation(id, personKey)));
-    this.writes = this.loaded.catch((error) => console.warn(`chinwag: conversation ${id} did not load:`, error));
+    this.writes = this.loaded.catch((error) => console.warn("flow: conversation %s did not load:", id, error));
   }
 
   /** Their time zone, as the business set it or they said it: schedules, quiet hours and the time line use it from now on. */
@@ -330,7 +330,7 @@ export class Conversation {
 
   /**
    * send_template: the agent sends one of the business's WhatsApp templates, its values filled, when
-   * Chinwag tells it their 24-hour window is closed. The fallback template is Chinwag's to send.
+   * Flow Framework tells it their 24-hour window is closed. The fallback template is Flow Framework's to send.
    */
   private templateTool(offered: TemplateDefinition[]): Tool {
     const names = offered.map((t) => t.name) as [string, ...string[]];
@@ -349,7 +349,7 @@ export class Conversation {
         try {
           if (declared) reads = fillTemplate(declared, template).body;
         } catch (error) {
-          return { error: error instanceof Error ? error.message.replace(/^chinwag: /, "") : String(error) };
+          return { error: error instanceof Error ? error.message.replace(/^flow: /, "") : String(error) };
         }
         const channel = this.owed.find((o) => o.windowClosed)?.channel ?? context.channel;
         const failure = await this.send(channel, { type: "template", ...template });
@@ -404,7 +404,7 @@ export class Conversation {
         const files = await this.readFiles(incoming.attachments ?? []);
         if (!this.closed) this.arrive(incoming, id, channel, options.messageId !== undefined, files);
       })
-      .catch((error) => console.warn(`chinwag: a message in conversation ${this.id} could not be read:`, error));
+      .catch((error) => console.warn("flow: a message in conversation %s could not be read:", this.id, error));
     this.preparing = ready;
     void ready.finally(() => {
       if (this.preparing !== ready) return;
@@ -588,7 +588,7 @@ export class Conversation {
     } else if (row.kind === "nudge") {
       if (p.prompt !== undefined) {
         if (p.windowClosed) {
-          const text = `[Nudge from the business, not from the person: ${p.prompt}] Their WhatsApp 24-hour window is closed: no ordinary message reaches them. If one of the business's templates says this, send it with send_template, its values filled in. If none fits, send nothing: Chinwag sends them a "you have a new message" template and gives you this again when they reply.`;
+          const text = `[Nudge from the business, not from the person: ${p.prompt}] Their WhatsApp 24-hour window is closed: no ordinary message reaches them. If one of the business's templates says this, send it with send_template, its values filled in. If none fits, send nothing: Flow Framework sends them a "you have a new message" template and gives you this again when they reply.`;
           this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel, address: p.address, windowClosed: true } });
           if (!this.running && this.hasWork()) this.schedule(0);
           return;
@@ -683,7 +683,7 @@ export class Conversation {
     if (this.closed) return this.writes;
     const next = this.writes.then(work).then(
       () => undefined,
-      (error) => console.warn(`chinwag: could not save conversation ${this.id}:`, error),
+      (error) => console.warn("flow: could not save conversation %s:", this.id, error),
     );
     this.writes = next;
     return next;
@@ -927,12 +927,12 @@ export class Conversation {
     }
     const context = this.settings.context ? await this.settings.context(this.id) : "";
     if (context.trim()) {
-      const event: ChinwagEvent = { type: "turn.context", conversationId: this.id, at: Date.now(), text: context };
+      const event: FlowEvent = { type: "turn.context", conversationId: this.id, at: Date.now(), text: context };
       for (const sink of this.settings.contextSinks) {
         try {
           sink(event);
         } catch (error) {
-          console.warn("chinwag: an event sink failed:", error);
+          console.warn("flow: an event sink failed:", error);
         }
       }
     }
@@ -1305,7 +1305,7 @@ export class Conversation {
     return `${text.slice(0, max)}\n[Chinwag] Cut: the result was ${text.length} characters; only the first ${max} are shown.`;
   }
 
-  /** The send tools the agent has right now, for Chinwag's notes: "send_sms", or "send_sms or send_app". */
+  /** The send tools the agent has right now, for Flow Framework's notes: "send_sms", or "send_sms or send_app". */
   private sendToolsNow(): string {
     return [...this.channels.keys()].map((c) => sendToolName(c)).join(" or ");
   }
@@ -1524,7 +1524,7 @@ const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image
 /**
  * The history as the person saw it: their messages (with their ids and channels), what the agent
  * delivered with its send tools and reactions, and its other tool calls with their results.
- * Chinwag's notes and the agent's plain text never reached the person and are left out. `only` is
+ * Flow Framework's notes and the agent's plain text never reached the person and are left out. `only` is
  * the channel of untagged messages (an agent with one channel does not tag them).
  */
 export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>, only: string): TranscriptEntry[] {
@@ -1603,7 +1603,7 @@ function shownText(incoming: Incoming, files: Files): string {
 
 /**
  * The person's messages in a history entry: kept beside it, or (in entries stored before they
- * were) read back from the text, where only Chinwag's own m1, m2, ... ids can be told apart.
+ * were) read back from the text, where only Flow Framework's own m1, m2, ... ids can be told apart.
  */
 function personMessages(entry: Extract<ChatMessage, { role: "user" }>, only: string): PersonMessage[] {
   if (entry.messages) return entry.messages;

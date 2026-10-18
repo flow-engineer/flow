@@ -58,7 +58,7 @@ export interface AgentOptions {
    * Answer some messages without the model: return the reply, "" to send nothing, or null to let
    * the agent reply. `message.channel` is the channel it came in on, by the name in `channels`
    * ("chat" from receive() without a `channelName`). It sees a channel's STOP, START and HELP
-   * first, with `message.keyword` set (null for other messages), to keep its own state; Chinwag
+   * first, with `message.keyword` set (null for other messages), to keep its own state; Flow Framework
    * still keeps or lifts the STOP whatever it returns or throws, and sends its own reply unless
    * this returns one. The message and the reply are kept in the history (the agent reads them at
    * its next turn) and the transcript, and are `message.in` and `message.out` events marked
@@ -72,7 +72,7 @@ export interface AgentOptions {
   inlineSkills?: boolean;
   /**
    * Live status lines (share_updates) on channels that can show them, web and app UIs. Default on;
-   * pass a string to replace Chinwag's guidance on when and what to share.
+   * pass a string to replace Flow Framework's guidance on when and what to share.
    */
   shareUpdates?: boolean | string;
   /**
@@ -96,7 +96,7 @@ export interface AgentOptions {
   events?: EventSink[];
   /** This agent's id in the database (several agents can share one). Default "default". */
   id?: string;
-  /** Where Chinwag keeps its state. Default: SQLite in memory (gone on restart). */
+  /** Where Flow Framework keeps its state. Default: SQLite in memory (gone on restart). */
   database?: Database;
   /**
    * Instead of `database`: a store that keeps the state elsewhere, such as a client of a store
@@ -163,7 +163,7 @@ export interface AgentOptions {
   templates?: TemplateDefinition[];
   /**
    * Send every turn to a traces endpoint as a trace. Default: from the environment, on when
-   * CHINWAG_TRACES_KEY is set (address CHINWAG_TRACES_URL, else https://flow.engineer/observe; CHINWAG_TRACES_CONTENT=1 for content),
+   * FLOW_FRAMEWORK_TRACES_KEY is set (address FLOW_FRAMEWORK_TRACES_URL, else https://flow.engineer/observe; FLOW_FRAMEWORK_TRACES_CONTENT=1 for content),
    * never under `node --test`.
    */
   traces?: TracesOptions;
@@ -189,7 +189,7 @@ export interface AgentStatus {
 export interface ReceiveOptions {
   /** What the channel can show. Default: plain text only (no reactions, no status). */
   channel?: ChannelInfo;
-  /** The channel's own id for the message; Chinwag makes one (m1, m2, ...) otherwise. */
+  /** The channel's own id for the message; Flow Framework makes one (m1, m2, ...) otherwise. */
   messageId?: string;
   /** The channel's name. Default "chat". */
   channelName?: string;
@@ -309,31 +309,31 @@ export class Agent {
   constructor(options: AgentOptions) {
     this.options = options;
     this.channelsByName = new Map((options.channels ?? []).map((c) => [c.name, c]));
-    if (this.channelsByName.size !== (options.channels ?? []).length) throw new Error("chinwag: two channels have the same name");
+    if (this.channelsByName.size !== (options.channels ?? []).length) throw new Error("flow: two channels have the same name");
     // A person's key is "key:<resolve's value>", "phone:<number>" or "<channel>:<address>": a channel
     // named key or phone would make a channel identity read as one of the other two.
-    for (const name of ["key", "phone"]) if (this.channelsByName.has(name)) throw new Error(`chinwag: "${name}" is reserved; give the channel another name`);
+    for (const name of ["key", "phone"]) if (this.channelsByName.has(name)) throw new Error(`flow: "${name}" is reserved; give the channel another name`);
     this.now = options.now ?? Date.now;
     if (options.fallbackTemplate) {
       const declared = declaredTemplate(options.templates, options.fallbackTemplate);
-      if (!declared) throw new Error(`chinwag: fallbackTemplate ${options.fallbackTemplate.name} is not one of the declared templates`);
+      if (!declared) throw new Error(`flow: fallbackTemplate ${options.fallbackTemplate.name} is not one of the declared templates`);
       fillTemplate(declared, options.fallbackTemplate);
     }
-    if (options.quietHours && !validQuietHours(options.quietHours)) throw new Error('chinwag: quietHours is { from: "HH:MM", to: "HH:MM" }');
-    if (options.defaultCountryCode !== undefined && !/^\+?[1-9]\d{0,2}$/.test(options.defaultCountryCode.trim())) throw new Error(`chinwag: defaultCountryCode is a calling code such as "+91", not "${options.defaultCountryCode}"`);
+    if (options.quietHours && !validQuietHours(options.quietHours)) throw new Error('flow: quietHours is { from: "HH:MM", to: "HH:MM" }');
+    if (options.defaultCountryCode !== undefined && !/^\+?[1-9]\d{0,2}$/.test(options.defaultCountryCode.trim())) throw new Error(`flow: defaultCountryCode is a calling code such as "+91", not "${options.defaultCountryCode}"`);
     this.countryCode = options.defaultCountryCode?.trim().replace(/^\+/, "");
     const tracing = options.traces ?? tracesFromEnv();
-    this.traces = tracing ? traces(tracing, { service: options.id ?? "chinwag", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind }) : null;
+    this.traces = tracing ? traces(tracing, { service: options.id ?? "flow", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind }) : null;
     const sinks = [...(options.events ?? []), ...(this.traces ? [this.traces.sink] : [])];
     const emit = emitter(sinks);
-    if ((options.dir === undefined) === (options.files === undefined)) throw new Error("chinwag: give an agent exactly one of dir or files");
+    if ((options.dir === undefined) === (options.files === undefined)) throw new Error("flow: give an agent exactly one of dir or files");
     const files = options.files ?? readAgentFolder(options.dir!);
     const skills = loadSkills(files);
     // The test cloud's stand-in for get_user_profile counts only for an agent with a profile.
     const tools = (options.tools ?? []).filter((t) => options.profile || !(t as { [STAND_IN]?: boolean })[STAND_IN]);
     if (options.profile && !tools.some((t) => t.name === PROFILE_TOOL)) tools.push(profileTool(options.profile));
     if (skills.length && !options.inlineSkills) tools.push(skillTool(skills, (id, name) => emit(id, "skill.loaded", { skill: name })));
-    if (options.store && (options.database || options.id)) throw new Error("chinwag: give an agent a store or a database (and id), not both");
+    if (options.store && (options.database || options.id)) throw new Error("flow: give an agent a store or a database (and id), not both");
     this.store = options.store ?? new Store(options.database ?? sqlite(), options.id ?? "default");
     this.settings = {
       model: options.model,
@@ -371,7 +371,7 @@ export class Agent {
       settle: (target, status, reason) => this.settle(target, status, reason),
     };
     const every = options.scheduleCheckMs ?? 5_000;
-    if (every > 0) setInterval(() => void this.runDue().catch((error) => console.warn("chinwag: scheduled messages:", error)), every).unref();
+    if (every > 0) setInterval(() => void this.runDue().catch((error) => console.warn("flow: scheduled messages:", error)), every).unref();
   }
 
   /**
@@ -423,7 +423,7 @@ export class Agent {
    */
   async simulate(input: { person: string; channel: string; message: string | Incoming; messageId?: string }): Promise<{ conversationId: string; messageId: string } | null> {
     const person = this.testPerson(input.person);
-    if (!person) throw new Error("chinwag: only the agent's testPeople can be simulated");
+    if (!person) throw new Error("flow: only the agent's testPeople can be simulated");
     const adapter = this.channelOf(input.channel);
     return this.released(await this.take(adapter, { channel: input.channel, from: this.testAddress(adapter, person), message: input.message, messageId: input.messageId, via: "playground", person }));
   }
@@ -601,7 +601,7 @@ export class Agent {
 
   private channelOf(name: string): Channel {
     const adapter = this.channelsByName.get(name);
-    if (!adapter) throw new Error(`chinwag: no channel named ${name}`);
+    if (!adapter) throw new Error(`flow: no channel named ${name}`);
     this.mustBeResumed();
     return adapter;
   }
@@ -656,7 +656,7 @@ export class Agent {
     try {
       return this.options.intercept?.(conversationId, text, message) ?? null;
     } catch (error) {
-      console.warn(`chinwag: intercept threw on a ${message.keyword.toUpperCase()} keyword; Chinwag handled it as usual:`, error);
+      console.warn(`flow: intercept threw on a ${message.keyword.toUpperCase()} keyword; Flow Framework handled it as usual:`, error);
       return null;
     }
   }
@@ -696,7 +696,7 @@ export class Agent {
       // wins, and both carry on with the conversation that is there now.
       await this.store.createConversation(`p_${randomUUID().slice(0, 12)}`, personKey);
       row = await this.store.conversationByKey(personKey);
-      if (!row) throw new Error(`chinwag: could not make a conversation for ${personKey}`);
+      if (!row) throw new Error(`flow: could not make a conversation for ${personKey}`);
       if (!this.conversations.has(row.id)) this.rows.set(row.id, row);
     }
     const id = row.id;
@@ -796,7 +796,7 @@ export class Agent {
       if (!row) return;
       this.rows.set(conversationId, row);
       act(this.open(conversationId));
-    })().catch((error) => console.warn(`chinwag: conversation ${conversationId} could not be loaded for a report:`, error));
+    })().catch((error) => console.warn("flow: conversation %s could not be loaded for a report:", conversationId, error));
   }
 
   conversation(conversationId: string): Conversation | undefined {
@@ -814,7 +814,7 @@ export class Agent {
    * then on. Throws for a name that is not a zone; refused (unknown_person) for someone who never wrote.
    */
   async setTimeZone(input: { to: { channel: string; address: string }; timeZone: string }): Promise<{ status: "set" } | { status: "refused"; reason: "unknown_person" }> {
-    if (!validZone(input.timeZone)) throw new Error(`chinwag: ${input.timeZone} is not a time zone; use an IANA name such as America/New_York`);
+    if (!validZone(input.timeZone)) throw new Error(`flow: ${input.timeZone} is not a time zone; use an IANA name such as America/New_York`);
     await this.settings.ready;
     const identity = await this.store.identity(input.to.channel, input.to.address);
     if (!identity) return { status: "refused", reason: "unknown_person" };
@@ -835,7 +835,7 @@ export class Agent {
    */
   async setQuietHours(input: { to: { channel: string; address: string }; quietHours: QuietHours | "off" | null }): Promise<{ status: "set" } | { status: "refused"; reason: "unknown_person" }> {
     const q = input.quietHours;
-    if (q !== null && q !== "off" && !validQuietHours(q)) throw new Error('chinwag: quietHours is { from: "HH:MM", to: "HH:MM" }, "off" or null');
+    if (q !== null && q !== "off" && !validQuietHours(q)) throw new Error('flow: quietHours is { from: "HH:MM", to: "HH:MM" }, "off" or null');
     await this.settings.ready;
     const identity = await this.store.identity(input.to.channel, input.to.address);
     if (!identity) return { status: "refused", reason: "unknown_person" };
@@ -931,7 +931,7 @@ export class Agent {
   async recordNudge(input: NudgeInput): Promise<NudgeState> {
     await this.settings.ready;
     const kinds = [input.text, input.prompt, input.template].filter((v) => v !== undefined).length;
-    if (kinds !== 1) throw new Error("chinwag: a nudge has exactly one of text, prompt or template");
+    if (kinds !== 1) throw new Error("flow: a nudge has exactly one of text, prompt or template");
     // A declared template whose values don't fit it never goes: Meta would refuse it, the playground would show nonsense.
     const declared = input.template && declaredTemplate(this.options.templates, input.template);
     if (declared) fillTemplate(declared, input.template!);
@@ -961,7 +961,7 @@ export class Agent {
       return settledAs({ ...record, body: input.template ? { template: input.template } : { text: input.text, prompt: input.prompt }, status: "dropped", reason });
     }
     if (input.at !== undefined) {
-      if (input.template) throw new Error("chinwag: a template nudge cannot be scheduled yet");
+      if (input.template) throw new Error("flow: a template nudge cannot be scheduled yet");
       const zone = (await this.store.conversation(conversationId))?.timeZone ?? this.options.timeZone ?? "UTC";
       const schedule = businessSchedule(conversationId, input.to.channel, input.at, zone, { text: input.text, prompt: input.prompt }, input.respectQuietHours !== false);
       const added = await add({ ...record, body: { text: input.text, prompt: input.prompt, at: input.at }, status: "scheduled" }, schedule);
@@ -1036,7 +1036,7 @@ export class Agent {
     });
     for (const q of queued) this.wake(q.conversationId, q.inbox);
     await this.releaseHeld(now);
-    await this.pruneMessageIds(now).catch((error) => console.warn("chinwag: pruning message ids:", error));
+    await this.pruneMessageIds(now).catch((error) => console.warn("flow: pruning message ids:", error));
     return queued.length;
   }
 
@@ -1140,7 +1140,7 @@ export class Agent {
   }
 
   private mustBeResumed(): void {
-    if (this.store.durable && !this.resumed) throw new Error("chinwag: call await agent.resume() before the first message when the database is durable");
+    if (this.store.durable && !this.resumed) throw new Error("flow: call await agent.resume() before the first message when the database is durable");
   }
 }
 

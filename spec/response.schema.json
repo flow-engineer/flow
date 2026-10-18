@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/flow-engineer/chinwag/blob/main/spec/response.schema.json",
+  "$id": "https://github.com/flow-engineer/flow/blob/main/spec/response.schema.json",
   "title": "AgentResponse",
   "description": "The agent's answer to one message: status 200, content-type application/json, the replies to send, in order. An empty list sends nothing. Keys other than `replies` are ignored.",
   "type": "object",

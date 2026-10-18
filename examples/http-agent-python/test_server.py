@@ -43,13 +43,13 @@ class PersonText(unittest.TestCase):
 
 class Endpoint(unittest.TestCase):
     def setUp(self):
-        self.enterContext(mock.patch.dict(os.environ, {"FAKE_MODEL": "1", "CHINWAG_AGENT_TOKEN": "t"}))
+        self.enterContext(mock.patch.dict(os.environ, {"FAKE_MODEL": "1", "FLOW_FRAMEWORK_AGENT_TOKEN": "t"}))
         self.enterContext(mock.patch.object(server.Handler, "log_message", lambda *args: None))
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         threading.Thread(target=httpd.serve_forever, args=(0.01,), daemon=True).start()
         self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
-        self.url = f"http://127.0.0.1:{httpd.server_address[1]}/chinwag"
+        self.url = f"http://127.0.0.1:{httpd.server_address[1]}/flow"
 
     def post(self, headers):
         body = {"conversationId": "whatsapp:test.order.whatsapp.1", "messageId": "m1", "channel": "whatsapp", "message": {"text": "hi"}}

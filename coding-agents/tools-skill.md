@@ -1,19 +1,19 @@
 ---
-name: chinwag-tools
-description: Write or change a Chinwag agent's tools and their test files (tests/tools/*.yaml). Load when adding a tool to a Chinwag agent, changing what a tool returns, or describing how a tool behaves in tests.
+name: flow-framework-tools
+description: Write or change a Flow Framework agent's tools and their test files (tests/tools/*.yaml). Load when adding a tool to a Flow Framework agent, changing what a tool returns, or describing how a tool behaves in tests.
 ---
 
-# Writing tools for a Chinwag agent
+# Writing tools for a Flow Framework agent
 
-Read the `chinwag` skill (`skill.md`) first if you haven't. Tests that use these tool files are
-in the `chinwag-tests` skill (`test-skill.md`). For a company with an existing app or API, build
-the context pack first (the `chinwag-context` skill, `context-skill.md`) and write the tools from
+Read the `flow-framework` skill (`skill.md`) first if you haven't. Tests that use these tool files are
+in the `flow-framework-tests` skill (`test-skill.md`). For a company with an existing app or API, build
+the context pack first (the `flow-framework-context` skill, `context-skill.md`) and write the tools from
 it.
 
 ## The tool
 
 ```ts
-import { tool, z } from "chinwag";
+import { tool, z } from "@flow-engineer/flow";
 
 export const findSlots = tool({
   name: "find_session_slots",
@@ -28,12 +28,12 @@ export const findSlots = tool({
 
 - The name and description are what the model reads to choose the tool: say what it does and
   what it returns, in one line.
-- `input` is a zod schema; Chinwag checks the model's input against it before `run` is called and
+- `input` is a zod schema; Flow Framework checks the model's input against it before `run` is called and
   sends the model the error if it doesn't fit.
 - `run` returns any JSON-able value; throw to report a failure (the agent sees `Failed: <message>`).
 - Don't make tools for talking to the person (send_<channel>, react, share_updates), for reminders
-  or scheduled messages, or for opting out of messages: Chinwag has them.
-- Key a person's data by `context.person` (who Chinwag verified they are) or `context.conversationId`,
+  or scheduled messages, or for opting out of messages: Flow Framework has them.
+- Key a person's data by `context.person` (who Flow Framework verified they are) or `context.conversationId`,
   never by an id the model passed. `context.person` is `key:<resolve's value>`, else
   `phone:<E.164>` (`phone:+15550100100`), else `<channel>:<address>`. To look the person up in the
   owner's backend use `context.key`: exactly what `resolve` returned (`customer-7`), or null when
@@ -61,11 +61,11 @@ export const findSlots = tool({
   the task needs them.
 - `signIn` and `hints` come from `context/access.yaml` (below).
 - When the team sends a new spec, re-read the overlay and the workflows against it, change only the
-  tools whose operations changed, and run `chinwag check` and the tests.
+  tools whose operations changed, and run `flow check` and the tests.
 
 ## The fields MCP and the CLI read
 
-The same tool is served to Claude and ChatGPT over MCP (`chinwag/mcp`) and as a command (`chinwag/cli`).
+The same tool is served to Claude and ChatGPT over MCP (`@flow-engineer/flow/mcp`) and as a command (`@flow-engineer/flow/cli`).
 These optional fields describe it there. **Chat ignores all of them**: they change nothing on
 WhatsApp, SMS or iMessage.
 
@@ -87,14 +87,14 @@ export const placeOrder = tool({
   shows its fields with `--json` and `--fields`. Give it whenever the result has a fixed shape.
 - `signIn`: "none" for what anyone may do signed out (the menu, opening hours), "optional" for what
   works either way and does more signed in, "required" (the default) for everything about a
-  person's own account. It applies only where sign-in is set up (the `chinwag-auth` skill).
+  person's own account. It applies only where sign-in is set up (the `flow-framework-auth` skill).
 - `hints` describe the tool to hosts, which ask the person before risky calls; nothing enforces
   them. `readOnly` (default false: a tool counts as a write), `destructive` (a write that may delete
   or overwrite; default true for writes), `idempotent` (calling again with the same input changes
   nothing more; default false), `openWorld` (reaches outside the business's own systems, such as the
   web; default true). Set them honestly: a read-only tool should say so, or hosts treat it as a
   write and the CLI asks for `--yes`.
-- `chinwag check` (from the agent's folder) refuses what cannot be served exactly: a name outside
+- `flow check` (from the agent's folder) refuses what cannot be served exactly: a name outside
   1 to 128 of `A-Z a-z 0-9 _ - .`, an empty description, a description naming a chat-only tool
   (`send_*`, `share_updates`, `load_skill`), an input that is not a `z.object`, an input or output
   with no exact JSON Schema (`z.date()`, transforms; use an ISO string), `readOnly` with
@@ -106,7 +106,7 @@ An existing MCP server's tools become the agent's own, so the agent uses them on
 iMessage like any tool:
 
 ```ts
-import { mcpTools } from "chinwag/mcp";
+import { mcpTools } from "@flow-engineer/flow/mcp";
 
 export const tools = [
   ...myTools,
@@ -114,7 +114,7 @@ export const tools = [
 ];
 ```
 
-- They are pinned: `chinwag mcp update` (from the agent's folder) writes the server's tools to
+- They are pinned: `flow mcp update` (from the agent's folder) writes the server's tools to
   `mcp.lock.json`, and only those are used. Commit it with the tests. A tool the server changes or
   removes later is refused with a clear error until the lock is updated, tested and committed; a
   tool it adds is not offered until then. `only: [...]` keeps a few of its tools, `prefix` keeps
@@ -156,11 +156,11 @@ responses:
   personal data removed); otherwise write realistic ones in exactly the shape `run` returns.
 - Examples show the shape, not the answer: the simulator takes ids, names and dates from the
   scenario's world, the call's input and what the agent already said. Write dates as placeholders
-  for the test's clock (`{{now + 10m}}`, `{{now + 2d | date}}`; see the `chinwag-tests` skill),
+  for the test's clock (`{{now + 10m}}`, `{{now + 2d | date}}`; see the `flow-framework-tests` skill),
   never as written dates, which go stale.
 - Latency lives only here. Scenarios describe situations ("the point of sale is slow this
   morning"); the simulator picks the matching response and latency on each call.
 
 ## Authenticated backend access
 
-A tool can use `await context.credentials!.get<YourClient>("backend")` when the agent/server supplies a `credentials` provider. That provider resolves access from Chinwag’s verified `context.key`/`context.person`, independently of model input. Share it between chat and MCP; never put credentials into tool schemas, outputs, errors or logs. See `auth-skill.md` for verified-phone and OAuth entry points.
+A tool can use `await context.credentials!.get<YourClient>("backend")` when the agent/server supplies a `credentials` provider. That provider resolves access from Flow Framework’s verified `context.key`/`context.person`, independently of model input. Share it between chat and MCP; never put credentials into tool schemas, outputs, errors or logs. See `auth-skill.md` for verified-phone and OAuth entry points.

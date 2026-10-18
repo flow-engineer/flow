@@ -3,7 +3,7 @@
 
 import { appendFileSync } from "node:fs";
 
-export interface ChinwagEvent {
+export interface FlowEvent {
   type:
     | "message.in"
     | "message.arrived"
@@ -37,9 +37,12 @@ export interface ChinwagEvent {
   [detail: string]: unknown;
 }
 
+/** @deprecated Renamed {@link FlowEvent} with the package (formerly chinwag). */
+export type ChinwagEvent = FlowEvent;
+
 /** A place events go. `context` asks for `turn.context`; without it the person's record is not sent. */
 export interface EventSink {
-  (event: ChinwagEvent): void;
+  (event: FlowEvent): void;
   context?: boolean;
 }
 
@@ -49,13 +52,13 @@ export function jsonlSink(path: string): EventSink {
 }
 
 export function emitter(sinks: EventSink[]) {
-  return (conversationId: string, type: ChinwagEvent["type"], detail: Record<string, unknown> = {}) => {
-    const event: ChinwagEvent = { type, conversationId, at: Date.now(), ...detail };
+  return (conversationId: string, type: FlowEvent["type"], detail: Record<string, unknown> = {}) => {
+    const event: FlowEvent = { type, conversationId, at: Date.now(), ...detail };
     for (const sink of sinks) {
       try {
         sink(event);
       } catch (error) {
-        console.warn("chinwag: an event sink failed:", error);
+        console.warn("flow: an event sink failed:", error);
       }
     }
   };

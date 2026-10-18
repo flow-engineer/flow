@@ -23,7 +23,7 @@
 //   GET  /api/platforms                      each platform's rules, the agent's channels and test people, link cards,
 //                                            the action labels (the Person tab's "Their account")
 //
-// The test cloud (`testCloud: true`, for Chinwag's test cloud only): generated people per run, any
+// The test cloud (`testCloud: true`, for Flow Framework's test cloud only): generated people per run, any
 // person id, through AgentConnection.receive; the same API with `platform` for `channel`, `person`
 // free, and POST /api/reset to start a conversation over. Its transcript is kept in memory.
 //
@@ -49,7 +49,7 @@ import {
   type Incoming,
   type ListRow,
   type Outbound,
-  type ChinwagEvent,
+  type FlowEvent,
   type PlaygroundSink,
   type Template,
   type TemplateDefinition,
@@ -76,7 +76,7 @@ export interface AgentConnection {
   status(): { busy: boolean; idleForMs: number; backgroundTasks: number; conversations: number };
 }
 
-/** What the playground needs from an agent. Chinwag's Agent is one as it is. */
+/** What the playground needs from an agent. Flow Framework's Agent is one as it is. */
 export interface PlaygroundAgent {
   testPeople(): TestPerson[];
   channels(): ChannelSummary[];
@@ -91,7 +91,7 @@ export interface PlaygroundAgent {
   status(): { busy: boolean; idleForMs: number; backgroundTasks: number; conversations: number };
   /** The WhatsApp templates the agent declared, shown as WhatsApp would show them. */
   templates?(): TemplateDefinition[];
-  /** The Person panel (Chinwag's Agent has them all): what is set and waiting for a person, nudges, the clock's due work. */
+  /** The Person panel (Flow Framework's Agent has them all): what is set and waiting for a person, nudges, the clock's due work. */
   contact?: Agent["contact"];
   outbox?: Agent["outbox"];
   recordNudge?: Agent["recordNudge"];
@@ -441,7 +441,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
   /** Tool calls in progress, by call id, so later events update the same line. */
   const toolLines = new Map<string, Extract<Line, { kind: "tool" }>>();
 
-  function show(k: string, event: ChinwagEvent): void {
+  function show(k: string, event: FlowEvent): void {
     if (event.type === "tool.start" && typeof event.callId === "string") {
       const line: Extract<Line, { kind: "tool" }> = { kind: "tool", callId: event.callId, tool: String(event.tool), input: event.input, at: event.at, status: "running" };
       toolLines.set(`${k}:${event.callId}`, line);
@@ -557,7 +557,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
   const guarded = (work: (req: IncomingMessage, res: ServerResponse) => Promise<void>): Handler => (req, res) =>
     work(req, res).catch((error) => {
-      console.warn("chinwag simulators:", error);
+      console.warn("flow simulators:", error);
       if (!res.headersSent) res.writeHead(500).end();
     });
 
@@ -719,7 +719,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     const known = people.get(event.conversationId);
     const person = known?.values().next().value;
     // A failed turn (a wrong or expired model key, say) on the terminal too, also for no known person.
-    if (event.type === "model.error") console.error(`chinwag: model error${person ? ` (${person.name})` : ""}: ${String(event.error)}`);
+    if (event.type === "model.error") console.error(`flow: model error${person ? ` (${person.name})` : ""}: ${String(event.error)}`);
     if (!known || !playing) return;
     for (const person of known.values()) for (const c of playing.channels()) show(threadKey(c.name, person), event);
   };
@@ -978,7 +978,7 @@ interface Gate {
  * `Authorization: Bearer`. Lax lets sign-in return from another site. Compared in constant time; wrong tokens are limited per address.
  */
 function tokenGate(token: string | undefined): Gate {
-  requireToken(token, "chinwag simulators: a deployed playground");
+  requireToken(token, "flow simulators: a deployed playground");
   // The cookie holds a value made from the token, not the token itself.
   const session = createHash("sha256").update(`chinwag-playground:${token}`).digest("hex");
   // Cookies are shared across localhost ports: independent agents must not overwrite each other.

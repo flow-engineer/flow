@@ -1,4 +1,4 @@
-// `chinwag check`, from an agent's folder: whether its tools can be served over MCP exactly as
+// `flow check`, from an agent's folder: whether its tools can be served over MCP exactly as
 // declared, whether its CLI file (src/cli.ts) still matches them, and whether the skills it would
 // send to MCP hosts name tools only chats have. Rules only, no model: what it reports is
 // objectively wrong (errors, exit 1) or worth a look (warnings).
@@ -12,7 +12,7 @@ import { CHAT_ONLY, describe, toolsProblems } from "../../mcp/src/describe.ts";
 import { loadSkills, readAgentFolder } from "../../src/skills.ts";
 import type { Tool } from "../../src/tools.ts";
 
-export const CHECK_LINE = `  chinwag check [--json] [--plugin <dir>]    Check the agent's tools, CLI file and skills for MCP and the CLI`;
+export const CHECK_LINE = `  flow check [--json] [--plugin <dir>]    Check the agent's tools, CLI file and skills for MCP and the CLI`;
 
 export async function checkCli(argv: string[], dir = process.cwd()): Promise<number> {
   const json = argv.includes("--json");
@@ -24,7 +24,7 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
   if (pluginDir) errors.push(...pluginProblems(dir, resolve(dir, pluginDir)));
   const agentFile = join(dir, "src/agent.ts");
   if (!existsSync(agentFile)) {
-    console.error(`No src/agent.ts in ${dir}. Run chinwag check from the agent's folder.`);
+    console.error(`No src/agent.ts in ${dir}. Run flow check from the agent's folder.`);
     return 1;
   }
   const agent = await import(pathToFileURL(agentFile).href);
@@ -66,16 +66,16 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
   return errors.length ? 1 : 0;
 }
 
-/** `chinwag mcp update`: loads the agent with every mcpTools call writing its server's current tools to mcp.lock.json. */
+/** `flow mcp update`: loads the agent with every mcpTools call writing its server's current tools to mcp.lock.json. */
 export async function mcpUpdateCli(dir = process.cwd()): Promise<number> {
   const agentFile = join(dir, "src/agent.ts");
   if (!existsSync(agentFile)) {
-    console.error(`No src/agent.ts in ${dir}. Run chinwag mcp update from the agent's folder.`);
+    console.error(`No src/agent.ts in ${dir}. Run flow mcp update from the agent's folder.`);
     return 1;
   }
   const { UPDATE_ENV } = await import("../../mcp/src/client.ts");
   process.env[UPDATE_ENV] = "1";
   await import(pathToFileURL(agentFile).href);
-  console.error(`Updated ${join(dir, "mcp.lock.json")}. Run chinwag check and the tests, then commit it.`);
+  console.error(`Updated ${join(dir, "mcp.lock.json")}. Run flow check and the tests, then commit it.`);
   return 0;
 }

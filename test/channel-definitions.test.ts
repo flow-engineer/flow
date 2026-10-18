@@ -8,7 +8,7 @@ import { createAgent, customUI, sms, whatsapp, z, type Channel, type Outbound, t
 import { call, last, respond, scriptedModel } from "./helpers.ts";
 
 function agentWith(channels: Channel[]) {
-  const dir = mkdtempSync(join(tmpdir(), "chinwag-"));
+  const dir = mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const agent = createAgent({ dir, model: scripted.model, debounceMs: 0, channels, scheduleCheckMs: 0 });
@@ -17,7 +17,7 @@ function agentWith(channels: Channel[]) {
 
 const props = (tool: { parameters: unknown }) => Object.keys((tool.parameters as { properties: object }).properties);
 
-/** A WhatsApp provider that records what Chinwag asked it to do. */
+/** A WhatsApp provider that records what Flow Framework asked it to do. */
 function recorder(extra: Partial<WhatsAppProvider> = {}) {
   const calls: unknown[][] = [];
   const provider: WhatsAppProvider = {

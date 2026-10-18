@@ -1,0 +1,10 @@
+{
+  "name": "flow-framework-flow-messaging",
+  "private": true,
+  "description": "Holds the Flow Messaging adapter's tests and typecheck; it ships in the @flow-engineer/flow package as @flow-engineer/flow/flow-messaging.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test --test-timeout=30000 \"test/**/*.test.ts\"",
+    "typecheck": "../node_modules/.bin/tsc --noEmit -p ."
+  }
+}

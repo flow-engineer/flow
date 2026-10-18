@@ -1,6 +1,6 @@
 // A Chinwag tool as an MCP tool (spec 2026-07-28), and the rules that make that translation exact.
 // Every field of the descriptor comes from the tool or a stated default; nothing is guessed, and a
-// tool that cannot be described exactly is a problem `chinwag check` reports, not a schema we bend.
+// tool that cannot be described exactly is a problem `flow check` reports, not a schema we bend.
 
 import { z } from "zod";
 import type { SignIn, Tool } from "../../src/tools.ts";

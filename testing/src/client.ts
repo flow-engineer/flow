@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { basename, relative, resolve } from "node:path";
-import { toSpec, type Agent, type Incoming, type EventSink, type Outbound, type ChinwagEvent, type Tool } from "../../src/index.ts";
+import { toSpec, type Agent, type Incoming, type EventSink, type Outbound, type FlowEvent, type Tool } from "../../src/index.ts";
 import { PROFILE_TOOL, profileTool } from "../../src/conversation.ts";
 import { STAND_IN } from "../../src/tools.ts";
 import type { Command, Opened, WireIncoming, OpenSession, Receipt, RunKey, RunSummary, SessionSummary, ToolCallRequest, ToolCallResult } from "./protocol.ts";
@@ -22,7 +22,7 @@ export interface ConnectOptions {
   title?: string;
   /** The agent's real tools: only their names, descriptions and inputs are used. */
   tools: Tool[];
-  /** Builds the agent with the tools and events it is given: a Chinwag Agent, or anything that answers like one (http-agent.ts). */
+  /** Builds the agent with the tools and events it is given: a Flow Framework Agent, or anything that answers like one (http-agent.ts). */
   build: (options: { tools: Tool[]; events: EventSink[] }) => AgentUnderTest;
   files: SuiteFile[];
   /** The tests folder: files a scenario attaches are read from here, and never leave this machine. */
@@ -147,13 +147,13 @@ export function postBudgetMs(baseMs: number, bytes: number): number {
   return baseMs + Math.floor(Math.max(0, bytes) / 100_000) * 1_000;
 }
 
-/** What the cloud plays: a Chinwag Agent's channels, messages in and reactions. */
+/** What the cloud plays: a Flow Framework Agent's channels, messages in and reactions. */
 export type AgentUnderTest = Pick<Agent, "channels" | "receive" | "reacted"> & Partial<Pick<Agent, "hasProfile">>;
 
 export interface CloudAccess {
   /** The cloud's front door, as given to --cloud. */
   cloud: string;
-  /** The agent's CI key (CHINWAG_CLOUD_KEY). */
+  /** The agent's CI key (FLOW_FRAMEWORK_CLOUD_KEY). */
   ciKey?: string;
   /** Whoever runs the tests attests that the test files hold no real people's data. */
   synthetic: boolean;
@@ -166,7 +166,7 @@ export interface CloudAccess {
  * a local one needs neither, and gets them when they are given. */
 export function cloudHeaders(access: CloudAccess): Record<string, string> {
   const local = isLoopback(access.cloud);
-  if (!local && !access.ciKey) throw new Error("A hosted cloud needs the agent's CI key: set CHINWAG_CLOUD_KEY.");
+  if (!local && !access.ciKey) throw new Error("A hosted cloud needs the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY.");
   if ((!local || access.ciKey) && !access.synthetic) {
     throw new Error("A hosted cloud runs synthetic tests only: pass --synthetic to attest that your test files hold no real customer or member data.");
   }

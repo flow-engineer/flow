@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
 # Runs gitleaks on the commits being pushed and refuses them if their messages or changes name a
-# customer or vendor. The names are kept outside this repository: CHINWAG_DENY_NAMES
-# (comma-separated) or, when that is unset, the file named by CHINWAG_DENY_FILE (one per line or
-# comma-separated). Install once per clone: git config core.hooksPath scripts/hooks
+# customer or vendor. The names are kept outside this repository: FLOW_FRAMEWORK_DENY_NAMES
+# (comma-separated) or, when that is unset, the file named by FLOW_FRAMEWORK_DENY_FILE (one per line or
+# comma-separated); the names from before the rename, CHINWAG_DENY_NAMES and CHINWAG_DENY_FILE, still work. Install once per clone: git config core.hooksPath scripts/hooks
 set -euo pipefail
 
 zero=0000000000000000000000000000000000000000
 
 names=$(mktemp)
 trap 'rm -f "$names"' EXIT
-if [ -n "${CHINWAG_DENY_NAMES:-}" ]; then
-  printf '%s' "$CHINWAG_DENY_NAMES" | tr ',' '\n' >"$names"
-elif [ -n "${CHINWAG_DENY_FILE:-}" ] && [ -f "$CHINWAG_DENY_FILE" ]; then
-  tr ',' '\n' <"$CHINWAG_DENY_FILE" >"$names"
+deny_names=${FLOW_FRAMEWORK_DENY_NAMES:-${CHINWAG_DENY_NAMES:-}}
+deny_file=${FLOW_FRAMEWORK_DENY_FILE:-${CHINWAG_DENY_FILE:-}}
+if [ -n "$deny_names" ]; then
+  printf '%s' "$deny_names" | tr ',' '\n' >"$names"
+elif [ -n "$deny_file" ] && [ -f "$deny_file" ]; then
+  tr ',' '\n' <"$deny_file" >"$names"
 else
   echo "pre-push: no list of customer and vendor names to check against." >&2
-  echo "Set CHINWAG_DENY_NAMES (comma-separated), or CHINWAG_DENY_FILE to a file outside this repository." >&2
+  echo "Set FLOW_FRAMEWORK_DENY_NAMES (comma-separated), or FLOW_FRAMEWORK_DENY_FILE to a file outside this repository." >&2
   exit 1
 fi
 sed -i.bak -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' "$names" && rm -f "$names.bak"

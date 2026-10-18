@@ -1,7 +1,7 @@
 // An existing MCP server's tools as Chinwag tools, so a chat agent uses them like its own.
 //
 // Pinned by default: the tools come from mcp.lock.json in the agent's folder (each tool's
-// descriptor and fingerprint, written by `chinwag mcp update`), never from what the server says
+// descriptor and fingerprint, written by `flow mcp update`), never from what the server says
 // today. A tool the server has changed or removed since is refused with a clear error until the
 // lock is updated and committed: what was tested is what runs. Building the tools reads only the
 // lock; the server is first reached on a call, and its list is read again before a call once the
@@ -27,7 +27,7 @@ export interface McpToolsOptions {
   prefix?: string;
   /** Take the server's tools as they are now, with no lock (default false). */
   live?: boolean;
-  /** Default: mcp.lock.json in the current folder (the agent's, for chinwag commands). */
+  /** Default: mcp.lock.json in the current folder (the agent's, for flow commands). */
   lockFile?: string;
 }
 
@@ -46,7 +46,7 @@ export interface McpLock {
 }
 
 export const RECHECK_MS = 5 * 60_000;
-/** Set by `chinwag mcp update`: mcpTools writes the server's current tools into the lock. */
+/** Set by `flow mcp update`: mcpTools writes the server's current tools into the lock. */
 export const UPDATE_ENV = "CHINWAG_MCP_UPDATE";
 const IDEMPOTENCY_META = "chinwag/idempotency-key";
 
@@ -59,7 +59,7 @@ export async function mcpTools(options: McpToolsOptions): Promise<Tool[]> {
     return picked(options, [...current.values()]).map((d) => wrap(options, d, connection, null));
   }
   const entry = readLock(lockFile).servers[options.name];
-  if (!entry) throw new Error(`chinwag/mcp: ${options.name} is not in ${lockFile}. Run chinwag mcp update from the agent's folder, then commit the file.`);
+  if (!entry) throw new Error(`@flow-engineer/flow/mcp: ${options.name} is not in ${lockFile}. Run flow mcp update from the agent's folder, then commit the file.`);
   return picked(options, Object.values(entry.tools).map((t) => t.descriptor)).map((d) => wrap(options, d, connection, entry.tools[d.name]!.fingerprint));
 }
 
@@ -114,7 +114,7 @@ function connect(options: McpToolsOptions): Connection {
   let last: { at: number; tools: Map<string, McpDescriptor> } | undefined;
   function open(): Promise<Client> {
     client ??= (async () => {
-      const c = new Client({ name: "chinwag", version: "1" });
+      const c = new Client({ name: "flow", version: "1" });
       await c.connect(new StreamableHTTPClientTransport(new URL(options.url), { requestInit: { headers: options.headers ?? {} } }));
       return c;
     })().catch((error) => {
@@ -169,8 +169,8 @@ function wrap(options: McpToolsOptions, d: McpDescriptor, connection: Connection
     async run(input, context) {
       if (locked) {
         const now = (await connection.recent()).get(d.name);
-        if (!now) throw new Error(`${options.name} no longer has ${d.name}. The agent's mcp.lock.json must be updated (chinwag mcp update) before it can be used.`);
-        if (fingerprint(now) !== locked) throw new Error(`${options.name} changed ${d.name} since it was tested. The agent's mcp.lock.json must be updated (chinwag mcp update) before it can be used.`);
+        if (!now) throw new Error(`${options.name} no longer has ${d.name}. The agent's mcp.lock.json must be updated (flow mcp update) before it can be used.`);
+        if (fingerprint(now) !== locked) throw new Error(`${options.name} changed ${d.name} since it was tested. The agent's mcp.lock.json must be updated (flow mcp update) before it can be used.`);
       }
       const result = await connection.call(d.name, withoutPlaceholders(input as Record<string, unknown>, d.inputSchema), { [IDEMPOTENCY_META]: context.idempotencyKey }, context.signal);
       const text = result.content

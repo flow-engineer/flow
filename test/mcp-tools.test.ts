@@ -37,7 +37,7 @@ async function update<T>(run: () => Promise<T>): Promise<T> {
 const search = tool({ name: "search", description: "Search products.", input: z.object({ q: z.string(), color: z.string().optional() }), signIn: "none", hints: { readOnly: true }, run: ({ q, color }) => ({ q, color: color ?? null }) });
 const buy = tool({ name: "buy", description: "Buy a product.", input: z.object({ sku: z.string() }), signIn: "none", run: ({ sku }) => `bought ${sku}` });
 
-test("chinwag mcp update writes the server's tools into the lock, and the agent then uses exactly those", async () => {
+test("flow mcp update writes the server's tools into the lock, and the agent then uses exactly those", async () => {
   const shop = await upstream([search, buy]);
   const lockFile = join(mkdtempSync(join(tmpdir(), "chinwag-lock-")), "mcp.lock.json");
   await update(() => mcpTools({ name: "shop", url: shop.url, lockFile }));
@@ -60,13 +60,13 @@ test("a tool the server changed or removed since the lock is refused with a clea
   await update(() => mcpTools({ name: "shop", url: shop.url, lockFile }));
   shop.swap([{ ...search, description: "Search products, now with prices." }]);
   const tools = await mcpTools({ name: "shop", url: shop.url, lockFile });
-  await assert.rejects(async () => tools.find((t) => t.name === "search")!.run({ q: "mug" }, context()), /shop changed search since it was tested.*chinwag mcp update/);
+  await assert.rejects(async () => tools.find((t) => t.name === "search")!.run({ q: "mug" }, context()), /shop changed search since it was tested.*flow mcp update/);
   await assert.rejects(async () => tools.find((t) => t.name === "buy")!.run({ sku: "A1" }, context()), /shop no longer has buy/);
 });
 
 test("a server missing from the lock stops the agent at start, naming the command to run", async () => {
   const lockFile = join(mkdtempSync(join(tmpdir(), "chinwag-lock-")), "mcp.lock.json");
-  await assert.rejects(mcpTools({ name: "shop", url: "http://127.0.0.1:9/mcp", lockFile }), /shop is not in .*mcp\.lock\.json\. Run chinwag mcp update/);
+  await assert.rejects(mcpTools({ name: "shop", url: "http://127.0.0.1:9/mcp", lockFile }), /shop is not in .*mcp\.lock\.json\. Run flow mcp update/);
 });
 
 test("the model sees the server's own input schema, and placeholders for arguments it did not mean are left out", async () => {

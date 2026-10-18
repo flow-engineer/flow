@@ -232,7 +232,7 @@ test("STOP on SMS stops everything the business starts, with no model call, unti
   assert.deepEqual(h.events.filter((e) => e.answered && e.type === "message.out").map((e) => e.text), ["You're unsubscribed. Reply START to resume.", "Reply STOP to opt out."]);
 });
 
-test("intercept sees STOP, START and HELP first, marked as keywords; its own reply goes instead of Chinwag's, and the STOP holds", async () => {
+test("intercept sees STOP, START and HELP first, marked as keywords; its own reply goes instead of Flow Framework's, and the STOP holds", async () => {
   const seen: Array<[string, string | null]> = [];
   const keywords = { ...SMS_KEYWORDS, replies: { stop: "You're unsubscribed.", start: "Welcome back.", help: "Reply STOP to opt out." } };
   const h = multi({
@@ -248,7 +248,7 @@ test("intercept sees STOP, START and HELP first, marked as keywords; its own rep
   assert.equal(await h.message("sms", SAM.address, "Start"), null);
   assert.equal((await h.agent.nudge({ to: SAM, text: "Your order is ready." })).status, "sent");
   assert.deepEqual(seen, [["STOP", "stop"], ["help", "help"], ["Start", "start"]]);
-  assert.deepEqual(h.texts("sms"), ["Okay, no more texts from us.", "Text us any question.", "Welcome back.", "Your order is ready."], "one reply each: the hook's, else Chinwag's");
+  assert.deepEqual(h.texts("sms"), ["Okay, no more texts from us.", "Text us any question.", "Welcome back.", "Your order is ready."], "one reply each: the hook's, else Flow Framework's");
   assert.equal(h.calls.length, 0);
 });
 
@@ -323,7 +323,7 @@ test("a message intercept answers while a turn runs is answered at once, and joi
   assert.deepEqual((await h.agent.transcript(a!.conversationId)).map((l) => (l.kind === "in" || l.kind === "out") && l.text), ["what should I eat today?", "Oats and fruit.", "chest pain, help", "Call 911 now."]);
 });
 
-test("a STOP is kept, and Chinwag's reply sent, when intercept throws on it", async () => {
+test("a STOP is kept, and Flow Framework's reply sent, when intercept throws on it", async () => {
   const keywords = { ...SMS_KEYWORDS, replies: { stop: "You're unsubscribed." } };
   let calls = 0;
   const h = multi({ channels: { sms: { info: SMS, phone: true, kind: "sms", keywords } }, intercept: () => { calls++; throw new Error("the flag store is down"); } });
@@ -554,7 +554,7 @@ test("past the window, the agent sends a template that says the nudge, filled in
   const nudge = h.agent.nudge({ to: h.to, prompt: "Their order 1042 shipped" });
   const turn = await h.nextCall(1);
   assert.match(last(turn.request.messages).content, /window is closed[\s\S]*send_template/);
-  assert.ok(turn.request.tools.some((t) => t.name === "send_template" && !/message_waiting:/.test(t.description)), "the fallback is Chinwag's, not offered");
+  assert.ok(turn.request.tools.some((t) => t.name === "send_template" && !/message_waiting:/.test(t.description)), "the fallback is Flow Framework's, not offered");
   turn.answer(respond(call("send_template", { name: "order_shipped", body: ["Sam", "1042"] })));
   (await h.nextCall(2)).answer(respond());
   assert.equal((await nudge).status, "sent");
