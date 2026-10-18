@@ -15,6 +15,8 @@
 // (what each run ended as and the judge's reasons, never the messages), and --failed runs again the
 // scenarios that did not pass. --json prints one report (testing/src/report.ts) on stdout at every exit,
 // and `flow show <run>` prints one run's record from the cloud (testing/src/show.ts).
+// `flow login`, `logout`, `whoami`, `setup` and `link` sign in to flow.engineer and get the agent's
+// keys and its phone link (testing/src/account.ts).
 
 import { mkdirSync, existsSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -26,6 +28,7 @@ import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions } from "./client.ts";
 import { runPrinter } from "./print-run.ts";
 import { checkEndpointCli } from "./check-endpoint.ts";
+import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
 import { httpAgent } from "./http-agent.ts";
 import { newStandalone, packageRoot } from "./new.ts";
 import { EXIT, finishedOutcome, loadEnv, networkCode, reportError, runVerdict, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type Verdict } from "./report.ts";
@@ -86,14 +89,14 @@ with the judge's reasons. Never the messages. The folder is git-ignored and the 
 Environment (also read from the agent folder's .env, or --dotenv; variables already set win;
 the CHINWAG_ names from before the rename still work):
   FLOW_FRAMEWORK_CLOUD     The test cloud, when --cloud is not given
-  FLOW_FRAMEWORK_CLOUD_KEY The agent's CI key, for a hosted cloud (oci_...: make one at
-                           https://flow.engineer/observe, your agent, Developers)
+  FLOW_FRAMEWORK_CLOUD_KEY The agent's CI key, for a hosted cloud (oci_...: flow setup
+                           writes it, or make one at https://flow.engineer/observe, your agent, Developers)
   FLOW_FRAMEWORK_AGENT_TOKEN
                            With --agent-url: sent to it as authorization: Bearer <token>
   OPENROUTER_API_KEY       The agent's model key, or OPENAI_API_KEY, ANTHROPIC_API_KEY or
                            GEMINI_API_KEY: the first with a value is used`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
-const USAGE = `Usage:\n${NEW_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n  flow --version            Show the version\n\n${TEST_OPTIONS}`;
+const USAGE = `Usage:\n${NEW_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${ACCOUNT_LINES}\n  flow --version            Show the version\n\n${TEST_OPTIONS}`;
 
 checkNode(process.versions.node);
 
@@ -103,6 +106,7 @@ if (process.argv[2] === "check-endpoint") {
   process.exit(await checkEndpointCli(process.argv.slice(3)));
 }
 if (process.argv[2] === "show") process.exit(await showCli(process.argv.slice(3)));
+if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) process.exit(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
 const TEST_FLAGS = {
   cloud: { type: "string" },
@@ -185,7 +189,7 @@ try {
     environment: values.environment,
   });
 } catch (error) {
-  const where = !ciKey && cloud.replace(/\/+$/, "") === OBSERVE_URL ? ` Make a key at ${OBSERVE_URL}: your agent, Developers.` : "";
+  const where = !ciKey && cloud.replace(/\/+$/, "") === OBSERVE_URL ? " Run npx flow login, then npx flow setup, to get one into .env." : "";
   invalid(`${(error as Error).message}${where}`);
 }
 

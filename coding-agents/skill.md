@@ -298,6 +298,25 @@ Open `/playground/?token=...` once (it becomes an HttpOnly cookie and leaves the
 with `Authorization: Bearer <token>`. Wrong tokens are limited per address, and every simulated
 message is logged with the person, channel, time and address.
 
+## Put it on a phone
+
+To chat with the agent from a real phone (Telegram), with no key made by hand, run these from the
+agent's folder. `login` opens the owner's browser and prints a link and a code: show both to the
+owner and wait while they approve (with `--json` the first line is `{"status":"pending",...}`).
+
+```sh
+npx flow login --json                # once per machine; the owner approves in the browser
+npx flow setup --json                # writes the test cloud, traces and Flow Messaging keys into .env
+npx flow test --synthetic            # the tests, on the key setup wrote
+npm start                            # the agent, with fm.telegram() from @flow-engineer/flow/flow-messaging
+npx flow link --json                 # the link; give its say_to_person to the owner
+```
+
+`setup` prints names and last 4 characters only, keeps values already in `.env` (`--replace`
+takes the new ones), and is safe to run again. Wire the channel as `flow-messaging/README.md` says.
+Each error is `{"error":{"code","message","next"}}`: run its `next`. CI never logs in: `setup --ci`
+says how to give it the cloud key.
+
 ## Send traces to a dashboard
 
 Every turn can go to a traces endpoint as an OTLP/JSON trace, posted to `<url>/v1/traces`, so

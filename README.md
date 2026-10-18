@@ -424,6 +424,10 @@ npx flow test --synthetic                    # the whole suite once more before 
 
 ### Get a test cloud
 
+The quick way: `npx flow login`, then `npx flow setup` in the agent's folder, which
+writes `FLOW_FRAMEWORK_CLOUD_KEY` (and the traces and Flow Messaging keys) into `.env`;
+`npx flow link` then prints a link to chat with the agent on Telegram. By hand:
+
 1. Sign in at https://flow.engineer/observe (Google, GitHub or an email link).
 2. Workspace → New agent.
 3. On the agent's Developers page, "Make a CI key". It starts with `oci_` and is shown once.
