@@ -1,9 +1,11 @@
-// covers: scripts/new-agent.ts testing/src/new.ts examples/cafe/src/main.ts
+// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/src/main.ts
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { newAgent } from "../scripts/new-agent.ts";
 import { initHere, newStandalone } from "../testing/src/new.ts";
 
@@ -58,4 +60,20 @@ test("flow init makes the same agent in the folder it runs in, named after it, o
   assert.match(main, /process\.env\.FLOW_MESSAGING_KEY \? flowMessaging\(\)/);
   assert.equal(readFileSync(join(dir, ".gitignore"), "utf8"), "dist/\nnode_modules/\n.env\n.flow/\n");
   assert.throws(() => initHere(dir), /has package\.json, tsconfig\.json, src, agent, tests/);
+});
+
+test("flow init's next steps lead with getting a model key when none is set, and leave that step out when .env or the shell has one", () => {
+  const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
+  const init = (env: Record<string, string> = {}, dotenv?: string) => {
+    const dir = mkdtempSync(join(tmpdir(), "flow-init-cli-"));
+    if (dotenv !== undefined) writeFileSync(join(dir, ".env"), dotenv);
+    const result = spawnSync(process.execPath, [cli, "init"], { cwd: dir, env: { PATH: process.env.PATH, ...env }, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const none = init();
+  assert.match(none, /^ {2}2\. Model key: none yet\. Run npx @flow-engineer\/flow setup to get Flow's free trial credit, or add your own key/m);
+  assert.match(none, /^ {2}3\. npx @flow-engineer\/flow chat/m);
+  assert.match(init({ OPENAI_API_KEY: "sk-shell" }), /^ {2}2\. npx @flow-engineer\/flow chat/m);
+  assert.doesNotMatch(init({}, "OPENROUTER_API_KEY=sk-mine\n"), /Model key/);
 });

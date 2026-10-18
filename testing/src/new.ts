@@ -41,8 +41,8 @@ const TSCONFIG = {
   include: ["src"],
 };
 
-const ENV_EXAMPLE = `# One model key. The first line with a value is the one used.
-# Make it at the provider, then paste it here. Never commit this file.
+const ENV_EXAMPLE = `# One model key. The first line with a value is the one used. npx @flow-engineer/flow setup
+# writes Flow's free trial key here; or make your own at the provider and paste it. Never commit this file.
 #   OPENROUTER_API_KEY   https://openrouter.ai/keys
 #   OPENAI_API_KEY       https://platform.openai.com/api-keys
 #   ANTHROPIC_API_KEY    https://console.anthropic.com/settings/keys
@@ -71,14 +71,15 @@ A chat agent on Flow Framework (https://github.com/flow-engineer/flow), started 
 - Load the skills in \`.claude/skills/\` before changing it: \`flow-framework\` to build the agent, \`flow-framework-tools\`
   for its tools and their test files, \`flow-framework-tests\` for its test scenarios.
 - \`agent/AGENTS.md\` is the agent's own prompt, not instructions for coding agents.
-- The owner puts one model key in \`.env\` (never read or print it): \`OPENROUTER_API_KEY\`,
+- One model key goes in \`.env\` (never read or print it): \`npx @flow-engineer/flow link\` (or \`setup\`)
+  writes Flow's free trial key there, or the owner types their own: \`OPENROUTER_API_KEY\`,
   \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`. Then \`npx @flow-engineer/flow chat\`
   talks to it in the terminal, \`npm start\` runs it in the playground, and \`npx @flow-engineer/flow link\`
   signs in, puts its other keys in \`.env\` and prints the link that reaches it from a phone while
   \`npm start\` runs. \`npm run typecheck\` checks the types, \`npm test -- --synthetic\` runs the
   tests in the test cloud at https://flow.engineer/observe with the owner's \`FLOW_FRAMEWORK_CLOUD_KEY\`
   (\`npx @flow-engineer/flow --help\`).
-- The guide for coding agents, with exit codes and next steps: https://github.com/flow-engineer/flow/blob/main/docs/agents.md
+- The guide for coding agents, with exit codes and next steps: https://flow.engineer/flow-framework/agents.md
 `;
 
 /** Makes `<into>/<name>` (the current folder by default) and returns it. */

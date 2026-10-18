@@ -26,6 +26,23 @@ const KEYS = [
   { env: "GEMINI_API_KEY", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", model: "gemini-3.8-flash" },
 ] as const;
 
+/** The .env names a model key may be on, in the order they are read. */
+export const MODEL_KEY_NAMES: readonly string[] = KEYS.map((k) => k.env);
+
+/**
+ * What to tell the owner when no model key is set, said the same way by `chat`, `npm start`,
+ * `init`, `setup` and `link`: one sentence, and `next` as a command (`nextLine` is how it is printed).
+ */
+export const NO_MODEL_KEY = {
+  code: "no_model_key",
+  message: `This agent has no model key: put one in .env in the agent's folder, on one of the lines ${KEYS.slice(0, -1).map((k) => `${k.env}=`).join(", ")} or ${KEYS.at(-1)!.env}= (an OpenRouter key is made at https://openrouter.ai/keys).`,
+  next: "npx @flow-engineer/flow setup",
+  nextLine: "Next: run npx @flow-engineer/flow setup to get Flow's free trial credit, or add your own key.",
+} as const;
+
+/** True when the environment names a model key with a value. */
+export const hasModelKey = (env: Record<string, string | undefined>) => KEYS.some((k) => Boolean(env[k.env]?.trim()));
+
 /** Which key, address and model an omitted `apiKey` / `baseURL` resolve to. */
 export function modelFromKeys(env: Record<string, string | undefined>): { apiKey?: string; baseURL: string; model: string } {
   const named = env.MODEL?.trim();
@@ -42,8 +59,9 @@ export function openAICompatible(options: OpenAICompatibleOptions = {}): Model {
   const baseURL = options.baseURL ?? fromEnv?.baseURL ?? KEYS[0].baseURL;
   const apiKey = options.apiKey ?? fromEnv?.apiKey ?? (process.env.OPENROUTER_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim());
   // A server at a base URL you name (a local one) may need no key; the client still sends one.
+  // Code that builds its model itself can also pass apiKey, or baseURL for a server that needs none.
   if (!apiKey && options.baseURL === undefined) {
-    throw new Error(`No model key: set one of ${KEYS.map((k) => k.env).join(", ")} (in the agent's .env), or pass apiKey, or baseURL for a server that needs none.`);
+    throw Object.assign(new Error(`${NO_MODEL_KEY.message}\n${NO_MODEL_KEY.nextLine}`), { code: NO_MODEL_KEY.code, next: NO_MODEL_KEY.next });
   }
   const client = new OpenAI({
     apiKey: apiKey || "none",

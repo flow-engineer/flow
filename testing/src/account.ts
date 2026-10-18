@@ -24,9 +24,10 @@ import {
   SETUP_ENV, setup, startDevice, TimedOut, tryLink, warningsOf, whoami, type Account, type PendingLogin, type SetupAnswer,
 } from "./flow-login.ts";
 import { packageRoot } from "./new.ts";
+import { hasModelKey, MODEL_KEY_NAMES, NO_MODEL_KEY } from "../../src/model.ts";
 import { RUN } from "../../src/names.ts";
 
-export const ACCOUNT_COMMANDS = new Set(["login", "logout", "whoami", "setup", "link"]);
+export const ACCOUNT_COMMANDS = new Set(["login", "logout", "whoami", "setup", "link", "status"]);
 
 export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] [--force] [--no-browser] [--json]
                             Sign in to flow.engineer: opens the browser, prints the link and code,
@@ -34,12 +35,17 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
                             waiting for the same code, --no-wait returns at once
   flow logout [--json]      End this machine's sign-in and delete its token
   flow whoami [--json]      Show the account you are signed in as
-  flow setup [--replace] [--ci] [--json]
-                            Write this agent's keys (test cloud, traces, Flow Messaging) and each
-                            open channel's sender into ./.env (in an agent's folder: package.json)
+  flow setup [--replace] [--rotate <keys>] [--ci] [--json]
+                            Write this agent's keys (test cloud, traces, Flow Messaging, and Flow's
+                            trial model key when there is no model key) and each open channel's
+                            sender into ./.env (in an agent's folder: package.json); --rotate
+                            cloud,traces,messaging,model or all makes those keys again
   flow link [--channel telegram|whatsapp|imessage] [--timeout <s>] [--no-browser] [--json]
                             Print the link that opens a chat with this agent from a phone; signs in
-                            and runs setup first when this folder is not set up yet`;
+                            and runs setup first when this folder is not set up yet
+  flow status [--json]      What this folder has and lacks: the model key (never its value), the
+                            sign-in, each channel's sender in .env, and, signed in, which channels
+                            are open now and their free-trial counts`;
 
 const USAGE = `Usage:\n${ACCOUNT_LINES}
 
@@ -97,7 +103,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
               force: { type: "boolean", default: false },
             }
           : {}),
-        ...(command === "setup" ? { replace: { type: "boolean", default: false }, ci: { type: "boolean", default: false } } : {}),
+        ...(command === "setup" ? { replace: { type: "boolean", default: false }, rotate: { type: "string" }, ci: { type: "boolean", default: false } } : {}),
         ...(command === "link" ? { channel: { type: "string", default: "telegram" } } : {}),
       },
     }));
@@ -119,6 +125,11 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     console.error(`flow link: --channel takes ${CHANNELS.join(", ")}.\n\n${USAGE}`);
     return EXIT.usage;
   }
+  const rotate = values.rotate === undefined ? [] : String(values.rotate).split(",").map((k) => k.trim());
+  if (rotate.some((k) => !(k in ROTATE)) || (rotate.includes("all") && rotate.length > 1)) {
+    console.error(`flow setup: --rotate takes ${Object.keys(ROTATE).filter((k) => k !== "all").join(", ")} (comma-separated), or all.\n\n${USAGE}`);
+    return EXIT.usage;
+  }
   const json = values.json === true;
   // Straight to the file descriptors, never buffered: a coding agent's cut-off command keeps every line.
   const out = (report: unknown) => writeAll(1, `${JSON.stringify(report)}\n`);
@@ -129,7 +140,8 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     }
     else if (command === "logout") await logout(json, out, say);
     else if (command === "whoami") await showAccount(json, out, say);
-    else if (command === "setup") await setupEnv(values.replace === true, values.ci === true, json, out, say);
+    else if (command === "status") await status(json, out, say);
+    else if (command === "setup") await setupEnv({ replace: values.replace === true, rotate, ci: values.ci === true }, json, out, say);
     else await link({ channel, noBrowser: values["no-browser"] === true, timeoutSeconds }, json, out, say);
     return EXIT.ok;
   } catch (error) {
@@ -363,9 +375,12 @@ async function showAccount(json: boolean, out: Out, say: Say): Promise<void> {
   say(`Signed in to flow.engineer as ${account.email} (account ${account.account}).`);
 }
 
-const SECRET = new Set<string>([SETUP_ENV.cloud_key, SETUP_ENV.traces_key, SETUP_ENV.messaging_key]);
+const SECRET = new Set<string>([SETUP_ENV.cloud_key, SETUP_ENV.traces_key, SETUP_ENV.messaging_key, ...MODEL_KEY_NAMES]);
 const masked = (name: string, value: string) => (SECRET.has(name) ? `${/^[a-z]+_(?:test_|live_)?/.exec(value)?.[0] ?? ""}…${value.slice(-4)}` : value);
 const ENV_LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/;
+
+/** `--rotate`'s names and the answer field each makes again; `all` is every key. */
+const ROTATE: Record<string, string> = { cloud: "cloud_key", traces: "traces_key", messaging: "messaging_key", model: "model_key", all: "" };
 
 /** The names set in a .env's lines, with their values unquoted. */
 function envValues(lines: string[]): Map<string, string> {
@@ -393,8 +408,60 @@ function agentFolder(dir: string): void {
     `cd into your agent's folder, or make an agent here first: ${RUN} init`, EXIT.usage);
 }
 
-async function setupEnv(replace: boolean, ci: boolean, json: boolean, out: Out, say: Say, forLink?: { channel: string }): Promise<void> {
-  if (ci) {
+/** Where the agent's model key stands, the same in setup, link and status (never its value). */
+interface ModelKeyReport {
+  set: boolean;
+  /** The first name with a value, in .env or the environment. */
+  env: string | null;
+  /** Flow's trial credit, when this setup's answer named it. */
+  flow_trial: { limit_usd: number | null; minted: boolean } | null;
+  /** With no key: the sentence that says so. */
+  message?: string;
+}
+
+/**
+ * The model key's state: `line` to print, and with no key the step that gets one, which goes first
+ * in the run's one `next`. `afterSetup`: setup ran just now, so its answer says why there is none.
+ */
+function modelKeyReport(value: (name: string) => string | undefined, trial: SetupAnswer["model_key"] | undefined, afterSetup: boolean): { report: ModelKeyReport; line: string; next?: string } {
+  const env = MODEL_KEY_NAMES.find((name) => value(name)) ?? null;
+  const flowTrial = trial ? { limit_usd: typeof trial.limit_usd === "number" ? trial.limit_usd : null, minted: trial.minted === true } : null;
+  const credit = `Flow trial credit${flowTrial?.limit_usd != null ? ` ($${flowTrial.limit_usd})` : ""}`;
+  if (env) return { report: { set: true, env, flow_trial: flowTrial }, line: flowTrial?.minted && trial?.env === env ? `Model: ${credit}` : `Model: ${env} is set` };
+  if (flowTrial && !flowTrial.minted && flowTrial.limit_usd === 0) {
+    // Rotated with no credit left: there is no trial key to have.
+    const message = "This account's Flow trial credit is used up.";
+    return { report: { set: false, env: null, flow_trial: flowTrial, message }, line: message, next: "add your own model key to .env" };
+  }
+  if (flowTrial && !flowTrial.minted) {
+    // The account's trial key was shown once, to the folder set up first.
+    const message = `This account's ${credit} key went into the .env of the folder that was set up first, and is not shown again.`;
+    return { report: { set: false, env: null, flow_trial: flowTrial, message }, line: message, next: `copy it from there, run ${RUN} setup --rotate model for a new one, or add your own key` };
+  }
+  const report = { set: false, env: null, flow_trial: null, message: NO_MODEL_KEY.message };
+  // Setup ran and flow.engineer gave no trial key (an older server, or no credit for this account now).
+  if (afterSetup) return { report, line: NO_MODEL_KEY.message, next: "add your own model key to .env (flow.engineer gave no trial credit)" };
+  return { report, line: NO_MODEL_KEY.message, next: NO_MODEL_KEY.nextLine.replace(/^Next: /, "").replace(/\.$/, "") };
+}
+
+/** A non-Telegram try link without /try's Telegram-only bot parameters (`bot`, `bs`). */
+function tryUrlFor(channel: string, url: string): string {
+  const parsed = URL.parse(url);
+  if (channel === "telegram" || !parsed || !(parsed.searchParams.has("bot") || parsed.searchParams.has("bs"))) return url;
+  parsed.searchParams.delete("bot");
+  parsed.searchParams.delete("bs");
+  return parsed.toString();
+}
+
+interface SetupOptions {
+  replace: boolean;
+  /** --rotate's names (cloud, traces, messaging, model, or all). */
+  rotate: string[];
+  ci: boolean;
+}
+
+async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say, forLink?: { channel: string }): Promise<{ answer: SetupAnswer }> {
+  if (options.ci) {
     const steps = [
       `CI never signs in. It runs the tests with the agent's test cloud key, ${SETUP_ENV.cloud_key}, as a secret.`,
       `Run ${NEXT.setup} on your machine first, then copy the key from .env into your CI without printing it, for GitHub:`,
@@ -403,7 +470,7 @@ async function setupEnv(replace: boolean, ci: boolean, json: boolean, out: Out, 
     ];
     if (json) out({ ci: { secret: SETUP_ENV.cloud_key, steps } });
     for (const line of steps) say(line);
-    return;
+    return { answer: {} as SetupAnswer };
   }
   const dir = process.cwd();
   agentFolder(dir);
@@ -416,22 +483,37 @@ async function setupEnv(replace: boolean, ci: boolean, json: boolean, out: Out, 
   const named = (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { name?: string }).name ?? basename(dir);
   // The server takes 1 to 64 letters, digits, spaces, -, _ and .: a package's scope and other characters go.
   const name = named.replace(/^@[^/]*\//, "").replace(/[^A-Za-z0-9 ._-]/g, "-").slice(0, 64) || "my-agent";
-  // An empty value (`cp .env.example .env`) is missing: the server mints it.
-  const have = Object.values(SETUP_ENV).filter((n) => n !== SETUP_ENV.try_url && before.get(n));
+  const all = options.rotate.includes("all");
+  const rotated = new Set(all ? Object.values(ROTATE).filter(Boolean) : options.rotate.map((k) => ROTATE[k]!));
+  const rotatedEnv = new Set([...rotated].flatMap((field) => (field === "model_key" ? MODEL_KEY_NAMES : [SETUP_ENV[field as keyof typeof SETUP_ENV]])));
+  // An empty value (`cp .env.example .env`) is missing: the server mints it. A model key counts in
+  // the shell too (npm start reads both), so Flow's trial key is asked for only when there is none:
+  // with any model key set, OPENROUTER_API_KEY (the name flow.engineer mints for) is said as had.
+  const models = MODEL_KEY_NAMES.filter((n) => before.get(n) || process.env[n]?.trim());
+  const have = [
+    ...Object.values(SETUP_ENV).filter((n) => n !== SETUP_ENV.try_url && before.get(n)),
+    ...new Set(models.length ? [...models, MODEL_KEY_NAMES[0]!] : []),
+  ].filter((n) => !rotatedEnv.has(n));
+  // Dropping a key's name from `have` makes it again; Flow's trial key also needs `rotate`, since the
+  // account keeps one (an older server takes only true, so a list is sent only for the model key).
+  const rotate = all ? true : rotated.has("model_key") ? [...rotated] : undefined;
   let answer: SetupAnswer;
   try {
     // Every channel: each comes back with its shared sender only while it is open.
-    answer = await setup(url, token, { name, hostname: hostname(), channels: [...CHANNELS], have });
+    answer = await setup(url, token, { name, hostname: hostname(), channels: [...CHANNELS], have, ...(rotate ? { rotate } : {}) });
   } catch (error) {
     // The keys minted anyway are not shown again, so whatever the error carries goes into .env first.
     if (error instanceof LoginRefused) {
-      const written = writeEnv(file, lines, before, error.fields, replace);
+      const written = writeEnv(file, lines, before, envEntries(error.fields, before), (n) => options.replace || rotatedEnv.has(n));
       if (written.some((w) => w.action === "added" || w.action === "replaced")) say(`Kept in .env before the error: ${written.map((w) => `${w.name} ${w.action}`).join(", ")}.`);
     }
     throw error;
   }
-  const warnings = warningsOf(answer as unknown as Record<string, unknown>);
-  const written = writeEnv(file, lines, before, answer as unknown as Record<string, unknown>, replace);
+  const fields = answer as unknown as Record<string, unknown>;
+  const warnings = warningsOf(fields);
+  const had = new Map(before);
+  // --replace takes every new value but a model key: only --rotate model replaces one the owner may have typed.
+  const written = writeEnv(file, lines, before, envEntries(fields, before), (n) => rotatedEnv.has(n) || (options.replace && !MODEL_KEY_NAMES.includes(n)));
   if (typeof answer.join_code !== "string" || !answer.join_code) {
     const kept = written.filter((w) => w.action === "added" || w.action === "replaced").map((w) => w.name);
     const stop = new Stop("no_join_code", `flow.engineer gave no join code${kept.length ? ` (the keys it made are in .env: ${kept.join(", ")})` : ""}, so there is no phone link yet.`,
@@ -441,36 +523,67 @@ async function setupEnv(replace: boolean, ci: boolean, json: boolean, out: Out, 
   }
   printWarnings(warnings);
 
-  const open = CHANNELS.filter((c) => typeof (answer as unknown as Record<string, unknown>)[`${c}_sender`] === "string");
-  const links = Object.fromEntries(open.map((c) => [c, answer.try_urls?.[c] ?? (c === "telegram" && answer.try_url ? answer.try_url : tryLink(url, answer.join_code!, c))]));
-  const next = [`${RUN} test --synthetic`, "npm start", ...(answer.next?.length ? answer.next : [NEXT.link])];
+  const open = CHANNELS.filter((c) => typeof fields[`${c}_sender`] === "string");
+  const links = Object.fromEntries(open.map((c) => [c, tryUrlFor(c, answer.try_urls?.[c] ?? (c === "telegram" && answer.try_url ? answer.try_url : tryLink(url, answer.join_code!, c)))]));
+  // A closed channel's trial counts are not shown: only the open ones'.
+  const trial = answer.trial ? Object.fromEntries(Object.entries(answer.trial).filter(([c]) => open.includes(c))) : null;
+  const model = modelKeyReport((n) => before.get(n) || process.env[n]?.trim() || undefined, modelKeyOf(fields), true);
+  // A first run's order: a model key if there is none, talk to it, run it, then the phone; tests last.
+  const next = [...(model.next ? [model.next] : []), `${RUN} chat`, "npm start", ...(answer.next?.length ? answer.next : [NEXT.link]), `${RUN} test --synthetic`];
   if (json) {
     out({
       agent: answer.agent_id, join_code: answer.join_code, env_written: { ".env": written }, minted: answer.minted ?? [],
       dashboard_url: answer.dashboard_url ?? null, try_url: answer.try_url ?? null, telegram_link: answer.telegram_link ?? null,
-      whatsapp_link: answer.whatsapp_link ?? null, imessage_link: answer.imessage_link ?? null, try_urls: links, trial: answer.trial ?? null, next, warnings,
+      whatsapp_link: answer.whatsapp_link ?? null, imessage_link: answer.imessage_link ?? null, try_urls: links, trial, model_key: model.report,
+      // link's own line (or its error) has the run's next steps: one list per run.
+      ...(forLink ? {} : { next }), warnings,
     });
   }
   say(`Agent ${answer.agent_id}. In .env:`);
-  for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}${w.action === "kept" ? " (yours differs; --replace takes the new one)" : ""}`);
+  for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}${w.action === "kept" ? (MODEL_KEY_NAMES.includes(w.name) ? " (yours; --rotate model takes Flow's)" : " (yours differs; --replace takes the new one)") : ""}`);
   if (answer.dashboard_url) say(`Its dashboard: ${answer.dashboard_url}`);
-  const people = answer.trial?.imessage?.contacts;
+  // Said by link instead, once, with its link.
+  if (!forLink) say(model.line);
+  const people = trial?.imessage?.contacts;
   if (people && typeof people.used === "number" && typeof people.limit === "number") say(`iMessage: ${people.used} of ${people.limit} people`);
   if (!forLink) {
-    for (const c of open) say(`On ${CHANNEL_NAME[c]}: ${links[c]}${trialNote(answer.trial?.[c])}`);
+    for (const c of open) say(`On ${CHANNEL_NAME[c]}: ${links[c]}${trialNote(trial?.[c])}`);
+    const added = addedToRunning((n) => had.get(n) || process.env[n]?.trim(), (n) => before.get(n) || process.env[n]?.trim());
+    if (added) say(added);
     say(`Next: ${next.join(", then ")}`);
   }
+  return { answer };
 }
 
 const trialNote = (t: { limit: number | null; used: number } | undefined) => (t && typeof t.limit === "number" ? ` (free trial: ${t.used} of ${t.limit} messages used)` : "");
 
+/** setup's model_key when it is an object, else undefined (an older server sends none). */
+function modelKeyOf(fields: Record<string, unknown>): SetupAnswer["model_key"] | undefined {
+  const key = fields.model_key;
+  return key && typeof key === "object" && !Array.isArray(key) ? (key as SetupAnswer["model_key"]) : undefined;
+}
+
+/**
+ * The .env lines an answer gives: SETUP_ENV's fields, then Flow's trial model key on its own name,
+ * unless .env or the environment already has another model key (the owner's: never overridden).
+ */
+function envEntries(fields: Record<string, unknown>, before: Map<string, string>): Array<[string, unknown]> {
+  const entries: Array<[string, unknown]> = Object.entries(SETUP_ENV).map(([field, envName]) => [envName, fields[field]]);
+  const trial = modelKeyOf(fields);
+  const env = trial?.env;
+  if (typeof env === "string" && MODEL_KEY_NAMES.includes(env) && typeof trial?.value === "string") {
+    const other = MODEL_KEY_NAMES.find((n) => n !== env && (before.get(n) || process.env[n]?.trim()));
+    if (!other) entries.push([env, trial.value]);
+  }
+  return entries;
+}
+
 type Written = { name: string; action: "added" | "unchanged" | "kept" | "replaced"; value: string };
 
-/** Merges setup's fields into .env's lines and writes the file (mode 0600) when anything changed. */
-function writeEnv(file: string, lines: string[], before: Map<string, string>, fields: Record<string, unknown>, replace: boolean): Written[] {
+/** Merges the entries into .env's lines and writes the file (mode 0600) when anything changed; `replace(name)` says when a value there gives way. */
+function writeEnv(file: string, lines: string[], before: Map<string, string>, entries: Array<[string, unknown]>, replace: (name: string) => boolean): Written[] {
   const written: Written[] = [];
-  for (const [field, envName] of Object.entries(SETUP_ENV)) {
-    const value = fields[field];
+  for (const [envName, value] of entries) {
     if (typeof value !== "string" || !value) continue;
     const old = before.get(envName);
     const at = lines.findIndex((line) => ENV_LINE.exec(line)?.[1] === envName);
@@ -481,7 +594,7 @@ function writeEnv(file: string, lines: string[], before: Map<string, string>, fi
       else lines.push(`${envName}=${value}`);
       action = "added";
     } else if (old === value) action = "unchanged";
-    else if (!replace) action = "kept";
+    else if (!replace(envName)) action = "kept";
     else {
       lines[at] = `${envName}=${value}`;
       action = "replaced";
@@ -494,6 +607,72 @@ function writeEnv(file: string, lines: string[], before: Map<string, string>, fi
   return written;
 }
 
+/**
+ * What a running agent (npm start reads .env once, when it starts) lacks after .env changed from
+ * `had` to `now`: the channels it is not on yet and a model key, as one sentence; undefined when
+ * nothing it uses is new.
+ */
+function addedToRunning(had: (name: string) => string | undefined, now: (name: string) => string | undefined): string | undefined {
+  // The starter is on Telegram whenever it has the Flow Messaging key, and on WhatsApp and iMessage
+  // when .env names their senders; without the key it was on no channel at all.
+  const on = (env: (name: string) => string | undefined, c: string) => Boolean(env(SETUP_ENV.messaging_key) && (c === "telegram" || env(SENDER_ENV[c]!)));
+  const channels = CHANNELS.filter((c) => on(now, c) && !on(had, c)).map((c) => CHANNEL_NAME[c]!);
+  const model = !MODEL_KEY_NAMES.some((n) => had(n)) && MODEL_KEY_NAMES.some((n) => now(n)) ? ["the model key"] : [];
+  const what = [...channels, ...model];
+  if (!what.length) return undefined;
+  return `If npm start is running, restart it to add ${what.length === 1 ? what[0] : `${what.slice(0, -1).join(", ")} and ${what.at(-1)}`}.`;
+}
+
+/**
+ * `flow status`: what this folder has and lacks, read from .env and the environment, and, when
+ * signed in and set up, flow.engineer's answer for which channels are open now and their trial
+ * counts. It changes nothing: setup is asked with every key named as had, so nothing is made, and
+ * its answer is not written. Not signed in, or flow.engineer unreachable: that part is left out.
+ */
+async function status(json: boolean, out: Out, say: Say): Promise<void> {
+  const value = dotenvValue();
+  const model = modelKeyReport(value, undefined, false);
+  const joinCode = value(SETUP_ENV.join_code) ?? null;
+  let account: Account | null = null;
+  let server: SetupAnswer | null = null;
+  const current = currentToken();
+  const url = loginUrl();
+  if (current && (!current.url || current.url === url)) {
+    try {
+      account = await whoami(url, current.token);
+      if (joinCode && existsSync(join(process.cwd(), "package.json"))) {
+        const named = (JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { name?: string }).name ?? basename(process.cwd());
+        const name = named.replace(/^@[^/]*\//, "").replace(/[^A-Za-z0-9 ._-]/g, "-").slice(0, 64) || "my-agent";
+        const have = [...Object.values(SETUP_ENV).filter((n) => n !== SETUP_ENV.try_url), ...MODEL_KEY_NAMES];
+        server = await setup(url, current.token, { name, hostname: hostname(), channels: [...CHANNELS], have });
+      }
+    } catch {
+      // Signed out on the server, or not reachable: status says what it can from here.
+    }
+  }
+  const fields = (server ?? {}) as Record<string, unknown>;
+  const channels = Object.fromEntries(CHANNELS.map((c) => [c, {
+    sender: Boolean(c === "telegram" ? value(SETUP_ENV.messaging_key) : value(SENDER_ENV[c]!)),
+    open: server ? typeof fields[`${c}_sender`] === "string" : null,
+    trial: server && typeof fields[`${c}_sender`] === "string" ? server.trial?.[c] ?? null : null,
+  }]));
+  const next = [
+    ...(model.next ? [model.next] : []),
+    ...(!joinCode || !value(SETUP_ENV.messaging_key) ? [NEXT.link] : CHANNELS.filter((c) => channels[c]!.open && !channels[c]!.sender).map((c) => `${NEXT.link} --channel ${c}`)),
+    ...(model.report.set ? [`${RUN} chat`, "npm start"] : []),
+  ];
+  if (json) out({ model_key: model.report, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, next });
+  say(model.line);
+  say(account ? `Signed in as ${account.email}.` : current ? "Not signed in here (or flow.engineer could not be reached)." : "Not signed in.");
+  for (const c of CHANNELS) {
+    const { sender, open, trial } = channels[c]!;
+    const where = sender ? "in .env" : "not in .env";
+    const now = open === null ? "" : open ? "; open now" : "; not open yet";
+    say(`${CHANNEL_NAME[c]}: ${c === "telegram" ? `Flow Messaging key ${where}` : `sender ${where}`}${now}${trialNote(trial ?? undefined)}`);
+  }
+  if (next.length) say(`Next: ${next.join(", then ")}`);
+}
+
 interface LinkOptions {
   channel: string;
   noBrowser: boolean;
@@ -504,22 +683,23 @@ interface LinkOptions {
 function dotenvValue(): (name: string) => string | undefined {
   const file = join(process.cwd(), ".env");
   const saved = existsSync(file) ? envValues(readFileSync(file, "utf8").split("\n")) : new Map<string, string>();
-  return (name) => process.env[name] || saved.get(name);
+  return (name) => process.env[name]?.trim() || saved.get(name);
 }
 
 /**
  * The phone link for this folder's join code. Not set up yet (no join code or no Flow Messaging key
  * in .env, or no sender for a WhatsApp or iMessage link): it signs in first when it has to (the same
  * login, resuming a code already waiting) and runs setup, then asks flow.engineer for the channel's
- * page, so a channel that is not open yet answers with the server's next step instead of a link
- * that does not work.
+ * page. A channel that is not open yet is said once, with the links of the channels that are (exit
+ * 0); with none open, it stops with the server's next step.
  */
 async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Promise<void> {
   const again = `${NEXT.link}${options.channel === "telegram" ? "" : ` --channel ${options.channel}`}`;
   const what = CHANNEL_NAME[options.channel]!;
   const needsSender = options.channel !== "telegram";
   let value = dotenvValue();
-  let restart = false;
+  let trialKey: SetupAnswer["model_key"] | undefined;
+  let had: ((name: string) => string | undefined) | undefined;
   if (!value(SETUP_ENV.join_code) || !value(SETUP_ENV.messaging_key) || (needsSender && !value(SENDER_ENV[options.channel]!))) {
     agentFolder(process.cwd());
     if (!(await signedInAccount(loginUrl()))) {
@@ -527,27 +707,67 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
       await login({ noBrowser: options.noBrowser, wait: false, noWait: false, force: true, timeoutSeconds: options.timeoutSeconds, resume: { then: again } }, json, out, say);
     }
     say("Setting up this agent's keys in .env.");
-    await setupEnv(false, false, json, out, say, { channel: options.channel });
+    had = value;
+    ({ answer: { model_key: trialKey } } = await setupEnv({ replace: false, rotate: [], ci: false }, json, out, say, { channel: options.channel }));
     value = dotenvValue();
-    restart = true;
   }
   const joinCode = value(SETUP_ENV.join_code);
   if (!joinCode) throw new Stop("no_join_code", `Setup wrote no ${SETUP_ENV.join_code} into .env.`, NEXT.setup, EXIT.refused);
-  if (needsSender && !value(SENDER_ENV[options.channel]!)) {
-    throw new Stop("channel_not_open", `${what} is not open on Flow's shared senders yet, so setup got no ${SENDER_ENV[options.channel]}.`, NEXT.link, EXIT.refused);
-  }
   // The server's own try_url when setup kept one for this join code and channel, else the same page built here.
   const fromServer = value(SETUP_ENV.try_url);
-  const url = fromServer?.includes(`/try/${encodeURIComponent(joinCode)}?`) && URL.parse(fromServer)?.searchParams.get("c") === options.channel ? fromServer : tryLink(loginUrl(), joinCode, options.channel);
-  await checkTryPage(url);
-  const replyOnly = REPLY_ONLY[options.channel];
-  const sayToPerson = `Open this on your phone and send the message ${what} fills in: ${url}${replyOnly ? ` ${replyOnly}` : ""}`;
-  if (json) out({ url, channel: options.channel, join_code: joinCode, reply_only: Boolean(replyOnly), say_to_person: sayToPerson });
-  say(url);
-  say(`Open it on a phone with ${what} and send the message it fills in, with your join code. From then on`);
-  say("that phone chats with this agent while it runs (npm start), with no public URL or tunnel.");
-  if (replyOnly) say(replyOnly);
-  if (restart) say("If the agent is running already, restart it (npm start) so it picks up the new .env.");
+  const pageFor = (channel: string) =>
+    fromServer?.includes(`/try/${encodeURIComponent(joinCode)}?`) && URL.parse(fromServer)?.searchParams.get("c") === channel ? tryUrlFor(channel, fromServer) : tryLink(loginUrl(), joinCode, channel);
+  /** The channel's link, or the Stop that says it is not open (no sender in .env, or the try page says channel_not_open). */
+  const open = async (channel: string): Promise<string | Stop> => {
+    if (channel !== "telegram" && !value(SENDER_ENV[channel]!)) {
+      return new Stop("channel_not_open", `${CHANNEL_NAME[channel]} is not open on Flow's shared senders yet, so setup got no ${SENDER_ENV[channel]}.`, NEXT.link, EXIT.refused);
+    }
+    const url = pageFor(channel);
+    try {
+      await checkTryPage(url);
+    } catch (error) {
+      if (error instanceof Stop && error.code === "channel_not_open") return error;
+      throw error;
+    }
+    return url;
+  };
+  const model = modelKeyReport(value, trialKey, had !== undefined);
+  const asked = await open(options.channel);
+  let links: Array<[string, string]>;
+  let notOpen: string | undefined;
+  if (typeof asked === "string") links = [[options.channel, asked]];
+  else {
+    // The asked-for channel is closed: the others' links instead, each checked the same way.
+    links = [];
+    for (const c of CHANNELS.filter((c) => c !== options.channel)) {
+      const other = await open(c);
+      if (typeof other === "string") links.push([c, other]);
+    }
+    if (!links.length) throw asked;
+    notOpen = `${what} isn't open yet; here ${links.length === 1 ? "is your" : "are your"} ${links.map(([c]) => CHANNEL_NAME[c]).join(" and ")} link${links.length === 1 ? "" : "s"}.`;
+  }
+  const [channel, url] = links[0]!;
+  const replyOnly = REPLY_ONLY[channel];
+  const sayToPerson = `${notOpen ? `${what} isn't open yet. ` : ""}Open this on your phone and send the message ${CHANNEL_NAME[channel]} fills in: ${url}${replyOnly ? ` ${replyOnly}` : ""}`;
+  if (json) {
+    out({
+      url, channel, join_code: joinCode, reply_only: Boolean(replyOnly), say_to_person: sayToPerson,
+      ...(notOpen ? { not_open: options.channel, message: notOpen, links: Object.fromEntries(links) } : {}),
+      model_key: model.report, ...(model.next ? { next: model.next } : {}),
+    });
+  }
+  if (notOpen) {
+    say(notOpen);
+    for (const [c, u] of links) say(`On ${CHANNEL_NAME[c]}: ${u}`);
+  } else say(url);
+  if (model.report.set) say(model.line);
+  say(`Open ${notOpen && links.length > 1 ? "one" : "it"} on a phone and send the message it fills in, with your join code. From then on`);
+  // No model key: the agent cannot answer yet, so the phone does not chat with it until there is one.
+  say(model.report.set ? "that phone chats with this agent while it runs (npm start), with no public URL or tunnel." : "that phone reaches this agent while it runs (npm start), but it answers only once .env has a model key:");
+  if (model.next) say(`${model.line}\nNext: ${model.next}.`);
+  for (const [c] of links) if (REPLY_ONLY[c]) say(REPLY_ONLY[c]!);
+  const added = had ? addedToRunning(had, value) : undefined;
+  if (added) say(added);
 }
 
 /**

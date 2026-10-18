@@ -4,8 +4,10 @@
 // (agent.simulate). Each line read from stdin is one message; the agent's replies are printed once
 // its turn is over, so it works typed by a person or piped by a coding agent:
 //   printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat
-// --json prints each thing the agent sends as one JSON line. The conversation lives only as long as
-// the command. Exit status: 0 done (stdin ended), 1 usage or the agent could not be built.
+// --json prints each thing the agent sends as one JSON line, and an error as
+// {"error":{"code","message","next"}} (no_model_key, no_agent, not_built, no_test_people,
+// no_channel). The conversation lives only as long as the command. Exit status: 0 done (stdin
+// ended), 1 usage or the agent could not be built.
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -13,6 +15,7 @@ import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import type { Agent, FlowEvent, Outbound } from "../../src/index.ts";
+import { NO_MODEL_KEY } from "../../src/model.ts";
 import { loadEnv } from "./report.ts";
 
 export const CHAT_LINE = `  flow chat [--channel <name>] [--person <phone>] [--json]
@@ -38,11 +41,15 @@ export async function chatCli(args: string[], input: NodeJS.ReadableStream = pro
     return 0;
   }
   loadEnv(undefined);
-  const file = join(process.cwd(), "src", "agent.ts");
-  if (!existsSync(file)) {
-    console.error(`flow chat: no src/agent.ts here. Run it from your agent's folder (npx @flow-engineer/flow init makes one).`);
+  const json = values.json === true;
+  /** Stops with exit 1: the sentence on stderr, and with --json the error as one JSON line on stdout. */
+  const fail = (code: string, message: string, next?: string, nextLine = next ? `Next: ${next}` : undefined) => {
+    console.error(`flow chat: ${message}${nextLine ? `\n${nextLine}` : ""}`);
+    if (json) process.stdout.write(`${JSON.stringify({ error: { code, message, next: next ?? null } })}\n`);
     return 1;
-  }
+  };
+  const file = join(process.cwd(), "src", "agent.ts");
+  if (!existsSync(file)) return fail("no_agent", "There is no src/agent.ts here: run it from your agent's folder.", "npx @flow-engineer/flow init", "Next: npx @flow-engineer/flow init makes one in an empty folder.");
   const turns: Array<(event: FlowEvent) => void> = [];
   let agent: Agent;
   try {
@@ -50,26 +57,20 @@ export async function chatCli(args: string[], input: NodeJS.ReadableStream = pro
     if (typeof module.buildAgent !== "function") throw new Error("src/agent.ts must export buildAgent({ events }).");
     agent = module.buildAgent({ events: [(event: FlowEvent) => turns.forEach((listener) => listener(event))] });
   } catch (error) {
-    console.error(`flow chat: ${(error as Error).message}`);
-    return 1;
+    if ((error as { code?: unknown }).code === NO_MODEL_KEY.code) return fail(NO_MODEL_KEY.code, NO_MODEL_KEY.message, NO_MODEL_KEY.next, NO_MODEL_KEY.nextLine);
+    return fail("not_built", (error as Error).message);
   }
   const person = values.person ? agent.testPeople().find((p) => p.phone.replace(/\D/g, "") === values.person!.replace(/\D/g, "")) : agent.testPeople()[0];
   const channel = values.channel ? agent.channels().find((c) => c.name === values.channel) : agent.channels()[0];
-  if (!person || !channel) {
-    console.error(
-      !person
-        ? `flow chat: ${values.person ? `${values.person} is not one of the agent's testPeople` : "the agent has no testPeople"}; declare them in createAgent({ testPeople: [{ name, phone }] }).`
-        : `flow chat: ${values.channel ? `no channel named ${values.channel}` : "the agent has no channels"}; it has ${agent.channels().map((c) => c.name).join(", ") || "none"}.`,
-    );
-    return 1;
-  }
+  if (!person) return fail("no_test_people", `${values.person ? `${values.person} is not one of the agent's testPeople` : "the agent has no testPeople"}; declare them in createAgent({ testPeople: [{ name, phone }] }).`);
+  if (!channel) return fail("no_channel", `${values.channel ? `no channel named ${values.channel}` : "the agent has no channels"}; it has ${agent.channels().map((c) => c.name).join(", ") || "none"}.`);
 
-  agent.attachPlayground(({ outbound }) => print(outbound, channel.name, values.json === true));
+  agent.attachPlayground(({ outbound }) => print(outbound, channel.name, json));
   turns.push((event) => {
     if (event.type === "model.error") console.error(`flow chat: the model failed: ${String(event.error ?? event.message ?? "error")}`);
   });
   const prompt = (process.stdin as NodeJS.ReadStream).isTTY && input === process.stdin;
-  if (!values.json) console.error(`Talking to the agent on ${channel.name} as ${person.name} (${person.phone}). Ctrl-D ends.`);
+  if (!json) console.error(`Talking to the agent on ${channel.name} as ${person.name} (${person.phone}). Ctrl-D ends.`);
   const lines = createInterface({ input, terminal: false });
   if (prompt) process.stderr.write("you: ");
   let conversationId: string | undefined;

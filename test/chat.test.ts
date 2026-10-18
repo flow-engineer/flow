@@ -60,5 +60,22 @@ test("flow chat with no test people, or outside an agent's folder, says what is 
   assert.match(none.err, /no testPeople; declare them in createAgent/);
   const empty = await chat(mkdtempSync(join(tmpdir(), "flow-chat-")), "hello\n");
   assert.equal(empty.code, 1);
-  assert.match(empty.err, /no src\/agent\.ts here.*flow init/);
+  assert.match(empty.err, /no src\/agent\.ts here[^]*Next: npx @flow-engineer\/flow init/);
+});
+
+test("flow chat with no model key says so in one sentence with the next step; --json gives it as an error object", async () => {
+  const dir = agentFolder("[]");
+  writeFileSync(join(dir, "src", "agent.ts"), `import { createAgent, openAICompatible } from ${JSON.stringify(framework)};
+export function buildAgent() { return createAgent({ dir: new URL("../agent", import.meta.url).pathname, model: openAICompatible() }); }
+`);
+  const human = await chat(dir, "hi\n");
+  assert.equal(human.code, 1);
+  assert.match(human.err, /^flow chat: This agent has no model key: put one in \.env in the agent's folder, on one of the lines OPENROUTER_API_KEY=/);
+  assert.match(human.err, /\nNext: run npx @flow-engineer\/flow setup to get Flow's free trial credit, or add your own key\.\n$/);
+  const json = await chat(dir, "hi\n", ["--json"]);
+  assert.equal(json.code, 1);
+  const { error } = JSON.parse(json.out);
+  assert.equal(error.code, "no_model_key");
+  assert.equal(error.next, "npx @flow-engineer/flow setup");
+  assert.match(error.message, /^This agent has no model key/);
 });

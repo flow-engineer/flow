@@ -19,8 +19,9 @@ tool, and `flow-framework-tests` (`test-skill.md`) before writing or changing a 
 example: a complete agent with tools and tests that depends on the `@flow-engineer/flow` package and imports
 `@flow-engineer/flow` and `@flow-engineer/flow/simulators`, with these skills in `.claude/skills/`. Run `npm install` there.
 Build in it, changing Pip's prompt, skills, tools and tests into yours. The owner copies
-`.env.example` to `.env` and puts one model key in it (never read or print it). Flow Framework does not
-issue that key; it is made at the provider: `OPENROUTER_API_KEY` at https://openrouter.ai/keys,
+`.env.example` to `.env` and puts one model key in it (never read or print it), or runs
+`npx @flow-engineer/flow link` (or `setup`), which writes Flow's free trial key there. Their own key is made
+at the provider: `OPENROUTER_API_KEY` at https://openrouter.ai/keys,
 `OPENAI_API_KEY` at https://platform.openai.com/api-keys, `ANTHROPIC_API_KEY` at
 https://console.anthropic.com/settings/keys, or `GEMINI_API_KEY` at https://aistudio.google.com/apikey.
 The first one with a value is used, and `CAFE_MODEL` sets the café's model id. Then `npm start`
@@ -305,10 +306,11 @@ from the agent's folder (`npx @flow-engineer/flow init` makes a starter in an em
 `chat` reads stdin; nothing else asks for input or needs a terminal.
 
 ```sh
-printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # locally, no account: one message per line, replies printed
-npx @flow-engineer/flow link --json          # signs in and runs setup when needed, then the link; give its say_to_person to the owner
-npx @flow-engineer/flow test --synthetic     # the tests, on the key setup wrote
+npx @flow-engineer/flow link --json          # signs in and runs setup when needed (Flow's trial model key too), then the link; give its say_to_person to the owner
+printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # locally: one message per line, replies printed
 npm start                                    # the agent; the owner texts it while it runs
+npx @flow-engineer/flow status --json        # what the folder has and lacks, at any time
+npx @flow-engineer/flow test --synthetic     # the tests, on the key setup wrote
 ```
 
 `link` runs `login` first when not signed in: it opens the owner's browser itself and prints the
