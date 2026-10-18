@@ -3,8 +3,8 @@ info:
   title: Flow Framework agent endpoint
   version: 0.1.0
   license:
-    name: MIT
-    identifier: MIT
+    name: Apache-2.0
+    identifier: Apache-2.0
   description: |
     The HTTP endpoint an agent on any framework, in any language, exposes so Flow Framework's test suite
     can talk to it: `flow test --agent-url <url>`. Implement this one operation and the test

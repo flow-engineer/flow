@@ -149,4 +149,4 @@ package yet.
 
 ## License
 
-MIT, as the rest of this repository.
+Apache-2.0, as the rest of this repository.
