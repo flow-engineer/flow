@@ -13,26 +13,50 @@
     :root { --bg: #161615; --panel: #1f1f1d; --ink: #ecebe6; --quiet: #9a9a94; --line: #33332f; }
   }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); }
+  [hidden] { display: none !important; }
+  body { margin: 0; font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--ink); height: 100dvh; display: grid; grid-template-rows: auto minmax(0, 1fr); }
   button { font: inherit; }
-  .top { display: flex; align-items: center; gap: 16px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
-  .top h1 { font-size: 15px; margin: 0; font-weight: 600; }
-  .top h1 small { color: var(--quiet); font-weight: 400; }
-  .tabs { display: flex; gap: 4px; flex-wrap: wrap; }
-  .tab { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--ink); cursor: pointer; }
-  .tab img { width: 16px; height: 16px; }
-  .tab small { color: var(--quiet); font-size: 11px; }
-  .tab[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-  .tab { position: relative; }
-  .tab .unread { position: absolute; top: -5px; right: -5px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: #e5484d; color: #fff; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; }
-  .spacer { flex: 1; }
-  .ghost { padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); cursor: pointer; }
-  select.ghost { max-width: 240px; }
+  .top { display: grid; grid-template-columns: minmax(160px, 1fr) auto minmax(0, 1fr); align-items: center; gap: 20px; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .top h1 { min-width: 0; font-size: 14px; margin: 0; font-weight: 650; line-height: 1.35; }
+  .top h1 .agent-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .top h1 small { display: block; margin-top: 2px; color: var(--quiet); font-size: 11px; font-weight: 400; }
+  .tabs { display: flex; align-items: center; justify-self: center; gap: 4px; max-width: 100%; padding: 6px; border: 1px solid var(--line); border-radius: 14px; background: var(--bg); overflow-x: auto; scrollbar-width: thin; }
+  .tab { position: relative; display: flex; flex: none; align-items: center; justify-content: center; min-width: 36px; height: 36px; padding: 8px; border: 0; border-radius: 9px; background: transparent; color: var(--quiet); cursor: pointer; transition: background .16s, color .16s; }
+  .tab img, .tab svg { display: block; width: 20px; height: 20px; flex: none; }
+  .tab-icon.web { color: #4679d8; } .tab-icon.terminal { color: var(--ink); } .tab-icon.imessage { color: #32bc4c; } .tab-icon.sms { color: #3578e5; }
+  .tab-label { display: flex; align-items: center; gap: 6px; max-width: 0; opacity: 0; overflow: hidden; white-space: nowrap; padding-left: 0; font-size: 12px; font-weight: 550; transition: max-width .2s ease, opacity .16s ease, padding-left .2s ease; }
+  .tab:hover .tab-label, .tab:focus-visible .tab-label { max-width: 160px; opacity: 1; padding-left: 8px; }
+  .tab:hover { background: var(--panel); color: var(--ink); }
+  .tab[aria-pressed="true"] { background: var(--panel); color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset, 0 1px 3px rgba(0,0,0,.04); }
+  .tab:focus-visible, .ghost:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tab .unread { position: absolute; top: -3px; right: -3px; min-width: 15px; height: 15px; padding: 0 4px; border-radius: 999px; background: #e5484d; color: #fff; font-size: 9px; font-weight: 700; line-height: 15px; text-align: center; }
+  .header-controls { display: flex; justify-self: end; align-items: flex-end; gap: 8px; white-space: nowrap; }
+  .person-picker { display: grid; gap: 3px; min-width: 0; }
+  .person-picker > span { color: var(--quiet); font-size: 10px; font-weight: 550; }
+  .ghost { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: var(--ink); cursor: pointer; }
+  .ghost:hover { background: var(--bg); }
+  .header-actions { display: flex; align-items: center; gap: 6px; padding-left: 10px; border-left: 1px solid var(--line); }
+  .header-actions .ghost { font-size: 12px; }
+  .header-actions svg { width: 14px; height: 14px; flex: none; }
+  select.ghost { display: block; width: 190px; max-width: 100%; font-size: 12px; text-overflow: ellipsis; }
+  @media (max-width: 1240px) {
+    .top { grid-template-columns: minmax(0, 1fr) auto; gap: 12px 20px; }
+    .tabs { grid-row: 2; grid-column: 1 / -1; justify-self: start; }
+  }
+  @media (max-width: 580px) {
+    .top { grid-template-columns: minmax(0, 1fr); padding: 12px 14px; gap: 12px; }
+    .tabs { grid-row: auto; grid-column: auto; justify-self: stretch; width: fit-content; }
+    .header-controls { justify-self: stretch; justify-content: space-between; gap: 10px; }
+    .person-picker { flex: 1; } select.ghost { width: 100%; }
+    .header-actions { padding-left: 8px; }
+  }
+  @media (hover: none) { .tab:hover:not(:focus-visible) .tab-label { max-width: 0; opacity: 0; padding-left: 0; } }
+  @media (prefers-reduced-motion: reduce) { .tab, .tab-label { transition: none; } }
   .empty { grid-column: 1 / -1; padding: 32px; text-align: center; color: var(--quiet); }
   .empty code { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 1px 6px; }
   body:not(.play) .play-only, body.play .cloud-only { display: none; }
-  main { display: grid; grid-template-columns: minmax(0, 400px) minmax(0, 1fr); gap: 16px; padding: 16px; height: calc(100vh - 58px); }
-  @media (max-width: 820px) { main { grid-template-columns: 1fr; height: auto; } .side { height: 520px; } .phone { height: 680px; } }
+  main { display: grid; grid-template-columns: minmax(0, 400px) minmax(0, 1fr); gap: 16px; padding: 16px; min-height: 0; }
+  @media (max-width: 820px) { body { height: auto; min-height: 100dvh; } main { grid-template-columns: 1fr; height: auto; } .side { height: 520px; } .phone { height: 680px; } }
 
   /* The phone */
   .phone { border-radius: 28px; overflow: hidden; display: flex; flex-direction: column; min-height: 0; border: 1px solid var(--line); box-shadow: 0 2px 10px rgba(0,0,0,.06); position: relative; }
@@ -233,21 +257,25 @@
   .log div { display: grid; grid-template-columns: 70px 1fr; gap: 8px; border-bottom: 1px dashed var(--line); padding: 2px 0; }
   .log .t { color: var(--quiet); }
   .tag { font-weight: 600; } .tag.inline { color: var(--good); } .tag.bg { color: var(--warn); } .tag.fold, .tag.ack { color: var(--fold); } .tag.bad { color: var(--bad); }
-  .auth-state { padding: 12px 18px; border-bottom: 1px solid var(--line, #ddd); font-size: 13px; }
+  .auth-state { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line, #ddd); font-size: 13px; }
   .auth-state[hidden] { display: none; }
-  .auth-state a, .auth-state button { margin-left: 10px; }
+  .auth-state a { color: var(--accent); text-underline-offset: 3px; }
+  .auth-state button { margin-left: auto; font-size: 12px; }
 </style>
 </head>
 <body>
-<div class="top">
-  <h1>{{title}} <small>· Chinwag playground</small></h1>
+<header class="top">
+  <h1><span class="agent-title">{{title}}</span><small>Chinwag playground</small></h1>
   <div class="tabs" id="tabs" role="group" aria-label="Platform"></div>
-  <div class="spacer"></div>
-  <select class="ghost play-only" id="who" aria-label="Person" title="Choose a saved test person, or start as a new signed-out user"></select>
-  <button class="ghost" id="debug" type="button" aria-pressed="false" title="Show the agent's tool calls in the conversation">Debug</button>
-  <button class="ghost cloud-only" id="reset" type="button">New conversation</button>
-  <button class="ghost play-only" id="clear" type="button" title="Forget this person: their history, schedules and everything the agent kept about them">Clear history</button>
-</div>
+  <div class="header-controls">
+    <label class="person-picker play-only" for="who"><span>Person</span><select class="ghost" id="who" aria-label="Person" title="Choose a saved test person, or start as a new signed-out user"></select></label>
+    <div class="header-actions">
+      <button class="ghost" id="debug" type="button" aria-pressed="false" title="Show the agent's tool calls in the conversation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m8 8-4 4 4 4m8-8 4 4-4 4m-3-11-2 14"/></svg>Debug</button>
+      <button class="ghost cloud-only" id="reset" type="button">New conversation</button>
+      <button class="ghost play-only" id="clear" type="button" title="Forget this person: their history, schedules and everything the agent kept about them"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 10v7m4-7v7"/></svg>Clear history</button>
+    </div>
+  </div>
+</header>
 <main>
   <section class="phone" id="phone" aria-label="Simulator">
     <div class="bar" id="bar">
@@ -1107,15 +1135,32 @@
   });
 
   function tabFor(id, label, p) {
+    const known = platforms.find(platform => platform.id === id.toLowerCase());
+    const kind = id.toLowerCase() === "terminal" ? "terminal" : (known?.id ?? p.id);
+    const name = known?.name ?? (kind === "terminal" ? "Terminal" : label);
     const b = document.createElement("button");
     b.className = "tab";
     b.type = "button";
     b.dataset.id = id;
-    const img = document.createElement("img");
-    img.src = `https://cdn.simpleicons.org/${p.icon}`;
-    img.alt = "";
-    b.append(img, document.createTextNode(label));
-    if (!p.complete) { const s = document.createElement("small"); s.textContent = "partial"; b.appendChild(s); }
+    b.dataset.label = name;
+    b.setAttribute("aria-label", name);
+    b.title = name + (p.complete ? "" : " · partial simulation");
+    if (!p.complete) b.setAttribute("aria-description", "Some platform features are not simulated yet.");
+    const drawings = {
+      web: '<circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18M5 6h14M5 18h14"/>',
+      terminal: '<rect x="2" y="3" width="20" height="18" rx="4"/><path d="m6 8 4 4-4 4m7 0h5"/>',
+      imessage: '<rect x="1" y="1" width="22" height="22" rx="6" fill="currentColor" stroke="none"/><path d="M19 11.5c0 3.3-3.1 6-7 6-.9 0-1.7-.1-2.5-.4L6 19l.8-3.2C5.7 14.7 5 13.2 5 11.5c0-3.3 3.1-6 7-6s7 2.7 7 6Z" fill="white" stroke="none"/>',
+      sms: '<rect x="1" y="1" width="22" height="22" rx="6" fill="currentColor" stroke="none"/><path d="M6 6h12v9H9l-3 3V6Zm3 3h6m-6 3h4" stroke="white" stroke-width="1.5"/>',
+    };
+    if (drawings[kind]) {
+      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      icon.setAttribute("viewBox", "0 0 24 24"); icon.setAttribute("fill", "none"); icon.setAttribute("stroke", "currentColor"); icon.setAttribute("stroke-width", "1.6"); icon.setAttribute("aria-hidden", "true");
+      icon.classList.add("tab-icon", kind); icon.innerHTML = drawings[kind]; b.appendChild(icon);
+    } else {
+      const img = document.createElement("img"); img.src = `https://cdn.simpleicons.org/${known?.icon ?? p.icon}`; img.alt = ""; b.appendChild(img);
+    }
+    const text = document.createElement("span"); text.className = "tab-label"; text.appendChild(document.createTextNode(name));
+    b.appendChild(text);
     const badge = document.createElement("span"); badge.className = "unread"; badge.hidden = true; badge.setAttribute("aria-label", "new message"); b.appendChild(badge);
     b.addEventListener("click", () => setPlatform(id));
     $("tabs").appendChild(b);
@@ -1204,10 +1249,12 @@
       const badge = b.querySelector(".unread");
       if (!badge) continue;
       const stored = recall(key(ch));
+      b.setAttribute("aria-label", b.dataset.label);
       if (ch === current.channel || stored === null) { remember(key(ch), String(last)); badge.hidden = true; continue; }
       const unread = times.filter((t) => t > Number(stored)).length;
       badge.hidden = unread === 0;
       badge.textContent = unread > 9 ? "9+" : String(unread);
+      if (unread) b.setAttribute("aria-label", `${b.dataset.label}, ${unread} new ${unread === 1 ? "message" : "messages"}`);
     }
   }
 
