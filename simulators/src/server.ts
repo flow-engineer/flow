@@ -178,6 +178,7 @@ export type Line =
       list?: { button: string; rows: ListRow[] };
       /** A button under the message that opens this page. */
       link?: { label: string; url: string };
+      authentication?: boolean;
       /** A photo above the text, which is its caption. */
       image?: { url: string };
       /** The channel's own params the agent filled in (an app_link): shown under the message. */
@@ -370,6 +371,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
           ...(outbound.buttons ? { buttons: outbound.buttons } : {}),
           ...(outbound.list ? { list: outbound.list } : {}),
           ...(outbound.link ? { link: outbound.link } : {}),
+          ...(outbound.authentication ? { authentication: true } : {}),
           ...(outbound.image ? { image: outbound.image } : {}),
           ...(outbound.fields ? { fields: outbound.fields } : {}),
           ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}),
@@ -576,17 +578,17 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
   // The playground.
 
   /** The test person (by phone) each conversation belongs to, so its trace shows in their simulators. */
-  type PlayingPerson = TestPerson & { key?: string };
+  type PlayingPerson = TestPerson & { key?: string; visitor?: string; visitorChannel?: string };
   const people = new Map<string, Map<string, PlayingPerson>>();
   let playing: PlaygroundAgent | null = null;
-  const personKey = (person: PlayingPerson) => person.key ? `account:${person.key}` : person.phone;
+  const personKey = (person: PlayingPerson) => person.key ? `account:${person.key}` : person.visitor ? `visitor:${person.visitor}` : person.phone;
   const threadKey = (channel: string, person: PlayingPerson) => `${channel}:${personKey(person)}`;
   const rememberPerson = (id: string, person: PlayingPerson) => {
     const all = people.get(id) ?? new Map<string, PlayingPerson>();
     all.set(personKey(person), person); people.set(id, all);
   };
   const conversation = (agent: PlaygroundAgent, person: PlayingPerson) => person.key
-    ? agent.visitorConversation!(person.key) : agent.testConversation(person.phone);
+    ? agent.visitorConversation!(person.key) : person.visitor ? agent.visitorConversation!(null, { channel: person.visitorChannel!, address: person.visitor }) : agent.testConversation(person.phone);
 
   const playgroundEvents: EventSink = (event) => {
     const known = people.get(event.conversationId);
@@ -600,7 +602,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
   function attach(agent: PlaygroundAgent): void {
     playing = agent;
     agent.attachPlayground(({ conversationId, person, channel, outbound }) => {
-      rememberPerson(conversationId, person);
+      rememberPerson(conversationId, { ...person, visitorChannel: channel });
       const own = agent.channels().find((c) => c.name === channel);
       if (own) for (const other of people.get(conversationId)!.values()) deliverer(platformFor(own), threadKey(channel, other), agent.templates?.())(outbound);
     });
@@ -702,9 +704,8 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       const state = await options.authentication({ channel, visitor });
       const publicState = { signedIn: !!state.key, label: state.label, signInUrl: state.signInUrl };
       if (path === "/api/auth" || reset) return json(res, 200, publicState);
-      if (!state.key) return json(res, 401, { error: "Sign in to continue.", ...publicState });
-      person = { phone: "", name: "Signed-in user", key: state.key };
       visitorAddress = state.address ?? visitor;
+      person = state.key ? { phone: "", name: "Signed-in user", key: state.key } : { phone: "", name: "New user", visitor: visitorAddress, visitorChannel: channel.name };
     } else if (!person) return json(res, 403, { error: "choose a declared test person, or a new user when sign-in is configured" });
     if (!person) return json(res, 403, { error: "Sign in to continue." });
     if (path === "/api/auth") return json(res, 200, { signedIn: true });
@@ -728,13 +729,13 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     const p = platformFor(channel);
 
     // The Person panel: what is set and waiting for this person, and the business's side (nudges).
-    const to = { channel: channel.name, address: person.key ? visitorAddress : channel.kind === "custom" ? `test:${person.phone}` : person.phone };
+    const to = { channel: channel.name, address: person.key ? visitorAddress : person.visitor ? `visitor:${visitorAddress}` : channel.kind === "custom" ? `test:${person.phone}` : person.phone };
     if (req.method === "GET" && path === "/api/person") {
       if (!agent.contact || !agent.outbox) return json(res, 404, { error: "this agent has no contact record" });
       const id = await conversation(agent, person);
       // One person on every channel: their record from whichever channel they have written on.
       let contact = await agent.contact(to);
-      if (!person.key) for (const c of agent.channels()) contact ??= await agent.contact({ channel: c.name, address: c.kind === "custom" ? `test:${person.phone}` : person.phone });
+      if (!person.key && !person.visitor) for (const c of agent.channels()) contact ??= await agent.contact({ channel: c.name, address: c.kind === "custom" ? `test:${person.phone}` : person.phone });
       // When the agent wrote on each channel (its latest 20), so the page can flag a channel it is not showing.
       const lastOut: Record<string, number[]> = {};
       for (const e of id ? await agent.transcript(id) : []) if (e.kind === "out") lastOut[e.channel] = [...(lastOut[e.channel] ?? []), e.at].slice(-20);
@@ -803,7 +804,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       console.info(JSON.stringify({ chinwag: "playground.message", person: person.name, channel: channel.name, at: new Date(line.at).toISOString() }));
       emitLine(k, line);
       carrier(p, k, text);
-      const taken = person.key ? await agent.simulateVisitor!({ key: person.key, address: visitorAddress, channel: channel.name, message: incoming })
+      const taken = person.key || person.visitor ? await agent.simulateVisitor!({ key: person.key, address: visitorAddress, channel: channel.name, message: incoming })
         : await agent.simulate({ person: person.phone, channel: channel.name, message: incoming });
       if (taken) rememberPerson(taken.conversationId, person);
       line.id = taken?.messageId ?? null;

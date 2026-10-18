@@ -3,7 +3,82 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { z } from "zod";
 import { tool } from "../src/index.ts";
-import { WEB, call, gate, harness, last, respond, say, users } from "./helpers.ts";
+import { WEB, WEB_APP, WHATSAPP, call, gate, harness, last, multi, respond, say, users } from "./helpers.ts";
+
+// Other tool tests have no chat auth adapter; MCP tests do not run the chat execution path.
+test("chat refuses protected tools and sends one real login message for parallel calls", async () => {
+  let executions = 0, challenges = 0;
+  const secret = tool({ name: "private_data", description: "Private data.", signIn: "required", input: z.object({}), run: () => ++executions });
+  const h = multi({ channels: { web: { info: { ...WEB_APP, linkButton: { labelMax: 20 } } } }, tools: [secret], auth: { signIn: (ctx) => {
+    assert.equal(ctx.key, null); assert.equal(ctx.address, "visitor-1"); challenges++;
+    return { message: "Please sign in to see your account.", url: "https://brand.example/login" };
+  } } });
+  const taken = await h.message("web", "visitor-1", "show my account");
+  const first = await h.nextCall(0);
+  assert.match(first.request.tools.find((t) => t.name === "private_data")!.description, /Requires sign-in/);
+  first.answer(respond(call("send_web", { text: "Let me check." }), call("private_data"), call("private_data")));
+  await h.agent.conversation(taken!.conversationId)!.whenIdle();
+  assert.equal(executions, 0); assert.equal(challenges, 1); assert.equal(h.calls.length, 1);
+  const prompt = h.out.find((o) => o.outbound.type === "message" && o.outbound.link);
+  assert.deepEqual(prompt?.outbound, { type: "message", authentication: true, text: "Please sign in to see your account.", link: { label: "Sign in", url: "https://brand.example/login" } });
+  const transcript = await h.agent.transcript(taken!.conversationId);
+  assert.ok(transcript.some((t) => t.kind === "out" && t.text === "Please sign in to see your account."));
+});
+
+// Existing deadline tests cover backend work, not an auth check that outlasts a tool deadline.
+test("authentication cannot detach or execute a protected operation while verification is pending", async () => {
+  const entered = gate<void>(), verified = gate<boolean>();
+  let ran = false;
+  const secret = tool({ name: "secret", description: "Private.", deadlineMs: 0, input: z.object({}), run: () => { ran = true; } });
+  const h = multi({ channels: { web: { info: WEB_APP } }, resolve: () => "account-1", tools: [secret], auth: {
+    verify: () => { entered.open(); return verified.promise; }, signIn: () => ({ message: "Please sign in again." }),
+  } });
+  const taken = await h.message("web", "visitor-1", "my data");
+  (await h.nextCall(0)).answer(respond(call("send_web", { text: "Checking." }), call("secret")));
+  await entered.promise;
+  assert.equal(ran, false);
+  assert.equal(h.events.some(e => e.type === "tool.detached"), false);
+  verified.open(false);
+  await h.agent.conversation(taken!.conversationId)!.whenIdle();
+  assert.equal(ran, false);
+  assert.equal(h.events.some(e => e.type === "tool.detached"), false);
+  assert.ok(h.out.some(o => o.outbound.type === "message" && o.outbound.authentication));
+});
+
+test("public and optional chat tools run signed out, with no login challenge", async () => {
+  const seen: Array<string | null> = [];
+  const tools = (["none", "optional"] as const).map((signIn) => tool({ name: signIn, description: signIn, signIn, input: z.object({}), run: (_i, ctx) => { seen.push(ctx.key); return "public result"; } }));
+  const h = multi({ channels: { web: { info: WEB_APP } }, tools, auth: { signIn: () => { throw new Error("Must not ask for login"); } } });
+  const taken = await h.message("web", "visitor-1", "hello");
+  (await h.nextCall(0)).answer(respond(call("send_web", { text: "Hello." }), call("none"), call("optional")));
+  (await h.nextCall(1)).answer(respond(call("send_web", { text: "Public result." })));
+  await h.agent.conversation(taken!.conversationId)!.whenIdle();
+  assert.deepEqual(seen, [null, null]);
+  assert.equal(h.events.filter((e) => e.type === "auth.required").length, 0);
+});
+
+test("verified-phone accounts run protected chat tools directly; revoked optional access loses credentials", async () => {
+  let active = true;
+  const keys: Array<string | null> = [];
+  const required = tool({ name: "required", description: "Private.", input: z.object({}), run: (_i, ctx) => { keys.push(ctx.key); return "private result"; } });
+  const optional = tool({ name: "optional", description: "Optional.", signIn: "optional", input: z.object({}), run: async (_i, ctx) => { keys.push(ctx.key); return ctx.credentials!.get("account"); } });
+  const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true } }, resolve: () => "account-1", tools: [required, optional],
+    credentials: (_name, ctx) => ctx.key ? "private credential" : "public access", auth: { verify: () => active, signIn: () => ({ message: "Sign in again." }) } });
+  const taken = await h.message("whatsapp", "+15555550101", "my account");
+  (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Checking." }), call("required")));
+  (await h.nextCall(1)).answer(respond(call("send_whatsapp", { text: "Done." })));
+  await h.agent.conversation(taken!.conversationId)!.whenIdle();
+  assert.deepEqual(keys, ["account-1"]);
+  active = false;
+  await h.message("whatsapp", "+15555550101", "try optional");
+  (await h.nextCall(2)).answer(respond(call("send_whatsapp", { text: "Checking." }), call("optional")));
+  const result = await h.nextCall(3);
+  assert.ok(JSON.stringify(result.request.messages).includes("public access"));
+  assert.ok(!JSON.stringify(result.request.messages).includes("private credential"));
+  result.answer(respond(call("send_whatsapp", { text: "Public only." })));
+  await h.agent.conversation(taken!.conversationId)!.whenIdle();
+  assert.deepEqual(keys, ["account-1", null]);
+});
 
 test("tools in one response run together, and messages go out while they run", async () => {
   const a = gate<string>();

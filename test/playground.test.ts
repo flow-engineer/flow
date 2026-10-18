@@ -46,6 +46,28 @@ test("a visitor needs no declared phone and cannot rebind another account's chan
   assert.deepEqual(h.out, [], "no real provider is called");
 });
 
+// Earlier visitor tests keep the conversation resident; they cannot catch restoration replacing new proof with an older address.
+test("a fresh authenticated browser keeps its address when account history is restored", async () => {
+  const database = sqlite();
+  const h = multi({ channels: { app: { info: WEB_APP } }, database });
+  h.agent.attachPlayground(() => {});
+  const old = await h.agent.simulateVisitor({ channel: "app", key: "account-a", address: "old-browser", message: "old session" });
+  (await h.nextCall(0)).answer(respond(call("send_app", { text: "Hello" })));
+  await h.agent.conversation(old!.conversationId)!.whenIdle();
+  await h.agent.conversation(old!.conversationId)!.stored();
+  h.agent.conversation(old!.conversationId)!.close();
+  const seen: string[] = [];
+  const next = multi({ channels: { app: { info: WEB_APP } }, database, auth: { verify: ctx => { seen.push(ctx.address); return ctx.address === "new-browser"; }, signIn: () => ({ message: "Unexpected login challenge" }) }, tools: [tool({ name: "private", description: "Account.", input: z.object({}), run: () => "ok" })] });
+  next.agent.attachPlayground(() => {});
+  await next.agent.resume();
+  const fresh = await next.agent.simulateVisitor({ channel: "app", key: "account-a", address: "new-browser", message: "new session" });
+  assert.equal(fresh!.conversationId, old!.conversationId);
+  (await next.nextCall(0)).answer(respond(call("send_app", { text: "Checking" }), call("private")));
+  (await next.nextCall(1)).answer(respond(call("send_app", { text: "Done" })));
+  await next.agent.conversation(fresh!.conversationId)!.whenIdle();
+  assert.deepEqual(seen, ["new-browser"]);
+});
+
 test("a test person who switches channels resumes the same conversation", async () => {
   const h = playground();
   const a = await h.agent.simulate({ person: SAM.phone, channel: "whatsapp", message: "hi" });

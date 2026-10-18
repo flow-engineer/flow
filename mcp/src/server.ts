@@ -45,6 +45,8 @@ export interface McpAuth {
 export interface McpIdentity {
   key: string;
   scopes?: string[];
+  /** Request-bound backend access, such as a brand token exchange. Never exposed to the model. */
+  credentials?: CredentialProvider;
 }
 
 export interface McpServerOptions {
@@ -147,7 +149,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         // CLI retries can preserve a call key; other hosts get one per request.
         idempotencyKey: typeof sentKey === "string" && sentKey.length > 0 && sentKey.length <= 256 ? sentKey : randomUUID(),
         signal: ctx.mcpReq?.signal ?? new AbortController().signal,
-      }, options.credentials);
+      }, (ctx.http?.authInfo?.extra?.credentials as CredentialProvider | undefined) ?? options.credentials);
       const started = Date.now();
       emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input: parsed.data, ...detail });
       const result = await callTool(t, parsed.data, context);
@@ -192,6 +194,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
       const identity = await options.auth.verify(bearer, request);
       if (!identity) return challenge(url, servedPath, 401, "invalid_token", "The token is not valid.", []);
       authInfo = { token: bearer, clientId: "", scopes: identity.scopes ?? [], extra: { key: identity.key } };
+      if (identity.credentials) Object.defineProperty(authInfo.extra!, "credentials", { value: identity.credentials, enumerable: false });
     }
     let parsedBody: unknown;
     if (request.method === "POST") {

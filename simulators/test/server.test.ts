@@ -128,7 +128,7 @@ test("the web simulator plays the agent's own custom UI, and shows the params it
 const SAM = { name: "Sam", phone: "+15555550101" };
 
 // Existing tests cover operator access and declared people, but never a person's real sign-in.
-test("real sign-in gates history and messages, isolates browser/channel identities, and can start signed out again", async () => {
+test("visitors chat signed out, join verified account history after login, and isolate browser/channel identities", async () => {
   const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true }, web: { info: WHATSAPP } }, testPeople: [SAM], resolve: ({ phone }) => phone === SAM.phone ? "account-1" : null, database: sqlite() });
   await h.agent.resume();
   const signedIn = new Map<string, string>();
@@ -148,18 +148,19 @@ test("real sign-in gates history and messages, isolates browser/channel identiti
     const cookie = status.headers.get("set-cookie")!.split(";")[0];
     assert.match(status.headers.get("set-cookie")!, /HttpOnly; SameSite=Lax/);
     const visitor = seen.at(-1)!;
-    for (const path of ["transcript", "events", "poll", "person"]) assert.equal((await api(path, cookie)).status, 401, path);
-    for (const path of ["messages", "reactions", "clear", "nudge"]) {
-      assert.equal((await api(path, cookie, "POST", { text: "private", signedIn: true, visitor })).status, 401, path);
-    }
-    assert.equal(h.calls.length, 0, "body claims cannot authenticate or start a model turn");
+    assert.deepEqual((await (await api("transcript", cookie)).json()).lines, [], "signed-out history contains no account data");
+    assert.equal((await api("messages", cookie, "POST", { text: "hello", signedIn: true, key: "account-1", visitor })).status, 202);
+    (await h.nextCall(0)).answer(respond(call("send_web", { text: "Hello" })));
+    const anonymous = (await h.agent.visitorConversation(null, { channel: "web", address: visitor }))!;
+    await h.agent.conversation(anonymous)!.whenIdle();
+    assert.equal(await h.agent.visitorConversation("account-1"), null, "body claims cannot authenticate the visitor");
     signedIn.set(visitor, "account-1"); // Verified OAuth callback supplied the real account identity.
     assert.equal((await (await api("auth", cookie)).json()).signedIn, true);
     assert.equal((await api("transcript", cookie)).status, 200);
-    assert.equal((await api("transcript")).status, 401, "another browser remains signed out");
-    assert.equal((await fetch(`${server.url}/api/transcript?person=visitor&channel=whatsapp`, { headers: { cookie } })).status, 401, "another channel needs its own connection");
+    assert.deepEqual((await (await api("transcript")).json()).lines, [], "another browser has no account history");
+    assert.equal((await (await fetch(`${server.url}/api/auth?person=visitor&channel=whatsapp`, { headers: { cookie } })).json()).signedIn, false, "another channel needs its own connection");
     assert.equal((await api("messages", cookie, "POST", { text: "a latte" })).status, 202);
-    (await h.nextCall(0)).answer(respond(call("send_web", { text: "Hello again" })));
+    (await h.nextCall(1)).answer(respond(call("send_web", { text: "Hello again" })));
     const id = (await h.agent.visitorConversation("account-1"))!;
     assert.equal(id, await h.agent.testConversation(SAM.phone), "OAuth and a verified phone reach the same account conversation");
     await h.agent.conversation(id)!.whenIdle();
@@ -170,7 +171,7 @@ test("real sign-in gates history and messages, isolates browser/channel identiti
     assert.equal((await reset.json()).signedIn, false);
     const freshCookie = reset.headers.get("set-cookie")!.split(";")[0];
     assert.notEqual(freshCookie, cookie);
-    assert.equal((await api("transcript", freshCookie)).status, 401);
+    assert.deepEqual((await (await api("transcript", freshCookie)).json()).lines, []);
     assert.ok((await h.agent.transcript(id)).length, "starting signed out keeps account history");
     assert.equal((await fetch(`${server.url}/api/transcript?person=${encodeURIComponent(SAM.phone)}&channel=web`)).status, 200, "existing declared people stay unchanged");
     const fresh = seen.at(-1)!;

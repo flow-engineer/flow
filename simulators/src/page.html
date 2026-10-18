@@ -497,8 +497,12 @@
       }
     }
     const body = document.createElement("span");
-    if (current.formatting === "whatsapp") body.innerHTML = whatsappHtml(line.text);
-    else body.textContent = line.text;
+    // Channels without link buttons carry the URL in text. A real auth link must still open login.
+    const authURL = line.authentication && !line.link ? /\n(https?:\/\/\S+)$/.exec(line.text) : null;
+    const link = line.link || (authURL ? { label: "Sign in", url: authURL[1] } : null);
+    const text = authURL ? line.text.slice(0, authURL.index) : line.text;
+    if (current.formatting === "whatsapp") body.innerHTML = whatsappHtml(text);
+    else body.textContent = text;
     b.appendChild(body);
     if (tpl && tpl.footer) { const f = document.createElement("span"); f.className = "tpl-foot"; f.textContent = tpl.footer; b.appendChild(f); }
     if (current.id === "whatsapp") {
@@ -551,16 +555,21 @@
       btns.appendChild(btn);
       row.appendChild(btns);
     }
-    if (line.link) {
-      // A button that opens a page (WhatsApp's call-to-action URL button). Nothing is really opened.
+    if (link) {
+      // A button that opens a page (WhatsApp's call-to-action URL button). Authentication opens the real login. Other links use a simulated screen.
       const btns = document.createElement("div");
       btns.className = "btns";
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.textContent = "↗ " + line.link.label;
-      btn.title = line.link.url;
-      const url = line.link.url;
-      btn.addEventListener("click", () => openScreen(cards.find((c) => url.includes(c.match)) || { label: line.link.label, kind: "page" }, url));
+      btn.textContent = "↗ " + link.label;
+      btn.title = link.url;
+      const url = link.url;
+      btn.addEventListener("click", () => {
+        if (line.authentication) {
+          const target = new URL(url, location.href);
+          if (["https:", "http:"].includes(target.protocol)) location.assign(target.href);
+        } else openScreen(cards.find((c) => url.includes(c.match)) || { label: link.label, kind: "page" }, url);
+      });
       btns.appendChild(btn);
       row.appendChild(btns);
     }
@@ -917,7 +926,7 @@
       if (mine !== opened) return;
       showAuth(state);
       try { $("text").value = sessionStorage.getItem(draftKey()) || $("text").value; } catch {}
-      if (!signedIn) { sysnote("Sign in to continue. Your message stays here while you sign in."); return; }
+
     }
     const response = await fetch(BASE + "/api/transcript" + query());
     if (isVisitor() && response.status === 401) { showAuth(await response.json()); return; }
@@ -998,12 +1007,7 @@
   }
 
   async function send(text, extra = {}) {
-    if (isVisitor() && !signedIn) {
-      try { sessionStorage.setItem(draftKey(), text); } catch {}
-      $("text").value = text;
-      sysnote("Sign in before sending this message.", true);
-      return;
-    }
+    if (isVisitor() && !signedIn) { try { sessionStorage.setItem(draftKey(), text); } catch {} }
     const body = { ...where(), text, ...extra };
     if (!body.replyTo && replyTo) body.replyTo = replyTo.id;
     setReply(null);
@@ -1012,7 +1016,7 @@
       $("text").value = text;
       if (isVisitor() && response.status === 401) showAuth(await response.json());
       sysnote("Your message was not sent. Check sign-in and try again.", true);
-    } else { try { sessionStorage.removeItem(draftKey()); } catch {} }
+    } else if (signedIn) { try { sessionStorage.removeItem(draftKey()); } catch {} }
   }
 
   function showAuth(state) {

@@ -85,6 +85,7 @@ export function skillTool(skills: Skill[], onLoad: (conversationId: string, name
   const names = skills.map((s) => s.name);
   return tool({
     name: "load_skill",
+    signIn: "none",
     description: "Read a skill's full instructions. Use it before doing what the skill covers.",
     input: z.object({ name: z.enum(names as [string, ...string[]]) }),
     deadlineMs: 60_000,

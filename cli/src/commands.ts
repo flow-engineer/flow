@@ -58,6 +58,10 @@ export interface CliConfig {
   groups?: Record<string, string>;
   /** A Client ID Metadata Document URL for sign-in; without it the CLI registers itself (DCR). */
   clientMetadataUrl?: string;
+  /** A registered public OAuth client, for providers without dynamic registration. No client secret in a distributed CLI. */
+  clientId?: string;
+  /** A provider requiring an exact registered loopback port can fix it here; default chooses a free port. */
+  redirectPort?: number;
   /** How a sign-in link is opened (default: printed for the person to open). */
   openUrl?: (url: string) => void | Promise<void>;
 }

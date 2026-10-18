@@ -17,6 +17,8 @@ export interface ToolContext {
   key: string | null;
   /** The channel of their latest message. */
   channel: string;
+  /** Provider/server-issued address on a chat channel; absent for standalone MCP calls. */
+  address?: string;
   /** The model's id for this call, as the history keeps it. */
   callId: string;
   /**
@@ -39,6 +41,25 @@ export interface Credentials {
   get<T = unknown>(name: string): Promise<T>;
 }
 
+/** Server-side identity at a chat tool boundary. No credentials or model-supplied account ids. */
+export interface ChatAuthContext {
+  conversationId: string;
+  person: string;
+  key: string | null;
+  channel: string;
+  address: string;
+  tool: string;
+  signal: AbortSignal;
+}
+
+/** Brand-owned login: OAuth, an existing login page, verified phone, or a custom challenge. */
+export interface ChatAuth {
+  /** Recheck a resolved account's current access. Without this, a non-null resolved key is enough. */
+  verify?: (context: Readonly<ChatAuthContext>) => boolean | Promise<boolean>;
+  /** Called only when a protected operation needs authentication. A custom in-chat prompt needs no URL. */
+  signIn: (context: Readonly<ChatAuthContext>) => { message: string; url?: string } | Promise<{ message: string; url?: string }>;
+}
+
 /** Bind backend access without putting secrets on an enumerable context or in any event. */
 export function toolContext(context: Omit<ToolContext, "credentials">, provider?: CredentialProvider): ToolContext {
   const identity = Object.freeze({ ...context });
@@ -56,7 +77,7 @@ export interface Tool<Input = any> {
   run(input: Input, context: ToolContext): Promise<unknown> | unknown;
   /** The longest the reply waits for this tool before it moves to the background (default: the agent's, 60 s). */
   deadlineMs?: number;
-  // The fields below describe the tool to the other surfaces (MCP, the CLI). Chat ignores them all.
+  // Metadata shared with other surfaces (MCP, the CLI).
   /** A name for people ("Place an order"); derived from `name` when absent. */
   title?: string;
   /** The result's shape. Over MCP the result is checked against it and sent as structured content too. */
@@ -65,8 +86,9 @@ export interface Tool<Input = any> {
   status?: { running?: string; done?: string };
   /**
    * Whether the person must be signed in. "required" (the default) refuses a call without sign-in,
-   * "optional" runs either way, "none" never needs it. It applies only where sign-in is set up (an
-   * MCP server with `auth`); everywhere else every tool runs.
+   * "optional" runs either way, "none" never needs it. Enforced where sign-in is configured:
+   * createAgent({ auth }) for chat, or mcpServer({ auth }) for MCP. Existing agents without auth
+   * keep their current behaviour.
    */
   signIn?: SignIn;
   /** How the tool behaves, for hosts to decide what to ask the person first. Nothing enforces them. */

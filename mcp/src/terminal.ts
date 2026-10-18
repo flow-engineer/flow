@@ -32,7 +32,7 @@ export function terminalServer(options: TerminalServerOptions) {
       if (inFlight >= 128) return Response.json({ error: "busy" }, { status: 429 });
       inFlight++;
       const previous = pending.get(identity.key) ?? Promise.resolve();
-      const work = previous.catch(() => undefined).then(() => options.agent().request({ channel: channel.name, key: identity.key, text: input.text as string, conversationId: input.conversationId as string | undefined }));
+      const work = previous.catch(() => undefined).then(() => options.agent().request({ channel: channel.name, key: identity.key, text: input.text as string, conversationId: input.conversationId as string | undefined, credentials: identity.credentials }));
       pending.set(identity.key, work);
       try { return Response.json(await work); }
       catch { return Response.json({ error: "turn_failed" }, { status: 500 }); }

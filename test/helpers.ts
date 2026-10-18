@@ -102,6 +102,7 @@ export function multi(options: {
   database?: Database;
   resolve?: AgentOptions["resolve"];
   credentials?: AgentOptions["credentials"];
+  auth?: AgentOptions["auth"];
   now?: () => number;
   timeZone?: string;
   dir?: string;
@@ -147,6 +148,7 @@ export function multi(options: {
     database,
     resolve: options.resolve,
     credentials: options.credentials,
+    auth: options.auth,
     now: options.now,
     timeZone: options.timeZone,
     testPeople: options.testPeople,

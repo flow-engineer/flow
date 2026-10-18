@@ -2,7 +2,7 @@
 import { mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs, styleText } from "node:util";
-import { configDir, isSignedIn, storedProvider } from "./auth.ts";
+import { configDir, isSignedIn, storedAccessToken } from "./auth.ts";
 import { tokenEnvOf, type CliConfig } from "./commands.ts";
 import type { CliIO } from "./run.ts";
 
@@ -16,7 +16,9 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   if (command === "ask" ? flags.positionals.length !== 1 : flags.positionals.length !== 0) { io.writeError(`Usage: ${usage}\n`); return 2; }
   if (command === "chat" && !io.interactive) { io.writeError(`chat needs a terminal; use ${config.name} ask "<question>" instead.\n`); return 2; }
   if (!server) { io.writeError("Pass --server <url> or configure the MCP server.\n"); return 5; }
-  if (!token && isSignedIn(config, server)) token = (await storedProvider(config, server).tokens())?.access_token;
+  const stored = !token && isSignedIn(config, server);
+  try { if (stored) token = await storedAccessToken(config, server); }
+  catch { io.writeError(`Sign in again: ${config.name} auth login.\n`); return 3; }
   if (!token) { io.writeError(`Sign in first: ${config.name} auth login (or set ${tokenEnvOf(config)}).\n`); return 3; }
   const humanChat = command === "chat" && !flags.values.json;
   const endpoint = config.agent ?? new URL("/agent/terminal", server).href;
@@ -28,7 +30,15 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
     let response;
     const clearStatus = humanChat && Boolean(process.stderr.isTTY) && process.env.TERM !== "dumb";
     if (humanChat) io.writeError(`${styleText("dim", "  Waiting for reply…")}${clearStatus ? "" : "\n"}`);
-    try { response = await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ text, ...(saved[endpoint] ? { conversationId: saved[endpoint] } : {}) }), signal: AbortSignal.timeout(10 * 60_000) }); }
+    const request = () => fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify({ text, ...(saved[endpoint] ? { conversationId: saved[endpoint] } : {}) }), signal: AbortSignal.timeout(10 * 60_000) });
+    try {
+      response = await request();
+      if (response.status === 401 && stored) {
+        await response.body?.cancel();
+        token = await storedAccessToken(config, server!, true);
+        if (token) response = await request();
+      }
+    }
     catch { response = undefined; }
     finally { if (clearStatus) io.writeError("\r\u001b[2K"); }
     if (!response) { io.writeError("Could not reach the agent.\n"); return 5; }

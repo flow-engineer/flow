@@ -104,15 +104,16 @@ test("backend credentials are resolved by verified account, isolated across conc
   let both!: () => void;
   const arrived = new Promise<void>(resolve => { both = resolve; });
   let waiting = 0;
-  const url = await serve({
-    name: "test", version: "1", events: [e => { events.push(e); }],
-    auth: { issuer: "https://login.example.com", verify: token => ["sam", "ria"].includes(token) ? { key: token } : null },
-    credentials: async (name, context) => {
+  const backend = async (name: string, context: Readonly<Omit<ToolContext, "credentials">>, proof?: string) => {
       assert.equal(name, "api");
       if (++waiting === 2) both();
       await gate;
-      return `private-api-${context.key}`;
-    },
+      return `private-api-${context.key}${proof ? `-${proof}` : ""}`;
+  };
+  const url = await serve({
+    name: "test", version: "1", events: [e => { events.push(e); }],
+    auth: { issuer: "https://login.example.com", verify: token => token === "sam" ? { key: token, credentials: (name, ctx) => backend(name, ctx, "request-proof") } : token === "ria" ? { key: token } : null },
+    credentials: backend,
     tools: [tool({ name: "account", description: "Read their account.", input: z.object({ claimed_user: z.string() }), run: async (_input, context) => {
       const credential = await context.credentials!.get<string>("api");
       seen.push({ key: context.key, context: JSON.stringify(context), credential });
@@ -126,7 +127,7 @@ test("backend credentials are resolved by verified account, isolated across conc
     release();
     const results = await calls;
     assert.deepEqual(results.map(r => r.content), [[{ type: "text", text: '{"account":"sam"}' }], [{ type: "text", text: '{"account":"ria"}' }]]);
-    assert.deepEqual(seen.map(s => [s.key, s.credential]).sort(), [["ria", "private-api-ria"], ["sam", "private-api-sam"]]);
+    assert.deepEqual(seen.map(s => [s.key, s.credential]).sort(), [["ria", "private-api-ria"], ["sam", "private-api-sam-request-proof"]]);
     assert.ok(seen.every(s => !s.context.includes("private-api") && !s.context.includes("credentials")));
     assert.ok(!JSON.stringify(events).includes("private-api"));
   } finally { release(); await Promise.all([sam.close(), ria.close()]); }

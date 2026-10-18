@@ -129,7 +129,7 @@ test("wrong arguments exit 2 with what is wrong and the help to read, before any
 
 test("auth login signs in on the organization's own login, and the token is kept at mode 600", async () => {
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "chinwag-cli-"));
-  let issuer = "";
+  let issuer = "", registrations = 0;
   issuer = await listen(async (req, res) => {
     const url = new URL(req.url!, issuer);
     const body = await new Promise<string>((resolve) => {
@@ -140,7 +140,7 @@ test("auth login signs in on the organization's own login, and the token is kept
     if (url.pathname === "/.well-known/oauth-authorization-server") {
       return json(200, { issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`, registration_endpoint: `${issuer}/register`, response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"], code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"] });
     }
-    if (url.pathname === "/register") return json(201, { ...JSON.parse(body), client_id: "cli-1" });
+    if (url.pathname === "/register") { registrations++; return json(201, { ...JSON.parse(body), client_id: "cli-1" }); }
     if (url.pathname === "/authorize") {
       // The person signs in on the organization's page; here the page approves at once.
       const back = new URL(url.searchParams.get("redirect_uri")!);
@@ -171,6 +171,10 @@ test("auth login signs in on the organization's own login, and the token is kept
   const after = io();
   assert.equal(await runCli(cli, ["my-orders", "--json"], after.channel), 0);
   assert.deepEqual(JSON.parse(after.out), { for: "user-7" });
+  assert.equal(registrations, 1);
+  const registered = { ...cli, name: "registered-client", clientId: "known-client" };
+  assert.equal(await runCli(registered, ["auth", "login"], io().channel), 0);
+  assert.equal(registrations, 1, "an existing provider's registered client never requires DCR");
 });
 
 // Tool argument tests cannot prove that the server receives CLI metadata outside arguments.
@@ -192,9 +196,9 @@ test("ask and chat use the authenticated agent terminal, preserve identity and n
   t.after(() => { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; });
   const scripted = scriptedModel();
   let agent: ReturnType<typeof createAgent>;
-  const terminal = terminalServer({ agent: () => agent, auth: { verify: token => token === "test" ? { key: "user-7" } : null } });
+  const terminal = terminalServer({ agent: () => agent, auth: { verify: token => token === "test" ? { key: "user-7", credentials: async (name, ctx) => { assert.equal(name, "api"); assert.equal(ctx.key, "user-7"); return "request-bound-backend"; } } : null } });
   let seenKey: string | null = null;
-  const mine = tool({ name: "mine", description: "Who this is for.", input: z.object({}), run: (_i, ctx) => { seenKey = ctx.key; return "the test person's orders"; } });
+  const mine = tool({ name: "mine", description: "Who this is for.", input: z.object({}), run: async (_i, ctx) => { seenKey = ctx.key; assert.equal(await ctx.credentials!.get("api"), "request-bound-backend"); return "the test person's orders"; } });
   agent = createAgent({ files: { "AGENTS.md": "Test agent" }, model: scripted.model, channels: [terminal.channel], tools: [mine], debounceMs: 0, scheduleCheckMs: 0 });
   const base = await listen(async (req, res) => {
     assert.equal(req.url, "/agent/terminal", "ask/chat must not fetch the MCP tools");

@@ -5,14 +5,18 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
   auth,
+  discoverOAuthServerInfo,
+  refreshAuthorization,
   type OAuthClientMetadata,
   type OAuthClientProvider,
   type StoredOAuthClientInformation,
   type StoredOAuthTokens,
+  type OAuthDiscoveryState,
 } from "@modelcontextprotocol/client";
 import type { CliConfig } from "./commands.ts";
 
@@ -20,6 +24,9 @@ interface Saved {
   client?: StoredOAuthClientInformation;
   tokens?: StoredOAuthTokens;
   verifier?: string;
+  state?: string;
+  discovery?: OAuthDiscoveryState;
+  tokensSavedAt?: number;
 }
 
 export function configDir(config: CliConfig): string {
@@ -52,6 +59,7 @@ export function storedProvider(config: CliConfig, server: string, redirectUrl?: 
   };
   const metadata: OAuthClientMetadata = {
     client_name: `${config.name} CLI`,
+    application_type: "native",
     redirect_uris: redirectUrl ? [redirectUrl] : [],
     grant_types: ["authorization_code", "refresh_token"],
     response_types: ["code"],
@@ -65,10 +73,13 @@ export function storedProvider(config: CliConfig, server: string, redirectUrl?: 
       return metadata;
     },
     ...(config.clientMetadataUrl ? { clientMetadataUrl: config.clientMetadataUrl } : {}),
-    clientInformation: () => read().client,
+    clientInformation: () => config.clientId ? { client_id: config.clientId } : read().client,
     saveClientInformation: (client) => write({ client }),
     tokens: () => read().tokens,
-    saveTokens: (tokens) => write({ tokens }),
+    saveTokens: (tokens) => write({ tokens, tokensSavedAt: Date.now() }),
+    state: () => { const state = randomBytes(32).toString("base64url"); write({ state }); return state; },
+    discoveryState: () => read().discovery,
+    saveDiscoveryState: (discovery) => write({ discovery }),
     redirectToAuthorization: async (url) => {
       if (config.openUrl) await config.openUrl(url.toString());
       else console.error(`Open this link to sign in:\n  ${url}`);
@@ -80,6 +91,22 @@ export function storedProvider(config: CliConfig, server: string, redirectUrl?: 
       return verifier;
     },
   };
+}
+
+/** Terminal HTTP uses the same stored OAuth session as MCP, including refresh and issuer binding. */
+export async function storedAccessToken(config: CliConfig, server: string, forceRefresh = false): Promise<string | undefined> {
+  const saved = readAll(config)[server];
+  if (!saved?.tokens) return undefined;
+  const { tokens } = saved;
+  const expired = saved.tokensSavedAt !== undefined && tokens.expires_in !== undefined && saved.tokensSavedAt + tokens.expires_in * 1000 <= Date.now() + 30_000;
+  if (!expired && !forceRefresh) return tokens.access_token;
+  if (!tokens.refresh_token || (!saved.client && !config.clientId)) return undefined;
+  const info = await discoverOAuthServerInfo(server);
+  const issuer = info.authorizationServerMetadata?.issuer ?? String(info.authorizationServerUrl);
+  if (tokens.issuer && tokens.issuer !== issuer) throw new Error("The authorization server changed; sign in again.");
+  const fresh = await refreshAuthorization(info.authorizationServerUrl, { metadata: info.authorizationServerMetadata, clientInformation: config.clientId ? { client_id: config.clientId } : saved.client!, refreshToken: tokens.refresh_token, resource: info.resourceMetadata?.resource });
+  await storedProvider(config, server).saveTokens({ ...fresh, issuer });
+  return fresh.access_token;
 }
 
 export function isSignedIn(config: CliConfig, server: string): boolean {
@@ -95,7 +122,7 @@ export function signOut(config: CliConfig, server: string): void {
 /** Sign in: the browser goes to the organization's own login, and comes back to a loopback port. */
 export async function signIn(config: CliConfig, server: string): Promise<void> {
   const callback = createServer();
-  await new Promise<void>((resolve) => callback.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve, reject) => { callback.once("error", reject); callback.listen(config.redirectPort ?? 0, "127.0.0.1", resolve); });
   const { port } = callback.address() as { port: number };
   const redirectUrl = `http://127.0.0.1:${port}/callback`;
   try {
@@ -106,6 +133,10 @@ export async function signIn(config: CliConfig, server: string): Promise<void> {
         if (url.pathname !== "/callback") return void res.writeHead(404).end();
         const error = url.searchParams.get("error");
         const got = url.searchParams.get("code");
+        if (req.method !== "GET" || req.headers.host !== `127.0.0.1:${port}` || !readAll(config)[server]?.state || url.searchParams.get("state") !== readAll(config)[server]?.state) {
+          res.writeHead(400, { "content-type": "text/plain" }).end("Invalid sign-in response.");
+          return;
+        }
         res.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end(got ? `Signed in. You can close this tab and go back to ${config.name}.` : `Sign-in failed: ${error ?? "no code"}.`);
         if (got) resolve({ code: got, iss: url.searchParams.get("iss") ?? undefined });
         else reject(new Error(`Sign-in failed: ${error ?? "no code came back"}.`));
