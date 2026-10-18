@@ -44,7 +44,9 @@ export class Client {
 
   constructor(options: { apiKey: string; baseUrl: string }) {
     this.apiKey = options.apiKey;
-    this.baseUrl = options.baseUrl.replace(/\/+$/, "");
+    let end = options.baseUrl.length;
+    while (end > 0 && options.baseUrl[end - 1] === "/") end--;
+    this.baseUrl = options.baseUrl.slice(0, end);
   }
 
   get<T>(path: string): Promise<T> {

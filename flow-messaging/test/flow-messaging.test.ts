@@ -265,3 +265,15 @@ test("contact.deleted forgets the contact's Flow conversation: a later nudge sta
   assert.deepEqual((await flow.request(post("/v1/messages"))).body, { sender: "snd_WA", to: { phone: "+15550100100" }, content: { type: "text", text: "We kept nothing about you", format: "plain" } });
   assert.equal(flow.sends("/v1/conversations/conv_wa/messages").length, 1, "nothing more into the erased conversation");
 });
+
+test("trailing slashes come off the base URL, in linear time even on a long run of slashes that does not end the URL", async (t) => {
+  const flow = await fakeFlow();
+  t.after(() => flow.close());
+  const started = performance.now();
+  flowMessaging({ apiKey: "fk_test_key", webhookSecret: SECRET, baseUrl: "http://127.0.0.1:1" + "/".repeat(200_000) + "x" });
+  assert.ok(performance.now() - started < 1000, "a quadratic trim takes seconds on this input");
+
+  const channel = flowMessaging({ apiKey: "fk_test_key", webhookSecret: SECRET, baseUrl: flow.url + "///" }).telegram({ sender: "snd_TG" });
+  await channel.send("777", { type: "message", text: "slashes" });
+  assert.ok(await flow.request((r) => post("/v1/messages")(r) && r.body.content.text === "slashes"));
+});

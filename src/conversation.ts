@@ -293,7 +293,7 @@ export class Conversation {
     this.builtins = new Map(builtins.map((t) => [t.name, t]));
     this.builtinSpecs = builtins.map(toSpec);
     this.loaded = settings.ready.then(() => (existing ? this.load() : settings.store.createConversation(id, personKey)));
-    this.writes = this.loaded.catch((error) => console.warn(`laminar-flow: conversation ${id} did not load:`, error));
+    this.writes = this.loaded.catch((error) => console.warn("laminar-flow: conversation %s did not load:", id, error));
   }
 
   /** Their time zone, as the business set it or they said it: schedules, quiet hours and the time line use it from now on. */
@@ -384,7 +384,7 @@ export class Conversation {
         const files = await this.readFiles(incoming.attachments ?? []);
         if (!this.closed) this.arrive(incoming, id, channel, options.messageId !== undefined, files);
       })
-      .catch((error) => console.warn(`laminar-flow: a message in conversation ${this.id} could not be read:`, error));
+      .catch((error) => console.warn("laminar-flow: a message in conversation %s could not be read:", this.id, error));
     this.preparing = ready;
     void ready.finally(() => {
       if (this.preparing !== ready) return;
@@ -663,7 +663,7 @@ export class Conversation {
     if (this.closed) return this.writes;
     const next = this.writes.then(work).then(
       () => undefined,
-      (error) => console.warn(`laminar-flow: could not save conversation ${this.id}:`, error),
+      (error) => console.warn("laminar-flow: could not save conversation %s:", this.id, error),
     );
     this.writes = next;
     return next;

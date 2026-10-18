@@ -661,7 +661,7 @@ export class Agent {
       if (!row) return;
       this.rows.set(conversationId, row);
       act(this.open(conversationId));
-    })().catch((error) => console.warn(`laminar-flow: conversation ${conversationId} could not be loaded for a report:`, error));
+    })().catch((error) => console.warn("laminar-flow: conversation %s could not be loaded for a report:", conversationId, error));
   }
 
   conversation(conversationId: string): Conversation | undefined {
