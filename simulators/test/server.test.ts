@@ -127,6 +127,58 @@ test("the web simulator plays the agent's own custom UI, and shows the params it
 
 const SAM = { name: "Sam", phone: "+15555550101" };
 
+// Existing tests cover operator access and declared people, but never a person's real sign-in.
+test("real sign-in gates history and messages, isolates browser/channel identities, and can start signed out again", async () => {
+  const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true }, web: { info: WHATSAPP } }, testPeople: [SAM], resolve: ({ phone }) => phone === SAM.phone ? "account-1" : null, database: sqlite() });
+  await h.agent.resume();
+  const signedIn = new Map<string, string>();
+  const seen: string[] = [];
+  const play = simulators({ authentication: async ({ channel, visitor }) => {
+    seen.push(visitor);
+    return { key: signedIn.get(visitor), label: `Account on ${channel.name}`, signInUrl: "https://login.example/sign-in" };
+  } });
+  const server = await play.listen(h.agent, 0);
+  const query = "?person=visitor&channel=web";
+  const api = (path: string, cookie = "", method = "GET", body: object = {}) => fetch(`${server.url}/api/${path}${query}`, {
+    method, headers: { cookie, "content-type": "application/json" }, ...(method === "POST" ? { body: JSON.stringify(body) } : {}),
+  });
+  try {
+    const status = await api("auth");
+    assert.equal((await status.json()).signedIn, false);
+    const cookie = status.headers.get("set-cookie")!.split(";")[0];
+    assert.match(status.headers.get("set-cookie")!, /HttpOnly; SameSite=Lax/);
+    const visitor = seen.at(-1)!;
+    for (const path of ["transcript", "events", "poll", "person"]) assert.equal((await api(path, cookie)).status, 401, path);
+    for (const path of ["messages", "reactions", "clear", "nudge"]) {
+      assert.equal((await api(path, cookie, "POST", { text: "private", signedIn: true, visitor })).status, 401, path);
+    }
+    assert.equal(h.calls.length, 0, "body claims cannot authenticate or start a model turn");
+    signedIn.set(visitor, "account-1"); // Verified OAuth callback supplied the real account identity.
+    assert.equal((await (await api("auth", cookie)).json()).signedIn, true);
+    assert.equal((await api("transcript", cookie)).status, 200);
+    assert.equal((await api("transcript")).status, 401, "another browser remains signed out");
+    assert.equal((await fetch(`${server.url}/api/transcript?person=visitor&channel=whatsapp`, { headers: { cookie } })).status, 401, "another channel needs its own connection");
+    assert.equal((await api("messages", cookie, "POST", { text: "a latte" })).status, 202);
+    (await h.nextCall(0)).answer(respond(call("send_web", { text: "Hello again" })));
+    const id = (await h.agent.visitorConversation("account-1"))!;
+    assert.equal(id, await h.agent.testConversation(SAM.phone), "OAuth and a verified phone reach the same account conversation");
+    await h.agent.conversation(id)!.whenIdle();
+    assert.equal(h.out.length, 0, "visitor replies never call a real channel provider");
+    const history = await (await api("transcript", cookie)).json();
+    assert.ok(history.lines.some((line: Line) => line.kind === "out" && line.text === "Hello again"));
+    const reset = await api("auth/reset", cookie, "POST");
+    assert.equal((await reset.json()).signedIn, false);
+    const freshCookie = reset.headers.get("set-cookie")!.split(";")[0];
+    assert.notEqual(freshCookie, cookie);
+    assert.equal((await api("transcript", freshCookie)).status, 401);
+    assert.ok((await h.agent.transcript(id)).length, "starting signed out keeps account history");
+    assert.equal((await fetch(`${server.url}/api/transcript?person=${encodeURIComponent(SAM.phone)}&channel=web`)).status, 200, "existing declared people stay unchanged");
+    const fresh = seen.at(-1)!;
+    signedIn.set(fresh, "account-2");
+    assert.deepEqual((await (await api("transcript", freshCookie)).json()).lines, [], "a different login cannot inherit the previous account's history");
+  } finally { await server.close(); }
+});
+
 /** Pip-like agent with one WhatsApp channel and Sam as its test person, on `database`. */
 function agentOn(database: ReturnType<typeof sqlite>, dir?: string) {
   return multi({ channels: { whatsapp: { info: WHATSAPP, phone: true } }, testPeople: [SAM], database, dir });
@@ -172,6 +224,21 @@ test("a deployed playground lets in only its token, from its own pages, then onl
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+// Browsers share cookies between localhost ports; the single-server gate test cannot catch collisions.
+test("independent local playgrounds keep separate operator cookies", async () => {
+  const h = agentOn(sqlite());
+  const tokens = ["a".repeat(40), "b".repeat(40)];
+  const servers = tokens.map((token) => createServer(simulators().handler(h.agent, { token, base: "/play" })));
+  await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))));
+  const urls = servers.map((server) => `http://127.0.0.1:${(server.address() as { port: number }).port}/play`);
+  try {
+    const cookies = await Promise.all(urls.map(async (url, i) => (await fetch(`${url}/?token=${tokens[i]}`, { redirect: "manual" })).headers.get("set-cookie")!.split(";")[0]));
+    assert.notEqual(cookies[0].split("=")[0], cookies[1].split("=")[0]);
+    for (const url of urls) assert.equal((await fetch(`${url}/api/platforms`, { headers: { cookie: cookies.join("; ") } })).status, 200);
+    assert.equal((await fetch(`${urls[0]}/api/platforms`, { headers: { cookie: cookies[1] } })).status, 401);
+  } finally { await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve())))); }
 });
 
 test("a file sent from a simulator reaches the agent with its bytes, the message box as its caption", async () => {

@@ -85,3 +85,11 @@ Keep the OAuth protocol layer reusable and the account authority in the brand. T
 For Firebase the app’s function can validate the signed-in user’s Firebase session, or the authenticated provider’s phone proof, and resolve its Firebase UID. A Firebase custom token and any long-lived backend refresh credential stay behind this brand-owned boundary; never give a general Admin SDK service-account key to an agent. The old local test-account bootstrap is test setup, not a production sign-in flow.
 
 A custom login implements the same boundary. Do not make every brand adopt one identity provider or copy an OAuth server into its agent repository.
+
+## Exercise sign-in in the playground
+
+Pass `authentication` to `simulators` to add **New user · signed out** to the person picker. Existing declared test people retain their current identities. The hook receives the `channel` and an opaque `visitor` issued by the playground server, and returns `{ key?, address?, label?, signInUrl? }`. Resolve that visitor's connection with the application's normal auth adapter and return the canonical account `key` only after authentication. A phone-primary brand can resolve a simulated provider-verified phone immediately; other interfaces can return the application's OAuth connection URL. Never take the key or verified phone proof from request bodies, and keep credentials out of the result.
+
+For a new user the playground checks this hook before history, messages, events and person-specific actions. It calls `agent.simulateVisitor` with the server-verified identity, so the account's existing conversation is shared with other interfaces and replies stay in the simulator. A new user needs no declared phone or preassigned account. Each interface needs its own proof; signing in on web does not silently authorize another CLI session.
+
+After login return to the mounted playground with `person=visitor`; its message draft stays available. **New signed-out user** replaces the browser's connection identity without clearing account history or revoking other clients. An existing authorization-server session may still allow login without re-entering a password. The operator token remains required on a deployed playground, and declared people still use the developer identity shortcut. This is a developer simulator, not a customer-facing chat endpoint.

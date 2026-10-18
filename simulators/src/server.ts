@@ -29,7 +29,7 @@
 //
 // The person's messages have the agent's ids (m1, m2, ...); the agent's messages get a1, a2, ...
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -78,6 +78,8 @@ export interface PlaygroundAgent {
   channels(): ChannelSummary[];
   simulate(input: { person: string; channel: string; message: Incoming }): Promise<{ conversationId: string; messageId: string } | null>;
   testConversation(phone: string): Promise<string | null>;
+  simulateVisitor?: Agent["simulateVisitor"];
+  visitorConversation?: Agent["visitorConversation"];
   transcript(conversationId: string): Promise<TranscriptEntry[]>;
   reacted(conversationId: string, emoji: string, toText: string): void;
   forgetPerson(conversationId: string): Promise<void>;
@@ -123,6 +125,18 @@ export interface SimulatorsOptions {
   pages?: { page: string; person: string };
   /** The agent's clock (playgroundClock(), passed to createAgent as `now`): the Person panel can move it. */
   clock?: PlaygroundClock;
+  /**
+   * Adds "New user · signed out" to the person picker. `visitor` is an opaque browser identity,
+   * scoped to the channel. Return the account `key` only after the application's normal auth
+   * verifies it, plus its channel `address` if different from visitor. Keep credentials server-side.
+   * Existing declared test people keep their current identity shortcut.
+   */
+  authentication?: (input: { channel: ChannelSummary; visitor: string }) => Promise<{
+    key?: string;
+    address?: string;
+    label?: string;
+    signInUrl?: string;
+  }>;
 }
 
 export interface LinkCard {
@@ -562,33 +576,42 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
   // The playground.
 
   /** The test person (by phone) each conversation belongs to, so its trace shows in their simulators. */
-  const people = new Map<string, TestPerson>();
+  type PlayingPerson = TestPerson & { key?: string };
+  const people = new Map<string, Map<string, PlayingPerson>>();
   let playing: PlaygroundAgent | null = null;
-  const threadKey = (channel: string, person: TestPerson) => `${channel}:${person.phone}`;
+  const personKey = (person: PlayingPerson) => person.key ? `account:${person.key}` : person.phone;
+  const threadKey = (channel: string, person: PlayingPerson) => `${channel}:${personKey(person)}`;
+  const rememberPerson = (id: string, person: PlayingPerson) => {
+    const all = people.get(id) ?? new Map<string, PlayingPerson>();
+    all.set(personKey(person), person); people.set(id, all);
+  };
+  const conversation = (agent: PlaygroundAgent, person: PlayingPerson) => person.key
+    ? agent.visitorConversation!(person.key) : agent.testConversation(person.phone);
 
   const playgroundEvents: EventSink = (event) => {
-    const person = people.get(event.conversationId);
+    const known = people.get(event.conversationId);
+    const person = known?.values().next().value;
     // A failed turn (a wrong or expired model key, say) on the terminal too, also for no known person.
     if (event.type === "model.error") console.error(`chinwag: model error${person ? ` (${person.name})` : ""}: ${String(event.error)}`);
-    if (!person || !playing) return;
-    for (const c of playing.channels()) show(threadKey(c.name, person), event);
+    if (!known || !playing) return;
+    for (const person of known.values()) for (const c of playing.channels()) show(threadKey(c.name, person), event);
   };
 
   function attach(agent: PlaygroundAgent): void {
     playing = agent;
     agent.attachPlayground(({ conversationId, person, channel, outbound }) => {
-      people.set(conversationId, person);
+      rememberPerson(conversationId, person);
       const own = agent.channels().find((c) => c.name === channel);
-      if (own) return deliverer(platformFor(own), threadKey(channel, person), agent.templates?.())(outbound);
+      if (own) for (const other of people.get(conversationId)!.values()) deliverer(platformFor(own), threadKey(channel, other), agent.templates?.())(outbound);
     });
   }
 
   /** The conversation on one channel, rebuilt from the agent's store, with what only the platform showed (the carrier's replies). */
-  async function load(agent: PlaygroundAgent, person: TestPerson, channel: ChannelSummary): Promise<Thread> {
+  async function load(agent: PlaygroundAgent, person: PlayingPerson, channel: ChannelSummary): Promise<Thread> {
     const k = threadKey(channel.name, person);
     const t = thread(k);
-    const id = await agent.testConversation(person.phone);
-    if (id) people.set(id, person);
+    const id = await conversation(agent, person);
+    if (id) rememberPerson(id, person);
     const p = platformFor(channel);
     let count = 0;
     const lines: Line[] = [];
@@ -633,7 +656,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     if (req.method === "GET" && path === "/api/platforms") {
       const channels = agent.channels().map((c) => ({ name: c.name, kind: c.kind, platform: platformFor(c) }));
       return json(res, 200, {
-        platforms: PLATFORMS, channels, people: agent.testPeople(), cards: options.cards ?? [],
+        platforms: PLATFORMS, channels, people: agent.testPeople(), cards: options.cards ?? [], authentication: !!options.authentication,
         templates: (agent.templates?.() ?? []).map((t) => ({ name: t.name, body: t.body })),
         panel: { person: !!(agent.contact && agent.outbox), nudge: !!agent.recordNudge, clock: !!(options.clock && agent.runDue) },
       });
@@ -658,11 +681,36 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     }
 
     const asked = (name: string) => (typeof body?.[name] === "string" ? (body[name] as string) : (url.searchParams.get(name) ?? ""));
-    const person = agent.testPeople().find((p) => digits(p.phone) === digits(asked("person")) && digits(p.phone) !== "");
-    if (!person) return json(res, 403, { error: "only this agent's test people can be played: declare them in createAgent({ testPeople })" });
+    const isVisitor = asked("person") === "visitor";
+    let person: PlayingPerson | undefined = agent.testPeople().find((p) => digits(p.phone) === digits(asked("person")) && digits(p.phone) !== "");
+    const channel = agent.channels().find((c) => c.name === asked("channel"));
+    let visitorAddress = "";
+    if (isVisitor && options.authentication) {
+      if (!channel) return json(res, 400, { error: "channel must be one of the agent's own channels" });
+      if (!agent.simulateVisitor || !agent.visitorConversation) return json(res, 400, { error: "this playground needs an agent with authenticated visitor support" });
+      const cookieName = `chinwag_visitor_${createHash("sha256").update(`${req.headers.host} ${base}`).digest("hex").slice(0, 12)}`;
+      let browser = (req.headers.cookie ?? "").split(/;\s*/).find((cookie) => cookie.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
+      if (!browser || !/^[A-Za-z0-9_-]{43}$/.test(browser)) browser = undefined;
+      const reset = req.method === "POST" && path === "/api/auth/reset";
+      if (!browser || reset) {
+        browser = randomBytes(32).toString("base64url");
+        const secure = (req.socket as TLSSocket).encrypted || req.headers["x-forwarded-proto"] === "https";
+        res.setHeader("set-cookie", `${cookieName}=${browser}; HttpOnly; SameSite=Lax; Path=${base || "/"}; Max-Age=2592000${secure ? "; Secure" : ""}`);
+      }
+      // Each interface needs its own proof. A web login cannot authenticate an unrelated CLI.
+      const visitor = createHash("sha256").update(JSON.stringify([browser, channel.name])).digest("base64url");
+      const state = await options.authentication({ channel, visitor });
+      const publicState = { signedIn: !!state.key, label: state.label, signInUrl: state.signInUrl };
+      if (path === "/api/auth" || reset) return json(res, 200, publicState);
+      if (!state.key) return json(res, 401, { error: "Sign in to continue.", ...publicState });
+      person = { phone: "", name: "Signed-in user", key: state.key };
+      visitorAddress = state.address ?? visitor;
+    } else if (!person) return json(res, 403, { error: "choose a declared test person, or a new user when sign-in is configured" });
+    if (!person) return json(res, 403, { error: "Sign in to continue." });
+    if (path === "/api/auth") return json(res, 200, { signedIn: true });
 
     if (req.method === "POST" && path === "/api/clear") {
-      const id = await agent.testConversation(person.phone);
+      const id = await conversation(agent, person);
       if (id) {
         await agent.forgetPerson(id);
         people.delete(id);
@@ -675,19 +723,18 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       return json(res, 200, { ok: true });
     }
 
-    const channel = agent.channels().find((c) => c.name === asked("channel"));
     if (!channel) return json(res, 400, { error: "channel must be one of the agent's own channels" });
     const k = threadKey(channel.name, person);
     const p = platformFor(channel);
 
     // The Person panel: what is set and waiting for this person, and the business's side (nudges).
-    const to = { channel: channel.name, address: channel.kind === "custom" ? `test:${person.phone}` : person.phone };
+    const to = { channel: channel.name, address: person.key ? visitorAddress : channel.kind === "custom" ? `test:${person.phone}` : person.phone };
     if (req.method === "GET" && path === "/api/person") {
       if (!agent.contact || !agent.outbox) return json(res, 404, { error: "this agent has no contact record" });
-      const id = await agent.testConversation(person.phone);
+      const id = await conversation(agent, person);
       // One person on every channel: their record from whichever channel they have written on.
       let contact = await agent.contact(to);
-      for (const c of agent.channels()) contact ??= await agent.contact({ channel: c.name, address: c.kind === "custom" ? `test:${person.phone}` : person.phone });
+      if (!person.key) for (const c of agent.channels()) contact ??= await agent.contact({ channel: c.name, address: c.kind === "custom" ? `test:${person.phone}` : person.phone });
       // When the agent wrote on each channel (its latest 20), so the page can flag a channel it is not showing.
       const lastOut: Record<string, number[]> = {};
       for (const e of id ? await agent.transcript(id) : []) if (e.kind === "out") lastOut[e.channel] = [...(lastOut[e.channel] ?? []), e.at].slice(-20);
@@ -731,7 +778,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       const t = await load(agent, person, channel);
       // Taken with the lines, in the same step: every event after this number came after these lines.
       recentOf(k);
-      return json(res, 200, { channel: channel.name, person, optedOut: t.optedOut, lines: t.lines, seq });
+      return json(res, 200, { channel: channel.name, person: { name: person.name, phone: person.phone }, optedOut: t.optedOut, lines: t.lines, seq });
     }
     if (req.method === "GET" && path === "/api/events") return events(req, res, k, url);
     if (req.method === "GET" && path === "/api/poll") return poll(res, k, url);
@@ -740,7 +787,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       const messageId = typeof body?.messageId === "string" ? body.messageId : "";
       const emoji = typeof body?.emoji === "string" ? body.emoji.slice(0, 16) : "";
       const target = findLine(k, messageId);
-      const id = await agent.testConversation(person.phone);
+      const id = await conversation(agent, person);
       if (!p.personReactions || !target || target.kind !== "out" || !emoji || !id) {
         return json(res, 400, { error: "reactions need a platform that has them, an agent message id and an emoji" });
       }
@@ -753,11 +800,12 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       const text = typeof body?.text === "string" ? body.text.trim().slice(0, 4_000) : "";
       if (!text && !attachmentsOf(body).length) return json(res, 400, { error: "text or a file is required" });
       const { incoming, line } = incomingOf(k, body, text, Boolean(p.replies));
-      console.info(JSON.stringify({ chinwag: "playground.message", person: person.name, phone: person.phone, channel: channel.name, at: new Date(line.at).toISOString(), ip: req.socket.remoteAddress ?? null }));
+      console.info(JSON.stringify({ chinwag: "playground.message", person: person.name, channel: channel.name, at: new Date(line.at).toISOString() }));
       emitLine(k, line);
       carrier(p, k, text);
-      const taken = await agent.simulate({ person: person.phone, channel: channel.name, message: incoming });
-      if (taken) people.set(taken.conversationId, person);
+      const taken = person.key ? await agent.simulateVisitor!({ key: person.key, address: visitorAddress, channel: channel.name, message: incoming })
+        : await agent.simulate({ person: person.phone, channel: channel.name, message: incoming });
+      if (taken) rememberPerson(taken.conversationId, person);
       line.id = taken?.messageId ?? null;
       push(k, { type: "id", at: line.at, messageId: line.id });
       return json(res, 202, { messageId: line.id, at: line.at });
@@ -796,6 +844,8 @@ function tokenGate(token: string | undefined): Gate {
   requireToken(token, "chinwag simulators: a deployed playground");
   // The cookie holds a value made from the token, not the token itself.
   const session = createHash("sha256").update(`chinwag-playground:${token}`).digest("hex");
+  // Cookies are shared across localhost ports: independent agents must not overwrite each other.
+  const cookieName = `${COOKIE}_${session.slice(0, 12)}`;
   const tries = wrongTries();
 
   return {
@@ -817,13 +867,13 @@ function tokenGate(token: string | undefined): Gate {
         if (req.method !== "GET" || !sameSecret(query, token)) return fail();
         url.searchParams.delete("token");
         const secure = (req.socket as TLSSocket).encrypted || req.headers["x-forwarded-proto"] === "https";
-        const cookie = `${COOKIE}=${session}; Path=${base || "/"}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
+        const cookie = `${cookieName}=${session}; Path=${base || "/"}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
         const rest = url.searchParams.toString();
         res.writeHead(303, { "set-cookie": cookie, location: url.pathname + (rest ? `?${rest}` : ""), "cache-control": "no-store" }).end();
         return false;
       }
       if (bearer !== undefined) return sameSecret(bearer, token) ? true : fail();
-      const cookie = (req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
+      const cookie = (req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
       if (cookie !== undefined && sameSecret(cookie, session)) return true;
       refuse(res, 401);
       return false;
@@ -919,7 +969,7 @@ async function readBody(req: IncomingMessage, limit = MAX_BODY): Promise<Record<
 }
 
 function json(res: ServerResponse, status: number, value: unknown): void {
-  res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
+  res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(value));
 }
 
 function html(res: ServerResponse, body: string): void {

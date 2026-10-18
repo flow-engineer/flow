@@ -233,6 +233,9 @@
   .log div { display: grid; grid-template-columns: 70px 1fr; gap: 8px; border-bottom: 1px dashed var(--line); padding: 2px 0; }
   .log .t { color: var(--quiet); }
   .tag { font-weight: 600; } .tag.inline { color: var(--good); } .tag.bg { color: var(--warn); } .tag.fold, .tag.ack { color: var(--fold); } .tag.bad { color: var(--bad); }
+  .auth-state { padding: 12px 18px; border-bottom: 1px solid var(--line, #ddd); font-size: 13px; }
+  .auth-state[hidden] { display: none; }
+  .auth-state a, .auth-state button { margin-left: 10px; }
 </style>
 </head>
 <body>
@@ -240,7 +243,7 @@
   <h1>{{title}} <small>· Chinwag playground</small></h1>
   <div class="tabs" id="tabs" role="group" aria-label="Platform"></div>
   <div class="spacer"></div>
-  <select class="ghost play-only" id="who" aria-label="Test person" title="Who you are: one of the agent's test people, the same person on every channel"></select>
+  <select class="ghost play-only" id="who" aria-label="Person" title="Choose a saved test person, or start as a new signed-out user"></select>
   <button class="ghost" id="debug" type="button" aria-pressed="false" title="Show the agent's tool calls in the conversation">Debug</button>
   <button class="ghost cloud-only" id="reset" type="button">New conversation</button>
   <button class="ghost play-only" id="clear" type="button" title="Forget this person: their history, schedules and everything the agent kept about them">Clear history</button>
@@ -251,6 +254,7 @@
       <div class="avatar" id="avatar"></div>
       <div class="who"><b id="name">{{title}}</b><span id="sub"></span></div>
     </div>
+    <div class="auth-state" id="authState" hidden><span id="authLabel"></span><a id="signIn" hidden>Sign in</a><button class="ghost" id="startSignedOut" type="button">New signed-out user</button></div>
     <div class="thread" id="thread" aria-live="polite"></div>
     <div class="replying" id="replying"><b>Replying to</b><div id="replyingText"></div><button type="button" id="cancelReply" aria-label="Cancel reply">✕</button></div>
     <form class="compose" id="form">
@@ -358,6 +362,8 @@
   let person = params.get("person") || (PLAY ? recall("chinwag.person") : null) || "demo";
   let people = [];         // the playground: the agent's test people
   let channels = [];       // the playground: the agent's channels, each with the platform that plays it
+  let authentication = false;
+  let signedIn = true;
   let title = document.getElementById("name").textContent;
   const $ = (id) => document.getElementById(id);
   const TAPBACKS = [["❤️", "Loved"], ["👍", "Liked"], ["👎", "Disliked"], ["😂", "Laughed at"], ["‼️", "Emphasized"], ["❓", "Questioned"]];
@@ -372,6 +378,8 @@
   const rows = new Map();  // message id → row element
 
   const where = () => PLAY ? { channel: current.channel, person } : { platform: current.id, person };
+  const isVisitor = () => authentication && person === "visitor";
+  const draftKey = () => `chinwag.draft.${person}.${current.channel}`;
   const query = () => "?" + new URLSearchParams(where()).toString();
   const fmt = (ms) => ms == null ? "…" : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
   const clock = (at) => new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
@@ -398,6 +406,9 @@
     }
     const tab = PLAY ? current.channel : current.id;
     for (const b of document.querySelectorAll(".tab")) b.setAttribute("aria-pressed", String(b.dataset.id === tab));
+    signedIn = !isVisitor();
+    $("authState").hidden = !isVisitor();
+    $("clear").hidden = isVisitor();
     void refreshPerson();
     $("phone").className = "phone p-" + current.id;
     $("avatar").textContent = title.trim().charAt(0).toUpperCase();
@@ -414,7 +425,7 @@
     $("text").placeholder = current.id === "sms" ? "Text message" : "Message";
     updateCounter();
     if (!current.complete) sysnote("This simulator doesn't model every feature of the real platform yet.");
-    connect();
+    connect().catch(() => sysnote("Could not load this conversation. Try again.", true));
   }
 
   function sysnote(text, bad) {
@@ -899,7 +910,19 @@
     const mine = ++opened;
     if (source) { source.close(); source = null; }
     if (replayData) { showReplay(replayData); return; }
-    const { lines, seq } = await (await fetch(BASE + "/api/transcript" + query())).json();
+    if (isVisitor()) {
+      const response = await fetch(BASE + "/api/auth" + query());
+      if (!response.ok) throw new Error("Could not check sign-in");
+      const state = await response.json();
+      if (mine !== opened) return;
+      showAuth(state);
+      try { $("text").value = sessionStorage.getItem(draftKey()) || $("text").value; } catch {}
+      if (!signedIn) { sysnote("Sign in to continue. Your message stays here while you sign in."); return; }
+    }
+    const response = await fetch(BASE + "/api/transcript" + query());
+    if (isVisitor() && response.status === 401) { showAuth(await response.json()); return; }
+    if (!response.ok) throw new Error("Could not load history");
+    const { lines, seq } = await response.json();
     if (mine !== opened) return;
     for (const l of lines) showLine(l, false);
     if (!lines.length) {
@@ -975,11 +998,43 @@
   }
 
   async function send(text, extra = {}) {
+    if (isVisitor() && !signedIn) {
+      try { sessionStorage.setItem(draftKey(), text); } catch {}
+      $("text").value = text;
+      sysnote("Sign in before sending this message.", true);
+      return;
+    }
     const body = { ...where(), text, ...extra };
     if (!body.replyTo && replyTo) body.replyTo = replyTo.id;
     setReply(null);
-    await fetch(BASE + "/api/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const response = await fetch(BASE + "/api/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    if (!response.ok) {
+      $("text").value = text;
+      if (isVisitor() && response.status === 401) showAuth(await response.json());
+      sysnote("Your message was not sent. Check sign-in and try again.", true);
+    } else { try { sessionStorage.removeItem(draftKey()); } catch {} }
   }
+
+  function showAuth(state) {
+    signedIn = state.signedIn === true;
+    $("authState").hidden = false;
+    $("authLabel").textContent = state.label || (signedIn ? "Signed in" : "Signed out");
+    $("signIn").hidden = signedIn || !state.signInUrl;
+    $("signIn").removeAttribute("href");
+    if (state.signInUrl) {
+      const target = new URL(state.signInUrl, location.href);
+      if (["https:", "http:"].includes(target.protocol)) $("signIn").href = target.href;
+    }
+    const option = $("who").querySelector('option[value="visitor"]');
+    if (option) option.textContent = signedIn ? "Connected user" : "New user · signed out";
+    $("clear").hidden = true;
+  }
+  $("signIn").addEventListener("click", () => { try { sessionStorage.setItem(draftKey(), $("text").value); } catch {} });
+  $("startSignedOut").addEventListener("click", async () => {
+    const response = await fetch(BASE + "/api/auth/reset" + query(), { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    if (!response.ok) { sysnote("Could not reset this browser's sign-in.", true); return; }
+    setPlatform(current.channel);
+  });
 
   // The person's message is shown at once; the agent's id for it (for ticks, replies and
   // reactions) arrives a moment later.
@@ -1040,7 +1095,7 @@
   $("clear").addEventListener("click", () => {
     const who = people.find((p) => p.phone === person);
     if (who && confirm(`Forget ${who.name}? Their history, schedules and everything the agent kept about them go, on every channel.`)) {
-      fetch(BASE + "/api/clear?" + new URLSearchParams({ person }).toString(), { method: "POST" });
+      fetch(BASE + "/api/clear" + query(), { method: "POST" });
     }
   });
   document.addEventListener("click", (e) => {
@@ -1201,12 +1256,15 @@
   }
 
   (async () => {
-    ({ platforms, cards, people = [], channels = [], templates = [], panel = panel } = await (await fetch(BASE + "/api/platforms")).json());
+    ({ platforms, cards, people = [], channels = [], templates = [], panel = panel, authentication = false } = await (await fetch(BASE + "/api/platforms")).json());
     if (PLAY) {
       if (!channels.length) return empty("This agent has no channels. Declare them in <code>createAgent({ channels: [...] })</code> (whatsapp(), sms(), customUI()) to test it here.");
-      if (!people.length) return empty("This agent has no test people. Declare who may be played here in <code>createAgent({ testPeople: [{ name, phone }] })</code>.");
-      if (!people.some((p) => p.phone === person)) person = people[0].phone;
+      if (!people.length && !authentication) return empty("This agent has no test people. Declare who may be played here in <code>createAgent({ testPeople: [{ name, phone }] })</code>.");
+      if (!people.some((p) => p.phone === person) && !(authentication && person === "visitor")) person = authentication ? "visitor" : people[0].phone;
       remember("chinwag.person", person);
+      if (authentication) {
+        const option = document.createElement("option"); option.value = "visitor"; option.textContent = "New user · signed out"; $("who").appendChild(option);
+      }
       for (const p of people) {
         const o = document.createElement("option");
         o.value = p.phone;

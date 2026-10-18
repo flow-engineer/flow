@@ -174,7 +174,7 @@ export interface TestPerson {
 }
 
 /** Where the playground shows what the agent sends to a test person who wrote from it. */
-export type PlaygroundSink = (delivery: { conversationId: string; person: TestPerson; channel: string; outbound: Outbound }) => Promise<void> | void;
+export type PlaygroundSink = (delivery: { conversationId: string; person: TestPerson & { key?: string }; channel: string; outbound: Outbound }) => Promise<void> | void;
 
 export interface AgentStatus {
   busy: boolean;
@@ -296,6 +296,7 @@ export class Agent {
   /** Where each identity (channel, address) last wrote from; sends go back the same way. */
   private readonly via = new Map<string, Via>();
   private playgroundSink: PlaygroundSink | null = null;
+  private readonly playgroundVisitors = new Map<string, string>();
   /** Before this, this runner does not ask for the pruning claim again (it, or another runner, had it). */
   private pruneAfter = 0;
   /** `defaultCountryCode`'s digits. */
@@ -421,6 +422,21 @@ export class Agent {
     return this.released(await this.take(adapter, { channel: input.channel, from: this.testAddress(adapter, person), message: input.message, messageId: input.messageId, via: "playground", person }));
   }
 
+  /**
+   * A playground visitor after real authentication. `key` is verified by server code, never
+   * accepted from the browser. Replies stay in the simulator; no provider send is made.
+   */
+  async simulateVisitor(input: { key: string; address: string; channel: string; message: string | Incoming }): Promise<{ conversationId: string; messageId: string } | null> {
+    if (!input.key || !input.address) throw new Error("chinwag: a playground visitor needs a verified key and channel address");
+    return this.released(await this.take(this.channelOf(input.channel), { channel: input.channel, from: input.address, message: input.message, via: "playground", verifiedKey: input.key }));
+  }
+
+  /** A verified playground visitor's account history, including messages on other interfaces. */
+  async visitorConversation(key: string): Promise<string | null> {
+    await this.settings.ready;
+    return (await this.store.conversationByKey(`key:${key}`))?.id ?? null;
+  }
+
   /** They wrote, so they are there: what was held for their quiet hours goes now, in this turn. */
   private async released<T extends { conversationId: string } | null>(taken: T): Promise<T> {
     if (taken) await this.releaseHeld(this.now(), taken.conversationId);
@@ -523,6 +539,11 @@ export class Agent {
   private async arrive(adapter: Channel, input: Arrival) {
     await this.settings.ready;
     const identity = await this.conversationFor(adapter, input.channel, input.from, input.person, input.verifiedKey);
+    if (input.via === "playground") {
+      const address = viaKey(input.channel, input.from);
+      if (input.verifiedKey) this.playgroundVisitors.set(address, input.verifiedKey);
+      else this.playgroundVisitors.delete(address);
+    }
     const conversationId = identity.conversationId;
     if (input.messageId !== undefined && (await this.store.inboundTaken(conversationId, input.channel, input.messageId))) {
       // The provider sent this message before (a webhook retried): it was taken then. Its id is
@@ -633,10 +654,14 @@ export class Agent {
       const reply = this.requestReplies.get(viaKey(adapter.name, address));
       if (reply) return reply(outbound);
       if (this.via.get(viaKey(adapter.name, address)) !== "playground") return adapter.send(address, outbound);
+      const visitor = this.playgroundVisitors.get(viaKey(adapter.name, address));
+      if (visitor) return this.playgroundSink?.({ conversationId, person: { name: "Signed-in user", phone: "", key: visitor }, channel: adapter.name, outbound });
       const phone = address.startsWith("test:") ? address.slice(5) : address;
       const person = this.testPerson(phone);
       // With no playground page open, nothing is shown, and the conversation keeps it as sent.
       if (person) return this.playgroundSink?.({ conversationId, person, channel: adapter.name, outbound });
+      const key = this.rows.get(conversationId)?.personKey;
+      if (key?.startsWith("key:")) return this.playgroundSink?.({ conversationId, person: { name: "Signed-in user", phone: "", key: key.slice(4) }, channel: adapter.name, outbound });
     };
   }
 
@@ -1092,4 +1117,3 @@ export function quietHoursOf(row: Pick<ConversationRow, "quietHours">, agent: Qu
   if (row.quietHours) return row.quietHours;
   return agent === false ? null : (agent ?? DEFAULT_QUIET_HOURS);
 }
-

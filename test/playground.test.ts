@@ -30,6 +30,22 @@ test("only the agent's test people can be simulated", async () => {
   assert.equal((await h.store.allConversations()).length, 0, "nothing was made for them");
 });
 
+// Declared-person tests never exercise the verified-key visitor path or an account switch mid-turn.
+test("a visitor needs no declared phone and cannot rebind another account's channel identity", async () => {
+  const h = multi({ channels: { app: { info: WEB_APP } } });
+  const shown: Array<{ key?: string; text: string }> = [];
+  h.agent.attachPlayground(({ person, outbound }) => { if (outbound.type === "message") shown.push({ key: person.key, text: outbound.text }); });
+  const taken = await h.agent.simulateVisitor({ channel: "app", key: "account-a", address: "browser-a", message: "hello" });
+  const reply = await h.nextCall(0);
+  await assert.rejects(h.agent.simulateVisitor({ channel: "app", key: "account-b", address: "browser-a", message: "claim their history" }), /belongs to a different person/);
+  reply.answer(respond(call("send_app", { text: "Hello" })));
+  await h.agent.conversation(taken!.conversationId)!.whenIdle();
+  assert.equal(await h.agent.visitorConversation("account-a"), taken!.conversationId);
+  assert.equal(await h.agent.visitorConversation("account-b"), null);
+  assert.deepEqual(shown, [{ key: "account-a", text: "Hello" }], "a refused rebind cannot redirect the original reply");
+  assert.deepEqual(h.out, [], "no real provider is called");
+});
+
 test("a test person who switches channels resumes the same conversation", async () => {
   const h = playground();
   const a = await h.agent.simulate({ person: SAM.phone, channel: "whatsapp", message: "hi" });
