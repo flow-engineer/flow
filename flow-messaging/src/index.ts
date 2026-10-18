@@ -19,7 +19,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { sms as smsChannel, whatsapp as whatsappChannel, type Agent, type Attachment, type Channel, type ChannelInfo, type Incoming, type Message, type Template, type WhatsAppFeature } from "../../src/index.ts";
-import { Client, FlowMessagingError, verifySignature } from "./client.ts";
+import { Client, FlowMessagingError, idSegment, verifySignature } from "./client.ts";
 
 export { API_VERSION, FlowMessagingError, verifySignature } from "./client.ts";
 
@@ -156,7 +156,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   async function conversationFor(channel: string, to: string, messageId?: string): Promise<string | undefined> {
     const known = flowConversation.get(key(channel, to));
     if (known || !messageId) return known;
-    const found = (await client.get<FlowMessage>(`/v1/messages/${messageId}`)).conversation;
+    const found = (await client.get<FlowMessage>(`/v1/messages/${idSegment("msg", messageId)}`)).conversation;
     flowConversation.set(key(channel, to), found);
     return found;
   }
@@ -173,7 +173,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     try {
       const conversation = await conversationFor(route.name, to, about);
       let sent: FlowMessage;
-      if (conversation) sent = await client.post(`/v1/conversations/${conversation}/messages`, { content, ...(replyTo ? { reply_to: replyTo } : {}) });
+      if (conversation) sent = await client.post(`/v1/conversations/${idSegment("conv", conversation)}/messages`, { content, ...(replyTo ? { reply_to: replyTo } : {}) });
       else {
         if (!route.sender) throw new Error(`no conversation with them on ${route.name} yet, and no sender to start one (set FLOW_MESSAGING_${route.kind.toUpperCase()}_SENDER)`);
         sent = await client.post("/v1/messages", { sender: route.sender, to: recipient(route.kind, to), content });
@@ -188,7 +188,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   async function courtesy(route: Route, to: string, action: "typing" | "read", body: Record<string, unknown>, messageId?: string): Promise<void> {
     try {
       const conversation = await conversationFor(route.name, to, messageId);
-      if (conversation) await client.post(`/v1/conversations/${conversation}/${action}`, body, 1);
+      if (conversation) await client.post(`/v1/conversations/${idSegment("conv", conversation)}/${action}`, body, 1);
     } catch (error) {
       console.warn(`@flow-engineer/flow/flow-messaging: ${action} on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
     }
@@ -221,7 +221,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       const all: Array<{ id: string; name: string; language: string }> = [];
       let after = "";
       for (;;) {
-        const page = await client.get<{ data: typeof all; has_more: boolean }>(`/v1/templates?sender=${sender}&status=approved&limit=100${after ? `&after=${after}` : ""}`);
+        const page = await client.get<{ data: typeof all; has_more: boolean }>(`/v1/templates?${new URLSearchParams({ sender: idSegment("snd", sender), status: "approved", limit: "100", ...(after ? { after } : {}) })}`);
         all.push(...page.data);
         if (!page.has_more || !page.data.length) break;
         after = page.data.at(-1)!.id;
@@ -322,7 +322,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   async function addressOf(route: { kind: Kind }, contactId: string): Promise<string> {
     const known = contacts.get(contactId);
     if (known) return known;
-    const contact = await client.get<{ address?: { phone?: string; telegram_user_id?: string; handle?: string } }>(`/v1/contacts/${contactId}`);
+    const contact = await client.get<{ address?: { phone?: string; telegram_user_id?: string; handle?: string } }>(`/v1/contacts/${idSegment("ct", contactId)}`);
     const a = contact.address;
     const address = (route.kind === "telegram" ? a?.telegram_user_id : route.kind === "imessage" ? (a?.phone ?? a?.handle) : a?.phone) ?? contactId;
     contacts.set(contactId, address);
@@ -331,7 +331,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   async function quoted(id: string): Promise<{ text: string; fromAgent: boolean } | undefined> {
     try {
-      const m = await client.get<FlowMessage>(`/v1/messages/${id}`);
+      const m = await client.get<FlowMessage>(`/v1/messages/${idSegment("msg", id)}`);
       const text = textOf(m.content);
       return text ? { text, fromAgent: m.direction === "out" } : undefined;
     } catch {
