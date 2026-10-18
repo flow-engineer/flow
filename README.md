@@ -4,7 +4,7 @@
 
 Flow Framework (`npm i @flow-engineer/flow`). Formerly chinwag: see [Moving from chinwag](#moving-from-chinwag).
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/flow-engineer/flow/blob/main/LICENSE) ![Node 22.18+](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg) ![TypeScript](https://img.shields.io/badge/TypeScript-yes-3178c6.svg)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/flow-engineer/flow/blob/main/LICENSE) ![Node 22.18+](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg) ![TypeScript](https://img.shields.io/badge/TypeScript-yes-3178c6.svg)
 
 ![Pip, the café example, in the WhatsApp simulator: a double text folded into one reply, a menu lookup, and the order with reply buttons](https://raw.githubusercontent.com/flow-engineer/flow/main/docs/playground.png)
 
@@ -592,4 +592,4 @@ The test cloud, its address and its API are unchanged, and traces keep their `ch
 
 ## License
 
-[MIT](https://github.com/flow-engineer/flow/blob/main/LICENSE)
+[Apache-2.0](https://github.com/flow-engineer/flow/blob/main/LICENSE)
