@@ -1,15 +1,15 @@
 # Flow Messaging channels
 
-Put a Flow Framework (`npm i flowcore`) agent on real WhatsApp, Telegram and US SMS
-through [Flow Messaging](https://api.flow.engineer) (API version 2026-11-01). `flowcore/flow-messaging` gives you
+Put a Flow Framework (`npm i @flow-engineer/flow`) agent on real WhatsApp, Telegram and US SMS
+through [Flow Messaging](https://api.flow.engineer) (API version 2026-11-01). `@flow-engineer/flow/flow-messaging` gives you
 channels that send through Flow's senders, and a webhook that checks Flow's signed events and hands
 them to the agent. It needs nothing beyond the framework (it uses `fetch` and `node:crypto`).
 
 ```sh
-npm install flowcore
+npm install @flow-engineer/flow
 ```
 
-Node 22.18 or later. The adapter ships inside `flowcore`; import it from `flowcore/flow-messaging`.
+Node 22.18 or later. The adapter ships inside `@flow-engineer/flow`; import it from `@flow-engineer/flow/flow-messaging`.
 
 ## Quick start
 
@@ -36,8 +36,8 @@ sandbox contact your agent can talk to.
 ```ts
 // main.ts
 import { createServer } from "node:http";
-import { createAgent } from "flowcore";
-import { flowMessaging } from "flowcore/flow-messaging";
+import { createAgent } from "@flow-engineer/flow";
+import { flowMessaging } from "@flow-engineer/flow/flow-messaging";
 
 const fm = flowMessaging(); // reads FLOW_MESSAGING_KEY and FLOW_MESSAGING_WEBHOOK_SECRET
 
@@ -145,7 +145,7 @@ package yet.
 
 - Flow Messaging: https://api.flow.engineer
 - API reference: https://api.flow.engineer/openapi.yaml
-- Flow Framework: https://www.npmjs.com/package/flowcore
+- Flow Framework: https://www.npmjs.com/package/flow
 
 ## License
 

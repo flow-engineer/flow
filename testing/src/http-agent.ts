@@ -1,4 +1,4 @@
-// An agent you already have, on any framework, tested through its HTTP endpoint: `flowcore test
+// An agent you already have, on any framework, tested through its HTTP endpoint: `flow test
 // --agent-url <url>`. This plays the part of a Flow Framework Agent on the developer's machine: each of the
 // person's messages is one POST to the URL from here (so the agent never has to be reachable from
 // the internet), and the replies it answers go to the test cloud as a Flow Framework agent's would. Its own
@@ -18,7 +18,7 @@ import { sendInput, sendRefusal } from "../../src/talk.ts";
 
 export interface HttpAgentOptions {
   url: string;
-  /** Sent as `authorization: Bearer <token>` (FLOWCORE_AGENT_TOKEN). */
+  /** Sent as `authorization: Bearer <token>` (FLOW_FRAMEWORK_AGENT_TOKEN). */
   token?: string;
   /** The channel every message names; default the platform the run plays (whatsapp, sms, imessage, telegram, web). */
   channel?: string;

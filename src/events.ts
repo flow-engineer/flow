@@ -57,7 +57,7 @@ export function emitter(sinks: EventSink[]) {
       try {
         sink(event);
       } catch (error) {
-        console.warn("flowcore: an event sink failed:", error);
+        console.warn("flow: an event sink failed:", error);
       }
     }
   };

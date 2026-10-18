@@ -1,5 +1,5 @@
 {
-  "name": "flowcore-example-cafe",
+  "name": "flow-framework-example-cafe",
   "version": "0.1.0",
   "private": true,
   "description": "Pip, an ordering assistant for a café: Flow Framework's first example agent.",

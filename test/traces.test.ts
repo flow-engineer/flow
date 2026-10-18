@@ -35,7 +35,7 @@ async function fakeEndpoint(status = 200) {
 
 /** An SMS agent with one tool, tracing to `url`. */
 function agentFor(url: string, content: boolean, intercept?: AgentOptions["intercept"]) {
-  const dir = mkdtempSync(join(tmpdir(), "flowcore-"));
+  const dir = mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const sent: string[] = [];
@@ -114,12 +114,12 @@ test("a message intercept answers, and its reply, are traces of their own, also 
   ]);
 });
 
-test("under flowcore test, every trace says it is a test's and names the test session, so it is kept apart from real conversations", async (t) => {
-  process.env.FLOWCORE_RUN_KIND = "test";
-  process.env.FLOWCORE_TEST_SESSION = "tse_01JTESTSESSION0000000000000";
+test("under flow test, every trace says it is a test's and names the test session, so it is kept apart from real conversations", async (t) => {
+  process.env.FLOW_FRAMEWORK_RUN_KIND = "test";
+  process.env.FLOW_FRAMEWORK_TEST_SESSION = "tse_01JTESTSESSION0000000000000";
   t.after(() => {
-    delete process.env.FLOWCORE_RUN_KIND;
-    delete process.env.FLOWCORE_TEST_SESSION;
+    delete process.env.FLOW_FRAMEWORK_RUN_KIND;
+    delete process.env.FLOW_FRAMEWORK_TEST_SESSION;
   });
   const endpoint = await fakeEndpoint();
   const h = agentFor(endpoint.url, false);
@@ -162,13 +162,13 @@ test("the endpoint refusing traces never touches the conversation, is logged onc
   assert.doesNotMatch(warnings.join(""), /do-not-log-me/);
 });
 
-test("from the environment: a trace key goes to flow.engineer/observe unless a URL is set, content only with FLOWCORE_TRACES_CONTENT=1, never under node --test; the CHINWAG_ names still work", () => {
+test("from the environment: a trace key goes to flow.engineer/observe unless a URL is set, content only with FLOW_FRAMEWORK_TRACES_CONTENT=1, never under node --test; the CHINWAG_ names still work", () => {
   assert.equal(tracesFromEnv({}), undefined);
-  assert.deepEqual(tracesFromEnv({ FLOWCORE_TRACES_KEY: KEY }), { key: KEY, url: "https://flow.engineer/observe", content: false });
-  assert.deepEqual(tracesFromEnv({ FLOWCORE_TRACES_KEY: KEY, FLOWCORE_TRACES_URL: "  " }), { key: KEY, url: "https://flow.engineer/observe", content: false });
-  assert.deepEqual(tracesFromEnv({ FLOWCORE_TRACES_KEY: KEY, FLOWCORE_TRACES_URL: "https://example.test/traces" }), { key: KEY, url: "https://example.test/traces", content: false });
-  assert.deepEqual(tracesFromEnv({ FLOWCORE_TRACES_KEY: KEY, FLOWCORE_TRACES_URL: "https://example.test/traces", FLOWCORE_TRACES_CONTENT: "1" }), { key: KEY, url: "https://example.test/traces", content: true });
-  assert.equal(tracesFromEnv({ FLOWCORE_TRACES_KEY: KEY, NODE_TEST_CONTEXT: "child-v8" }), undefined);
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY }), { key: KEY, url: "https://flow.engineer/observe", content: false });
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "  " }), { key: KEY, url: "https://flow.engineer/observe", content: false });
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "https://example.test/traces" }), { key: KEY, url: "https://example.test/traces", content: false });
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "https://example.test/traces", FLOW_FRAMEWORK_TRACES_CONTENT: "1" }), { key: KEY, url: "https://example.test/traces", content: true });
+  assert.equal(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, NODE_TEST_CONTEXT: "child-v8" }), undefined);
   assert.deepEqual(tracesFromEnv({ CHINWAG_TRACES_KEY: KEY, CHINWAG_TRACES_URL: "https://example.test/traces", CHINWAG_TRACES_CONTENT: "1" }), { key: KEY, url: "https://example.test/traces", content: true });
-  assert.deepEqual(tracesFromEnv({ FLOWCORE_TRACES_KEY: KEY, CHINWAG_TRACES_KEY: "old", CHINWAG_TRACES_URL: "https://example.test/old" }), { key: KEY, url: "https://example.test/old", content: false });
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, CHINWAG_TRACES_KEY: "old", CHINWAG_TRACES_URL: "https://example.test/old" }), { key: KEY, url: "https://example.test/old", content: false });
 });

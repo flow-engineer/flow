@@ -136,7 +136,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       const conversation = await conversationFor(route.name, to, messageId);
       if (conversation) await client.post(`/v1/conversations/${conversation}/${action}`, body, 1);
     } catch (error) {
-      console.warn(`flowcore/flow-messaging: ${action} on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
+      console.warn(`@flow-engineer/flow/flow-messaging: ${action} on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
     }
   }
 
@@ -342,7 +342,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * One delivery: checks Flow-Signature, drops a redelivered event, hands the event to the agent.
    * 2xx tells Flow it arrived; a failure answers 500, so Flow delivers it again.
    */
-  const noSecret = () => new Error("flowcore/flow-messaging: set FLOW_MESSAGING_WEBHOOK_SECRET (or pass webhookSecret)");
+  const noSecret = () => new Error("@flow-engineer/flow/flow-messaging: set FLOW_MESSAGING_WEBHOOK_SECRET (or pass webhookSecret)");
 
   async function receive(agent: WebhookAgent, request: { body: Buffer | string; headers: Record<string, string | string[] | undefined> }): Promise<{ status: number; body: string }> {
     if (!secrets.length) throw noSecret();
@@ -368,7 +368,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value!);
       return { status: 200, body: "{}" };
     } catch (error) {
-      console.warn(`flowcore/flow-messaging: event ${event.id} (${event.type}) failed: ${error instanceof FlowMessagingError ? error.type : error instanceof Error ? error.name : "error"}`);
+      console.warn(`@flow-engineer/flow/flow-messaging: event ${event.id} (${event.type}) failed: ${error instanceof FlowMessagingError ? error.type : error instanceof Error ? error.name : "error"}`);
       return { status: 500, body: '{"error":"failed"}' };
     } finally {
       handling.delete(event.id);

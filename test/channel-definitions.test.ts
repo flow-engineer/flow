@@ -8,7 +8,7 @@ import { createAgent, customUI, sms, whatsapp, z, type Channel, type Outbound, t
 import { call, last, respond, scriptedModel } from "./helpers.ts";
 
 function agentWith(channels: Channel[]) {
-  const dir = mkdtempSync(join(tmpdir(), "flowcore-"));
+  const dir = mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const agent = createAgent({ dir, model: scripted.model, debounceMs: 0, channels, scheduleCheckMs: 0 });

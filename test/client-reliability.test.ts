@@ -60,7 +60,7 @@ test("a thrown receive, a bad frame and an unreadable attachment leave the sessi
   });
   try {
     const summary = await runInCloud({
-      cloud: cloud.url, name: "test", tools: [], files: [], testsDir: mkdtempSync(join(tmpdir(), "flowcore-files-")), log: (line) => logs.push(line),
+      cloud: cloud.url, name: "test", tools: [], files: [], testsDir: mkdtempSync(join(tmpdir(), "flow-files-")), log: (line) => logs.push(line),
       build: () => ({
         channels: () => [], reacted: () => {},
         receive: (_id, incoming, _deliver, options) => {
