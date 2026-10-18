@@ -152,7 +152,7 @@ test("platform_refused reaches the real agent's recovery loop; message.in carrie
   const ended = gate();
   const received: FlowEvent[] = [];
   const outbound: string[] = [];
-  const dir = mkdtempSync(join(tmpdir(), "laminar-flow-receipts-"));
+  const dir = mkdtempSync(join(tmpdir(), "flow-receipts-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const cloud = await tunnel((path, body, res) => {
     if (path.endsWith("/outbound")) {

@@ -1,13 +1,13 @@
 {
-  "name": "laminar-flow",
+  "name": "@flow-engineer/flow",
   "version": "0.2.0",
   "description": "An open-source runtime for chat agents that feel like a person texting back.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/flow-engineer/laminar-flow.git"
+    "url": "git+https://github.com/flow-engineer/flow.git"
   },
-  "homepage": "https://github.com/flow-engineer/laminar-flow",
+  "homepage": "https://github.com/flow-engineer/flow",
   "type": "module",
   "engines": {
     "node": ">=22.18"
@@ -32,7 +32,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "laminar-flow": "dist/testing/src/cli.js",
+    "flow": "dist/testing/src/cli.js",
     "chinwag": "dist/testing/src/chinwag.js"
   },
   "files": [

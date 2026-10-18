@@ -1,17 +1,17 @@
 ---
-name: laminar-flow-tools
+name: flow-framework-tools
 description: Write or change a Flow Framework agent's tools and their test files (tests/tools/*.yaml). Load when adding a tool to a Flow Framework agent, changing what a tool returns, or describing how a tool behaves in tests.
 ---
 
 # Writing tools for a Flow Framework agent
 
-Read the `laminar-flow` skill (`skill.md`) first if you haven't. Tests that use these tool files are
-in the `laminar-flow-tests` skill (`test-skill.md`).
+Read the `flow-framework` skill (`skill.md`) first if you haven't. Tests that use these tool files are
+in the `flow-framework-tests` skill (`test-skill.md`).
 
 ## The tool
 
 ```ts
-import { tool, z } from "laminar-flow";
+import { tool, z } from "@flow-engineer/flow";
 
 export const findSlots = tool({
   name: "find_session_slots",
@@ -83,7 +83,7 @@ responses:
   personal data removed); otherwise write realistic ones in exactly the shape `run` returns.
 - Examples show the shape, not the answer: the simulator takes ids, names and dates from the
   scenario's world, the call's input and what the agent already said. Write dates as placeholders
-  for the test's clock (`{{now + 10m}}`, `{{now + 2d | date}}`; see the `laminar-flow-tests` skill),
+  for the test's clock (`{{now + 10m}}`, `{{now + 2d | date}}`; see the `flow-framework-tests` skill),
   never as written dates, which go stale.
 - Latency lives only here. Scenarios describe situations ("the point of sale is slow this
   morning"); the simulator picks the matching response and latency on each call.

@@ -7,14 +7,14 @@ info:
     identifier: MIT
   description: |
     The HTTP endpoint an agent on any framework, in any language, exposes so Flow Framework's test suite
-    can talk to it: `laminar-flow test --agent-url <url>`. Implement this one operation and the test
-    cloud's simulated people can chat with your agent; `laminar-flow check-endpoint <url>` checks an
+    can talk to it: `flow test --agent-url <url>`. Implement this one operation and the test
+    cloud's simulated people can chat with your agent; `flow check-endpoint <url>` checks an
     implementation against this file without a cloud, a key or a model call.
 
     How a run uses it:
     - Each of the person's messages is one POST to the URL you give, from the machine running
-      `laminar-flow test` (so `http://localhost` works and the agent never has to be reachable from the
-      internet). The path is yours; `/laminar-flow` is the examples'.
+      `flow test` (so `http://localhost` works and the agent never has to be reachable from the
+      internet). The path is yours; `/flow` is the examples'.
     - A conversation's messages are sent one at a time, in order: the next is POSTed once the last
       one's answer is in. Different conversations may be in flight at once.
     - Keep each conversation's history by `conversationId`, as you would per phone number. The
@@ -41,18 +41,18 @@ info:
     `x-chinwag-platforms` below lists what each platform shows.
 servers:
   - url: http://localhost:3000
-    description: Wherever your agent listens; `laminar-flow test --agent-url` takes the full URL.
+    description: Wherever your agent listens; `flow test --agent-url` takes the full URL.
 security:
   - {}
   - bearer: []
 paths:
-  /laminar-flow:
+  /flow:
     post:
       operationId: receiveMessage
       summary: One message from the person; answer with the replies to send.
       description: |
-        Sent with `content-type: application/json`. When LAMINAR_FLOW_AGENT_TOKEN is set where
-        `laminar-flow test` runs, every request carries `authorization: Bearer <token>`: check it, and
+        Sent with `content-type: application/json`. When FLOW_FRAMEWORK_AGENT_TOKEN is set where
+        `flow test` runs, every request carries `authorization: Bearer <token>`: check it, and
         answer 401 to anything else.
       requestBody:
         required: true
@@ -109,7 +109,7 @@ components:
     bearer:
       type: http
       scheme: bearer
-      description: The value of LAMINAR_FLOW_AGENT_TOKEN, when it is set where `laminar-flow test` runs.
+      description: The value of FLOW_FRAMEWORK_AGENT_TOKEN, when it is set where `flow test` runs.
 # What each platform a run plays shows, as ChannelInfo in src/types.ts: a reply is checked against
 # its run's platform. A key that is absent means the platform does not have that feature. maxLength
 # absent is 4,000. Kept in step with simulators/src/platforms.ts by test/check-endpoint.test.ts.

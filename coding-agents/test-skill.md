@@ -1,15 +1,15 @@
 ---
-name: laminar-flow-tests
+name: flow-framework-tests
 description: Write or change tests for a Flow Framework agent (tests/scenarios/*.yaml). Load when adding a test scenario, deciding what a Flow Framework agent should be checked on, or turning a bad conversation into a test.
 ---
 
 # Writing tests for a Flow Framework agent
 
-Read the `laminar-flow` skill (`skill.md`) first if you haven't.
+Read the `flow-framework` skill (`skill.md`) first if you haven't.
 
 A test is a scenario: a situation to put the agent in, played through a platform simulator by a
 model acting as the person, with the agent's tools played by a model from `tests/tools/*.yaml`
-(see the `laminar-flow-tools` skill, `tools-skill.md`). At the end, what happened is checked against `expect`.
+(see the `flow-framework-tools` skill, `tools-skill.md`). At the end, what happened is checked against `expect`.
 
 ```yaml
 id: latte-correction
@@ -118,10 +118,10 @@ Tests run in the Flow Framework cloud: your agent stays on your machine with its
 connects out to the cloud, which plays the person and the tools and judges.
 
 1. Have a test cloud: the hosted one at https://flow.engineer/observe, the default (see "Get a test
-   cloud" below), or another with `--cloud <url>` or `LAMINAR_FLOW_CLOUD`.
+   cloud" below), or another with `--cloud <url>` or `FLOW_FRAMEWORK_CLOUD`.
 2. From the agent's folder (it must export `buildAgent` and `tools` from `src/agent.ts`), which reads
-   the agent's `.env` itself: `npx laminar-flow test --synthetic [--runs 3]` (`npm test -- --synthetic`
-   in an agent `laminar-flow new` made).
+   the agent's `.env` itself: `npx flow test --synthetic [--runs 3]` (`npm test -- --synthetic`
+   in an agent `flow new` made).
 3. It first reads every test file as the cloud does; a mistake stops it with
    `tests/scenarios/<file>.yaml:<line>: <field>: <what is wrong>`, one line each, and nothing is sent.
    Then it prints PASS or FAIL per run, with its run id, every failed check and the judge's reason,
@@ -133,7 +133,7 @@ connects out to the cloud, which plays the person and the tools and judges.
    or judge the run, such as `judge_failed`; the run is then `errored` and its line reads `ERROR`,
    whatever it ended as), `ended`, `turns`, `watch` and `failedChecks` (`kind`, `text` and the judge's
    `reason`). Each session that opened also leaves
-   `.laminar-flow/last-session.json` in the agent's folder (its path is printed on every exit): `sessionId`,
+   `.flow/last-session.json` in the agent's folder (its path is printed on every exit): `sessionId`,
    `agent`, `dashboard`, `suiteHash`, `endedAt`, `ended` (`finished`, `stopped` or `interrupted`),
    `only` (the scenarios it was limited to, else `null`) and per run `scenario` (file name without
    `.yaml`), `channel`, `run`, `runId`, `verdict` (`passed`, `failed`, `errored`: the cloud could not
@@ -151,17 +151,17 @@ connects out to the cloud, which plays the person and the tools and judges.
 
 Work in this loop, and never finish on a partial run:
 
-1. `npx laminar-flow test --synthetic`: the whole suite.
+1. `npx flow test --synthetic`: the whole suite.
 2. Fix what failed (the agent, or a test that asks for the wrong thing; say which).
-3. `npx laminar-flow test --synthetic --failed`, again until every run in it passes (exit 0).
-4. `npx laminar-flow test --synthetic`: the whole suite once more, since a fix can break another scenario.
+3. `npx flow test --synthetic --failed`, again until every run in it passes (exit 0).
+4. `npx flow test --synthetic`: the whole suite once more, since a fix can break another scenario.
 
 ### When a run fails
 
-1. `npx laminar-flow test --synthetic --json > report.json`, and read the runs whose `verdict` is not
+1. `npx flow test --synthetic --json > report.json`, and read the runs whose `verdict` is not
    `passed` (`jq '.runs[] | select(.verdict != "passed")' report.json`).
-2. `npx laminar-flow show last` (the first run that did not pass; it names the others) or
-   `npx laminar-flow show <runId>`: the checks with the judge's reasons, then the conversation in time
+2. `npx flow show last` (the first run that did not pass; it names the others) or
+   `npx flow show <runId>`: the checks with the judge's reasons, then the conversation in time
    order with every tool call the simulator played, its input, output and what it changed.
    `--json` gives the whole record.
 3. Decide which is wrong, and say which:
@@ -169,7 +169,7 @@ Work in this loop, and never finish on a partial run:
    - the test: a check asks for the wrong thing, or the scenario cannot reach its goal; fix the YAML;
    - the simulator: a tool output that could not happen, or a person who left the scenario; fix
      `tests/tools/*.yaml` or the scenario's `world` and `person`.
-4. `npx laminar-flow test --synthetic --failed`, then `--runs 3 --only <scenario>` on what you fixed, so
+4. `npx flow test --synthetic --failed`, then `--runs 3 --only <scenario>` on what you fixed, so
    a pass is not luck.
 5. The whole suite once more.
 
@@ -180,8 +180,8 @@ The owner does these; never ask for the key in chat or print it:
 1. Sign in at https://flow.engineer/observe (Google, GitHub or an email link).
 2. Workspace → New agent.
 3. On the agent's Developers page, "Make a CI key". It starts with `oci_` and is shown once.
-4. Put it in the agent's `.env` as `LAMINAR_FLOW_CLOUD_KEY` (never on the command line).
-5. `npx laminar-flow test --cloud https://flow.engineer/observe --synthetic` from the agent's folder (`--cloud` is that address by default).
+4. Put it in the agent's `.env` as `FLOW_FRAMEWORK_CLOUD_KEY` (never on the command line).
+5. `npx flow test --cloud https://flow.engineer/observe --synthetic` from the agent's folder (`--cloud` is that address by default).
 
 Your agent runs on your machine with your own model key. The cloud's person simulator, tool simulator and judge are free up to $5 a day per workspace, with 2 sessions at once; test data only (`--synthetic`), and records are deleted after 30 days. `--synthetic` is the promise that the test files hold no real customer or member data;
 the CLI refuses a hosted cloud without it and the key. `--environment staging` or `production` is
@@ -192,9 +192,9 @@ answers, with the session's own token. `--agent-version` (else `GITHUB_SHA`) and
 GitHub's branch) are kept with the session. A CI step (GitHub Actions shown):
 
 ```yaml
-- run: npx laminar-flow test --cloud https://flow.engineer/observe --synthetic --environment staging
+- run: npx flow test --cloud https://flow.engineer/observe --synthetic --environment staging
   env:
-    LAMINAR_FLOW_CLOUD_KEY: ${{ secrets.LAMINAR_FLOW_CLOUD_KEY }}
+    FLOW_FRAMEWORK_CLOUD_KEY: ${{ secrets.FLOW_FRAMEWORK_CLOUD_KEY }}
     OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 ```
 
@@ -203,21 +203,21 @@ runs only while the tests are the same. Every run calls real models, so it costs
 
 ## An agent on another framework, in any language
 
-An agent not built on Flow Framework is tested through an HTTP endpoint: `npx laminar-flow test --agent-url <url>`.
+An agent not built on Flow Framework is tested through an HTTP endpoint: `npx @flow-engineer/flow test --agent-url <url>`.
 To implement one:
 
-1. Read the contract, `spec/agent-endpoint.openapi.yaml` (in the laminar-flow package or the repository),
+1. Read the contract, `spec/agent-endpoint.openapi.yaml` (in the @flow-engineer/flow package or the repository),
    with `spec/request.schema.json` and `spec/response.schema.json`. Implement exactly that: one
    POST per message of the person's, answered in the same response with status 200 and
    `{ "replies": [...] }` (`[]` for no reply, never 204). Keep history by `conversationId`, ignore
-   request fields you do not know, and check `authorization: Bearer` when `LAMINAR_FLOW_AGENT_TOKEN` is set.
+   request fields you do not know, and check `authorization: Bearer` when `FLOW_FRAMEWORK_AGENT_TOKEN` is set.
 2. Only send what the run's platform shows (`x-chinwag-platforms` in the spec): no buttons on SMS,
    text within `maxLength`. Name the person's messages by the `messageId` they came with.
-3. Start the endpoint and run `npx laminar-flow check-endpoint <url>` (`--token-env NAME` when it needs
+3. Start the endpoint and run `npx @flow-engineer/flow check-endpoint <url>` (`--token-env NAME` when it needs
    a token). Fix every FAIL line; it must end "5 of 5 cases passed". Give the agent a mode with no
    model call (the examples' `FAKE_MODEL=1`) so the check costs nothing.
 4. Then write scenarios as above, with one difference: the agent's own tools run for real, so there
    are no `tests/tools/*.yaml`, no `world` for tools and no `outcome`, `calls` or `never` checks
-   (the cloud sees no tool calls); write what must be true as `judge` items. Run `npx laminar-flow test --agent-url <url>`.
+   (the cloud sees no tool calls); write what must be true as `judge` items. Run `npx @flow-engineer/flow test --agent-url <url>`.
 
 `examples/http-agent-python` and `examples/http-agent-go` are the café's agent done this way.

@@ -1,7 +1,7 @@
 {
-  "name": "laminar-flow-simulators",
+  "name": "flow-framework-simulators",
   "private": true,
-  "description": "Holds the simulators' tests and typecheck; they ship in the laminar-flow package as laminar-flow/simulators.",
+  "description": "Holds the simulators' tests and typecheck; they ship in the @flow-engineer/flow package as @flow-engineer/flow/simulators.",
   "type": "module",
   "scripts": {
     "test": "node --test --test-timeout=30000 \"test/**/*.test.ts\"",

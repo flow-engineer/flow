@@ -1,6 +1,6 @@
 ---
-name: laminar-flow
-description: Build or change a chat agent on Flow Framework (WhatsApp, SMS, iMessage, Telegram, web). Load when creating a Flow Framework agent, editing its prompt or skills, wiring it into the playground, or when code imports laminar-flow (formerly chinwag). Also load the laminar-flow-tools skill (tools-skill.md) before writing tools and laminar-flow-tests (test-skill.md) before writing tests.
+name: flow-framework
+description: Build or change a chat agent on Flow Framework (WhatsApp, SMS, iMessage, Telegram, web). Load when creating a Flow Framework agent, editing its prompt or skills, wiring it into the playground, or when code imports @flow-engineer/flow (formerly chinwag). Also load the flow-framework-tools skill (tools-skill.md) before writing tools and flow-framework-tests (test-skill.md) before writing tests.
 ---
 
 # Building an agent on Flow Framework
@@ -10,14 +10,14 @@ reply, acknowledges people fast, runs tools in parallel and waits for them, movi
 background only when the person writes again or it passes its limit.
 You write the agent's prompt, skills and tools; Flow Framework handles the conversation.
 
-Two more skills go with this one: `laminar-flow-tools` (`tools-skill.md`) before writing or changing a
-tool, and `laminar-flow-tests` (`test-skill.md`) before writing or changing a test.
+Two more skills go with this one: `flow-framework-tools` (`tools-skill.md`) before writing or changing a
+tool, and `flow-framework-tests` (`test-skill.md`) before writing or changing a test.
 
 ## Start a new agent
 
-`npx laminar-flow new <name>` (lowercase letters, digits and dashes) makes `./<name>/` from the café
-example: a complete agent with tools and tests that depends on the `laminar-flow` package and imports
-`laminar-flow` and `laminar-flow/simulators`, with these skills in `.claude/skills/`. Run `npm install` there.
+`npx @flow-engineer/flow new <name>` (lowercase letters, digits and dashes) makes `./<name>/` from the café
+example: a complete agent with tools and tests that depends on the `@flow-engineer/flow` package and imports
+`@flow-engineer/flow` and `@flow-engineer/flow/simulators`, with these skills in `.claude/skills/`. Run `npm install` there.
 Build in it, changing Pip's prompt, skills, tools and tests into yours. The owner copies
 `.env.example` to `.env` and puts one model key in it (never read or print it). Flow Framework does not
 issue that key; it is made at the provider: `OPENROUTER_API_KEY` at https://openrouter.ai/keys,
@@ -29,7 +29,7 @@ opens the playground; `npm run typecheck` checks the types.
 Inside a clone of Flow Framework itself, `npm run new -- <name>` copies the café to `agents/<name>/`
 instead (git-ignored, so it never collides with a pull). Its imports of `../../../src/` and
 `../../../simulators/src/` stay as they are, so changes to Flow Framework show at once; the key goes in
-`agents/<name>/.env`. The snippets below import `laminar-flow` and `laminar-flow/simulators`; in a clone's
+`agents/<name>/.env`. The snippets below import `@flow-engineer/flow` and `@flow-engineer/flow/simulators`; in a clone's
 agent, keep its relative imports.
 
 ## Layout
@@ -60,7 +60,7 @@ drift apart. Tests pass their own model, events and simulated tools:
 
 ```ts
 import { fileURLToPath } from "node:url";
-import { createAgent, openAICompatible, type EventSink, type Model, type Tool } from "laminar-flow";
+import { createAgent, openAICompatible, type EventSink, type Model, type Tool } from "@flow-engineer/flow";
 import { tools as myTools } from "./tools.ts";
 
 export const tools = myTools;
@@ -198,7 +198,7 @@ agent may send a fitting template itself (`send_template`), and `template.missin
 messages want one. Held nudges (quiet hours, a closed window) settle as `held`, then `sent` or `expired`.
 
 When the owner's backend is a separate service, mount `nudgeHandler(agent, { token })` (from
-`laminar-flow`; a token of at least 32 characters, from a secret; `base` is `/nudges` by default) in the
+`@flow-engineer/flow`; a token of at least 32 characters, from a secret; `base` is `/nudges` by default) in the
 agent's server rather than writing a route: `POST /nudges` takes the same fields with
 `idempotency_key` and `at` in ms since the epoch, and answers `202 { id, status }` once recorded,
 before any send or turn (`queued`, or `refused`/`dropped`/`scheduled` decided then: still a 202);
@@ -269,7 +269,7 @@ each with that platform's real rules, on the agent's own `channels` (declare the
 that is not connected yet if the numbers are not ready: test people never reach it):
 
 ```ts
-import { simulators } from "laminar-flow/simulators";
+import { simulators } from "@flow-engineer/flow/simulators";
 import { buildAgent } from "./agent.ts";
 
 const play = simulators({ title: "My agent" });
@@ -302,20 +302,20 @@ message is logged with the person, channel, time and address.
 
 Every turn can go to a traces endpoint as an OTLP/JSON trace, posted to `<url>/v1/traces`, so
 playground and real chats show up in a dashboard and can be graded. No code: set these in the
-agent's environment. The address is https://flow.engineer/observe unless `LAMINAR_FLOW_TRACES_URL`
+agent's environment. The address is https://flow.engineer/observe unless `FLOW_FRAMEWORK_TRACES_URL`
 names another; the trace key is made on that same site (never print it):
 
 ```sh
-LAMINAR_FLOW_TRACES_KEY=...
-LAMINAR_FLOW_TRACES_URL=https://flow.engineer/observe   # the default; set it only to send them elsewhere
-LAMINAR_FLOW_TRACES_CONTENT=1                           # send what was written; without it, metadata only
+FLOW_FRAMEWORK_TRACES_KEY=...
+FLOW_FRAMEWORK_TRACES_URL=https://flow.engineer/observe  # the default; set it only to send them elsewhere
+FLOW_FRAMEWORK_TRACES_CONTENT=1                          # send what was written; without it, metadata only
 ```
 
-Without `LAMINAR_FLOW_TRACES_CONTENT=1` the dashboard
+Without `FLOW_FRAMEWORK_TRACES_CONTENT=1` the dashboard
 gets ids, timing, model calls and tool names but no messages, so nothing to show or grade. Or in
 code: `createAgent({ ..., traces: { url, key, content: true, version: "v3" } })`. Traces are sent in the
 background after each turn and a failed send is dropped (logged once), so a dashboard outage never
 touches a chat; call `await agent.flushTraces()` before the process exits. Tests run under
-`node --test` never send from the environment. Under `laminar-flow test` the traces say they are a test's
+`node --test` never send from the environment. Under `flow test` the traces say they are a test's
 (`chinwag.run_kind` is "test", else "production", and each turn names the test session as
 `chinwag.test.session`), so the dashboard keeps them apart from real conversations.

@@ -20,7 +20,7 @@ import type { Agent, Incoming } from "../src/index.ts";
 test("a hosted cloud needs the CI key and --synthetic; a local one needs neither", () => {
   const hosted = "https://tests.example.com";
   assert.deepEqual(cloudHeaders({ cloud: "http://127.0.0.1:8900", synthetic: false }), {});
-  assert.throws(() => cloudHeaders({ cloud: hosted, synthetic: true }), /LAMINAR_FLOW_CLOUD_KEY/);
+  assert.throws(() => cloudHeaders({ cloud: hosted, synthetic: true }), /FLOW_FRAMEWORK_CLOUD_KEY/);
   assert.throws(() => cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: false }), /--synthetic/);
   assert.throws(() => cloudHeaders({ cloud: "http://localhost:8900", ciKey: "oci_x", synthetic: false }), /--synthetic/);
   assert.throws(() => cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: true, environment: "dev" }), /staging or production/);
@@ -86,7 +86,7 @@ test("the key goes to the front door only; the files and the stream go to the tu
 });
 
 test("a file a scenario attaches is read from the tests folder on this machine, and from nowhere else", async () => {
-  const testsDir = mkdtempSync(join(tmpdir(), "laminar-flow-tests-"));
+  const testsDir = mkdtempSync(join(tmpdir(), "flow-tests-"));
   mkdirSync(join(testsDir, "fixtures"));
   writeFileSync(join(testsDir, "fixtures", "receipt.png"), new Uint8Array([1, 2, 3]));
   const incoming = { conversationId: "c", messageId: "m1", channel: { reactions: false, status: false }, incoming: { text: "my receipt", attachments: [{ kind: "image", file: "fixtures/receipt.png" }, { kind: "document", file: "../../etc/passwd" }] } };

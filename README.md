@@ -2,11 +2,11 @@
 
 **Chat agents that feel like a person texting back**, on WhatsApp, SMS, iMessage, Telegram and your own app.
 
-Flow Framework (`npm i laminar-flow`). Formerly chinwag: see [Moving from chinwag](#moving-from-chinwag).
+Flow Framework (`npm i @flow-engineer/flow`). Formerly chinwag: see [Moving from chinwag](#moving-from-chinwag).
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/flow-engineer/laminar-flow/blob/main/LICENSE) ![Node 22.18+](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg) ![TypeScript](https://img.shields.io/badge/TypeScript-yes-3178c6.svg)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/flow-engineer/flow/blob/main/LICENSE) ![Node 22.18+](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg) ![TypeScript](https://img.shields.io/badge/TypeScript-yes-3178c6.svg)
 
-![Pip, the café example, in the WhatsApp simulator: a double text folded into one reply, a menu lookup, and the order with reply buttons](https://raw.githubusercontent.com/flow-engineer/laminar-flow/main/docs/playground.png)
+![Pip, the café example, in the WhatsApp simulator: a double text folded into one reply, a menu lookup, and the order with reply buttons](https://raw.githubusercontent.com/flow-engineer/flow/main/docs/playground.png)
 
 ## Why
 
@@ -19,31 +19,31 @@ Agent SDKs are built for agents that work alone on long tasks. Put one in a chat
 
 Flow Framework makes the chat behaviour the default. You write the agent's prompt, skills and tools; Flow Framework handles the conversation.
 
-![What Flow Framework handles: double texts, fast acknowledgements, tools that never stall the chat, one person across channels, each platform's rules, restarts, reminders, nudges, skills on demand, and a playground](https://raw.githubusercontent.com/flow-engineer/laminar-flow/main/docs/features.svg)
+![What Flow Framework handles: double texts, fast acknowledgements, tools that never stall the chat, one person across channels, each platform's rules, restarts, reminders, nudges, skills on demand, and a playground](https://raw.githubusercontent.com/flow-engineer/flow/main/docs/features.svg)
 
 ## Quick start
 
 Node 22.18 or later. Your agent is TypeScript that Node runs as it is, with no build step.
 
 ```bash
-npx laminar-flow new my-agent && cd my-agent && npm install
+npx @flow-engineer/flow new my-agent && cd my-agent && npm install
 cp .env.example .env        # then put one model key in it; the file says where to make one
 npm start
 ```
 
-`laminar-flow new <name>` makes `./<name>/` from the café example (lowercase letters, digits and dashes). Open the link `npm start` prints and text Pip, a café ordering assistant: your starting point. Pick a platform at the top (SMS, WhatsApp, iMessage, Telegram, web), and turn on **Debug** to see every tool call and how fast each message was answered. A model call that fails (a wrong or expired key, say) shows in the chat, in Debug and on the terminal. The café's `src/agent.ts` reads its model id from `CAFE_MODEL` (default: the model for the key you set, see [Models](#models)). The new folder has the coding-agent skills in `.claude/skills/` and an `AGENTS.md` pointing at them, so you can tell Claude Code, Codex or any coding agent what to build.
+`flow new <name>` makes `./<name>/` from the café example (lowercase letters, digits and dashes). Open the link `npm start` prints and text Pip, a café ordering assistant: your starting point. Pick a platform at the top (SMS, WhatsApp, iMessage, Telegram, web), and turn on **Debug** to see every tool call and how fast each message was answered. A model call that fails (a wrong or expired key, say) shows in the chat, in Debug and on the terminal. The café's `src/agent.ts` reads its model id from `CAFE_MODEL` (default: the model for the key you set, see [Models](#models)). The new folder has the coding-agent skills in `.claude/skills/` and an `AGENTS.md` pointing at them, so you can tell Claude Code, Codex or any coding agent what to build.
 
 ### In a folder of your own
 
 ```bash
-npm init -y && npm pkg set type=module && npm i laminar-flow
+npm init -y && npm pkg set type=module && npm i @flow-engineer/flow
 ```
 
 `src/main.ts`:
 
 ```ts
-import { createAgent, openAICompatible, sms, whatsapp } from "laminar-flow";
-import { simulators } from "laminar-flow/simulators";
+import { createAgent, openAICompatible, sms, whatsapp } from "@flow-engineer/flow";
+import { simulators } from "@flow-engineer/flow/simulators";
 
 // No provider connected yet: only the playground's test people reach the agent.
 const notConnected = async () => {
@@ -67,11 +67,11 @@ echo "OPENROUTER_API_KEY=sk-or-..." > .env
 node --env-file=.env src/main.ts
 ```
 
-Tests run with `npx laminar-flow test` (see [Testing](#testing)); `npx laminar-flow --help` lists everything the command does.
+Tests run with `npx flow test` (see [Testing](#testing)); `npx flow --help` lists everything the command does.
 
 ## How a turn works
 
-![One turn: two quick messages fold into one turn, an acknowledgement goes out with the tool call, the tool runs, one answer follows; if they write again while a tool runs, the tool moves to the background and its result comes back later](https://raw.githubusercontent.com/flow-engineer/laminar-flow/main/docs/turn.svg)
+![One turn: two quick messages fold into one turn, an acknowledgement goes out with the tool call, the tool runs, one answer follows; if they write again while a tool runs, the tool moves to the background and its result comes back later](https://raw.githubusercontent.com/flow-engineer/flow/main/docs/turn.svg)
 
 | When | Flow Framework does |
 |---|---|
@@ -84,7 +84,7 @@ Tests run with `npx laminar-flow test` (see [Testing](#testing)); `npx laminar-f
 
 ## Build an agent
 
-An agent is a prompt, a few skills and plain functions, so a coding agent can build and change one end to end. This is what `laminar-flow new` makes:
+An agent is a prompt, a few skills and plain functions, so a coding agent can build and change one end to end. This is what `flow new` makes:
 
 ```
 my-agent/
@@ -100,7 +100,7 @@ my-agent/
 **Tools** are functions with a zod input. Return anything; it is shown to the model as JSON.
 
 ```ts
-import { tool, z } from "laminar-flow";
+import { tool, z } from "@flow-engineer/flow";
 
 export const tools = [
   tool({
@@ -116,7 +116,7 @@ export const tools = [
 
 ```ts
 import { fileURLToPath } from "node:url";
-import { createAgent, openAICompatible, type EventSink, type Model, type Tool } from "laminar-flow";
+import { createAgent, openAICompatible, type EventSink, type Model, type Tool } from "@flow-engineer/flow";
 import { tools as myTools } from "./tools.ts";
 
 export const tools = myTools;
@@ -134,7 +134,7 @@ export function buildAgent(options: { model?: Model; events?: EventSink[]; tools
 **The playground** serves it in every simulator:
 
 ```ts
-import { simulators } from "laminar-flow/simulators";
+import { simulators } from "@flow-engineer/flow/simulators";
 import { buildAgent } from "./agent.ts";
 
 const play = simulators({ title: "My agent" });
@@ -147,7 +147,7 @@ The playground plays only the test people you declare (`testPeople: [{ name, pho
 
 ## Channels and people
 
-![One person: SMS and WhatsApp from the same number, and a signed-in app session, all lead to one conversation; each reply goes out on the channel the message came in on](https://raw.githubusercontent.com/flow-engineer/laminar-flow/main/docs/one-person.svg)
+![One person: SMS and WhatsApp from the same number, and a signed-in app session, all lead to one conversation; each reply goes out on the channel the message came in on](https://raw.githubusercontent.com/flow-engineer/flow/main/docs/one-person.svg)
 
 A channel is a definition: Flow Framework knows the platform's rules, your provider only says how to send.
 
@@ -190,7 +190,7 @@ createAgent({
 });
 ```
 
-A tool of yours named `get_user_profile` is used instead. In `laminar-flow test` runs the profile is played by the test cloud from the scenario's `world`, like your tools, so a test never reads a real one.
+A tool of yours named `get_user_profile` is used instead. In `flow test` runs the profile is played by the test cloud from the scenario's `world`, like your tools, so a test never reads a real one.
 
 `context(conversationId)` is still there for small facts at hand, added to the system prompt at the start of every turn. It runs before every reply, so a lookup in it (an API call, a slow query) delays every reply: put those in `profile` or a tool. What is the same for everyone (opening hours, policies) belongs in the agent's `AGENTS.md`.
 
@@ -276,7 +276,7 @@ When the system that decides to nudge is a separate service, mount `nudgeHandler
 
 ```ts
 import { createServer } from "node:http";
-import { nudgeHandler } from "laminar-flow";
+import { nudgeHandler } from "@flow-engineer/flow";
 
 const nudges = nudgeHandler(agent, { token: process.env.NUDGE_TOKEN! });
 createServer((req, res) => {
@@ -329,7 +329,7 @@ The contract is [`spec/nudges.openapi.yaml`](spec/nudges.openapi.yaml). In code,
   const log: EventSink = (event) => console.log(event.type, event.conversationId);
   createAgent({ /* ... */ events: [log] });
   ```
-- Traces: with `LAMINAR_FLOW_TRACES_KEY` set, every turn is posted as an OTLP/JSON trace to `<url>/v1/traces`, where the URL is `LAMINAR_FLOW_TRACES_URL`, else https://flow.engineer/observe (the trace key is made there). `LAMINAR_FLOW_TRACES_CONTENT=1` adds what was written; without it, metadata only. Under `laminar-flow test` every trace is marked as a test's (`chinwag.run_kind` "test" and the session as `chinwag.test.session`; otherwise `chinwag.run_kind` is "production"), so the dashboard can keep tests apart from real conversations.
+- Traces: with `FLOW_FRAMEWORK_TRACES_KEY` set, every turn is posted as an OTLP/JSON trace to `<url>/v1/traces`, where the URL is `FLOW_FRAMEWORK_TRACES_URL`, else https://flow.engineer/observe (the trace key is made there). `FLOW_FRAMEWORK_TRACES_CONTENT=1` adds what was written; without it, metadata only. Under `flow test` every trace is marked as a test's (`chinwag.run_kind` "test" and the session as `chinwag.test.session`; otherwise `chinwag.run_kind` is "production"), so the dashboard can keep tests apart from real conversations.
 
 ## Testing
 
@@ -356,7 +356,7 @@ expect:
 `expect.calls` and `expect.never` name tools that must or must not be called, checked by code from the recorded calls. `now` and `timezone` set the test's clock, and dates in test files are written against it (`{{now + 1d | date}}`), so they never go stale ([coding-agents/test-skill.md](coding-agents/test-skill.md)). `tests/tools/*.yaml` describe how each tool behaves (normal, slow, each error). Run the suite from the agent's folder:
 
 ```bash
-npx laminar-flow test --cloud https://flow.engineer/observe --synthetic --runs 3 --only latte-correction
+npx flow test --cloud https://flow.engineer/observe --synthetic --runs 3 --only latte-correction
 ```
 
 Your agent stays on your machine with its own model and key; the test cloud ([get one](#get-a-test-cloud)) plays the person and the tools and judges each run. The cloud is a hosted service, not part of this package. The command prints pass or fail per run, with the judge's reasons, the cost, and a link to watch each conversation. Before anything is sent it reads every test file as the cloud does, and a mistake stops it with the file and line (`tests/scenarios/latte-correction.yaml:3: person.goal: missing`).
@@ -366,7 +366,7 @@ Exit status:
 | Exit | Meaning |
 |---|---|
 | 0 | Every run passed. |
-| 1 | A run failed. Or nothing was sent: a wrong flag, a test file that does not parse, no `LAMINAR_FLOW_CLOUD_KEY`; the message is printed on its own. |
+| 1 | A run failed. Or nothing was sent: a wrong flag, a test file that does not parse, no `FLOW_FRAMEWORK_CLOUD_KEY`; the message is printed on its own. |
 | 2 | The connection, the tunnel or the stream failed (before or after the session opened), the cloud answered 5xx or no JSON, the cloud ended the session for its own failure, or runs errored (the cloud could not play or judge them) and none failed. |
 | 3 | The cloud refused: the open (a bad or wrong key, 401/403; an invalid request, 400; busy, 429 `rate_limited`; the spend cap, 429 `spend_cap`; 503 `capacity`), or it ended the session for the spend cap or capacity. |
 | 130 | Interrupted (Ctrl-C). |
@@ -394,7 +394,7 @@ Each run's line carries its id (`FAIL  latte-correction #1 (whatsapp) trn_…: 6
 
 `outcome` is `passed` (exit 0), `failed` or `invalid` (1), `errored` or `transport` (2), `refused` (3) or `interrupted` (130). A run's `verdict` is `errored` whenever the cloud names an `error` for it (such as `judge_failed`, `simulator_failed` or `spend_cap`), whatever it `ended` as: the cloud could not play or judge it, so it says nothing about the agent. Its line reads `ERROR` instead of `PASS` or `FAIL`, and the run's `error` is that code (else `null`). `error` is `{ "message", "status", "type", "retryAfterSeconds" }` when the session did not finish (`type` is the cloud's code, such as `spend_cap`; the others are `null` when it did not say).
 
-`--only latte-correction,order-fails` runs only those scenarios (file names without `.yaml`); every tool file still goes. Once the session has opened, every exit (0, 1, 2, 3 or 130) writes `.laminar-flow/last-session.json` in the agent's folder and prints its path; `laminar-flow new` git-ignores `.laminar-flow/`. It holds what each run ended as and the judge's reasons, never the messages (a reason can quote one, which is why the file stays on your machine; the suite is synthetic by `--synthetic`):
+`--only latte-correction,order-fails` runs only those scenarios (file names without `.yaml`); every tool file still goes. Once the session has opened, every exit (0, 1, 2, 3 or 130) writes `.flow/last-session.json` in the agent's folder and prints its path; `flow new` git-ignores `.flow/`. It holds what each run ended as and the judge's reasons, never the messages (a reason can quote one, which is why the file stays on your machine; the suite is synthetic by `--synthetic`):
 
 ```json
 {
@@ -408,18 +408,18 @@ Each run's line carries its id (`FAIL  latte-correction #1 (whatsapp) trn_…: 6
 }
 ```
 
-`ended` is `finished`, `stopped` (the session broke off or the cloud stopped it) or `interrupted`. `agent` is the cloud's id for the agent (a hosted cloud names it), which `laminar-flow show` reads. `only` is the scenarios the session was limited to, `null` for the whole suite. `verdict` is `passed`, `failed`, `errored` (the cloud could not play or judge the run) or `not_played` (the session ended first; its `runId` is `null`).
+`ended` is `finished`, `stopped` (the session broke off or the cloud stopped it) or `interrupted`. `agent` is the cloud's id for the agent (a hosted cloud names it), which `flow show` reads. `only` is the scenarios the session was limited to, `null` for the whole suite. `verdict` is `passed`, `failed`, `errored` (the cloud could not play or judge the run) or `not_played` (the session ended first; its `runId` is `null`).
 
-`laminar-flow show <run-id>` prints one run's record from the cloud, read with `LAMINAR_FLOW_CLOUD_KEY`: the verdict, every check with the judge's reason, then the conversation in time order with each tool call the simulator played (its input, output and what it changed). `laminar-flow show last` picks the first run in `.laminar-flow/last-session.json` that did not pass (its first run when all passed) and names the others. `--json` prints the record exactly as the cloud answered it. It exits 0 when it printed; 1 for a wrong flag, no key or last session, no such run (404) or one past the 30 days runs are kept (410); 2 when the cloud did not answer or answered 5xx; 3 when it refused the key (401, 403) or is busy (429).
+`flow show <run-id>` prints one run's record from the cloud, read with `FLOW_FRAMEWORK_CLOUD_KEY`: the verdict, every check with the judge's reason, then the conversation in time order with each tool call the simulator played (its input, output and what it changed). `flow show last` picks the first run in `.flow/last-session.json` that did not pass (its first run when all passed) and names the others. `--json` prints the record exactly as the cloud answered it. It exits 0 when it printed; 1 for a wrong flag, no key or last session, no such run (404) or one past the 30 days runs are kept (410); 2 when the cloud did not answer or answered 5xx; 3 when it refused the key (401, 403) or is busy (429).
 
-`--failed` runs again only the scenarios that did not pass in that file (failed, errored or not played), on every channel each plays: a scenario's channels are part of its file, so one channel cannot be picked alone. It goes with `--runs`; with `--only` it stops and says to pick one, since the two would each pick the scenarios. With nothing to run again it prints `Nothing failed in the last session (<id>).` and exits 0 (and says when that session ran only some scenarios); with no file it says to run `laminar-flow test` first and exits 1. The loop, for you or a coding agent:
+`--failed` runs again only the scenarios that did not pass in that file (failed, errored or not played), on every channel each plays: a scenario's channels are part of its file, so one channel cannot be picked alone. It goes with `--runs`; with `--only` it stops and says to pick one, since the two would each pick the scenarios. With nothing to run again it prints `Nothing failed in the last session (<id>).` and exits 0 (and says when that session ran only some scenarios); with no file it says to run `flow test` first and exits 1. The loop, for you or a coding agent:
 
 ```bash
-npx laminar-flow test --synthetic            # the whole suite
+npx flow test --synthetic                    # the whole suite
 # fix what failed
-npx laminar-flow show last                   # why: the judge's reasons, the conversation and the tool calls
-npx laminar-flow test --synthetic --failed   # only what did not pass; again until it exits 0
-npx laminar-flow test --synthetic            # the whole suite once more before you finish
+npx flow show last                           # why: the judge's reasons, the conversation and the tool calls
+npx flow test --synthetic --failed           # only what did not pass; again until it exits 0
+npx flow test --synthetic                    # the whole suite once more before you finish
 ```
 
 ### Get a test cloud
@@ -427,24 +427,24 @@ npx laminar-flow test --synthetic            # the whole suite once more before 
 1. Sign in at https://flow.engineer/observe (Google, GitHub or an email link).
 2. Workspace → New agent.
 3. On the agent's Developers page, "Make a CI key". It starts with `oci_` and is shown once.
-4. Put it in the agent's `.env` as `LAMINAR_FLOW_CLOUD_KEY` (never on the command line).
-5. `npx laminar-flow test --cloud https://flow.engineer/observe --synthetic` from the agent's folder (`--cloud` is that address by default).
+4. Put it in the agent's `.env` as `FLOW_FRAMEWORK_CLOUD_KEY` (never on the command line).
+5. `npx flow test --cloud https://flow.engineer/observe --synthetic` from the agent's folder (`--cloud` is that address by default).
 
 Your agent runs on your machine with your own model key. The cloud's person simulator, tool simulator and judge are free up to $5 a day per workspace, with 2 sessions at once; test data only (`--synthetic`), and records are deleted after 30 days.
 
-`--cloud` (or `LAMINAR_FLOW_CLOUD`) points at another test cloud. A hosted cloud takes its key in `LAMINAR_FLOW_CLOUD_KEY` and `--synthetic`, your attestation that the test files hold no real customer data; without the key the command stops and says where to make one.
+`--cloud` (or `FLOW_FRAMEWORK_CLOUD`) points at another test cloud. A hosted cloud takes its key in `FLOW_FRAMEWORK_CLOUD_KEY` and `--synthetic`, your attestation that the test files hold no real customer data; without the key the command stops and says where to make one.
 
 ### Test an agent you already have
 
-An agent built on any framework is tested through an HTTP endpoint, with no rewrite. It needs a test cloud like any run (see [Get a test cloud](#get-a-test-cloud)): `LAMINAR_FLOW_CLOUD_KEY` and `--synthetic` for the hosted one, the default, or `--cloud` for another. From a folder with `tests/scenarios/*.yaml`, with your agent running:
+An agent built on any framework is tested through an HTTP endpoint, with no rewrite. It needs a test cloud like any run (see [Get a test cloud](#get-a-test-cloud)): `FLOW_FRAMEWORK_CLOUD_KEY` and `--synthetic` for the hosted one, the default, or `--cloud` for another. From a folder with `tests/scenarios/*.yaml`, with your agent running:
 
 ```bash
-npx laminar-flow test --agent-url http://localhost:3000/laminar-flow --cloud https://flow.engineer/observe --synthetic
+npx @flow-engineer/flow test --agent-url http://localhost:3000/flow --cloud https://flow.engineer/observe --synthetic
 ```
 
 Before the session opens, the command sends one `HEAD` request to the URL (never a message), and stops with "Could not reach your agent at <url>" if nothing answers; any HTTP status counts as an answer.
 
-`laminar-flow test` runs on your machine and POSTs each of the person's messages to that URL from there, so your agent never has to be reachable from the internet (`http://localhost` is fine). The request is JSON, with `authorization: Bearer <LAMINAR_FLOW_AGENT_TOKEN>` when that variable is set:
+`flow test` runs on your machine and POSTs each of the person's messages to that URL from there, so your agent never has to be reachable from the internet (`http://localhost` is fine). The request is JSON, with `authorization: Bearer <FLOW_FRAMEWORK_AGENT_TOKEN>` when that variable is set:
 
 ```json
 {
@@ -461,7 +461,7 @@ Keep the conversation's history by `conversationId`, as you would per phone numb
 { "replies": [{ "type": "message", "text": "We're open 8am to 6pm today.", "buttons": ["Order ahead"] }] }
 ```
 
-A minimal server, with no dependencies (the whole file is [`examples/http-agent/server.mjs`](https://github.com/flow-engineer/laminar-flow/blob/main/examples/http-agent/server.mjs), with a test scenario beside it; it also ships in the package, in `node_modules/laminar-flow/examples/http-agent`):
+A minimal server, with no dependencies (the whole file is [`examples/http-agent/server.mjs`](https://github.com/flow-engineer/flow/blob/main/examples/http-agent/server.mjs), with a test scenario beside it; it also ships in the package, in `node_modules/@flow-engineer/flow/examples/http-agent`):
 
 ```js
 import { createServer } from "node:http";
@@ -487,10 +487,10 @@ The endpoint's contract is written down in [`spec/`](spec/): [`agent-endpoint.op
 Check an endpoint against the contract before a test run, with no cloud, no key and no model call on Flow Framework's side:
 
 ```bash
-npx laminar-flow check-endpoint http://localhost:3000/laminar-flow [--token-env NAME] [--json]
+npx @flow-engineer/flow check-endpoint http://localhost:3000/flow [--token-env NAME] [--json]
 ```
 
-It sends a fixed set of synthetic messages (a typed message, a double text, a photo, a tapped button quoting the agent, a message that may need no answer) and checks each answer: status 200, `{ "replies": [...] }`, every reply against the schema and what WhatsApp can show, and every id a reply names (`replyTo`, a reaction's `messageId`) one of the person's messages. One line per case; exit 0 when all pass, else 1. The token is the value of `NAME` (default `LAMINAR_FLOW_AGENT_TOKEN`).
+It sends a fixed set of synthetic messages (a typed message, a double text, a photo, a tapped button quoting the agent, a message that may need no answer) and checks each answer: status 200, `{ "replies": [...] }`, every reply against the schema and what WhatsApp can show, and every id a reply names (`replyTo`, a reaction's `messageId`) one of the person's messages. One line per case; exit 0 when all pass, else 1. The token is the value of `NAME` (default `FLOW_FRAMEWORK_AGENT_TOKEN`).
 
 The café's agent as an HTTP endpoint, with its two tools and one model through any OpenAI-compatible API (the same key variables as `openAICompatible`, `MODEL` for the model; `FAKE_MODEL=1` for a fixed reply and no model call): [`examples/http-agent-python`](examples/http-agent-python) (standard library only) and [`examples/http-agent-go`](examples/http-agent-go) (standard library only).
 
@@ -533,7 +533,7 @@ For agents with tools we recommend **Claude Haiku 5.5** (`anthropic/claude-haiku
 
 ## With a coding agent
 
-`laminar-flow new` puts the skills in your agent's `.claude/skills/`. They are also in [`coding-agents/`](https://github.com/flow-engineer/laminar-flow/tree/main/coding-agents): `skill.md` builds an agent, `tools-skill.md` writes tools and their test files, `test-skill.md` writes scenarios. The café in [`examples/cafe`](https://github.com/flow-engineer/laminar-flow/tree/main/examples/cafe) is a complete agent with tests to copy from.
+`flow new` puts the skills in your agent's `.claude/skills/`. They are also in [`coding-agents/`](https://github.com/flow-engineer/flow/tree/main/coding-agents): `skill.md` builds an agent, `tools-skill.md` writes tools and their test files, `test-skill.md` writes scenarios. The café in [`examples/cafe`](https://github.com/flow-engineer/flow/tree/main/examples/cafe) is a complete agent with tests to copy from.
 
 ## Roadmap
 
@@ -543,24 +543,24 @@ For agents with tools we recommend **Claude Haiku 5.5** (`anthropic/claude-haiku
 
 | Folder | What it is |
 |---|---|
-| `src/` | The runtime (`laminar-flow`) |
-| `simulators/` | The playground (`laminar-flow/simulators`): SMS, WhatsApp, iMessage, Telegram and web, with each platform's rules |
-| `flow-messaging/` | Channels on Flow Messaging (`laminar-flow/flow-messaging`): WhatsApp, Telegram and SMS through one API |
-| `testing/` | Test file formats and the `laminar-flow` command (`laminar-flow/testing`) |
+| `src/` | The runtime (`@flow-engineer/flow`) |
+| `simulators/` | The playground (`@flow-engineer/flow/simulators`): SMS, WhatsApp, iMessage, Telegram and web, with each platform's rules |
+| `flow-messaging/` | Channels on Flow Messaging (`@flow-engineer/flow/flow-messaging`): WhatsApp, Telegram and SMS through one API |
+| `testing/` | Test file formats and the `flow` command (`@flow-engineer/flow/testing`) |
 | `examples/cafe/` | Pip, an ordering assistant, with tests |
 | `coding-agents/` | Skills for coding agents |
 
 To work on Flow Framework itself, start an agent inside a clone; it imports `src/` and `simulators/src/` by path, so your changes show at once:
 
 ```bash
-git clone https://github.com/flow-engineer/laminar-flow
-cd laminar-flow && npm ci
+git clone https://github.com/flow-engineer/flow
+cd flow && npm ci
 npm run new -- my-agent
 echo "OPENROUTER_API_KEY=sk-or-..." > agents/my-agent/.env
 cd agents/my-agent && npm start
 ```
 
-`agents/` is git-ignored, so `git pull` never touches your agents. `npm test` runs the runtime's tests `cd simulators && npm test` the simulators' and `cd flow-messaging && npm test` the Flow Messaging channels'. Unit tests never call a real model. Read [AGENTS.md](https://github.com/flow-engineer/laminar-flow/blob/main/AGENTS.md) before contributing.
+`agents/` is git-ignored, so `git pull` never touches your agents. `npm test` runs the runtime's tests `cd simulators && npm test` the simulators' and `cd flow-messaging && npm test` the Flow Messaging channels'. Unit tests never call a real model. Read [AGENTS.md](https://github.com/flow-engineer/flow/blob/main/AGENTS.md) before contributing.
 
 ## FAQ
 
@@ -578,18 +578,18 @@ cd agents/my-agent && npm start
 
 ## Moving from chinwag
 
-Flow Framework was published as `chinwag` up to 0.1.13; from 0.2.0 it is `laminar-flow`, with no change in behaviour.
+Flow Framework was published as `chinwag` up to 0.1.13; from 0.2.0 it is `@flow-engineer/flow`, and its command is `flow`, with no change in behaviour.
 
-1. `npm uninstall chinwag && npm i laminar-flow`
-2. Imports: `chinwag` becomes `laminar-flow`, `chinwag/simulators` becomes `laminar-flow/simulators`, `chinwag/testing` becomes `laminar-flow/testing`. The type `ChinwagEvent` is now `FlowEvent` (the old name still works, deprecated).
-3. The command: `npx chinwag ...` becomes `npx laminar-flow ...` (in `package.json` scripts too). `chinwag` still runs for this release and says it was renamed.
-4. Environment: `CHINWAG_CLOUD`, `CHINWAG_CLOUD_KEY`, `CHINWAG_AGENT_TOKEN`, `CHINWAG_TRACES_KEY`, `CHINWAG_TRACES_URL` and `CHINWAG_TRACES_CONTENT` are now `LAMINAR_FLOW_CLOUD`, `LAMINAR_FLOW_CLOUD_KEY`, and so on. The old names still work; a new name wins when both are set.
-5. Test results now go to `.laminar-flow/last-session.json`; `--failed` and `show last` still read `.chinwag/last-session.json` until the first run writes the new one. Add `.laminar-flow/` to `.gitignore`.
-6. Coding-agent skills are now `laminar-flow`, `laminar-flow-tools` and `laminar-flow-tests`: copy them again from `node_modules/laminar-flow/coding-agents/`.
-7. Flow Messaging channels are in the package as `laminar-flow/flow-messaging` ([its README](flow-messaging/README.md)).
+1. `npm uninstall chinwag && npm i @flow-engineer/flow`
+2. Imports: `chinwag` becomes `@flow-engineer/flow`, `chinwag/simulators` becomes `@flow-engineer/flow/simulators`, `chinwag/testing` becomes `@flow-engineer/flow/testing`. The type `ChinwagEvent` is now `FlowEvent` (the old name still works, deprecated).
+3. The command: `npx chinwag ...` becomes `npx flow ...` (in `package.json` scripts too). `chinwag` still runs for this release and says it was renamed.
+4. Environment: `CHINWAG_CLOUD`, `CHINWAG_CLOUD_KEY`, `CHINWAG_AGENT_TOKEN`, `CHINWAG_TRACES_KEY`, `CHINWAG_TRACES_URL` and `CHINWAG_TRACES_CONTENT` are now `FLOW_FRAMEWORK_CLOUD`, `FLOW_FRAMEWORK_CLOUD_KEY`, and so on. The old names still work; a new name wins when both are set.
+5. Test results now go to `.flow/last-session.json`; `--failed` and `show last` still read `.chinwag/last-session.json` until the first run writes the new one. Add `.flow/` to `.gitignore`. Files the command keeps on this machine (such as a sign-in) go to `~/.config/flow-framework/`; `~/.config/chinwag/` is still read until then.
+6. Coding-agent skills are now `flow-framework`, `flow-framework-tools` and `flow-framework-tests`: copy them again from `node_modules/@flow-engineer/flow/coding-agents/`.
+7. Flow Messaging channels are in the package as `@flow-engineer/flow/flow-messaging` ([its README](flow-messaging/README.md)).
 
 The test cloud, its address and its API are unchanged, and traces keep their `chinwag.*` attribute names.
 
 ## License
 
-[MIT](https://github.com/flow-engineer/laminar-flow/blob/main/LICENSE)
+[MIT](https://github.com/flow-engineer/flow/blob/main/LICENSE)

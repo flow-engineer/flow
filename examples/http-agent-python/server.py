@@ -1,8 +1,8 @@
-# The café's agent, Pip, in Python with no dependencies, for `laminar-flow test --agent-url`: one POST
+# The café's agent, Pip, in Python with no dependencies, for `flow test --agent-url`: one POST
 # per message from the person, answered with the replies to send. Its model is any
 # OpenAI-compatible API; its tools run here, for real.
 #
-#   python3 server.py               listens on http://localhost:3000/laminar-flow (PORT to change it)
+#   python3 server.py               listens on http://localhost:3000/flow (PORT to change it)
 #   FAKE_MODEL=1 python3 server.py  the same, with a fixed reply instead of a model call
 
 import itertools
@@ -138,10 +138,10 @@ def turn(conversation_id, text):
 
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        if self.path != "/laminar-flow":
+        if self.path != "/flow":
             return self.answer(404)
-        # Set LAMINAR_FLOW_AGENT_TOKEN on both sides to require it.
-        token = os.environ.get("LAMINAR_FLOW_AGENT_TOKEN", os.environ.get("CHINWAG_AGENT_TOKEN"))
+        # Set FLOW_FRAMEWORK_AGENT_TOKEN on both sides to require it.
+        token = os.environ.get("FLOW_FRAMEWORK_AGENT_TOKEN", os.environ.get("CHINWAG_AGENT_TOKEN"))
         if token and self.headers.get("authorization") != f"Bearer {token}":
             return self.answer(401)
         try:
@@ -172,5 +172,5 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
     server = ThreadingHTTPServer(("", port), Handler)
-    print(f"Listening on http://localhost:{port}/laminar-flow", flush=True)
+    print(f"Listening on http://localhost:{port}/flow", flush=True)
     server.serve_forever()

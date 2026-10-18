@@ -284,7 +284,7 @@ export interface FilledTemplate {
  */
 export function fillTemplate(definition: TemplateDefinition, template: Template): FilledTemplate {
   const fail = (problem: string): never => {
-    throw new Error(`laminar-flow: template "${definition.name}" (${definition.language}) ${problem}`);
+    throw new Error(`flow: template "${definition.name}" (${definition.language}) ${problem}`);
   };
   if (template.body && template.variables) fail("got both body and variables: give one");
   const values = template.body ?? numbered(template.variables);

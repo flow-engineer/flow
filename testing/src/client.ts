@@ -153,7 +153,7 @@ export type AgentUnderTest = Pick<Agent, "channels" | "receive" | "reacted"> & P
 export interface CloudAccess {
   /** The cloud's front door, as given to --cloud. */
   cloud: string;
-  /** The agent's CI key (LAMINAR_FLOW_CLOUD_KEY). */
+  /** The agent's CI key (FLOW_FRAMEWORK_CLOUD_KEY). */
   ciKey?: string;
   /** Whoever runs the tests attests that the test files hold no real people's data. */
   synthetic: boolean;
@@ -166,7 +166,7 @@ export interface CloudAccess {
  * a local one needs neither, and gets them when they are given. */
 export function cloudHeaders(access: CloudAccess): Record<string, string> {
   const local = isLoopback(access.cloud);
-  if (!local && !access.ciKey) throw new Error("A hosted cloud needs the agent's CI key: set LAMINAR_FLOW_CLOUD_KEY.");
+  if (!local && !access.ciKey) throw new Error("A hosted cloud needs the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY.");
   if ((!local || access.ciKey) && !access.synthetic) {
     throw new Error("A hosted cloud runs synthetic tests only: pass --synthetic to attest that your test files hold no real customer or member data.");
   }

@@ -24,11 +24,11 @@ const run = {
 /** A run as the cloud reports it: hello's first run on sms, failed, unless `over` says otherwise. */
 const runOf = (over: Record<string, unknown>) => ({ ...run.run, ...over });
 const scenarioYaml = (id: string, channels: string) => `id: ${id}\nchannels: [${channels}]\nperson:\n  persona: a\n  goal: b\nopening:\n  - say: hi\n`;
-const lastSession = (dir: string) => JSON.parse(readFileSync(join(dir, ".laminar-flow", "last-session.json"), "utf8"));
+const lastSession = (dir: string) => JSON.parse(readFileSync(join(dir, ".flow", "last-session.json"), "utf8"));
 
 /** An agent folder with hello.yaml (sms) and any more scenarios, as file name to YAML. */
 function agentDir(more: Record<string, string> = {}): string {
-  const dir = mkdtempSync(join(tmpdir(), "laminar-flow-cli-"));
+  const dir = mkdtempSync(join(tmpdir(), "flow-cli-"));
   mkdirSync(join(dir, "src"));
   mkdirSync(join(dir, "tests", "scenarios"), { recursive: true });
   writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture" }));
@@ -75,8 +75,8 @@ function cloud(hold: boolean, frames: unknown[] = [run], sessionId = "s", answer
 
 function runCli(url: string, dir: string, extra: string[] = []) {
   const env = { ...process.env };
-  delete env.LAMINAR_FLOW_CLOUD;
-  delete env.LAMINAR_FLOW_CLOUD_KEY;
+  delete env.FLOW_FRAMEWORK_CLOUD;
+  delete env.FLOW_FRAMEWORK_CLOUD_KEY;
   return spawn(process.execPath, [cli, "test", "--cloud", url, ...extra], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
 }
 
@@ -93,7 +93,7 @@ test("a stream that dies prints the runs already in, keeps them with the rest as
     assert.match(out, /FAIL {2}hello #1/);
     assert.match(out, /1 of 3 runs finished before: the cloud closed the stream before the session finished/);
     assert.match(out, /http:\/\/dash\/s/);
-    assert.match(out, /^Results: \.laminar-flow\/last-session\.json/m);
+    assert.match(out, /^Results: \.flow\/last-session\.json/m);
     const last = lastSession(dir);
     assert.equal(last.ended, "stopped");
     assert.deepEqual(last.runs.map((r: { scenario: string; channel: string; verdict: string }) => `${r.scenario} ${r.channel} ${r.verdict}`), ["bye sms not_played", "bye whatsapp not_played", "hello sms failed"]);
@@ -112,8 +112,8 @@ async function cliOutput(args: string[], dir: string, node: string[] = []): Prom
 /** The same, with `env` added, and stdout and stderr also apart. */
 async function cliStreams(args: string[], dir: string, env: NodeJS.ProcessEnv = {}, node: string[] = []) {
   const full: NodeJS.ProcessEnv = { ...process.env, OPENROUTER_API_KEY: "test-key" };
-  delete full.LAMINAR_FLOW_CLOUD;
-  delete full.LAMINAR_FLOW_CLOUD_KEY;
+  delete full.FLOW_FRAMEWORK_CLOUD;
+  delete full.FLOW_FRAMEWORK_CLOUD_KEY;
   const child = spawn(process.execPath, [...node, cli, ...args], { cwd: dir, env: { ...full, ...env }, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
   let stdout = "";
@@ -130,14 +130,14 @@ test("the command line: --version, each command's own --help, and a plain line f
   assert.deepEqual(await cliOutput(["--version"], dir), { code: 0, out: `${version}\n` });
   const testHelp = await cliOutput(["test", "--help"], dir);
   assert.equal(testHelp.code, 0);
-  assert.match(testHelp.out, /laminar-flow test \[options\]/);
-  assert.doesNotMatch(testHelp.out, /laminar-flow new <name>/);
+  assert.match(testHelp.out, /flow test \[options\]/);
+  assert.doesNotMatch(testHelp.out, /flow new <name>/);
   const newHelp = await cliOutput(["new", "--help"], dir);
-  assert.match(newHelp.out, /laminar-flow new <name>/);
+  assert.match(newHelp.out, /flow new <name>/);
   assert.doesNotMatch(newHelp.out, /--cloud/);
   const bogus = await cliOutput(["test", "--bogus"], dir);
   assert.equal(bogus.code, 1);
-  assert.match(bogus.out, /^laminar-flow: unknown option --bogus\n\nUsage:\n {2}laminar-flow test/);
+  assert.match(bogus.out, /^flow: unknown option --bogus\n\nUsage:\n {2}flow test/);
   assert.doesNotMatch(bogus.out, /ERR_PARSE_ARGS|\n\s+at /);
   assert.deepEqual(await cliOutput(["test", "--runs", "abc"], dir), { code: 1, out: '--runs must be a whole number above 0, such as 3 (got "abc").\n' });
   const old = await cliOutput(["new", "x"], dir, ["--import", 'data:text/javascript,Object.defineProperty(process.versions,"node",{value:"22.17.0"})']);
@@ -147,10 +147,10 @@ test("the command line: --version, each command's own --help, and a plain line f
 
 test("what is wrong on this machine is said before the cloud is called, an address that does not answer is named, and the default cloud asks for its key", { timeout: 15_000 }, async () => {
   const closed = "http://127.0.0.1:9";
-  const empty = mkdtempSync(join(tmpdir(), "laminar-flow-cli-"));
+  const empty = mkdtempSync(join(tmpdir(), "flow-cli-"));
   const noAgent = await cliOutput(["test", "--cloud", closed], empty);
   assert.equal(noAgent.code, 1);
-  assert.match(noAgent.out, /^No src\/agent\.ts in .+ Run laminar-flow test from your agent's folder/);
+  assert.match(noAgent.out, /^No src\/agent\.ts in .+ Run flow test from your agent's folder/);
   const dir = agentDir();
   writeFileSync(join(dir, "tests", "scenarios", "bad.yaml"), "id: bad\nchannels: [sms, fax]\nperson:\n  persona: a\nopening:\n  - say: hi\n");
   assert.deepEqual(await cliOutput(["test", "--cloud", closed], dir), {
@@ -158,13 +158,13 @@ test("what is wrong on this machine is said before the cloud is called, an addre
     out: `${join("tests", "scenarios", "bad.yaml")}:2: channels[1]: Invalid option: expected one of "sms"|"whatsapp"|"imessage"|"telegram"|"web"\n${join("tests", "scenarios", "bad.yaml")}:3: person.goal: missing\n\nNothing was sent: fix the test files above.\n`,
   });
   const good = agentDir();
-  assert.match((await cliOutput(["test", "--cloud", closed, "--agent-url", "http://127.0.0.1:9/laminar-flow"], good)).out, /^Could not reach your agent at http:\/\/127\.0\.0\.1:9\/laminar-flow: ECONNREFUSED\. Start it first/m);
+  assert.match((await cliOutput(["test", "--cloud", closed, "--agent-url", "http://127.0.0.1:9/flow"], good)).out, /^Could not reach your agent at http:\/\/127\.0\.0\.1:9\/flow: ECONNREFUSED\. Start it first/m);
   // A cloud that does not answer is a connection failure (2), not a failed run.
   const named = await cliOutput(["test", "--cloud", closed], good);
   assert.equal(named.code, 2);
   assert.match(named.out, /^Could not reach http:\/\/127\.0\.0\.1:9: ECONNREFUSED\.$/m);
   // No cloud named: the hosted one, which needs a key before anything is sent.
-  assert.match((await cliOutput(["test"], good)).out, /^A hosted cloud needs the agent's CI key: set LAMINAR_FLOW_CLOUD_KEY\. Make a key at https:\/\/flow\.engineer\/observe: your agent, Developers\.$/m);
+  assert.match((await cliOutput(["test"], good)).out, /^A hosted cloud needs the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY\. Make a key at https:\/\/flow\.engineer\/observe: your agent, Developers\.$/m);
 });
 
 test("Ctrl-C prints the same partial report, keeps what finished, and exits 130", { timeout: 15_000 }, async () => {
@@ -191,7 +191,7 @@ test("Ctrl-C prints the same partial report, keeps what finished, and exits 130"
     assert.match(out, /1 of 1 runs finished before: interrupted/);
     assert.match(out, /http:\/\/dash\/s/);
     assert.match(out, /the cloud keeps playing; stop it from the dashboard: http:\/\/dash\/s/);
-    assert.match(out, /^Results: \.laminar-flow\/last-session\.json/m);
+    assert.match(out, /^Results: \.flow\/last-session\.json/m);
     const last = lastSession(dir);
     assert.equal(last.ended, "interrupted");
     assert.deepEqual(last.runs.map((r: { scenario: string; verdict: string }) => `${r.scenario} ${r.verdict}`), ["hello failed"]);
@@ -222,7 +222,7 @@ test("the cloud's refusal exits 3: an open refused for the spend cap is not sent
     assert.deepEqual({ outcome: report.outcome, exitCode: report.exitCode, sessionId: report.sessionId, runs: report.runs }, { outcome: "refused", exitCode: 3, sessionId: null, runs: [] });
     assert.deepEqual({ ...report.error, message: undefined }, { message: undefined, status: 429, type: "spend_cap", retryAfterSeconds: 0 });
     // No session opened, so the last one's results are left as they were.
-    assert.ok(!existsSync(join(dir, ".laminar-flow")));
+    assert.ok(!existsSync(join(dir, ".flow")));
   } finally { local.close(); }
 
   const ended = await cloud(false, [run, { type: "failed", error: "spend_cap: the daily spend cap is reached" }]);
@@ -248,7 +248,7 @@ test("with --json, every exit prints one report on stdout and every other line o
   } finally { local.close(); }
   assert.equal(result.code, 1, result.out);
   assert.match(result.stderr, /^FAIL {2}bee #1 \(sms\) trn_2: 6 turns/m);
-  assert.match(result.stderr, /^Results: \.laminar-flow\/last-session\.json/m);
+  assert.match(result.stderr, /^Results: \.flow\/last-session\.json/m);
   assert.equal(result.stdout.trim().split("\n").length, 1);
   const report = JSON.parse(result.stdout);
   assert.match(report.suiteHash, /^[0-9a-f]{64}$/);
@@ -261,7 +261,7 @@ test("with --json, every exit prints one report on stdout and every other line o
       { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [] },
     ],
   });
-  // The results file agrees with the report, and keeps the cloud's agent id for laminar-flow show.
+  // The results file agrees with the report, and keeps the cloud's agent id for flow show.
   const last = lastSession(dir);
   assert.equal(last.agent, "agt_1");
   assert.deepEqual(last.runs.map((r: { runId: string; verdict: string }) => `${r.runId} ${r.verdict}`), ["trn_2 failed", "trn_1 passed"]);
@@ -382,7 +382,7 @@ test("a finished session's results are kept, and --failed runs again only what d
   try {
     const result = await cliOutput(["test", "--cloud", full.url], dir);
     assert.equal(result.code, 1);
-    assert.match(result.out, /^Results: \.laminar-flow\/last-session\.json/m);
+    assert.match(result.out, /^Results: \.flow\/last-session\.json/m);
   } finally { full.close(); }
   const last = lastSession(dir);
   assert.deepEqual({ ...last, endedAt: undefined, suiteHash: undefined }, {
@@ -410,7 +410,7 @@ test("a finished session's results are kept, and --failed runs again only what d
 
   assert.deepEqual(await cliOutput(["test", "--failed", "--cloud", "http://127.0.0.1:9"], dir), {
     code: 0,
-    out: "Nothing failed in the last session (s2).\nIt ran only b, c: run laminar-flow test for the whole suite.\n",
+    out: "Nothing failed in the last session (s2).\nIt ran only b, c: run flow test for the whole suite.\n",
   });
 });
 
@@ -418,7 +418,7 @@ test("--failed with no last session, or with --only, stops before anything is se
   const dir = agentDir();
   const none = await cliOutput(["test", "--failed", "--cloud", "http://127.0.0.1:9"], dir);
   assert.equal(none.code, 1);
-  assert.match(none.out, /^No \.laminar-flow\/last-session\.json in .+: run laminar-flow test first/);
+  assert.match(none.out, /^No \.flow\/last-session\.json in .+: run flow test first/);
   assert.deepEqual(await cliOutput(["test", "--failed", "--only", "hello", "--cloud", "http://127.0.0.1:9"], dir), {
     code: 1,
     out: "--failed picks its scenarios from the last session and does not go with --only: run one or the other.\n",
@@ -480,11 +480,11 @@ test("the summary reads the same on every machine: token counts in one format, a
 
 test("--dotenv is read in place of the folder's .env, and variables already set win", { timeout: 15_000 }, async () => {
   const dir = agentDir();
-  writeFileSync(join(dir, ".env"), "LAMINAR_FLOW_CLOUD=http://127.0.0.1:7\n");
-  writeFileSync(join(dir, "ci.env"), "LAMINAR_FLOW_CLOUD=http://127.0.0.1:9\n");
+  writeFileSync(join(dir, ".env"), "FLOW_FRAMEWORK_CLOUD=http://127.0.0.1:7\n");
+  writeFileSync(join(dir, "ci.env"), "FLOW_FRAMEWORK_CLOUD=http://127.0.0.1:9\n");
   assert.match((await cliOutput(["test"], dir)).out, /^Could not reach http:\/\/127\.0\.0\.1:7: ECONNREFUSED\.$/m);
   assert.match((await cliOutput(["test", "--dotenv", "ci.env"], dir)).out, /^Could not reach http:\/\/127\.0\.0\.1:9: ECONNREFUSED\.$/m);
-  assert.match((await cliStreams(["test", "--dotenv", "ci.env"], dir, { LAMINAR_FLOW_CLOUD: "http://127.0.0.1:8" })).out, /^Could not reach http:\/\/127\.0\.0\.1:8: ECONNREFUSED\.$/m);
+  assert.match((await cliStreams(["test", "--dotenv", "ci.env"], dir, { FLOW_FRAMEWORK_CLOUD: "http://127.0.0.1:8" })).out, /^Could not reach http:\/\/127\.0\.0\.1:8: ECONNREFUSED\.$/m);
   assert.deepEqual(await cliOutput(["test", "--dotenv", "none.env"], dir), { code: 1, out: "--dotenv none.env: no such file.\n" });
 });
 
@@ -505,7 +505,7 @@ const record = {
   summary: { passed: false, ended: "goal_met", turns: 2, watch: "http://watch/trn_2" },
 };
 
-test("laminar-flow show prints a run's record from the cloud with the CI key: checks with reasons, then messages and tool calls in time order", { timeout: 15_000 }, async () => {
+test("flow show prints a run's record from the cloud with the CI key: checks with reasons, then messages and tool calls in time order", { timeout: 15_000 }, async () => {
   const asked: Array<{ path: string; authorization?: string }> = [];
   const server = createServer((req, res) => {
     asked.push({ path: req.url!, authorization: req.headers.authorization });
@@ -516,19 +516,19 @@ test("laminar-flow show prints a run's record from the cloud with the CI key: ch
   });
   const url = await new Promise<string>((done) => server.listen(0, "127.0.0.1", () => done(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)));
   const dir = agentDir();
-  mkdirSync(join(dir, ".laminar-flow"));
+  mkdirSync(join(dir, ".flow"));
   const runs = [
     { scenario: "hello", channel: "sms", run: 1, runId: "trn_1", verdict: "passed", failedChecks: [] },
     { scenario: "b", channel: "whatsapp", run: 1, runId: "trn_2", verdict: "failed", failedChecks: [] },
     { scenario: "c", channel: "sms", run: 1, runId: "trn_3", verdict: "errored", failedChecks: [] },
   ];
-  writeFileSync(join(dir, ".laminar-flow", "last-session.json"), JSON.stringify({ sessionId: "s1", agent: "agt_1", dashboard: "d", suiteHash: "h", endedAt: "t", ended: "finished", only: null, runs }));
-  const key = { LAMINAR_FLOW_CLOUD_KEY: "oci_test" };
+  writeFileSync(join(dir, ".flow", "last-session.json"), JSON.stringify({ sessionId: "s1", agent: "agt_1", dashboard: "d", suiteHash: "h", endedAt: "t", ended: "finished", only: null, runs }));
+  const key = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_test" };
   try {
     const shown = await cliStreams(["show", "last", "--cloud", url], dir, key);
     assert.equal(shown.code, 0, shown.out);
     assert.match(shown.stderr, /^Showing b #1 \(whatsapp\), failed: trn_2$/m);
-    assert.match(shown.stderr, /also did not pass: laminar-flow show trn_3/);
+    assert.match(shown.stderr, /also did not pass: flow show trn_3/);
     assert.deepEqual(asked, [{ path: "/v1/agents/agt_1/tests/runs/trn_2", authorization: "Bearer oci_test" }]);
     assert.equal(shown.stdout, [
       "FAIL  scenarios/b.yaml",

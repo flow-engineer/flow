@@ -2,8 +2,8 @@
 // (spec/agent-endpoint.openapi.yaml): one POST per message from the person, answered with the
 // replies to send. Its model is any OpenAI-compatible API; its tools run here, for real.
 //
-//	FAKE_MODEL=1 go run .     listens on http://localhost:3000/laminar-flow (PORT to change it), no key
-//	npx laminar-flow test --agent-url http://localhost:3000/laminar-flow --synthetic     from this folder
+//	FAKE_MODEL=1 go run .     listens on http://localhost:3000/flow (PORT to change it), no key
+//	npx @flow-engineer/flow test --agent-url http://localhost:3000/flow --synthetic      from this folder
 package main
 
 import (
@@ -147,11 +147,11 @@ func newAgent(m model, system, token string) *agent {
 }
 
 func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost || r.URL.Path != "/laminar-flow" {
+	if r.Method != http.MethodPost || r.URL.Path != "/flow" {
 		http.NotFound(w, r)
 		return
 	}
-	// Set LAMINAR_FLOW_AGENT_TOKEN on both sides to require it.
+	// Set FLOW_FRAMEWORK_AGENT_TOKEN on both sides to require it.
 	if a.token != "" && r.Header.Get("authorization") != "Bearer "+a.token {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -260,6 +260,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Listening on http://localhost:%s/laminar-flow\n", port)
-	log.Fatal(http.Serve(listener, newAgent(m, string(system), cmp.Or(os.Getenv("LAMINAR_FLOW_AGENT_TOKEN"), os.Getenv("CHINWAG_AGENT_TOKEN")))))
+	fmt.Printf("Listening on http://localhost:%s/flow\n", port)
+	log.Fatal(http.Serve(listener, newAgent(m, string(system), cmp.Or(os.Getenv("FLOW_FRAMEWORK_AGENT_TOKEN"), os.Getenv("CHINWAG_AGENT_TOKEN")))))
 }
