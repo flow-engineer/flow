@@ -189,6 +189,8 @@ function cliWords(text: string): string[] {
 }
 
 function localRequest(req: IncomingMessage): boolean {
+  // TODO: hosted CLI execution needs a security review before implementation/deployment.
+  // Keep this direct-loopback boundary; hosted support is not enabled by localCli options.
   const ip = req.socket.remoteAddress ?? "";
   return loopback(req.headers.host) && (ip === "::1" || /^127\./.test(ip) || /^::ffff:127\./.test(ip)) && !req.headers["x-forwarded-host"] && !req.headers["x-forwarded-for"];
 }

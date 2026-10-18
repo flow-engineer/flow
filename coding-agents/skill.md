@@ -473,6 +473,8 @@ An operation already accepted by the agent may still complete after its client s
 
 Enable this only in local startup code. The runner is off by default, rejects non-loopback or
 forwarded connections, and is not part of the hosted test cloud. It calls the actual CLI runner
+only locally. Hosted CLI support is deferred pending security review; do not add it to cloud startup
+or deployment wiring. See the hosted CLI TODO in the README. The runner invokes the CLI
 without a shell: quoting works, pipelines/expansion do not. The browser cannot override server
 or token flags, or use `skill --write` to write onto the developer's computer.
 For other embedded clients, `CliConfig.directory` overrides credential/conversation storage;

@@ -689,6 +689,10 @@ not enabled in the hosted test cloud. It invokes `runCli` in-process: no shell, 
 execution, expansion or pipelines. Quoted arguments work. Its configured endpoints stay fixed;
 use the installed CLI for `--server`, `--token` or `skill --write`.
 
+- [ ] **TODO: Hosted CLI runner — deferred until a security review is complete.** Review execution
+  isolation, custom-command filesystem/network access, credentials, OAuth callbacks, session cleanup
+  and abuse controls before implementing or deploying cloud support. Keep the current runner local-only.
+
 Embedded clients can set `CliConfig.directory` to isolate credential/conversation files and
 `CliIO.env` to avoid inheriting process tokens; `CliIO.signal` cancels sign-in and terminal HTTP
 requests. Defaults retain the installed CLI's existing environment and config directory.
