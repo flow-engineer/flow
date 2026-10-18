@@ -42,7 +42,7 @@ npx @flow-engineer/flow link                 # signs in (opens the browser), wri
 npm start                                    # open the link on your phone and text the agent
 ```
 
-`flow chat` builds the agent from `src/agent.ts` and writes as its first test person, one message per line of stdin. `flow link` signs in and runs `flow setup` when the folder is not set up yet, then prints the link for `--channel telegram` (the default), `whatsapp` or `imessage`; a channel flow.engineer cannot open yet answers with what to do instead. With `FLOW_MESSAGING_KEY` in `.env`, the starter's `npm start` connects to Flow Messaging by its outbound event stream, so there is no tunnel or public URL, and messages sent while it was stopped arrive when it starts again ([flow-messaging/README.md](flow-messaging/README.md)). Coding agents: [docs/agents.md](docs/agents.md) has the exit codes and `next` steps.
+`flow chat` builds the agent from `src/agent.ts` and writes as its first test person, one message per line of stdin. `flow link` signs in and runs `flow setup` when the folder is not set up yet, then prints the link for `--channel telegram` (the default), `whatsapp` or `imessage`; a channel flow.engineer cannot open yet answers with what to do instead. With `FLOW_MESSAGING_KEY` in `.env`, the starter's `npm start` is on Telegram, plus WhatsApp and iMessage when `.env` has their senders, and connects to Flow Messaging by its outbound event stream, so there is no tunnel or public URL, and messages sent while it was stopped arrive when it starts again ([flow-messaging/README.md](flow-messaging/README.md)). Coding agents: [docs/agents.md](docs/agents.md) has the exit codes and `next` steps.
 
 ### In a folder of your own
 
@@ -437,7 +437,7 @@ npx @flow-engineer/flow test --synthetic           # the whole suite once more b
 
 The quick way: `npx @flow-engineer/flow login` (it opens the browser and waits up to 120 s; `npx @flow-engineer/flow login --wait` waits again for the same code, so a coding agent can run it), then `npx @flow-engineer/flow setup` in the agent's folder, which
 writes `FLOW_FRAMEWORK_CLOUD_KEY` (and the traces and Flow Messaging keys, the join code and its
-`FLOW_FRAMEWORK_TRY_URL`) into `.env`; `npx @flow-engineer/flow link` then prints that link to chat with the agent from a phone (and does the sign-in and setup itself when they have not been done).
+`FLOW_FRAMEWORK_TRY_URL`, and the shared Telegram, WhatsApp and iMessage senders that are open) into `.env`, filling names `.env` has with no value and setting it to mode 0600; `npx @flow-engineer/flow link` then prints that link to chat with the agent from a phone (and does the sign-in and setup itself when they have not been done). On WhatsApp and iMessage the agent replies only after you write first (WhatsApp: within 24 hours of your last message). The sign-in token is sent only to the server that issued it, over https.
 Always name the package: `npx flow` on its own fetches another npm package. By hand:
 
 1. Sign in at https://flow.engineer/observe (Google, GitHub or an email link).
@@ -584,7 +584,7 @@ cd agents/my-agent && npm start
 
 **How is it different from general agent frameworks?** Those give you an agent loop, and a chat is one more thing you build on top. Flow Framework is opinionated about chat: one actor per conversation, double texts folded into one turn, tools that never stall the chat, acknowledgements, channel rules, one person across channels, and schedules built in.
 
-**Which channels are real?** WhatsApp, SMS and your own UI (`customUI`) have production definitions today; you plug in any provider by writing `sendMessage`. iMessage and Telegram are in the playground for now.
+**Which channels are real?** WhatsApp, SMS and your own UI (`customUI`) have production definitions today; you plug in any provider by writing `sendMessage`. Telegram and iMessage are real through Flow Messaging (`fm.telegram()`, `fm.imessage()`, [flow-messaging/README.md](flow-messaging/README.md)); in core they are in the playground for now.
 
 **Does it host my agent?** No. It runs in your Node process, on your machine or servers. You pay your model and messaging providers directly.
 
