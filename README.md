@@ -512,6 +512,10 @@ createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamabl
 - Sign-in is the host's OAuth against your own authorization server: `auth: { issuer, scopes,
   verify }`, with `signIn: "required" | "optional" | "none"` per tool. A call that needs sign-in gets
   HTTP 401 and the host's sign-in prompt; the person is `context.key` in the tool.
+- Backend access stays in tool code: supply the same `credentials` provider to `createAgent` and
+  `mcpServer`, then use `context.credentials.get("backend")` for that verified account. `resolve`
+  receives a normalized `phone` only on verified phone channels; phone-first brands need no extra
+  login or permissions screen there. See `coding-agents/auth-skill.md`.
 - Another MCP server's tools become your agent's with `mcpTools({ name, url })`, pinned to
   `mcp.lock.json` (`npx chinwag mcp update`), so a change on that server never reaches your
   customers before your tests do.

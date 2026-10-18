@@ -25,7 +25,7 @@ import {
 import { emitter, type EventSink } from "../../src/events.ts";
 import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, type AgentFiles } from "../../src/skills.ts";
 import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
-import { render, type Tool, type ToolContext } from "../../src/tools.ts";
+import { render, toolContext, type CredentialProvider, type Tool, type ToolContext } from "../../src/tools.ts";
 import { describe, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
 
 export interface McpAuth {
@@ -57,6 +57,8 @@ export interface McpServerOptions {
   /** Replaces the instructions a host gets on connecting (default: the skills and how to read them). */
   instructions?: string;
   auth?: McpAuth;
+  /** Backend access by verified account, separate from the bearer token issued for this MCP resource. */
+  credentials?: CredentialProvider;
   /** Where the endpoint is mounted (default "/mcp"). */
   path?: string;
   /** Native plugins deliver skills themselves. Default: tools only at `${path}/plugin`. */
@@ -136,7 +138,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         person,
         command: typeof meta["chinwag/command"] === "string" ? meta["chinwag/command"] : undefined,
       };
-      const context: ToolContext = {
+      const context: ToolContext = toolContext({
         conversationId: `mcp:${person}`,
         person,
         key: identity?.key ?? null,
@@ -145,7 +147,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         // CLI retries can preserve a call key; other hosts get one per request.
         idempotencyKey: typeof sentKey === "string" && sentKey.length > 0 && sentKey.length <= 256 ? sentKey : randomUUID(),
         signal: ctx.mcpReq?.signal ?? new AbortController().signal,
-      };
+      }, options.credentials);
       const started = Date.now();
       emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input: parsed.data, ...detail });
       const result = await callTool(t, parsed.data, context);

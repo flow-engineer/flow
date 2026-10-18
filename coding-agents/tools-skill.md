@@ -160,3 +160,7 @@ responses:
   never as written dates, which go stale.
 - Latency lives only here. Scenarios describe situations ("the point of sale is slow this
   morning"); the simulator picks the matching response and latency on each call.
+
+## Authenticated backend access
+
+A tool can use `await context.credentials!.get<YourClient>("backend")` when the agent/server supplies a `credentials` provider. That provider resolves access from Chinwag’s verified `context.key`/`context.person`, independently of model input. Share it between chat and MCP; never put credentials into tool schemas, outputs, errors or logs. See `auth-skill.md` for verified-phone and OAuth entry points.

@@ -22,7 +22,7 @@ import { businessSchedule, claimDue, summary } from "./schedules.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
 import { Store, type ConversationRow, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
 import { clock, quietUntil, validZone } from "./time.ts";
-import { STAND_IN, toSpec, type Tool } from "./tools.ts";
+import { STAND_IN, toSpec, type CredentialProvider, type Tool } from "./tools.ts";
 import { traces, tracesFromEnv, type Traces, type TracesOptions } from "./traces.ts";
 import type { ChannelInfo, Deliver, Incoming, Model, Outbound, Template, TemplateDefinition, Transcribe } from "./types.ts";
 
@@ -38,6 +38,8 @@ export interface AgentOptions {
    */
   transcribe?: Transcribe;
   tools?: Tool[];
+  /** Backend credentials or clients for a verified person, available only to tool code as context.credentials. */
+  credentials?: CredentialProvider;
   /**
    * Added to the system prompt at the start of every turn, before the model is called: keep it to
    * small facts at hand. It runs on every turn, so a lookup here (an API call, a slow query) delays
@@ -104,9 +106,10 @@ export interface AgentOptions {
   channels?: Channel[];
   /**
    * The owner's own key for a person (a member id), from a channel identity, or null when there is
-   * none. Identities with the same key are one person.
+   * none. Identities with the same key are one person. `phone` is normalized and present only
+   * when this channel verifies phone identities; an arbitrary address is never phone evidence.
    */
-  resolve?: (identity: { channel: string; address: string }) => Promise<string | null> | string | null;
+  resolve?: (identity: { channel: string; address: string; phone?: string }) => Promise<string | null> | string | null;
   /**
    * The calling code ("+91", "+44", "+1") for phone numbers that come without one. Set it when
    * your SMS provider gives national numbers ("098765 43210"): on every phone channel but
@@ -332,6 +335,7 @@ export class Agent {
       model: options.model,
       transcribe: options.transcribe,
       tools: new Map(tools.map((t) => [t.name, t])),
+      credentials: options.credentials,
       specs: tools.map(toSpec),
       instructions: loadInstructions(files, skills, options.inlineSkills),
       context: options.context,
@@ -582,8 +586,8 @@ export class Agent {
       // Not a phone channel: their playground address joins the person their number is.
       [personKey, verifiedBy] = [await this.testPersonKey(testPerson, adapter), "test person"];
     } else {
-      const owner = verifiedKey ?? await this.options.resolve?.({ channel, address });
       const phone = adapter.phone ? normalizePhone(address, adapter.kind === "whatsapp" ? undefined : this.countryCode) : "";
+      const owner = verifiedKey ?? await this.options.resolve?.({ channel, address, ...(phone ? { phone } : {}) });
       [personKey, verifiedBy] = owner ? [`key:${owner}`, "resolver"] : phone ? [`phone:${phone}`, "phone"] : [`${channel}:${address}`, "channel"];
     }
     let row = await this.store.conversationByKey(personKey);
@@ -608,7 +612,7 @@ export class Agent {
   private async testPersonKey(person: TestPerson, adapter: Channel | undefined): Promise<string> {
     const phone = normalizePhone(person.phone);
     const channel = [...this.channelsByName.values()].find((c) => c.phone) ?? adapter;
-    const owner = channel ? await this.options.resolve?.({ channel: channel.name, address: phone }) : null;
+    const owner = channel ? await this.options.resolve?.({ channel: channel.name, address: phone, ...(channel.phone ? { phone } : {}) }) : null;
     return owner ? `key:${owner}` : `phone:${phone}`;
   }
 

@@ -1,4 +1,4 @@
-// covers: mcp/src/server.ts mcp/src/describe.ts src/skills.ts
+// covers: mcp/src/server.ts mcp/src/describe.ts src/skills.ts src/tools.ts
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { after, test } from "node:test";
@@ -93,6 +93,43 @@ test("a valid token becomes the person, and a token without the write scope gets
   assert.equal(refused.status, 403);
   assert.match(refused.headers.get("www-authenticate")!, /error="insufficient_scope".*scope="read write"/);
   assert.equal((await rpc(url, call("status"), "someone-else")).status, 401, "an invalid token is refused whatever it calls");
+});
+
+// MCP access tokens identify callers; independent backend access must stay bound to that verified account even when calls overlap.
+test("backend credentials are resolved by verified account, isolated across concurrent callers and absent from traces", async () => {
+  const events: unknown[] = [];
+  const seen: Array<{ key: string | null; context: string; credential: string }> = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let both!: () => void;
+  const arrived = new Promise<void>(resolve => { both = resolve; });
+  let waiting = 0;
+  const url = await serve({
+    name: "test", version: "1", events: [e => { events.push(e); }],
+    auth: { issuer: "https://login.example.com", verify: token => ["sam", "ria"].includes(token) ? { key: token } : null },
+    credentials: async (name, context) => {
+      assert.equal(name, "api");
+      if (++waiting === 2) both();
+      await gate;
+      return `private-api-${context.key}`;
+    },
+    tools: [tool({ name: "account", description: "Read their account.", input: z.object({ claimed_user: z.string() }), run: async (_input, context) => {
+      const credential = await context.credentials!.get<string>("api");
+      seen.push({ key: context.key, context: JSON.stringify(context), credential });
+      return { account: context.key };
+    } })],
+  });
+  const sam = await client(url, "sam"), ria = await client(url, "ria");
+  try {
+    const calls = Promise.all([sam.callTool({ name: "account", arguments: { claimed_user: "ria" } }), ria.callTool({ name: "account", arguments: { claimed_user: "sam" } })]);
+    await arrived;
+    release();
+    const results = await calls;
+    assert.deepEqual(results.map(r => r.content), [[{ type: "text", text: '{"account":"sam"}' }], [{ type: "text", text: '{"account":"ria"}' }]]);
+    assert.deepEqual(seen.map(s => [s.key, s.credential]).sort(), [["ria", "private-api-ria"], ["sam", "private-api-sam"]]);
+    assert.ok(seen.every(s => !s.context.includes("private-api") && !s.context.includes("credentials")));
+    assert.ok(!JSON.stringify(events).includes("private-api"));
+  } finally { release(); await Promise.all([sam.close(), ria.close()]); }
 });
 
 test("a tool that throws is an isError result, and output is checked and sent as structured content", async () => {

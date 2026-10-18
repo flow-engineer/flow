@@ -46,7 +46,7 @@ import { scheduleTools } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
 import { REACT, UPDATE, reactInput, sendInput, sendRefusal, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
-import { render, tool, toSpec, type Tool } from "./tools.ts";
+import { render, tool, toolContext, toSpec, type CredentialProvider, type Tool } from "./tools.ts";
 import type { Attachment, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, PersonMessage, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 
 export interface ConversationSettings {
@@ -54,6 +54,7 @@ export interface ConversationSettings {
   /** Speech to text for voice notes; without it the agent is told it can't listen to them. */
   transcribe?: Transcribe;
   tools: Map<string, Tool>;
+  credentials?: CredentialProvider;
   specs: ToolSpec[];
   instructions: string;
   /** Per-turn context for the system prompt (the person's profile, the time). */
@@ -1345,7 +1346,7 @@ export class Conversation {
 
     this.settings.emit(this.id, "tool.start", { callId: call.id, tool: call.name, input: parsed.data });
     const key = createHash("sha256").update(`${this.id}\u0000${this.turns}\u0000${call.name}\u0000${input}`).digest("hex").slice(0, 32);
-    const context = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), callId: call.id, idempotencyKey: key, signal: this.lifetime.signal };
+    const context = toolContext({ conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), callId: call.id, idempotencyKey: key, signal: this.lifetime.signal }, this.settings.credentials);
     const r: Running = {
       call,
       input,
@@ -1584,4 +1585,3 @@ export function profileTool(profile: Profile): Tool {
 
 /** createAgent's `profile`: what the business knows about the person, fetched only when the agent asks. */
 export type Profile = (who: { conversationId: string; person: string; channel: string }) => Promise<unknown> | unknown;
-

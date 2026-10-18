@@ -27,6 +27,26 @@ export interface ToolContext {
   idempotencyKey: string;
   /** Aborted when the conversation closes (the person was forgotten): stop and drop the work. */
   signal: AbortSignal;
+  /** Server-side backend access for this verified person. Never supplied by the model or serialized into history or traces. */
+  credentials?: Credentials;
+}
+
+/** A business supplies named backend credentials or clients, resolved afresh for the verified person. */
+export type CredentialProvider = (name: string, context: Readonly<Omit<ToolContext, "credentials">>) => unknown | Promise<unknown>;
+
+export interface Credentials {
+  /** The business decides how to obtain, refresh and revoke access. The name is written by the tool author, not an account id from the model. */
+  get<T = unknown>(name: string): Promise<T>;
+}
+
+/** Bind backend access without putting secrets on an enumerable context or in any event. */
+export function toolContext(context: Omit<ToolContext, "credentials">, provider?: CredentialProvider): ToolContext {
+  const identity = Object.freeze({ ...context });
+  if (provider) Object.defineProperty(context, "credentials", {
+    value: Object.freeze({ get: <T = unknown>(name: string) => Promise.resolve().then(() => provider(name, identity)) as Promise<T> }),
+    enumerable: false,
+  });
+  return context;
 }
 
 export interface Tool<Input = any> {

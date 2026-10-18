@@ -1,4 +1,4 @@
-// covers: src/agent.ts src/conversation.ts src/talk.ts src/store.ts
+// covers: src/agent.ts src/conversation.ts src/talk.ts src/store.ts src/tools.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { z } from "zod";
@@ -86,6 +86,48 @@ test("a person resolve does not know is keyed by their verified phone, with no k
   (await h.nextCall(1)).answer(respond());
   await h.agent.conversation(a!.conversationId)!.whenIdle();
   assert.deepEqual(seen, [{ person: "phone:+15550100300", key: null }]);
+});
+
+// Phone-first brands need the verified, normalized number, never a number claimed by an ordinary web address.
+test("only phone channels supply verified phone evidence, and phone sign-in gives tools backend access directly", async () => {
+  const evidence: Array<{ channel: string; address: string; phone?: string }> = [];
+  const accounts: string[] = [];
+  let contextJSON = "";
+  const h = multi({
+    channels: { whatsapp: { info: WHATSAPP, phone: true, kind: "whatsapp" }, imessage: { info: SMS, phone: true }, web: { info: WEB_APP } },
+    resolve: (identity) => {
+      evidence.push(identity);
+      return identity.phone === "+919876543210" ? "account-7" : null;
+    },
+    credentials: (name, context) => {
+      assert.equal(name, "backend");
+      assert.equal(context.key, "account-7");
+      accounts.push(context.key);
+      return { authorization: "private-backend-credential" };
+    },
+    tools: [tool({ name: "account", description: "Read the signed-in account.", input: z.object({}), run: async (_input, context) => {
+      contextJSON = JSON.stringify(context);
+      const client = await context.credentials!.get<{ authorization: string }>("backend");
+      assert.equal(client.authorization, "private-backend-credential");
+      return { account: context.key };
+    } })],
+  });
+  const a = await h.message("whatsapp", "919876543210", "my account");
+  (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Looking it up." }), call("account")));
+  (await h.nextCall(1)).answer(respond());
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  const b = await h.message("imessage", "+91 (98765) 43210", "me too");
+  assert.equal(b!.conversationId, a!.conversationId);
+  (await h.nextCall(2)).answer(respond(call("send_imessage", { text: "Welcome back." })));
+  await h.agent.conversation(b!.conversationId)!.whenIdle();
+  const web = await h.message("web", "+919876543210", "I claim that number");
+  assert.notEqual(web!.conversationId, a!.conversationId);
+  (await h.nextCall(3)).answer(respond(call("send_web", { text: "Hello." })));
+  await h.agent.conversation(web!.conversationId)!.whenIdle();
+  assert.deepEqual(evidence.map(e => [e.channel, e.phone]), [["whatsapp", "+919876543210"], ["imessage", "+919876543210"], ["web", undefined]]);
+  assert.deepEqual(accounts, ["account-7"]);
+  assert.ok(!contextJSON.includes("credential"));
+  assert.ok(!JSON.stringify(h.events).includes("private-backend-credential"));
 });
 
 test("a channel may not be named key or phone, so a channel identity never reads as a resolve key or a phone", () => {
@@ -203,4 +245,3 @@ test("the test cloud's stand-in for get_user_profile replaces the real one, and 
   assert.ok(!(await plain.nextCall(0)).request.tools.some((t) => t.name === "get_user_profile"));
   assert.equal(plain.agent.hasProfile(), false);
 });
-
