@@ -32,7 +32,7 @@ In another terminal, against the contract, with no cloud, key or model call on F
 
 ```bash
 npx flowcore check-endpoint http://localhost:3000/flowcore
-node ../../testing/src/cli.ts check-endpoint http://localhost:3000/flowcore    # from a clone
+node ../../testing/src/cli.ts check-endpoint http://localhost:3000/flowcore        # from a clone
 ```
 
 ## Test it

@@ -307,8 +307,8 @@ names another; the trace key is made on that same site (never print it):
 
 ```sh
 FLOWCORE_TRACES_KEY=...
-FLOWCORE_TRACES_URL=https://flow.engineer/observe   # the default; set it only to send them elsewhere
-FLOWCORE_TRACES_CONTENT=1                           # send what was written; without it, metadata only
+FLOWCORE_TRACES_URL=https://flow.engineer/observe       # the default; set it only to send them elsewhere
+FLOWCORE_TRACES_CONTENT=1                               # send what was written; without it, metadata only
 ```
 
 Without `FLOWCORE_TRACES_CONTENT=1` the dashboard

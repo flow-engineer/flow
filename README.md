@@ -415,11 +415,11 @@ Each run's line carries its id (`FAIL  latte-correction #1 (whatsapp) trn_…: 6
 `--failed` runs again only the scenarios that did not pass in that file (failed, errored or not played), on every channel each plays: a scenario's channels are part of its file, so one channel cannot be picked alone. It goes with `--runs`; with `--only` it stops and says to pick one, since the two would each pick the scenarios. With nothing to run again it prints `Nothing failed in the last session (<id>).` and exits 0 (and says when that session ran only some scenarios); with no file it says to run `flowcore test` first and exits 1. The loop, for you or a coding agent:
 
 ```bash
-npx flowcore test --synthetic            # the whole suite
+npx flowcore test --synthetic                # the whole suite
 # fix what failed
-npx flowcore show last                   # why: the judge's reasons, the conversation and the tool calls
-npx flowcore test --synthetic --failed   # only what did not pass; again until it exits 0
-npx flowcore test --synthetic            # the whole suite once more before you finish
+npx flowcore show last                       # why: the judge's reasons, the conversation and the tool calls
+npx flowcore test --synthetic --failed       # only what did not pass; again until it exits 0
+npx flowcore test --synthetic                # the whole suite once more before you finish
 ```
 
 ### Get a test cloud

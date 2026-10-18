@@ -33,8 +33,8 @@ import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } fro
 import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
 import type { RunSummary } from "./protocol.ts";
 
-const NEW_LINE = "  flowcore new <name>   Make ./<name>/, a new agent started from the café example";
-const TEST_LINE = `  flowcore test [options]    Run the agent's tests in a test cloud, from the agent's folder
+const NEW_LINE = "  flowcore new <name>       Make ./<name>/, a new agent started from the café example";
+const TEST_LINE = `  flowcore test [options]   Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
                             the tests are in tests/scenarios and tests/tools)`;
 const CHECK_LINE = `  flowcore check-endpoint <url> [--token-env NAME] [--json]
@@ -85,14 +85,14 @@ with the judge's reasons. Never the messages. The folder is git-ignored and the 
 
 Environment (also read from the agent folder's .env, or --dotenv; variables already set win;
 the CHINWAG_ names from before the rename still work):
-  FLOWCORE_CLOUD       The test cloud, when --cloud is not given
-  FLOWCORE_CLOUD_KEY   The agent's CI key, for a hosted cloud (oci_...: make one at
+  FLOWCORE_CLOUD           The test cloud, when --cloud is not given
+  FLOWCORE_CLOUD_KEY       The agent's CI key, for a hosted cloud (oci_...: make one at
                            https://flow.engineer/observe, your agent, Developers)
   FLOWCORE_AGENT_TOKEN With --agent-url: sent to it as authorization: Bearer <token>
   OPENROUTER_API_KEY       The agent's model key, or OPENAI_API_KEY, ANTHROPIC_API_KEY or
                            GEMINI_API_KEY: the first with a value is used`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
-const USAGE = `Usage:\n${NEW_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n  flowcore --version    Show the version\n\n${TEST_OPTIONS}`;
+const USAGE = `Usage:\n${NEW_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n  flowcore --version        Show the version\n\n${TEST_OPTIONS}`;
 
 checkNode(process.versions.node);
 

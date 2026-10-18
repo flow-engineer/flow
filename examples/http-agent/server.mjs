@@ -2,7 +2,7 @@
 // person, answered with the replies to send. No dependencies. Put your own agent where reply() is.
 //
 //   node server.mjs                 listens on http://localhost:3000/flowcore (PORT to change it)
-//   npx flowcore test --agent-url http://localhost:3000/flowcore     from this folder, in another terminal
+//   npx flowcore test --agent-url http://localhost:3000/flowcore             from this folder, in another terminal
 
 import { createServer } from "node:http";
 

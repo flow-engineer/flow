@@ -28,7 +28,7 @@ In another terminal, with no cloud, key or model call on Flow Framework's side:
 
 ```bash
 npx flowcore check-endpoint http://localhost:3000/flowcore
-node ../../testing/src/cli.ts check-endpoint http://localhost:3000/flowcore   # from a clone of this repo
+node ../../testing/src/cli.ts check-endpoint http://localhost:3000/flowcore       # from a clone of this repo
 ```
 
 ## Test it

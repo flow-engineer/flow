@@ -3,7 +3,7 @@
 // replies to send. Its model is any OpenAI-compatible API; its tools run here, for real.
 //
 //	FAKE_MODEL=1 go run .     listens on http://localhost:3000/flowcore (PORT to change it), no key
-//	npx flowcore test --agent-url http://localhost:3000/flowcore --synthetic     from this folder
+//	npx flowcore test --agent-url http://localhost:3000/flowcore --synthetic             from this folder
 package main
 
 import (
