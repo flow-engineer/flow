@@ -2,10 +2,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgent, sqlite, tool, type AgentOptions, type Database, type TemplateDefinition, type TestPerson } from "../src/index.ts";
-import type { ChannelInfo, ChannelKind, ChatMessage, Keywords, Model, ModelRequest, ModelResponse, Outbound, ChinwagEvent, ToolCall } from "../src/index.ts";
+import type { ChannelInfo, ChannelKind, ChatMessage, Keywords, Model, ModelRequest, ModelResponse, Outbound, FlowEvent, ToolCall } from "../src/index.ts";
 
 /**
- * A model the test drives: each call waits for the test to answer it. The step Chinwag adds after a
+ * A model the test drives: each call waits for the test to answer it. The step Flow Framework adds after a
  * reply that was only delivered messages is answered with nothing, and counted in `followUps`,
  * unless `followUps: "manual"`: then it is a call like any other.
  */
@@ -61,10 +61,10 @@ export const respond = (...toolCalls: ToolCall[]): ModelResponse => ({ text: nul
 export const WEB: ChannelInfo = { reactions: true, status: true };
 
 export function harness(tools = [] as ReturnType<typeof tool>[], deadlineMs = 50, channel: ChannelInfo = WEB, followUps: "auto" | "manual" = "auto") {
-  const dir = mkdtempSync(join(tmpdir(), "chinwag-"));
+  const dir = mkdtempSync(join(tmpdir(), "laminar-flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel({ followUps });
-  const events: ChinwagEvent[] = [];
+  const events: FlowEvent[] = [];
   const agent = createAgent({ dir, model: scripted.model, tools, deadlineMs, partialAfterMs: 20, debounceMs: 0, events: [(e) => events.push(e)] });
   const out: Outbound[] = [];
   let fail: string | null = null;
@@ -112,11 +112,11 @@ export function multi(options: {
   profile?: AgentOptions["profile"];
   fallbackTemplate?: AgentOptions["fallbackTemplate"];
 }) {
-  const dir = options.dir ?? mkdtempSync(join(tmpdir(), "chinwag-"));
+  const dir = options.dir ?? mkdtempSync(join(tmpdir(), "laminar-flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const database = options.database ?? sqlite();
-  const events: ChinwagEvent[] = [];
+  const events: FlowEvent[] = [];
   const out: Array<{ channel: string; address: string; outbound: Outbound }> = [];
   const channels = Object.entries(options.channels).map(([name, c]) => ({
     name,

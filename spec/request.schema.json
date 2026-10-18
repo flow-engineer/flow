@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/flow-engineer/chinwag/blob/main/spec/request.schema.json",
+  "$id": "https://github.com/flow-engineer/laminar-flow/blob/main/spec/request.schema.json",
   "title": "AgentRequest",
-  "description": "One of the person's messages, as `chinwag test --agent-url` POSTs it to the agent's endpoint. This schema lists exactly what this version sends (additionalProperties is false so it stays exact); later versions may add optional fields, so an endpoint should ignore fields it does not know rather than validate requests strictly against this file.",
+  "description": "One of the person's messages, as `laminar-flow test --agent-url` POSTs it to the agent's endpoint. This schema lists exactly what this version sends (additionalProperties is false so it stays exact); later versions may add optional fields, so an endpoint should ignore fields it does not know rather than validate requests strictly against this file.",
   "type": "object",
   "required": [
     "conversationId",

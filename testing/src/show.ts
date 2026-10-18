@@ -1,18 +1,25 @@
-// `chinwag show <run-id|last>`: one run's full record from the test cloud (the transcript, the tool
+// `laminar-flow show <run-id|last>`: one run's full record from the test cloud (the transcript, the tool
 // calls the simulator played, every check with the judge's reason), so a coding agent can read why a
-// run failed without a browser. The agent's id comes from .chinwag/last-session.json, and the read
+// run failed without a browser. The agent's id comes from .laminar-flow/last-session.json, and the read
 // carries the agent's CI key: GET {cloud}/v1/agents/{agent}/tests/runs/{run}.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { OBSERVE_URL } from "../../src/traces.ts";
+import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import { loadEnv } from "./report.ts";
 
-/** Where every session's results go, in the agent's folder; `chinwag new` git-ignores .chinwag/. */
-export const LAST_SESSION = join(".chinwag", "last-session.json");
+/** Where every session's results go, in the agent's folder; `laminar-flow new` git-ignores .laminar-flow/. */
+export const LAST_SESSION = join(".laminar-flow", "last-session.json");
 
-/** .chinwag/last-session.json: what each run ended as, for `--failed`, `chinwag show` and coding agents. */
+/** The last session's file in dir: LAST_SESSION, else, before a run has written it, the one from before the rename (.chinwag/). */
+export function lastSessionIn(dir: string): string {
+  const path = join(dir, LAST_SESSION);
+  const old = join(dir, ".chinwag", "last-session.json");
+  return !existsSync(path) && existsSync(old) ? old : path;
+}
+
+/** .laminar-flow/last-session.json: what each run ended as, for `--failed`, `laminar-flow show` and coding agents. */
 export interface LastSession {
   sessionId: string;
   /** The cloud's id for the agent, from the open (an older cloud names none). */
@@ -29,7 +36,7 @@ export interface LastSession {
     scenario: string;
     channel: string;
     run: number;
-    /** The cloud's id for the run, for `chinwag show`; null when it was not played. */
+    /** The cloud's id for the run, for `laminar-flow show`; null when it was not played. */
     runId?: string | null;
     verdict: "passed" | "failed" | "errored" | "not_played";
     /** The checks as the test file says them, with the judge's reason. The file is local and
@@ -38,26 +45,26 @@ export interface LastSession {
   }>;
 }
 
-export const SHOW_LINE = `  chinwag show <run-id|last> [--json]
+export const SHOW_LINE = `  laminar-flow show <run-id|last> [--json]
                             Print one run's record from the test cloud: its checks with the
-                            judge's reasons, the transcript and the tool calls (chinwag show --help)`;
+                            judge's reasons, the transcript and the tool calls (laminar-flow show --help)`;
 
 const SHOW_USAGE = `Usage:
-  chinwag show <run-id|last> [options]
+  laminar-flow show <run-id|last> [options]
 
-Prints one run of the last \`chinwag test\` (or any run of this agent, by the id on its PASS or
+Prints one run of the last \`laminar-flow test\` (or any run of this agent, by the id on its PASS or
 FAIL line): verdict, every check with the judge's reason, then the conversation in time order with
 each tool call the simulator played and what it changed. \`last\` is the first run that did not
-pass in .chinwag/last-session.json (its first run when all passed).
+pass in .laminar-flow/last-session.json (its first run when all passed).
 
 Options:
   --json                   The record exactly as the cloud answered it, on stdout
-  --cloud <url>            The test cloud (default: CHINWAG_CLOUD, else https://flow.engineer/observe)
+  --cloud <url>            The test cloud (default: LAMINAR_FLOW_CLOUD, else https://flow.engineer/observe)
   --dotenv <path>          Read the environment from this file instead of the folder's .env
   -h, --help               Show this help
 
-Needs CHINWAG_CLOUD_KEY (the agent's CI key, also read from .env), and the agent's id that
-\`chinwag test\` keeps in .chinwag/last-session.json.
+Needs LAMINAR_FLOW_CLOUD_KEY (the agent's CI key, also read from .env), and the agent's id that
+\`laminar-flow test\` keeps in .laminar-flow/last-session.json.
 
 Exit status:
   0    Printed
@@ -85,7 +92,7 @@ type Line =
   | { kind: "out"; id?: string; text?: string; at?: number; buttons?: unknown; list?: unknown; link?: unknown; image?: unknown; template?: unknown }
   | { kind: "reaction"; messageId?: string; emoji?: string; at?: number; by?: string };
 
-/** `chinwag show`: returns the exit status. */
+/** `laminar-flow show`: returns the exit status. */
 export async function showCli(args: string[]): Promise<number> {
   let parsed;
   try {
@@ -98,7 +105,7 @@ export async function showCli(args: string[]): Promise<number> {
   } catch (error) {
     const { code, message } = error as NodeJS.ErrnoException;
     const unknown = code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" ? /'([^']+)'/.exec(message)?.[1] : undefined;
-    console.error(`chinwag: ${unknown ? `unknown option ${unknown}` : message.split(". ")[0]}\n\n${SHOW_USAGE}`);
+    console.error(`laminar-flow: ${unknown ? `unknown option ${unknown}` : message.split(". ")[0]}\n\n${SHOW_USAGE}`);
     return 1;
   }
   const { values, positionals } = parsed;
@@ -107,7 +114,7 @@ export async function showCli(args: string[]): Promise<number> {
     return 0;
   }
   if (positionals.length !== 1) {
-    console.error(`chinwag show takes one run id, or last.\n\n${SHOW_USAGE}`);
+    console.error(`laminar-flow show takes one run id, or last.\n\n${SHOW_USAGE}`);
     return 1;
   }
   const envProblem = loadEnv(values.dotenv);
@@ -115,10 +122,10 @@ export async function showCli(args: string[]): Promise<number> {
     console.error(envProblem);
     return 1;
   }
-  const cloud = (values.cloud || process.env.CHINWAG_CLOUD || OBSERVE_URL).replace(/\/+$/, "");
-  const key = process.env.CHINWAG_CLOUD_KEY || undefined;
+  const cloud = (values.cloud || setting("CLOUD") || OBSERVE_URL).replace(/\/+$/, "");
+  const key = setting("CLOUD_KEY") || undefined;
   if (!key) {
-    console.error(`chinwag show reads the run with the agent's CI key: set CHINWAG_CLOUD_KEY.${cloud === OBSERVE_URL ? ` Make a key at ${OBSERVE_URL}: your agent, Developers.` : ""}`);
+    console.error(`laminar-flow show reads the run with the agent's CI key: set LAMINAR_FLOW_CLOUD_KEY.${cloud === OBSERVE_URL ? ` Make a key at ${OBSERVE_URL}: your agent, Developers.` : ""}`);
     return 1;
   }
   const last = readLast();
@@ -130,7 +137,7 @@ export async function showCli(args: string[]): Promise<number> {
   if (runId === "last") {
     const pickedRun = pickLast(last);
     if (!pickedRun) {
-      console.error(`${LAST_SESSION} has no run ids: run chinwag test again, then chinwag show last.`);
+      console.error(`${LAST_SESSION} has no run ids: run laminar-flow test again, then laminar-flow show last.`);
       return 1;
     }
     runId = pickedRun;
@@ -141,7 +148,7 @@ export async function showCli(args: string[]): Promise<number> {
     return 1;
   }
   if (!id.test(last.agent!)) {
-    console.error(`${LAST_SESSION} names an agent id that is not one: run chinwag test again.`);
+    console.error(`${LAST_SESSION} names an agent id that is not one: run laminar-flow test again.`);
     return 1;
   }
   const url = `${cloud}/v1/agents/${last.agent}/tests/runs/${runId}`;
@@ -173,16 +180,16 @@ export async function showCli(args: string[]): Promise<number> {
 
 /** The last session's results, or what to do when there are none or they name no agent. */
 function readLast(): LastSession | string {
-  const path = join(process.cwd(), LAST_SESSION);
-  if (!existsSync(path)) return `No ${LAST_SESSION} in ${process.cwd()}: run chinwag test first; chinwag show reads the agent's id from it.`;
+  const path = lastSessionIn(process.cwd());
+  if (!existsSync(path)) return `No ${LAST_SESSION} in ${process.cwd()}: run laminar-flow test first; laminar-flow show reads the agent's id from it.`;
   let last: LastSession;
   try {
     last = JSON.parse(readFileSync(path, "utf8")) as LastSession;
     if (!Array.isArray(last.runs)) throw new Error("it has no runs");
   } catch (error) {
-    return `${LAST_SESSION} could not be read (${(error as Error).message}): run chinwag test again.`;
+    return `${LAST_SESSION} could not be read (${(error as Error).message}): run laminar-flow test again.`;
   }
-  if (!last.agent) return `${LAST_SESSION} has no agent id: run chinwag test once more against a current cloud, which names it, then chinwag show.`;
+  if (!last.agent) return `${LAST_SESSION} has no agent id: run laminar-flow test once more against a current cloud, which names it, then laminar-flow show.`;
   return last;
 }
 
@@ -193,7 +200,7 @@ function pickLast(last: LastSession): string | undefined {
   const chosen = notPassed[0] ?? withId[0];
   if (!chosen) return undefined;
   console.error(`Showing ${chosen.scenario} #${chosen.run} (${chosen.channel}), ${chosen.verdict}: ${chosen.runId}`);
-  for (const r of notPassed.slice(1)) console.error(`  also did not pass: chinwag show ${r.runId}   (${r.scenario} #${r.run}, ${r.channel}, ${r.verdict})`);
+  for (const r of notPassed.slice(1)) console.error(`  also did not pass: laminar-flow show ${r.runId}   (${r.scenario} #${r.run}, ${r.channel}, ${r.verdict})`);
   return chosen.runId!;
 }
 

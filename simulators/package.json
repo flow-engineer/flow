@@ -1,7 +1,7 @@
 {
-  "name": "chinwag-simulators",
+  "name": "laminar-flow-simulators",
   "private": true,
-  "description": "Holds the simulators' tests and typecheck; they ship in the chinwag package as chinwag/simulators.",
+  "description": "Holds the simulators' tests and typecheck; they ship in the laminar-flow package as laminar-flow/simulators.",
   "type": "module",
   "scripts": {
     "test": "node --test --test-timeout=30000 \"test/**/*.test.ts\"",

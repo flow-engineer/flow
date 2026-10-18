@@ -1,8 +1,8 @@
-// An agent you already have, wrapped for `chinwag test --agent-url`: one POST per message from the
+// An agent you already have, wrapped for `laminar-flow test --agent-url`: one POST per message from the
 // person, answered with the replies to send. No dependencies. Put your own agent where reply() is.
 //
-//   node server.mjs                 listens on http://localhost:3000/chinwag (PORT to change it)
-//   npx chinwag test --agent-url http://localhost:3000/chinwag     from this folder, in another terminal
+//   node server.mjs                 listens on http://localhost:3000/laminar-flow (PORT to change it)
+//   npx laminar-flow test --agent-url http://localhost:3000/laminar-flow     from this folder, in another terminal
 
 import { createServer } from "node:http";
 
@@ -20,13 +20,13 @@ async function reply(conversationId, channel, message) {
 }
 
 createServer(async (req, res) => {
-  if (req.method !== "POST" || req.url !== "/chinwag") return res.writeHead(404).end();
-  // Set CHINWAG_AGENT_TOKEN on both sides to require it.
-  const token = process.env.CHINWAG_AGENT_TOKEN;
+  if (req.method !== "POST" || req.url !== "/laminar-flow") return res.writeHead(404).end();
+  // Set LAMINAR_FLOW_AGENT_TOKEN on both sides to require it.
+  const token = process.env.LAMINAR_FLOW_AGENT_TOKEN ?? process.env.CHINWAG_AGENT_TOKEN;
   if (token && req.headers.authorization !== `Bearer ${token}`) return res.writeHead(401).end();
   let body = "";
   for await (const chunk of req) body += chunk;
   const { conversationId, channel, message } = JSON.parse(body);
   const replies = await reply(conversationId, channel, message);
   res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ replies }));
-}).listen(Number(process.env.PORT ?? 3000), () => console.log(`Listening on http://localhost:${process.env.PORT ?? 3000}/chinwag`));
+}).listen(Number(process.env.PORT ?? 3000), () => console.log(`Listening on http://localhost:${process.env.PORT ?? 3000}/laminar-flow`));

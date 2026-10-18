@@ -9,7 +9,7 @@ import { createAgent, sqlite, SMS_KEYWORDS, Store, tool, type Database, type Out
 import { SMS, WHATSAPP, call, gate, last, multi, respond, scriptedModel, users } from "./helpers.ts";
 
 const CHANNELS = { sms: { info: SMS, phone: true } };
-const file = () => join(mkdtempSync(join(tmpdir(), "chinwag-db-")), "chinwag.db");
+const file = () => join(mkdtempSync(join(tmpdir(), "laminar-flow-db-")), "chinwag.db");
 
 /** A database that dies at the first write to `table`: that write and every statement after it fail, as when the process is killed there. */
 function diesAt(table: string, db: Database): Database {
