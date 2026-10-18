@@ -222,8 +222,42 @@ test("ask and chat use the authenticated agent terminal, preserve identity and n
   for (let n = 0; n < 3; n++) (await scripted.nextCall(n + 2)).answer(respond(call("send_terminal", { text: `reply ${n}` })));
   assert.equal(await chat, 0);
   assert.deepEqual(interactive.out.trim().split("\n").map(line => JSON.parse(line).conversationId), [first.conversationId, first.conversationId, first.conversationId]);
+  assert.equal(interactive.err, "Type /exit or press Ctrl-D to leave.\n", "JSON chat has no presentation or progress text");
   assert.equal(statSync(join(process.env.XDG_CONFIG_HOME!, "terminal-test/chat.json")).mode & 0o777, 0o600);
   const other = await terminal.fetch(new Request(`${base}/agent/terminal`, { method: "POST", headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ text: "stolen", conversationId: "another-person" }) }));
   assert.equal(other.status, 500);
   assert.match((await terminal.fetch(new Request(`${base}/agent/terminal`, { method: "POST" }))).status.toString(), /401/);
+});
+
+// Auth/state coverage above checks JSON only; it cannot catch an unlabeled human transcript.
+test("human chat distinguishes input, waiting and agent replies", async (t) => {
+  const old = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "chinwag-chat-presentation-"));
+  t.after(() => { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; });
+  let received!: () => void, release!: () => void;
+  const requested = new Promise<void>(resolve => { received = resolve; });
+  const response = new Promise<void>(resolve => { release = resolve; });
+  t.after(release);
+  const base = await listen(async (req, res) => {
+    assert.equal(req.url, "/agent/terminal");
+    assert.equal(req.headers.authorization, "Bearer test");
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk as Buffer);
+    assert.equal(JSON.parse(Buffer.concat(chunks).toString()).text, "hello");
+    received();
+    await response;
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ conversationId: "person-1", replies: [{ type: "typing", on: true }, { type: "message", text: "Checking." }, { type: "message", text: "Here is the answer." }] }));
+  });
+  const out = io(true);
+  let prompt: string | undefined;
+  out.channel.lines = async function* (value) { prompt = value; yield "hello"; yield "/exit"; };
+  const chat = runCli(defineCli({ name: "acme", server: `${base}/mcp` }), ["chat", "--token", "test"], out.channel);
+  await requested;
+  assert.match(prompt!, /You.*› /);
+  assert.match(out.err, /acme chat/);
+  assert.match(out.err, /Waiting for reply/);
+  assert.equal(out.out, "", "a reply is not printed before the server answers");
+  release();
+  assert.equal(await chat, 0);
+  assert.equal(out.out, "\nacme\nChecking.\n\nHere is the answer.\n\n");
+  assert.doesNotMatch(out.out, /typing|person-1/);
 });

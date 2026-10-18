@@ -39,8 +39,8 @@ export interface CliIO {
   writeError(text: string): void;
   /** Whether a person is at a terminal to answer a question. */
   interactive: boolean;
-  /** Lines from an interactive terminal; injectable for embedded CLIs and tests. */
-  lines?: () => AsyncIterable<string>;
+  /** Lines from an interactive terminal, with an optional input prompt; injectable for embedded CLIs and tests. */
+  lines?: (prompt?: string) => AsyncIterable<string>;
   /** Ask a yes-or-no question (only when interactive). */
   confirm(question: string): Promise<boolean>;
 }
@@ -50,9 +50,15 @@ export function processIO(): CliIO {
     write: (text) => void process.stdout.write(text),
     writeError: (text) => void process.stderr.write(text),
     interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
-    async *lines() {
+    async *lines(prompt) {
       const rl = createInterface({ input: process.stdin, output: process.stderr });
-      try { for await (const line of rl) yield line; } finally { rl.close(); }
+      if (prompt) { rl.setPrompt(prompt); rl.prompt(); }
+      try {
+        for await (const line of rl) {
+          yield line;
+          if (prompt) rl.prompt();
+        }
+      } finally { rl.close(); }
     },
     async confirm(question) {
       const rl = createInterface({ input: process.stdin, output: process.stderr });

@@ -465,6 +465,9 @@ metadata is retained for up to 24 hours in at most 4,096 sessions; bearer tokens
 overrides the terminal URL; the default is the MCP server's origin plus `/agent/terminal`.
 `acme ask "Which orders are ready?" --json` prints one response; `acme chat` reads a TTY until
 Ctrl-D or `/exit`. Without a TTY use `ask` (chat exits 2); sign-in failures exit 3.
+Human chat shows a `You ›` input prompt, a waiting indicator and agent replies under the CLI's
+name. `--json` keeps stdout as one JSON response per line, without those labels. Embedded CLIs
+can supply `CliIO.lines(prompt?)` and their own output handlers to replace the presentation.
 `chat.json` is mode 600 and scoped by terminal endpoint. `--new` forgets the terminal's saved
 reference; the agent keeps its one-person history across channels. It does not erase a person's
 WhatsApp history. Teams can replace either command with their own Stricli command in `commands`.
