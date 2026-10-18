@@ -9,7 +9,9 @@
 // browser itself and waits at most --timeout seconds; a code not approved by then stays in
 // ~/.config/flow-framework/pending.json for `login --wait`, which polls the same code again.
 // Exit status: 0 done, 1 usage or not signed in, 2 network, 3 the server refused (or the code was
-// denied or expired), 4 the code is still waiting for approval.
+// denied or expired), 4 the code is still waiting for approval, or flow.engineer asked to wait
+// (429 slow_down: the wait is printed, and is retry_after with --json). A server's warnings go to
+// stderr one per line, and into the JSON as `warnings`.
 
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, readFileSync, writeFileSync, writeSync } from "node:fs";
@@ -19,7 +21,7 @@ import { parseArgs } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   currentToken, deleteCredentials, deletePending, LoginRefused, loginUrl, pollToken, readPending, REQUEST_TIMEOUT_MS, revoke, saveCredentials, savePending,
-  SETUP_ENV, setup, startDevice, TimedOut, tryLink, whoami, type Account, type PendingLogin, type SetupAnswer,
+  SETUP_ENV, setup, startDevice, TimedOut, tryLink, warningsOf, whoami, type Account, type PendingLogin, type SetupAnswer,
 } from "./flow-login.ts";
 import { packageRoot } from "./new.ts";
 import { RUN } from "../../src/names.ts";
@@ -49,7 +51,7 @@ Nothing asks for input. A code not approved in time is kept in ~/.config/flow-fr
 (mode 0600) until it expires, for ${RUN} login --wait. Signed in already, login says so; --force signs in again.
 
 Exit status: 0 done, 1 usage or not signed in, 2 network, 3 refused, denied or expired,
-4 still waiting for approval (run ${RUN} login --wait).`;
+4 still waiting for approval (run ${RUN} login --wait), or flow.engineer asked to wait (try again after the time it gives).`;
 
 const NEXT = { login: `${RUN} login`, wait: `${RUN} login --wait`, setup: `${RUN} setup`, link: `${RUN} link` };
 const CHANNELS = ["telegram", "whatsapp", "imessage"];
@@ -59,6 +61,10 @@ class Stop extends Error {
   readonly code: string;
   readonly next: string | undefined;
   readonly exit: number;
+  /** For a 429: the seconds flow.engineer asked to wait, null when it gave none. */
+  retryAfter: number | null | undefined;
+  /** The server's warnings that came with the error. */
+  warnings: string[] = [];
   constructor(code: string, message: string, next: string | undefined, exit: number) {
     super(message);
     this.code = code;
@@ -66,6 +72,12 @@ class Stop extends Error {
     this.exit = exit;
   }
 }
+
+/**
+ * A next step to run (a command or a URL) goes after "Next:"; anything else is a sentence for the
+ * owner (a trial limit's next) and is printed on its own line as it came.
+ */
+const isCommand = (next: string) => /^(?:npx|npm|flow|gh) |^https?:\/\//.test(next);
 
 /** Runs one account command; resolves to the exit status. */
 export async function accountCli(command: string, args: string[]): Promise<number> {
@@ -122,10 +134,21 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     return EXIT.ok;
   } catch (error) {
     const stop = asStop(error);
-    writeAll(2, `${stop.next ? `${stop.message} Next: ${stop.next}` : stop.message}\n`);
-    if (json) out(stop instanceof Pending ? stop.report : { error: { code: stop.code, message: stop.message, next: stop.next ?? null } });
+    printWarnings(stop.warnings);
+    writeAll(2, `${!stop.next ? stop.message : isCommand(stop.next) ? `${stop.message} Next: ${stop.next}` : `${stop.message}\n${stop.next}`}\n`);
+    if (json) {
+      out(stop instanceof Pending ? stop.report : {
+        error: { code: stop.code, message: stop.message, next: stop.next ?? null, ...(stop.retryAfter !== undefined ? { retry_after: stop.retryAfter } : {}) },
+        ...(stop.warnings.length ? { warnings: stop.warnings } : {}),
+      });
+    }
     return stop.exit;
   }
+}
+
+/** The server's warnings, one per line on stderr, as they came. */
+function printWarnings(warnings: string[]): void {
+  for (const warning of warnings) writeAll(2, `${warning}\n`);
 }
 
 /** Writes all of the text to the descriptor before going on. */
@@ -140,9 +163,18 @@ type Say = (line: string) => void;
 function asStop(error: unknown): Stop {
   if (error instanceof Stop) return error;
   if (error instanceof LoginRefused) {
-    if (error.status === 401) return new Stop("not_signed_in", "Your sign-in has ended or was revoked.", error.next ?? NEXT.login, EXIT.refused);
+    let stop: Stop;
+    if (error.status === 401) stop = new Stop("not_signed_in", "Your sign-in has ended or was revoked.", error.next ?? NEXT.login, EXIT.refused);
+    else if (error.status === 429) {
+      // Asked to wait: retryable, so the same exit as a sign-in still waiting.
+      const wait = error.retryAfter;
+      stop = new Stop(error.code, `${error.message} ${wait !== undefined ? `Wait ${wait} s before trying again.` : "Wait a little before trying again."}`, error.next, EXIT.pending);
+      stop.retryAfter = wait ?? null;
+    }
     // Status 0: refused here, before any request (an http login URL).
-    return new Stop(error.code, error.message, error.next, error.status === 0 ? EXIT.usage : EXIT.refused);
+    else stop = new Stop(error.code, error.message, error.next, error.status === 0 ? EXIT.usage : EXIT.refused);
+    stop.warnings = warningsOf(error.fields);
+    return stop;
   }
   if (error instanceof TimedOut) return new Stop("timeout", error.message, undefined, EXIT.network);
   const cause = (error as { cause?: { code?: string } }).cause?.code;
@@ -398,12 +430,16 @@ async function setupEnv(replace: boolean, ci: boolean, json: boolean, out: Out, 
     }
     throw error;
   }
+  const warnings = warningsOf(answer as unknown as Record<string, unknown>);
   const written = writeEnv(file, lines, before, answer as unknown as Record<string, unknown>, replace);
   if (typeof answer.join_code !== "string" || !answer.join_code) {
     const kept = written.filter((w) => w.action === "added" || w.action === "replaced").map((w) => w.name);
-    throw new Stop("no_join_code", `flow.engineer gave no join code${kept.length ? ` (the keys it made are in .env: ${kept.join(", ")})` : ""}, so there is no phone link yet.`,
+    const stop = new Stop("no_join_code", `flow.engineer gave no join code${kept.length ? ` (the keys it made are in .env: ${kept.join(", ")})` : ""}, so there is no phone link yet.`,
       answer.next?.[0] ?? NEXT.setup, EXIT.refused);
+    stop.warnings = warnings;
+    throw stop;
   }
+  printWarnings(warnings);
 
   const open = CHANNELS.filter((c) => typeof (answer as unknown as Record<string, unknown>)[`${c}_sender`] === "string");
   const links = Object.fromEntries(open.map((c) => [c, answer.try_urls?.[c] ?? (c === "telegram" && answer.try_url ? answer.try_url : tryLink(url, answer.join_code!, c))]));
@@ -412,12 +448,14 @@ async function setupEnv(replace: boolean, ci: boolean, json: boolean, out: Out, 
     out({
       agent: answer.agent_id, join_code: answer.join_code, env_written: { ".env": written }, minted: answer.minted ?? [],
       dashboard_url: answer.dashboard_url ?? null, try_url: answer.try_url ?? null, telegram_link: answer.telegram_link ?? null,
-      whatsapp_link: answer.whatsapp_link ?? null, imessage_link: answer.imessage_link ?? null, try_urls: links, trial: answer.trial ?? null, next,
+      whatsapp_link: answer.whatsapp_link ?? null, imessage_link: answer.imessage_link ?? null, try_urls: links, trial: answer.trial ?? null, next, warnings,
     });
   }
   say(`Agent ${answer.agent_id}. In .env:`);
   for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}${w.action === "kept" ? " (yours differs; --replace takes the new one)" : ""}`);
   if (answer.dashboard_url) say(`Its dashboard: ${answer.dashboard_url}`);
+  const people = answer.trial?.imessage?.contacts;
+  if (people && typeof people.used === "number" && typeof people.limit === "number") say(`iMessage: ${people.used} of ${people.limit} people`);
   if (!forLink) {
     for (const c of open) say(`On ${CHANNEL_NAME[c]}: ${links[c]}${trialNote(answer.trial?.[c])}`);
     say(`Next: ${next.join(", then ")}`);

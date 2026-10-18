@@ -45,8 +45,8 @@ npm start                                           # keep it running; the owner
 | 0 | Done | Go on |
 | 1 | Usage, not signed in, not an agent's folder, or a login URL that is not https | Fix the command, or run `next` |
 | 2 | flow.engineer could not be reached, or did not answer in time (`timeout`) | Try again |
-| 3 | Refused: denied, expired, a product failed, a channel not open yet, or a server with no CLI sign-in (`server_unsupported`) | Run `next` |
-| 4 | Sign-in still waiting for the owner's approval | Ask the owner to approve, then run `next` (the same code is kept) |
+| 3 | Refused: denied, expired, a product failed, a channel not open yet, a server with no CLI sign-in (`server_unsupported`), or a free-trial limit (`sandbox_allowance_used`, the iMessage people cap; HTTP 403) | Run `next`; for a trial limit `next` is a sentence: give it to the owner as it is |
+| 4 | Sign-in still waiting for the owner's approval, or flow.engineer asked to wait (`slow_down`, HTTP 429) | Approval: ask the owner to approve, then run `next` (the same code is kept). `slow_down`: wait `retry_after` seconds (printed as `Wait <n> s`), then run `next` |
 
 `login` and `link` wait at most `--timeout` seconds (120 by default) before exit 4, and no single
 request waits longer than 30 s. `login --wait` (or `link` again) goes on with the same code: no new
@@ -59,7 +59,17 @@ sign-in, and so is a code from another login URL.
 Every error is `{"error":{"code","message","next"}}` on stdout with `--json`, and
 `<message> Next: <next>` on stderr. A waiting sign-in is `{"status":"pending",...,"next":...}`.
 `next` is the exact command or URL to run; when it came from flow.engineer it is the server's.
-Run it, or give it to the owner when it needs them (a browser approval, a page to open).
+Run it, or give it to the owner when it needs them (a browser approval, a page to open). A
+`slow_down` error also has `retry_after` (seconds, or `null` when the server gave none). A
+trial limit's `next` is a sentence, not a command: it is printed on its own line as it came; pass
+it on to the owner unchanged.
+
+flow.engineer may add `warnings` (up to 20 lines) to any setup answer. Each is printed on its own
+line on stderr; with `--json` setup's line has `warnings` (an empty list when there are none), and
+an error line has it when there were any. Pass them on to the owner.
+
+`setup` also shows the free trial: messages used per channel, and on iMessage the people it may
+reach (`iMessage: 1 of 2 people`; `trial.imessage.contacts` `{limit, used}` in `--json`).
 
 ## Keys
 
