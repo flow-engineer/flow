@@ -22,6 +22,7 @@ export interface FlowEvent {
     | "skill.loaded"
     | "text.hidden"
     | "ack.required"
+    | "auth.required"
     | "reaction"
     | "status"
     | "message.undelivered"

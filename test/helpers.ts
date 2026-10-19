@@ -100,7 +100,9 @@ export function multi(options: {
   channels: Record<string, { info: ChannelInfo; phone?: boolean; kind?: ChannelKind; keywords?: Keywords }>;
   tools?: ReturnType<typeof tool>[];
   database?: Database;
-  resolve?: (identity: { channel: string; address: string }) => string | null;
+  resolve?: AgentOptions["resolve"];
+  credentials?: AgentOptions["credentials"];
+  auth?: AgentOptions["auth"];
   now?: () => number;
   timeZone?: string;
   dir?: string;
@@ -145,6 +147,8 @@ export function multi(options: {
     channels,
     database,
     resolve: options.resolve,
+    credentials: options.credentials,
+    auth: options.auth,
     now: options.now,
     timeZone: options.timeZone,
     testPeople: options.testPeople,

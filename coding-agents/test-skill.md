@@ -5,7 +5,9 @@ description: Write or change tests for a Flow Framework agent (tests/scenarios/*
 
 # Writing tests for a Flow Framework agent
 
-Read the `flow-framework` skill (`skill.md`) first if you haven't.
+Read the `flow-framework` skill (`skill.md`) first if you haven't. Turn the situations in
+`context/examples/` (the `flow-framework-context` skill) into scenarios, and run `npx flow check`
+before the tests when the agent serves MCP or a CLI.
 
 A test is a scenario: a situation to put the agent in, played through a platform simulator by a
 model acting as the person, with the agent's tools played by a model from `tests/tools/*.yaml`

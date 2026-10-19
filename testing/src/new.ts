@@ -68,8 +68,10 @@ const agentsMd = (name: string) => `# ${name}
 
 A chat agent on Flow Framework (https://github.com/flow-engineer/flow), started from its café example (Pip).
 
-- Load the skills in \`.claude/skills/\` before changing it: \`flow-framework\` to build the agent, \`flow-framework-tools\`
-  for its tools and their test files, \`flow-framework-tests\` for its test scenarios.
+- Load the skills in \`.claude/skills/\` before changing it: \`flow-framework\` to build the agent (and its MCP
+  server and CLI), \`flow-framework-tools\` for its tools and their test files, \`flow-framework-tests\` for its test
+  scenarios, \`flow-framework-context\` to gather what the tools are written from out of an existing
+  codebase, and \`flow-framework-auth\` for sign-in.
 - \`agent/AGENTS.md\` is the agent's own prompt, not instructions for coding agents.
 - The owner puts one model key in \`.env\` (never read or print it): \`OPENROUTER_API_KEY\`,
   \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`. Then \`npx @flow-engineer/flow chat\`
@@ -79,6 +81,8 @@ A chat agent on Flow Framework (https://github.com/flow-engineer/flow), started 
   tests in the test cloud at https://flow.engineer/observe with the owner's \`FLOW_FRAMEWORK_CLOUD_KEY\`
   (\`npx @flow-engineer/flow --help\`).
 - The guide for coding agents, with exit codes and next steps: https://github.com/flow-engineer/flow/blob/main/docs/agents.md
+- \`npm run mcp\` serves the same tools as an MCP server (src/mcp.ts) and \`npm run cli -- --help\` is
+  its command line (src/cli.ts). \`npx flow check\` checks the tools and the CLI file for both.
 `;
 
 /** Makes `<into>/<name>` (the current folder by default) and returns it. */
@@ -111,9 +115,13 @@ function makeAgent(dir: string, name: string, root: string): void {
     const source = readFileSync(path, "utf8")
       .replace(/(["'])(\.\.\/)+src\/index\.ts\1/g, '"@flow-engineer/flow"')
       .replace(/(["'])(\.\.\/)+simulators\/src\/index\.ts\1/g, '"@flow-engineer/flow/simulators"')
-      .replace(/(["'])(\.\.\/)+flow-messaging\/src\/index\.ts\1/g, '"@flow-engineer/flow/flow-messaging"');
-    if (/["']\.\.\/\.\.\//.test(source)) throw new Error(`flow: ${file} imports a file outside the agent; only Flow Framework's public entries can be rewritten.`);
-    writeFileSync(path, source);
+      .replace(/(["'])(\.\.\/)+flow-messaging\/src\/index\.ts\1/g, '"@flow-engineer/flow/flow-messaging"')
+      .replace(/(["'])(\.\.\/)+mcp\/src\/index\.ts\1/g, '"@flow-engineer/flow/mcp"')
+      .replace(/(["'])(\.\.\/)+cli\/src\/index\.ts\1/g, '"@flow-engineer/flow/cli"');
+    // The CLI is the agent's own command, named after it.
+    const text = file === "cli.ts" ? source.replace(/name: "cafe"/, `name: "${name}"`).replace(/CAFE_SERVER/g, `${name.toUpperCase().replace(/-/g, "_")}_SERVER`) : source;
+    if (/["']\.\.\/\.\.\//.test(text)) throw new Error(`flow: ${file} imports a file outside the agent; only Flow Framework's public entries can be rewritten.`);
+    writeFileSync(path, text);
   }
 
   const own = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -123,9 +131,11 @@ function makeAgent(dir: string, name: string, root: string): void {
     private: true,
     description: `${name}: a Flow Framework agent, started from the café example.`,
     type: "module",
+    bin: { [name]: "src/cli.ts" },
     engines: own.engines,
-    scripts: { start: "node --env-file-if-exists=.env src/main.ts", test: "flow test", typecheck: "tsc --noEmit" },
-    dependencies: { "@flow-engineer/flow": `^${own.version}` },
+    scripts: { start: "node --env-file-if-exists=.env src/main.ts", mcp: "node src/mcp.ts", cli: "node src/cli.ts", test: "flow test", typecheck: "tsc --noEmit" },
+    // The café serves its tools over MCP (src/mcp.ts) and as a CLI (src/cli.ts): their SDKs, pinned as Flow Framework pins them.
+    dependencies: { "@flow-engineer/flow": `^${own.version}`, ...own.peerDependencies },
     devDependencies: { "@types/node": own.devDependencies["@types/node"], typescript: own.devDependencies.typescript },
   };
   writeFileSync(join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);

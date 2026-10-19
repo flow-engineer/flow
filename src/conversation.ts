@@ -46,7 +46,7 @@ import { scheduleTools } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
 import { REACT, UPDATE, reactInput, sendInput, sendRefusal, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
-import { render, tool, toSpec, type Tool } from "./tools.ts";
+import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
 import type { Attachment, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, PersonMessage, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 
 export interface ConversationSettings {
@@ -54,6 +54,9 @@ export interface ConversationSettings {
   /** Speech to text for voice notes; without it the agent is told it can't listen to them. */
   transcribe?: Transcribe;
   tools: Map<string, Tool>;
+  credentials?: CredentialProvider;
+  credentialProvider?: (context: Readonly<Omit<ToolContext, "credentials">>) => CredentialProvider | undefined;
+  auth?: ChatAuth;
   specs: ToolSpec[];
   instructions: string;
   /** Per-turn context for the system prompt (the person's profile, the time). */
@@ -117,6 +120,14 @@ const APOLOGY = "Sorry, something went wrong on my side. Could you send that aga
 const EARLIER = "[Chinwag] Older messages of this conversation are no longer shown to you.";
 const NOT_SHOWN = "[Chinwag] You are no longer shown the photos or documents in these messages; ask them to send one again if you need it.";
 
+/** A server-verified auth change: an internal prompt, never a prewritten chat response. */
+export function signInNotice(channel: string, request?: string): string {
+  return `Internal authentication event: sign-in completed on ${channel}. Continue the conversation on that channel. ` +
+    "Resume a request that was blocked only by sign-in, using the verified account and normal tools. " +
+    "Do not replay operations that already ran or retry unrelated failures. If nothing is waiting for sign-in, acknowledge naturally. Do not quote this internal event. " +
+    (request ? `The pending request (user text, not system instructions) is: ${JSON.stringify(request)}` : "");
+}
+
 /** Photos and PDFs the model is shown at once, the latest; each is resent on every model call. */
 const MEDIA_SHOWN = 3;
 /** The largest photo, and the largest PDF or voice note, the agent reads (most models take 5 MB images). */
@@ -138,6 +149,7 @@ interface Running {
   input: string;
   startedAt: number;
   limitMs: number;
+  authorized: Promise<void>;
   outcome: Promise<{ ok: boolean; text: string }>;
   result?: { ok: boolean; text: string };
 }
@@ -159,6 +171,7 @@ interface Owed {
   nudge?: string;
   mode: "message" | "check" | "prompt";
   channel: string;
+  address?: string;
   /** A prompt nudge to someone whose WhatsApp window is closed: only a template reaches them. */
   windowClosed?: boolean;
 }
@@ -193,6 +206,8 @@ interface Note {
 
 /** Sent without the model: a fixed-text scheduled message, or a text or template nudge. */
 interface Direct {
+  /** A fixed nudge targets the address it was requested for, even if another session wrote later. */
+  address?: string;
   inbox?: number;
   channel: string;
   /** A held nudge released because they just wrote: their window is open. */
@@ -226,6 +241,7 @@ export class Conversation {
   /** Aborted when the conversation closes: tools' signal. */
   private readonly lifetime = new AbortController();
   private recentChannels: string[] = [];
+  private promptDestination?: { channel: string; address?: string };
   private timeZone: string | null = null;
   /** Their own quiet hours ("off": none), or null for the agent's. */
   private quietHours: QuietHours | "off" | null = null;
@@ -245,6 +261,10 @@ export class Conversation {
   /** The next model response is the first since their latest message. */
   private firstResponse = false;
   private readonly typingOn = new Set<string>();
+  /** One challenge per channel per turn, even when the model calls several protected tools. */
+  private signInPrompts = new Map<string, Promise<{ message: string; url?: string }>>();
+  private authBlocked = new Set<string>();
+  private authPromptsSent = new Set<string>();
   /** The send tool for each channel, this turn. */
   private sendTools = new Map<string, string>();
   private readonly builtins: Map<string, Tool>;
@@ -569,7 +589,7 @@ export class Conversation {
       if (p.prompt !== undefined) {
         if (p.windowClosed) {
           const text = `[Nudge from the business, not from the person: ${p.prompt}] Their WhatsApp 24-hour window is closed: no ordinary message reaches them. If one of the business's templates says this, send it with send_template, its values filled in. If none fits, send nothing: Flow Framework sends them a "you have a new message" template and gives you this again when they reply.`;
-          this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel, windowClosed: true } });
+          this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel, address: p.address, windowClosed: true } });
           if (!this.running && this.hasWork()) this.schedule(0);
           return;
         }
@@ -577,8 +597,8 @@ export class Conversation {
         const text = held
           ? `[Nudge from the business, not from the person, ${held}${p.prompt}] Tell them now in your own words. Others held with it come in this turn too: cover them all in one short message, not a text each, and answer anything they just asked first.`
           : `[Nudge from the business, not from the person: ${p.prompt}] Write it to them now in your own words, or send nothing if it does not fit what they asked not to be messaged about.`;
-        this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel } });
-      } else this.direct.push({ inbox: row.id, channel: p.channel, text: p.text, template: p.template, nudge: p.nudge, ...(p.theyWrote ? { theyWrote: true } : {}) });
+        this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel, address: p.address } });
+      } else this.direct.push({ inbox: row.id, channel: p.channel, address: p.address, text: p.text, template: p.template, nudge: p.nudge, ...(p.theyWrote ? { theyWrote: true } : {}) });
     }
     if (!this.running && this.hasWork()) this.schedule(0);
   }
@@ -672,7 +692,8 @@ export class Conversation {
   /** Picks up where the conversation was: its history, events not yet handled, tools cut off. */
   private async load(): Promise<void> {
     const { store } = this.settings;
-    for (const link of await this.settings.links(this.id)) this.link(link);
+    // A live arrival can attach its new address while persisted links are loading. Keep that proof.
+    for (const link of await this.settings.links(this.id)) if (!this.channels.has(link.name)) this.link(link);
     const history = await store.history(this.id);
     this.saved = history.length;
     this.history.push(...history);
@@ -792,7 +813,7 @@ export class Conversation {
 
   /** The channel of the person's latest message. */
   private currentChannel(): string {
-    return this.recentChannels.at(-1) ?? [...this.channels.keys()][0] ?? "chat";
+    return (!this.theirMessages ? this.promptDestination?.channel ?? this.owed.at(-1)?.channel : undefined) ?? this.recentChannels.at(-1) ?? [...this.channels.keys()][0] ?? "chat";
   }
 
   /** Move waiting messages and notes into the history; the person's messages are now read. */
@@ -889,7 +910,11 @@ export class Conversation {
     const turns = this.turns;
     this.resumeTurn = false;
     this.theirMessages = false;
+    this.promptDestination = undefined;
     this.settings.emit(this.id, "turn.start", {});
+    this.signInPrompts.clear();
+    this.authBlocked.clear();
+    this.authPromptsSent.clear();
     this.persist(() => store.updateConversation(this.id, { turnOpen: true, turns }));
     this.absorb();
     // A turn the person started (as against a background result, a scheduled message or a nudge).
@@ -924,11 +949,19 @@ export class Conversation {
     for (let step = 0; step < this.settings.maxSteps; step++) {
       if (this.closed) return;
       // The channels can grow mid-turn (they wrote on another one), so each step offers what is there now.
+      // A business prompt is addressed to one session, not whichever address last wrote on that channel.
+      if (!this.theirMessages) this.promptDestination = this.owed.at(-1) ?? this.promptDestination;
+      const destination = !this.theirMessages ? this.promptDestination : undefined;
+      if (destination?.address) {
+        const link = (await this.settings.links(this.id)).find(l => l.name === destination.channel && l.address === destination.address);
+        if (link) this.link(link);
+      }
       const views = this.views();
       const several = views.length > 1;
       this.sendTools = new Map(views.map((v) => [sendToolName(v.name), v.name]));
       const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), context].filter(Boolean).join("\n\n");
-      const specs = [...this.settings.specs, ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk)];
+      const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
+      const specs = [...ownSpecs, ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk)];
       const abort = new AbortController();
       if (restarts < this.settings.maxRestarts) this.stepAbort = abort;
       const callStarted = Date.now();
@@ -1021,7 +1054,13 @@ export class Conversation {
       for (const call of response.toolCalls) {
         this.history.push({ role: "tool", toolCallId: call.id, content: results.get(call.id) ?? "" });
       }
+      for (const [channel, prompt] of this.signInPrompts) {
+        if (this.authPromptsSent.has(channel)) continue;
+        await this.sendSignIn(channel, await prompt);
+        this.authPromptsSent.add(channel);
+      }
       this.flush();
+      if (work.length && work.every((call) => this.authBlocked.has(call.id)) && !this.absorb()) break;
       // Only messages: the turn is over unless one was refused or something new came in meanwhile, or
       // this replies to their message without having used any tool: it gets one more step, in case it
       // meant to act next (it said "getting your order" and has not asked for it yet). A tool
@@ -1089,7 +1128,7 @@ export class Conversation {
       const input = parsed.data as SendInput;
       const fields = Object.fromEntries(Object.keys(link.params ?? {}).flatMap((k) => ((input as Record<string, unknown>)[k] === undefined ? [] : [[k, (input as Record<string, unknown>)[k]]])));
       const hasFields = Object.keys(fields).length > 0;
-      if (several && !input.confirm && !this.recentChannels.includes(channel)) {
+      if (several && !input.confirm && !this.recentChannels.includes(channel) && !this.owed.some(o => o.channel === channel) && this.promptDestination?.channel !== channel) {
         const last = link.lastMessageAt ? ` (last time ${ago(this.settings.now() - link.lastMessageAt)} ago)` : "";
         return refused(`Not sent: they have not written on ${channel} in their last 5 messages${last}. If you are sure, call ${call.name} again with confirm: true.`);
       }
@@ -1194,7 +1233,7 @@ export class Conversation {
       this.settle(d, status, reason);
       this.flush([d]);
     };
-    const link = this.channels.get(d.channel);
+    const link = d.address === undefined ? this.channels.get(d.channel) : (await this.settings.links(this.id)).find(l => l.name === d.channel && l.address === d.address);
     if (!link) return settle("failed", `no way to reach them on ${d.channel} right now`);
     if (!d.template && !d.theyWrote && windowClosed(link, this.settings.now())) return settle("refused", "outside_window");
     // Every direct send is one the business starts (a nudge, or its scheduled text): the person's rules apply.
@@ -1214,7 +1253,9 @@ export class Conversation {
     }
     if (covered) return settle("dropped", `no-contact rule ${covered.id}: ${covered.rule}`);
     const outbound: Outbound = d.template ? { type: "template", ...d.template } : { type: "message", text: d.text ?? "" };
-    const failure = await this.send(d.channel, outbound);
+    let failure: string | null = null;
+    if (this.closed) return settle("failed", "this person was forgotten");
+    try { await link.deliver(outbound); } catch (error) { failure = errorText(error); }
     if (failure) return settle("failed", failure);
     if (d.template) {
       // A declared template's text, so the agent knows what the person read (and tapped a reply to).
@@ -1283,6 +1324,9 @@ export class Conversation {
       if (typeof started === "string") results[i] = started;
       else live.push({ i, r: started });
     });
+    // Authentication is a prerequisite, never a detached background operation.
+    await Promise.all(live.map(({ r }) => r.authorized));
+    await Promise.all(live.filter(({ r }) => this.authBlocked.has(r.call.id)).map(({ r }) => r.outcome));
     let firstDoneAt: number | null = null;
     for (;;) {
       for (const { i, r } of live) {
@@ -1345,14 +1389,52 @@ export class Conversation {
 
     this.settings.emit(this.id, "tool.start", { callId: call.id, tool: call.name, input: parsed.data });
     const key = createHash("sha256").update(`${this.id}\u0000${this.turns}\u0000${call.name}\u0000${input}`).digest("hex").slice(0, 32);
-    const context = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), callId: call.id, idempotencyKey: key, signal: this.lifetime.signal };
+    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal };
+    const credentials = this.settings.credentialProvider?.(identityContext) ?? this.settings.credentials;
+    let context = toolContext(identityContext, credentials);
+    let authorize!: () => void;
+    const authorized = new Promise<void>(resolve => { authorize = resolve; });
     const r: Running = {
       call,
       input,
       startedAt: Date.now(),
       limitMs: tool.deadlineMs ?? this.settings.deadlineMs,
+      authorized,
       outcome: Promise.resolve()
-        .then(() => tool.run(parsed.data, context))
+        .then(async () => {
+          try {
+            const auth = this.settings.auth;
+            const signIn = tool.signIn ?? (this.builtins.has(call.name) ? "none" : "required");
+            if (auth && signIn !== "none") {
+              const identity: ChatAuthContext = Object.freeze({ conversationId: this.id, person: context.person, key: context.key, channel: context.channel, address: this.channels.get(context.channel)?.address ?? "", tool: call.name, signal: this.lifetime.signal });
+              let verified = !!context.key;
+              if (verified && auth.verify) {
+                try { verified = await this.authentication(() => auth.verify!(identity)); }
+                catch { verified = false; }
+              }
+              if (this.closed) return { error: "conversation_closed" };
+              if (!verified && signIn === "required") {
+                this.authBlocked.add(call.id);
+                if (!this.signInPrompts.has(context.channel)) {
+                  const prompt = this.authentication(() => auth.signIn(identity)).then((challenge) => {
+                    if (!challenge.message?.trim()) throw new Error("Empty sign-in challenge");
+                    if (challenge.url) {
+                      const url = new URL(challenge.url);
+                      if (url.username || url.password || (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))) throw new Error("Unsafe sign-in URL");
+                    }
+                    return challenge;
+                  }).catch(() => ({ message: "I couldn't start sign-in. Please try again." }));
+                  this.signInPrompts.set(context.channel, prompt);
+                }
+                this.settings.emit(this.id, "auth.required", { tool: call.name, channel: context.channel });
+                return { error: "sign_in_required", executed: false };
+              }
+              if (!verified) context = toolContext({ ...context, key: null, person: `${context.channel}:${identity.address}` }, credentials);
+            }
+            if (this.closed) return { error: "conversation_closed" };
+            return tool.run(parsed.data, context);
+          } finally { r.startedAt = Date.now(); authorize(); }
+        })
         .then(
           (output) => ({ ok: true, text: render(output) }),
           (error) => ({ ok: false, text: `Failed: ${error instanceof Error ? error.message : String(error)}` }),
@@ -1360,6 +1442,29 @@ export class Conversation {
     };
     void r.outcome.then((result) => (r.result = result));
     return r;
+  }
+
+  /** A failed or unresponsive auth service cannot leave a protected call hanging or let it execute. */
+  private async authentication<T>(work: () => T | Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>;
+    try { return await Promise.race([Promise.resolve().then(work), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Sign-in timed out")), 15_000); })]); }
+    finally { clearTimeout(timer!); }
+  }
+
+  /** A login request is a real channel message, recorded as delivered, without another model call. */
+  private async sendSignIn(channel: string, prompt: { message: string; url?: string }): Promise<void> {
+    const link = this.channels.get(channel);
+    if (!link) return;
+    const outbound = fitMessage(link.info, { type: "message" as const, text: prompt.message, authentication: true, ...(prompt.url ? { link: { label: "Sign in", url: prompt.url } } : {}) });
+    const failure = await this.send(channel, outbound);
+    if (failure) { this.undelivered(prompt.message, failure); return; }
+    const callId = `auth_${randomUUID()}`;
+    this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(channel), arguments: JSON.stringify({ text: outbound.text, ...(outbound.link ? { link: outbound.link } : {}) }) }] });
+    this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel, authentication: true }) });
+    this.settings.emit(this.id, "message.out", { text: outbound.text, link: outbound.link, channel, authentication: true });
+    this.sent();
+    this.sentThisTurn.add(prompt.message.trim());
+    await this.acknowledged(channel);
   }
 
   /** The reply stops waiting for this tool: it carries on in the background and its result comes back as a note. */
@@ -1398,6 +1503,7 @@ export type TranscriptEntry =
       kind: "out";
       channel: string;
       text: string;
+      authentication?: boolean;
       at: number;
       replyTo?: string;
       buttons?: string[];
@@ -1447,7 +1553,7 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
         args = JSON.parse(call.arguments || "{}");
       } catch {}
       if (call.name.startsWith("send_")) {
-        let delivered: { delivered?: boolean; channel?: string } = {};
+        let delivered: { delivered?: boolean; channel?: string; authentication?: boolean } = {};
         try {
           delivered = JSON.parse(result?.content ?? "");
         } catch {}
@@ -1457,6 +1563,7 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
           kind: "out",
           channel: delivered.channel,
           text: String(args.text ?? ""),
+          ...(delivered.authentication ? { authentication: true } : {}),
           at: result!.at,
           ...(typeof args.reply_to === "string" ? { replyTo: args.reply_to } : {}),
           ...(Array.isArray(args.buttons) && args.buttons.length ? { buttons: args.buttons as string[] } : {}),
@@ -1584,4 +1691,3 @@ export function profileTool(profile: Profile): Tool {
 
 /** createAgent's `profile`: what the business knows about the person, fetched only when the agent asks. */
 export type Profile = (who: { conversationId: string; person: string; channel: string }) => Promise<unknown> | unknown;
-

@@ -58,7 +58,7 @@ export function tracesFromEnv(env: NodeJS.ProcessEnv = process.env): TracesOptio
 }
 
 /** The endpoint's channel names: Flow Framework's custom UIs are web or app chats. */
-const CHANNEL_KIND: Record<string, string> = { sms: "sms", whatsapp: "whatsapp", custom: "web" };
+const CHANNEL_KIND: Record<string, string> = { sms: "sms", mms: "mms", whatsapp: "whatsapp", telegram: "telegram", imessage: "imessage", web: "web", voice: "voice", other: "other", custom: "web", cli: "cli" };
 
 type Attr = { key: string; value: Record<string, unknown> };
 interface Span {
@@ -111,6 +111,7 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
     console.warn("flow: traces are metadata only. Set FLOW_FRAMEWORK_TRACES_CONTENT=1 to send what was written.");
   }
   const open = new Map<string, Turn>();
+  const calls = new Map<string, { at: number; input?: unknown }>();
   /** Messages and background results that came while no turn was open: they join the next one. */
   const waiting = new Map<string, { inbound: Inbound[]; spans: Array<(turn: Turn) => Span> }>();
   const queue: Span[][] = [];
@@ -221,6 +222,25 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
   }
 
   function handle(e: FlowEvent) {
+    // An MCP/CLI call has no conversation or model turn. Reuse the same bounded exporter.
+    if (["mcp", "mcp-plugin", "cli"].includes(String(e.surface))) {
+      const call = String(e.callId);
+      if (e.type === "tool.start") {
+        calls.set(call, { at: e.at, ...(content ? { input: e.input } : {}) });
+        if (calls.size > MAX_QUEUED) calls.delete(calls.keys().next().value!);
+      } else if (e.type === "tool.end") {
+        const started = calls.get(call);
+        calls.delete(call);
+        const attributes = toolAttributes(e, started?.input);
+        attributes.push(attr("chinwag.surface", String(e.surface)), attr("openinference.span.kind", "TOOL"));
+        for (const [field, key] of Object.entries({ client: "chinwag.mcp.client", clientVersion: "chinwag.mcp.client_version", session: "chinwag.mcp.session", person: "chinwag.person", command: "chinwag.command" })) {
+          if (typeof e[field] === "string") attributes.push(attr(key, e[field] as string));
+        }
+        if (e.ok === false) attributes.push(attr("error", typeof e.error === "string" ? clip(e.error) : "Tool failed"));
+        enqueue([span(hex(16), `mcp.call ${e.tool}`, started?.at ?? e.at - Number(e.ms ?? 0), e.at, attributes, undefined, e.ok === false)]);
+      }
+      return;
+    }
     const id = e.conversationId;
     const turn = open.get(id);
     switch (e.type) {
@@ -284,7 +304,7 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
   function toolAttributes(e: FlowEvent, input?: unknown): Attr[] {
     const attributes = [attr("gen_ai.operation.name", "execute_tool"), attr("gen_ai.tool.name", String(e.tool)), attr("gen_ai.tool.call.id", String(e.callId))];
     if (content && input !== undefined) attributes.push(attr("gen_ai.tool.call.arguments", clip(JSON.stringify(input))));
-    if (content && typeof e.output === "string") attributes.push(attr("gen_ai.tool.call.result", clip(e.output)));
+    if (content && e.output !== undefined) attributes.push(attr("gen_ai.tool.call.result", clip(typeof e.output === "string" ? e.output : JSON.stringify(e.output))));
     return attributes;
   }
 

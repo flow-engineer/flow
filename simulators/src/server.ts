@@ -29,8 +29,10 @@
 //
 // The person's messages have the agent's ids (m1, m2, ...); the agent's messages get a1, a2, ...
 
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { TLSSocket } from "node:tls";
@@ -55,6 +57,8 @@ import {
   type TranscriptEntry,
 } from "../../src/index.ts";
 import type { Agent } from "../../src/agent.ts";
+import type { CliConfig } from "../../cli/src/commands.ts";
+import type { CliIO } from "../../cli/src/run.ts";
 import { requireToken, sameSecret, wrongTries } from "../../src/http.ts";
 import { PLATFORMS, channelOf, platform as platformOf, smsSegments, type Platform } from "./platforms.ts";
 
@@ -78,6 +82,8 @@ export interface PlaygroundAgent {
   channels(): ChannelSummary[];
   simulate(input: { person: string; channel: string; message: Incoming }): Promise<{ conversationId: string; messageId: string } | null>;
   testConversation(phone: string): Promise<string | null>;
+  simulateVisitor?: Agent["simulateVisitor"];
+  visitorConversation?: Agent["visitorConversation"];
   transcript(conversationId: string): Promise<TranscriptEntry[]>;
   reacted(conversationId: string, emoji: string, toText: string): void;
   forgetPerson(conversationId: string): Promise<void>;
@@ -123,6 +129,18 @@ export interface SimulatorsOptions {
   pages?: { page: string; person: string };
   /** The agent's clock (playgroundClock(), passed to createAgent as `now`): the Person panel can move it. */
   clock?: PlaygroundClock;
+  /**
+   * Adds "New user · signed out" to the person picker. `visitor` is an opaque browser identity,
+   * scoped to the channel. Return the account `key` only after the application's normal auth
+   * verifies it, plus its channel `address` if different from visitor. Keep credentials server-side.
+   * Existing declared test people keep their current identity shortcut.
+   */
+  authentication?: (input: { channel: ChannelSummary; visitor: string }) => Promise<{
+    key?: string;
+    address?: string;
+    label?: string;
+    signInUrl?: string;
+  }>;
 }
 
 export interface LinkCard {
@@ -137,13 +155,134 @@ export interface LinkCard {
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 type Listening = { close(): Promise<void>; url: string };
 
+export interface LocalCliOptions {
+  /** The team's actual defineCli configuration. The browser cannot override its endpoints. */
+  config: CliConfig;
+  /** The channel tab that opens this runner, e.g. "terminal". */
+  channel: string;
+}
+
 export interface Playground {
   /** Pass to the agent's `events`: the trace and tool calls of test people's conversations. */
   events: EventSink;
   /** Serves the playground on 127.0.0.1 only; a token is optional there. */
-  listen(agent: PlaygroundAgent, port: number, options?: { token?: string }): Promise<Listening>;
+  listen(agent: PlaygroundAgent, port: number, options?: { token?: string; localCli?: LocalCliOptions }): Promise<Listening>;
   /** The playground as a request handler under `base`, for a deployed agent's own server: a token is required. */
-  handler(agent: PlaygroundAgent, options: { token: string; base?: string }): Handler;
+  handler(agent: PlaygroundAgent, options: { token: string; base?: string; localCli?: LocalCliOptions }): Handler;
+}
+
+/** Literal argv, with quoting and escaping, but no shell expansion, pipelines or execution. */
+function cliWords(text: string): string[] {
+  const words: string[] = [];
+  let word = "", quote = "", started = false, escape = false;
+  for (const ch of text) {
+    if (escape) { word += ch; escape = false; started = true; }
+    else if (ch === "\\" && quote !== "'") { escape = true; started = true; }
+    else if (quote) { if (ch === quote) quote = ""; else word += ch; }
+    else if (ch === '"' || ch === "'") { quote = ch; started = true; }
+    else if (/\s/.test(ch)) { if (started) words.push(word); word = ""; started = false; }
+    else { word += ch; started = true; }
+  }
+  if (quote || escape) throw new Error("Finish the quoted or escaped argument, then try again.");
+  if (started) words.push(word);
+  return words;
+}
+
+function localRequest(req: IncomingMessage): boolean {
+  // TODO: hosted CLI execution needs a security review before implementation/deployment.
+  // Keep this direct-loopback boundary; hosted support is not enabled by localCli options.
+  const ip = req.socket.remoteAddress ?? "";
+  return loopback(req.headers.host) && (ip === "::1" || /^127\./.test(ip) || /^::ffff:127\./.test(ip)) && !req.headers["x-forwarded-host"] && !req.headers["x-forwarded-for"];
+}
+
+/** Only explicitly enabled local playgrounds instantiate a runner; the test cloud never does. */
+function localCliRunner(options: LocalCliOptions, base: string): Handler & { close(): void } {
+  type Output = { seq: number; stream: "stdout" | "stderr" | "input" | "exit" | "login"; text: string };
+  type Session = {
+    directory: string; config: CliConfig; output: Output[]; seq: number; size: number; touched: number;
+    running: boolean; waiting: boolean; abort: AbortController; accept?: (line: string | null) => void;
+  };
+  const sessions = new Map<string, Session>();
+  const dispose = (s: Session) => { s.abort.abort(); s.accept?.(null); rmSync(s.directory, { recursive: true, force: true }); };
+  const clean = () => { for (const [key, s] of sessions) if (Date.now() - s.touched > 30 * 60_000) { dispose(s); sessions.delete(key); } };
+  const timer = setInterval(clean, 60_000); timer.unref();
+  const close = () => { clearInterval(timer); for (const s of sessions.values()) dispose(s); sessions.clear(); process.removeListener("exit", close); };
+  process.once("exit", close);
+  const emit = (s: Session, stream: Output["stream"], text: string) => {
+    if (s.abort.signal.aborted) return;
+    // Keep a reconnectable tail, with a bounded amount of developer-visible output.
+    text = text.slice(-128 * 1024);
+    s.output.push({ seq: ++s.seq, stream, text }); s.size += text.length;
+    while (s.size > 128 * 1024 && s.output.length > 1) s.size -= s.output.shift()!.text.length;
+  };
+  const input = (s: Session) => new Promise<string | null>((resolve) => {
+    if (s.abort.signal.aborted) return resolve(null);
+    s.waiting = true;
+    s.accept = (line) => { s.waiting = false; s.accept = undefined; resolve(line); };
+  });
+  const handle: Handler = async (req, res) => {
+    if (!localRequest(req) || crossSite(req)) return forbid(res, "The CLI runner is available only on the local playground's own origin.");
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const path = inside(url, base);
+    clean();
+    const cookie = `chinwag_cli_${createHash("sha256").update(`${req.headers.host} ${base}`).digest("hex").slice(0, 12)}`;
+    let key = (req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(`${cookie}=`))?.slice(cookie.length + 1);
+    let s = key ? sessions.get(key) : undefined;
+    if (req.method === "POST" && path === "/api/cli/reset" && s) { dispose(s); sessions.delete(key!); s = undefined; }
+    if (!s) {
+      key = randomBytes(32).toString("base64url");
+      const directory = mkdtempSync(join(tmpdir(), "chinwag-cli-"));
+      s = { directory, config: { ...options.config, directory }, output: [], seq: 0, size: 0, touched: Date.now(), running: false, waiting: false, abort: new AbortController() };
+      const owned = s;
+      s.config.openUrl = (link) => emit(owned, "login", link);
+      sessions.set(key, s);
+      res.appendHeader("set-cookie", `${cookie}=${key}; HttpOnly; SameSite=Lax; Path=${base || "/"}`);
+    }
+    s.touched = Date.now();
+    if (req.method === "GET" && path === "/api/cli") {
+      const after = Math.max(0, Number(url.searchParams.get("after")) || 0);
+      return json(res, 200, { events: s.output.filter((e) => e.seq > after), seq: s.seq, running: s.running, waiting: s.waiting });
+    }
+    if (req.method === "POST" && path === "/api/cli/reset") return json(res, 200, { ok: true });
+    if (req.method === "POST" && path === "/api/cli/input") {
+      const body = await readBody(req, MAX_BODY);
+      const text = typeof body?.text === "string" ? body.text.slice(0, 4_000) : "";
+      if (!text.trim()) return json(res, 400, { error: "Enter a command or a reply." });
+      if (s.running) {
+        if (!s.accept) return json(res, 409, { error: "The CLI is still running. Wait for its input prompt." });
+        emit(s, "input", `${text}\n`); s.accept(text);
+        return json(res, 202, { ok: true });
+      }
+      let argv: string[];
+      try { argv = cliWords(text); } catch (error) { return json(res, 400, { error: (error as Error).message }); }
+      if (argv[0] === s.config.name) argv.shift();
+      if (argv.some((w) => /^--(server|token)(=|$)/.test(w))) return json(res, 400, { error: "This runner uses its configured server and its own sign-in. Use auth login." });
+      if (argv[0] === "skill" && argv.some((w) => /^--write(=|$)/.test(w))) return json(res, 400, { error: "Use the installed CLI to write a skill to your computer; this runner can display it with skill." });
+      emit(s, "input", `$ ${text}\n`);
+      s.running = true;
+      const owned = s;
+      const io: CliIO = {
+        env: { NO_COLOR: "1", TERM: "dumb" }, signal: s.abort.signal, interactive: true,
+        write: (text) => emit(owned, "stdout", text), writeError: (text) => emit(owned, "stderr", text),
+        async *lines(prompt) {
+          while (!owned.abort.signal.aborted) {
+            if (prompt) emit(owned, "stdout", prompt);
+            const line = await input(owned);
+            if (line === null) return;
+            yield line;
+          }
+        },
+        confirm: async (question) => { emit(owned, "stderr", `${question} [y/N] `); return /^y(es)?$/i.test((await input(owned)) ?? ""); },
+      };
+      void import("../../cli/src/run.ts").then(({ runCli }) => runCli(owned.config, argv, io)).then(
+        (code) => emit(owned, "exit", String(code)),
+        () => { emit(owned, "stderr", "The CLI could not finish this command.\n"); emit(owned, "exit", "1"); },
+      ).finally(() => { owned.running = false; owned.waiting = false; owned.accept = undefined; });
+      return json(res, 202, { ok: true });
+    }
+    res.writeHead(404).end();
+  };
+  return Object.assign(handle, { close });
 }
 
 export interface TestCloudSimulators {
@@ -164,6 +303,7 @@ export type Line =
       list?: { button: string; rows: ListRow[] };
       /** A button under the message that opens this page. */
       link?: { label: string; url: string };
+      authentication?: boolean;
       /** A photo above the text, which is its caption. */
       image?: { url: string };
       /** The channel's own params the agent filled in (an app_link): shown under the message. */
@@ -356,6 +496,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
           ...(outbound.buttons ? { buttons: outbound.buttons } : {}),
           ...(outbound.list ? { list: outbound.list } : {}),
           ...(outbound.link ? { link: outbound.link } : {}),
+          ...(outbound.authentication ? { authentication: true } : {}),
           ...(outbound.image ? { image: outbound.image } : {}),
           ...(outbound.fields ? { fields: outbound.fields } : {}),
           ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}),
@@ -562,33 +703,42 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
   // The playground.
 
   /** The test person (by phone) each conversation belongs to, so its trace shows in their simulators. */
-  const people = new Map<string, TestPerson>();
+  type PlayingPerson = TestPerson & { key?: string; visitor?: string; visitorChannel?: string };
+  const people = new Map<string, Map<string, PlayingPerson>>();
   let playing: PlaygroundAgent | null = null;
-  const threadKey = (channel: string, person: TestPerson) => `${channel}:${person.phone}`;
+  const personKey = (person: PlayingPerson) => person.key ? `account:${person.key}` : person.visitor ? `visitor:${person.visitor}` : person.phone;
+  const threadKey = (channel: string, person: PlayingPerson) => `${channel}:${personKey(person)}`;
+  const rememberPerson = (id: string, person: PlayingPerson) => {
+    const all = people.get(id) ?? new Map<string, PlayingPerson>();
+    all.set(personKey(person), person); people.set(id, all);
+  };
+  const conversation = (agent: PlaygroundAgent, person: PlayingPerson) => person.key
+    ? agent.visitorConversation!(person.key) : person.visitor ? agent.visitorConversation!(null, { channel: person.visitorChannel!, address: person.visitor }) : agent.testConversation(person.phone);
 
   const playgroundEvents: EventSink = (event) => {
-    const person = people.get(event.conversationId);
+    const known = people.get(event.conversationId);
+    const person = known?.values().next().value;
     // A failed turn (a wrong or expired model key, say) on the terminal too, also for no known person.
     if (event.type === "model.error") console.error(`flow: model error${person ? ` (${person.name})` : ""}: ${String(event.error)}`);
-    if (!person || !playing) return;
-    for (const c of playing.channels()) show(threadKey(c.name, person), event);
+    if (!known || !playing) return;
+    for (const person of known.values()) for (const c of playing.channels()) show(threadKey(c.name, person), event);
   };
 
   function attach(agent: PlaygroundAgent): void {
     playing = agent;
     agent.attachPlayground(({ conversationId, person, channel, outbound }) => {
-      people.set(conversationId, person);
+      rememberPerson(conversationId, { ...person, visitorChannel: channel });
       const own = agent.channels().find((c) => c.name === channel);
-      if (own) return deliverer(platformFor(own), threadKey(channel, person), agent.templates?.())(outbound);
+      if (own) for (const other of people.get(conversationId)!.values()) deliverer(platformFor(own), threadKey(channel, other), agent.templates?.())(outbound);
     });
   }
 
   /** The conversation on one channel, rebuilt from the agent's store, with what only the platform showed (the carrier's replies). */
-  async function load(agent: PlaygroundAgent, person: TestPerson, channel: ChannelSummary): Promise<Thread> {
+  async function load(agent: PlaygroundAgent, person: PlayingPerson, channel: ChannelSummary): Promise<Thread> {
     const k = threadKey(channel.name, person);
     const t = thread(k);
-    const id = await agent.testConversation(person.phone);
-    if (id) people.set(id, person);
+    const id = await conversation(agent, person);
+    if (id) rememberPerson(id, person);
     const p = platformFor(channel);
     let count = 0;
     const lines: Line[] = [];
@@ -618,7 +768,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     return t;
   }
 
-  async function handle(agent: PlaygroundAgent, req: IncomingMessage, res: ServerResponse, base: string, gate: Gate | null): Promise<void> {
+  async function handle(agent: PlaygroundAgent, req: IncomingMessage, res: ServerResponse, base: string, gate: Gate | null, cli?: { options: LocalCliOptions; handle: Handler }): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = inside(url, base);
     // Without a token, a page on another site (or a DNS name rebound to 127.0.0.1) must not run
@@ -626,6 +776,10 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     if (!gate && !loopback(req.headers.host)) return forbid(res, "This playground answers only on localhost or 127.0.0.1.");
     if (path.startsWith("/api/") && crossSite(req)) return forbid(res, "This playground's API answers only its own page.");
     if (gate && !gate.allows(req, res, url, base)) return;
+    if (path === "/api/cli" || path.startsWith("/api/cli/")) {
+      if (!cli) { res.writeHead(404).end(); return; }
+      return cli.handle(req, res);
+    }
 
     if (req.method === "GET" && path === "/") return html(res, page(playPage, base));
     if (req.method === "GET" && path === "/person") return html(res, page(personPage, base));
@@ -633,7 +787,8 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     if (req.method === "GET" && path === "/api/platforms") {
       const channels = agent.channels().map((c) => ({ name: c.name, kind: c.kind, platform: platformFor(c) }));
       return json(res, 200, {
-        platforms: PLATFORMS, channels, people: agent.testPeople(), cards: options.cards ?? [],
+        platforms: PLATFORMS, channels, people: agent.testPeople(), cards: options.cards ?? [], authentication: !!options.authentication,
+        ...(cli && localRequest(req) ? { localCli: { channel: cli.options.channel, name: cli.options.config.name } } : {}),
         templates: (agent.templates?.() ?? []).map((t) => ({ name: t.name, body: t.body })),
         panel: { person: !!(agent.contact && agent.outbox), nudge: !!agent.recordNudge, clock: !!(options.clock && agent.runDue) },
       });
@@ -658,11 +813,35 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     }
 
     const asked = (name: string) => (typeof body?.[name] === "string" ? (body[name] as string) : (url.searchParams.get(name) ?? ""));
-    const person = agent.testPeople().find((p) => digits(p.phone) === digits(asked("person")) && digits(p.phone) !== "");
-    if (!person) return json(res, 403, { error: "only this agent's test people can be played: declare them in createAgent({ testPeople })" });
+    const isVisitor = asked("person") === "visitor";
+    let person: PlayingPerson | undefined = agent.testPeople().find((p) => digits(p.phone) === digits(asked("person")) && digits(p.phone) !== "");
+    const channel = agent.channels().find((c) => c.name === asked("channel"));
+    let visitorAddress = "";
+    if (isVisitor && options.authentication) {
+      if (!channel) return json(res, 400, { error: "channel must be one of the agent's own channels" });
+      if (!agent.simulateVisitor || !agent.visitorConversation) return json(res, 400, { error: "this playground needs an agent with authenticated visitor support" });
+      const cookieName = `chinwag_visitor_${createHash("sha256").update(`${req.headers.host} ${base}`).digest("hex").slice(0, 12)}`;
+      let browser = (req.headers.cookie ?? "").split(/;\s*/).find((cookie) => cookie.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
+      if (!browser || !/^[A-Za-z0-9_-]{43}$/.test(browser)) browser = undefined;
+      const reset = req.method === "POST" && path === "/api/auth/reset";
+      if (!browser || reset) {
+        browser = randomBytes(32).toString("base64url");
+        const secure = (req.socket as TLSSocket).encrypted || req.headers["x-forwarded-proto"] === "https";
+        res.setHeader("set-cookie", `${cookieName}=${browser}; HttpOnly; SameSite=Lax; Path=${base || "/"}; Max-Age=2592000${secure ? "; Secure" : ""}`);
+      }
+      // Each interface needs its own proof. A web login cannot authenticate an unrelated CLI.
+      const visitor = createHash("sha256").update(JSON.stringify([browser, channel.name])).digest("base64url");
+      const state = await options.authentication({ channel, visitor });
+      const publicState = { signedIn: !!state.key, label: state.label, signInUrl: state.signInUrl };
+      if (path === "/api/auth" || reset) return json(res, 200, publicState);
+      visitorAddress = state.address ?? visitor;
+      person = state.key ? { phone: "", name: "Signed-in user", key: state.key } : { phone: "", name: "New user", visitor: visitorAddress, visitorChannel: channel.name };
+    } else if (!person) return json(res, 403, { error: "choose a declared test person, or a new user when sign-in is configured" });
+    if (!person) return json(res, 403, { error: "Sign in to continue." });
+    if (path === "/api/auth") return json(res, 200, { signedIn: true });
 
     if (req.method === "POST" && path === "/api/clear") {
-      const id = await agent.testConversation(person.phone);
+      const id = await conversation(agent, person);
       if (id) {
         await agent.forgetPerson(id);
         people.delete(id);
@@ -675,19 +854,18 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       return json(res, 200, { ok: true });
     }
 
-    const channel = agent.channels().find((c) => c.name === asked("channel"));
     if (!channel) return json(res, 400, { error: "channel must be one of the agent's own channels" });
     const k = threadKey(channel.name, person);
     const p = platformFor(channel);
 
     // The Person panel: what is set and waiting for this person, and the business's side (nudges).
-    const to = { channel: channel.name, address: channel.kind === "custom" ? `test:${person.phone}` : person.phone };
+    const to = { channel: channel.name, address: person.key ? visitorAddress : person.visitor ? `visitor:${visitorAddress}` : channel.kind === "custom" ? `test:${person.phone}` : person.phone };
     if (req.method === "GET" && path === "/api/person") {
       if (!agent.contact || !agent.outbox) return json(res, 404, { error: "this agent has no contact record" });
-      const id = await agent.testConversation(person.phone);
+      const id = await conversation(agent, person);
       // One person on every channel: their record from whichever channel they have written on.
       let contact = await agent.contact(to);
-      for (const c of agent.channels()) contact ??= await agent.contact({ channel: c.name, address: c.kind === "custom" ? `test:${person.phone}` : person.phone });
+      if (!person.key && !person.visitor) for (const c of agent.channels()) contact ??= await agent.contact({ channel: c.name, address: c.kind === "custom" ? `test:${person.phone}` : person.phone });
       // When the agent wrote on each channel (its latest 20), so the page can flag a channel it is not showing.
       const lastOut: Record<string, number[]> = {};
       for (const e of id ? await agent.transcript(id) : []) if (e.kind === "out") lastOut[e.channel] = [...(lastOut[e.channel] ?? []), e.at].slice(-20);
@@ -731,7 +909,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       const t = await load(agent, person, channel);
       // Taken with the lines, in the same step: every event after this number came after these lines.
       recentOf(k);
-      return json(res, 200, { channel: channel.name, person, optedOut: t.optedOut, lines: t.lines, seq });
+      return json(res, 200, { channel: channel.name, person: { name: person.name, phone: person.phone }, optedOut: t.optedOut, lines: t.lines, seq });
     }
     if (req.method === "GET" && path === "/api/events") return events(req, res, k, url);
     if (req.method === "GET" && path === "/api/poll") return poll(res, k, url);
@@ -740,7 +918,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       const messageId = typeof body?.messageId === "string" ? body.messageId : "";
       const emoji = typeof body?.emoji === "string" ? body.emoji.slice(0, 16) : "";
       const target = findLine(k, messageId);
-      const id = await agent.testConversation(person.phone);
+      const id = await conversation(agent, person);
       if (!p.personReactions || !target || target.kind !== "out" || !emoji || !id) {
         return json(res, 400, { error: "reactions need a platform that has them, an agent message id and an emoji" });
       }
@@ -753,11 +931,12 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       const text = typeof body?.text === "string" ? body.text.trim().slice(0, 4_000) : "";
       if (!text && !attachmentsOf(body).length) return json(res, 400, { error: "text or a file is required" });
       const { incoming, line } = incomingOf(k, body, text, Boolean(p.replies));
-      console.info(JSON.stringify({ chinwag: "playground.message", person: person.name, phone: person.phone, channel: channel.name, at: new Date(line.at).toISOString(), ip: req.socket.remoteAddress ?? null }));
+      console.info(JSON.stringify({ chinwag: "playground.message", person: person.name, channel: channel.name, at: new Date(line.at).toISOString() }));
       emitLine(k, line);
       carrier(p, k, text);
-      const taken = await agent.simulate({ person: person.phone, channel: channel.name, message: incoming });
-      if (taken) people.set(taken.conversationId, person);
+      const taken = person.key || person.visitor ? await agent.simulateVisitor!({ key: person.key, address: visitorAddress, channel: channel.name, message: incoming })
+        : await agent.simulate({ person: person.phone, channel: channel.name, message: incoming });
+      if (taken) rememberPerson(taken.conversationId, person);
       line.id = taken?.messageId ?? null;
       push(k, { type: "id", at: line.at, messageId: line.id });
       return json(res, 202, { messageId: line.id, at: line.at });
@@ -767,16 +946,22 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
   const playground: Playground = {
     events: playgroundEvents,
-    listen: (agent, port, listenOptions = {}) => {
+    listen: async (agent, port, listenOptions = {}) => {
       const gate = listenOptions.token === undefined ? null : tokenGate(listenOptions.token);
       attach(agent);
-      return serve(guarded((req, res) => handle(agent, req, res, "", gate)), port);
+      const runner = listenOptions.localCli ? localCliRunner(listenOptions.localCli, "") : undefined;
+      const cli = runner ? { options: listenOptions.localCli!, handle: runner } : undefined;
+      try {
+        const listening = await serve(guarded((req, res) => handle(agent, req, res, "", gate, cli)), port);
+        return { ...listening, close: async () => { runner?.close(); await listening.close(); } };
+      } catch (error) { runner?.close(); throw error; }
     },
     handler: (agent, handlerOptions) => {
       const gate = tokenGate(handlerOptions?.token);
       attach(agent);
       const base = handlerOptions.base ?? "";
-      return guarded((req, res) => handle(agent, req, res, base, gate));
+      const cli = handlerOptions.localCli ? { options: handlerOptions.localCli, handle: localCliRunner(handlerOptions.localCli, base) } : undefined;
+      return guarded((req, res) => handle(agent, req, res, base, gate, cli));
     },
   };
   return playground;
@@ -789,13 +974,15 @@ interface Gate {
 
 /**
  * The playground's lock on a deployed agent. The token comes once as `?token=` (swapped for an
- * HttpOnly, SameSite=Strict cookie, and dropped from the URL) or on every API call as
- * `Authorization: Bearer`. Compared in constant time; wrong tokens are limited per address.
+ * HttpOnly, SameSite=Lax cookie, and dropped from the URL) or on every API call as
+ * `Authorization: Bearer`. Lax lets sign-in return from another site. Compared in constant time; wrong tokens are limited per address.
  */
 function tokenGate(token: string | undefined): Gate {
   requireToken(token, "flow simulators: a deployed playground");
   // The cookie holds a value made from the token, not the token itself.
   const session = createHash("sha256").update(`chinwag-playground:${token}`).digest("hex");
+  // Cookies are shared across localhost ports: independent agents must not overwrite each other.
+  const cookieName = `${COOKIE}_${session.slice(0, 12)}`;
   const tries = wrongTries();
 
   return {
@@ -807,6 +994,8 @@ function tokenGate(token: string | undefined): Gate {
         refuse(res, 401);
         return false;
       };
+      const secure = (req.socket as TLSSocket).encrypted || req.headers["x-forwarded-proto"] === "https";
+      const sessionCookie = `${cookieName}=${session}; Path=${base || "/"}; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
       const query = url.searchParams.get("token");
       const bearer = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];
       if ((query !== null || bearer !== undefined) && blocked) {
@@ -816,15 +1005,17 @@ function tokenGate(token: string | undefined): Gate {
       if (query !== null) {
         if (req.method !== "GET" || !sameSecret(query, token)) return fail();
         url.searchParams.delete("token");
-        const secure = (req.socket as TLSSocket).encrypted || req.headers["x-forwarded-proto"] === "https";
-        const cookie = `${COOKIE}=${session}; Path=${base || "/"}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
         const rest = url.searchParams.toString();
-        res.writeHead(303, { "set-cookie": cookie, location: url.pathname + (rest ? `?${rest}` : ""), "cache-control": "no-store" }).end();
+        res.writeHead(303, { "set-cookie": sessionCookie, location: url.pathname + (rest ? `?${rest}` : ""), "cache-control": "no-store" }).end();
         return false;
       }
       if (bearer !== undefined) return sameSecret(bearer, token) ? true : fail();
-      const cookie = (req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
-      if (cookie !== undefined && sameSecret(cookie, session)) return true;
+      const cookie = (req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
+      if (cookie !== undefined && sameSecret(cookie, session)) {
+        // Renew on page visits so existing Strict cookies also survive the next sign-in round trip.
+        if (req.method === "GET" && ["/", "/person"].includes(inside(url, base))) res.setHeader("set-cookie", sessionCookie);
+        return true;
+      }
       refuse(res, 401);
       return false;
     },
@@ -919,7 +1110,7 @@ async function readBody(req: IncomingMessage, limit = MAX_BODY): Promise<Record<
 }
 
 function json(res: ServerResponse, status: number, value: unknown): void {
-  res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
+  res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(value));
 }
 
 function html(res: ServerResponse, body: string): void {
