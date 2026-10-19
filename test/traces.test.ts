@@ -58,7 +58,8 @@ const attrs = (span: any) => Object.fromEntries(span.attributes.map((a: any) => 
 
 test("each turn is one trace: the person's ids and channel, its model calls, tools and replies", async () => {
   const endpoint = await fakeEndpoint();
-  const h = agentFor(endpoint.url, true);
+  // This path assertion also covers long trailing-slash runs without regex backtracking.
+  const h = agentFor(endpoint.url + "/".repeat(100_000), true);
   await playTurn(h, "+15550100123");
   const request = await endpoint.next(1);
   endpoint.close();

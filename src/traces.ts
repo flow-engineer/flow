@@ -100,7 +100,10 @@ export interface Traces {
 let warnedMetadataOnly = false;
 
 export function traces(options: TracesOptions, agent: { service: string; kindOf(channel: string): string | undefined }): Traces {
-  const base = (options.url ?? "").replace(/\/+$/, "");
+  const url = options.url ?? "";
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 47) end--;
+  const base = url.slice(0, end);
   if (!options.key) throw new Error("flow: traces need a key");
   if (!base) throw new Error("flow: traces need your traces endpoint's URL");
   if (!allowedUrl(base)) throw new Error("flow: traces go over https (http only to this machine)");
