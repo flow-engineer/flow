@@ -125,8 +125,9 @@ export type Command =
   | BusinessCommand;
 
 /**
- * A business run's commands. `step` numbers the scenario's opening steps from 1; its StepAnswer
- * carries the same number. `open` is step 0.
+ * A business run's commands. `step` numbers the run's business commands from 1 in the order the
+ * cloud sends them (`open` is 0; a step with `at:` is an `advance` and then its own command); its
+ * StepAnswer carries the same number. The client treats it as opaque.
  */
 export type BusinessCommand =
   /** A run starts: build its agent with its clock at `now` (epoch ms). The person is `address` on `channelName`;
