@@ -99,6 +99,7 @@ test("taps come as choices and reactions to the agent's messages as reactions", 
   assert.equal(lastUser(first.request.messages), "[whatsapp · msg_1, tapped] Tuesday");
   first.answer(respond(call("send_whatsapp", { text: "Booked for Tuesday" })));
   await flow.request(post("/v1/conversations/conv_wa/messages"));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 
   assert.equal((await live.deliver(event("reaction.added", WA, { message_id: "msg_out1", emoji: "👍" }))).status, 200);
   await live.deliver(received(WA, "msg_2", { type: "text", text: "thanks" }));
