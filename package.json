@@ -1,8 +1,8 @@
 {
   "name": "@flow-engineer/flow",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "An open-source runtime for chat agents that feel like a person texting back.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/flow-engineer/flow.git"
@@ -50,6 +50,7 @@
     "examples/cafe/tests",
     "examples/http-agent",
     "flow-messaging/README.md",
+    "docs/agents.md",
     "coding-agents",
     "spec",
     "README.md",

@@ -1,11 +1,11 @@
-// covers: scripts/new-agent.ts testing/src/new.ts
+// covers: scripts/new-agent.ts testing/src/new.ts examples/cafe/src/main.ts
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { newAgent } from "../scripts/new-agent.ts";
-import { newStandalone } from "../testing/src/new.ts";
+import { initHere, newStandalone } from "../testing/src/new.ts";
 
 test("npm run new copies the café under its name, renamed, and refuses bad or taken names", () => {
   const agents = mkdtempSync(join(tmpdir(), "flow-agents-"));
@@ -51,4 +51,17 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   assert.match(env, /^FLOW_FRAMEWORK_TRACES_URL=https:\/\/flow\.engineer\/observe$/m);
   assert.throws(() => newStandalone("my-agent", { into }), /already exists/);
   assert.throws(() => newStandalone("My_Agent", { into }), /not a usable name/);
+});
+
+test("flow init makes the same agent in the folder it runs in, named after it, on Flow Messaging when .env has its key, and never over files already there", () => {
+  const dir = join(mkdtempSync(join(tmpdir(), "flow-init-")), "My Shop");
+  mkdirSync(dir);
+  writeFileSync(join(dir, ".gitignore"), "dist/");
+  assert.equal(initHere(dir), "my-shop");
+  assert.equal(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).name, "my-shop");
+  const main = readFileSync(join(dir, "src", "main.ts"), "utf8");
+  assert.match(main, /from "@flow-engineer\/flow\/flow-messaging"/);
+  assert.match(main, /process\.env\.FLOW_MESSAGING_KEY \? flowMessaging\(\)/);
+  assert.equal(readFileSync(join(dir, ".gitignore"), "utf8"), "dist/\nnode_modules/\n.env\n.flow/\n");
+  assert.throws(() => initHere(dir), /has package\.json, tsconfig\.json, src, agent, tests/);
 });

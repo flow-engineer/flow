@@ -1,11 +1,12 @@
 // A fake Flow Messaging for the tests: answers the calls the channels make as the spec shapes them
 // (files by their bytes),
-// records every request, and signs events the way Flow does before posting them to a webhook.
+// records every request, and signs events the way Flow does before posting them to a webhook. Its
+// /v1/stream is a minimal WebSocket server (text and close frames) the tests drive frame by frame.
 
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgent, type Database, type FlowEvent } from "../../src/index.ts";
@@ -63,6 +64,39 @@ export async function fakeFlow() {
     res.writeHead(answer.status, { "content-type": "application/json" }).end(JSON.stringify(answer.body));
     waiters.splice(0).forEach((w) => w());
   });
+  const streams: FakeStream[] = [];
+  const streamWaiters: Array<() => void> = [];
+  server.on("upgrade", (req, socket: Socket) => {
+    const accept = createHash("sha1").update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+    const offered = String(req.headers["sec-websocket-protocol"] ?? "").split(",").map((p) => p.trim());
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSec-WebSocket-Protocol: flow\r\n\r\n`);
+    const ended = gateOf();
+    socket.on("data", (data: Buffer) => {
+      if ((data[0]! & 0x0f) === 0x8) socket.end(); // the client's close frame (or its answer to ours)
+    });
+    socket.on("close", () => ended.open());
+    socket.on("error", () => {}); // a client gone mid-write; "close" follows
+    const frame = (opcode: number, payload: Buffer) => {
+      const head = payload.length < 126 ? Buffer.from([0x80 | opcode, payload.length]) : Buffer.from([0x80 | opcode, 126, payload.length >> 8, payload.length & 0xff]);
+      socket.write(Buffer.concat([head, payload]));
+    };
+    streams.push({
+      url: new URL(req.url!, "http://x"),
+      protocols: offered,
+      authorization: req.headers.authorization,
+      send: (value) => frame(0x1, Buffer.from(JSON.stringify(value))),
+      close: (code, reason = "") => frame(0x8, Buffer.concat([Buffer.from([code >> 8, code & 0xff]), Buffer.from(reason)])),
+      drop: () => socket.destroy(),
+      ended: ended.promise,
+    });
+    streamWaiters.splice(0).forEach((w) => w());
+  });
+  /** The n-th stream opened (from 0), now or once it opens. */
+  async function stream(n: number): Promise<FakeStream> {
+    while (streams.length <= n) await new Promise<void>((resolve) => streamWaiters.push(resolve));
+    return streams[n]!;
+  }
+
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
@@ -76,7 +110,28 @@ export async function fakeFlow() {
   }
   const sends = (path: string) => requests.filter((r) => r.method === "POST" && r.path === path);
 
-  return { url, requests, queued, contacts, messages, templates, files, request, sends, close: () => server.close() };
+  return { url, requests, queued, contacts, messages, templates, files, request, sends, streams, stream, close: () => server.close() };
+}
+
+/** One client on the fake /v1/stream. */
+export interface FakeStream {
+  url: URL;
+  protocols: string[];
+  authorization: string | undefined;
+  /** Sends one JSON frame. */
+  send(frame: unknown): void;
+  /** Sends a close frame with this code. */
+  close(code: number, reason?: string): void;
+  /** Cuts the connection with no close frame. */
+  drop(): void;
+  /** Resolves when the connection is gone. */
+  ended: Promise<void>;
+}
+
+function gateOf() {
+  let open!: () => void;
+  const promise = new Promise<void>((resolve) => (open = resolve));
+  return { promise, open };
 }
 
 /** An agent on the three Flow channels, with its webhook served, driven by a scripted model. */

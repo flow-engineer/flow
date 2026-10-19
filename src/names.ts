@@ -11,6 +11,12 @@ export function setting(name: string, env: NodeJS.ProcessEnv = process.env): str
   return env[`FLOW_FRAMEWORK_${name}`] ?? env[`CHINWAG_${name}`];
 }
 
+/**
+ * The command to print in a next step. `npx flow` would fetch another npm package wherever this one is
+ * not installed, so a hint always names the package.
+ */
+export const RUN = "npx @flow-engineer/flow";
+
 /** An agent's results folder, in the agent's folder: written here, and git-ignored by `flow new`. */
 export const RESULTS_DIR = ".flow";
 /** The results folder from before the rename, still read until a run writes {@link RESULTS_DIR}. */

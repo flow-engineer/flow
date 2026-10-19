@@ -122,7 +122,7 @@ connects out to the cloud, which plays the person and the tools and judges.
 1. Have a test cloud: the hosted one at https://flow.engineer/observe, the default (see "Get a test
    cloud" below), or another with `--cloud <url>` or `FLOW_FRAMEWORK_CLOUD`.
 2. From the agent's folder (it must export `buildAgent` and `tools` from `src/agent.ts`), which reads
-   the agent's `.env` itself: `npx flow test --synthetic [--runs 3]` (`npm test -- --synthetic`
+   the agent's `.env` itself: `npx @flow-engineer/flow test --synthetic [--runs 3]` (`npm test -- --synthetic`
    in an agent `flow new` made).
 3. It first reads every test file as the cloud does; a mistake stops it with
    `tests/scenarios/<file>.yaml:<line>: <field>: <what is wrong>`, one line each, and nothing is sent.
@@ -153,17 +153,17 @@ connects out to the cloud, which plays the person and the tools and judges.
 
 Work in this loop, and never finish on a partial run:
 
-1. `npx flow test --synthetic`: the whole suite.
+1. `npx @flow-engineer/flow test --synthetic`: the whole suite.
 2. Fix what failed (the agent, or a test that asks for the wrong thing; say which).
-3. `npx flow test --synthetic --failed`, again until every run in it passes (exit 0).
-4. `npx flow test --synthetic`: the whole suite once more, since a fix can break another scenario.
+3. `npx @flow-engineer/flow test --synthetic --failed`, again until every run in it passes (exit 0).
+4. `npx @flow-engineer/flow test --synthetic`: the whole suite once more, since a fix can break another scenario.
 
 ### When a run fails
 
-1. `npx flow test --synthetic --json > report.json`, and read the runs whose `verdict` is not
+1. `npx @flow-engineer/flow test --synthetic --json > report.json`, and read the runs whose `verdict` is not
    `passed` (`jq '.runs[] | select(.verdict != "passed")' report.json`).
-2. `npx flow show last` (the first run that did not pass; it names the others) or
-   `npx flow show <runId>`: the checks with the judge's reasons, then the conversation in time
+2. `npx @flow-engineer/flow show last` (the first run that did not pass; it names the others) or
+   `npx @flow-engineer/flow show <runId>`: the checks with the judge's reasons, then the conversation in time
    order with every tool call the simulator played, its input, output and what it changed.
    `--json` gives the whole record.
 3. Decide which is wrong, and say which:
@@ -171,7 +171,7 @@ Work in this loop, and never finish on a partial run:
    - the test: a check asks for the wrong thing, or the scenario cannot reach its goal; fix the YAML;
    - the simulator: a tool output that could not happen, or a person who left the scenario; fix
      `tests/tools/*.yaml` or the scenario's `world` and `person`.
-4. `npx flow test --synthetic --failed`, then `--runs 3 --only <scenario>` on what you fixed, so
+4. `npx @flow-engineer/flow test --synthetic --failed`, then `--runs 3 --only <scenario>` on what you fixed, so
    a pass is not luck.
 5. The whole suite once more.
 
@@ -183,7 +183,7 @@ The owner does these; never ask for the key in chat or print it:
 2. Workspace → New agent.
 3. On the agent's Developers page, "Make a CI key". It starts with `oci_` and is shown once.
 4. Put it in the agent's `.env` as `FLOW_FRAMEWORK_CLOUD_KEY` (never on the command line).
-5. `npx flow test --cloud https://flow.engineer/observe --synthetic` from the agent's folder (`--cloud` is that address by default).
+5. `npx @flow-engineer/flow test --cloud https://flow.engineer/observe --synthetic` from the agent's folder (`--cloud` is that address by default).
 
 Your agent runs on your machine with your own model key. The cloud's person simulator, tool simulator and judge are free up to $5 a day per workspace, with 2 sessions at once; test data only (`--synthetic`), and records are deleted after 30 days. `--synthetic` is the promise that the test files hold no real customer or member data;
 the CLI refuses a hosted cloud without it and the key. `--environment staging` or `production` is
@@ -194,7 +194,7 @@ answers, with the session's own token. `--agent-version` (else `GITHUB_SHA`) and
 GitHub's branch) are kept with the session. A CI step (GitHub Actions shown):
 
 ```yaml
-- run: npx flow test --cloud https://flow.engineer/observe --synthetic --environment staging
+- run: npx @flow-engineer/flow test --cloud https://flow.engineer/observe --synthetic --environment staging
   env:
     FLOW_FRAMEWORK_CLOUD_KEY: ${{ secrets.FLOW_FRAMEWORK_CLOUD_KEY }}
     OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
