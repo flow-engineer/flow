@@ -35,14 +35,20 @@ import { CHECK_LINE as TOOLS_CHECK_LINE, checkCli, mcpUpdateCli } from "./check.
 import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
 import { httpAgent } from "./http-agent.ts";
-import { initHere, newStandalone, packageRoot } from "./new.ts";
+import { createInterface } from "node:readline/promises";
+import { displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
 import { EXIT, finishedOutcome, loadEnv, networkCode, reportError, runVerdict, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
 import type { RunSummary } from "./protocol.ts";
 
-const NEW_LINE = `  flow new <name>           Make ./<name>/, a new agent started from the café example
-  flow init                 Make that agent in the current folder, named after it`;
+const NEW_LINE = `  flow new <name> [--display-name <name>]
+                            Make ./<name>/, a new agent started from the café example
+  flow init [--display-name <name>]
+                            Make that agent in the current folder, named after it.
+                            --display-name is what people call it, such as "FlatX agent": a
+                            phone reaches it with "Hi FlatX agent (ref <code>)" (asked for when
+                            run in a terminal; else the folder's name in words)`;
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
                             the tests are in tests/scenarios and tests/tools)`;
@@ -180,15 +186,36 @@ if (values.help || process.argv.length <= 2) {
   process.exit(0);
 }
 
+/** --display-name, else asked for in a terminal (Enter takes the folder's name in words), else that default. */
+async function askDisplayName(given: string | undefined, packageName: string): Promise<string | undefined> {
+  if (given !== undefined || !process.stdin.isTTY || !process.stdout.isTTY) return given;
+  const fallback = displayNameOf(undefined, packageName);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(`What should people call your agent? Their phone says "Hi <it>" (Enter for "${fallback}"): `)).trim() || undefined;
+  } finally {
+    rl.close();
+  }
+}
+
+const namedLine = (dir: string) => {
+  const displayName = (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { displayName?: string }).displayName;
+  return `People call it "${displayName}" (package.json displayName): a phone reaches it with "Hi ${displayName} (ref <code>)".`;
+};
+
+const displayNameFlag = (values as { "display-name"?: string })["display-name"];
+
 if (command === "new") {
   const name = rest.length === 1 ? rest[0]! : "";
+  let dir: string;
   try {
-    newStandalone(name);
+    if (!name) throw new Error("Usage: flow new <name> [--display-name <name>]");
+    dir = newStandalone(name, { displayName: await askDisplayName(displayNameFlag, name) });
   } catch (error) {
-    console.error(name ? (error as Error).message : "Usage: flow new <name>");
+    console.error((error as Error).message);
     process.exit(1);
   }
-  console.log(`Made ./${name}/ from the café example (Pip). Next:
+  console.log(`Made ./${name}/ from the café example (Pip). ${namedLine(dir)} Next:
   1. cd ${name} && npm install
 ${nextSteps()}`);
   process.exit(0);
@@ -197,14 +224,14 @@ ${nextSteps()}`);
 if (command === "init") {
   let name: string;
   try {
-    if (rest.length) throw new Error("Usage: flow init (it makes the agent in the current folder; flow new <name> makes a folder for it)");
-    name = initHere();
+    if (rest.length) throw new Error("Usage: flow init [--display-name <name>] (it makes the agent in the current folder; flow new <name> makes a folder for it)");
+    name = initHere(process.cwd(), { displayName: await askDisplayName(displayNameFlag, folderName(process.cwd())) });
   } catch (error) {
     console.error((error as Error).message);
     process.exit(1);
   }
   loadEnv(undefined); // a .env already here may hold a model key
-  console.log(`Made ${name}, started from the café example (Pip), in this folder. Next:
+  console.log(`Made ${name}, started from the café example (Pip), in this folder. ${namedLine(process.cwd())} Next:
   1. npm install
 ${nextSteps()}`);
   process.exit(0);
@@ -559,7 +586,7 @@ function stoppedReason(error: unknown, cloud: string): string {
 /** The command's flags, or exits 1 with what is wrong and that command's usage. */
 function parseCommandLine() {
   const isNew = process.argv[2] === "new" || process.argv[2] === "init";
-  const options = isNew ? { help: TEST_FLAGS.help, version: TEST_FLAGS.version } : TEST_FLAGS;
+  const options = isNew ? { help: TEST_FLAGS.help, version: TEST_FLAGS.version, "display-name": { type: "string" } } : TEST_FLAGS;
   try {
     return parseArgs({ allowPositionals: true, strict: true, options: options as typeof TEST_FLAGS });
   } catch (error) {
