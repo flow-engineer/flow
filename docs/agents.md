@@ -13,13 +13,18 @@ package.
 ## The flow
 
 ```sh
-npx @flow-engineer/flow init                        # the starter agent in this (empty) folder; flow new <name> makes a folder
+npx @flow-engineer/flow init --display-name "FlatX agent"   # the starter in this (empty) folder; ask the owner what to call it first
 npm install
 npx @flow-engineer/flow link --json                 # signs in and sets up if needed (the keys, Flow's trial model key among them), then prints the phone link
 npm start                                           # keep it running: the playground link it prints, and the phone link reaches it
 npx @flow-engineer/flow status --json               # any time: what the folder has and lacks
 printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check: talk to it locally, one message per line
 ```
+
+Before `init` (or `flow new <folder>`), ask the owner what people should call their agent, such as
+"FlatX agent", and pass it as `--display-name`. It is kept as `displayName` in `package.json`, and
+the message their phone sends to reach the agent is `Hi FlatX agent (ref <code>)`; change it there
+any time. Without the flag, `init` asks in a terminal and otherwise uses the folder's name in words.
 
 ## How the owner tests it
 
@@ -29,6 +34,10 @@ When the owner asks how to test the agent, recommend these, in this order:
    (`testPeople`; Maria, Sam and Priya in the starter) and the channels are side by side, and
    **Debug** shows each tool call and how fast each message was answered.
 2. **Their phone**: the link from `link` (`say_to_person` in `link --json`), while `npm start` runs.
+   It is the channel's own link (`url`): `https://t.me/<bot>?start=<code>` (press Start),
+   `https://wa.me/<number>?text=...` or, for iMessage, `sms:<number>?&body=...` (an iPhone or a Mac),
+   each with `Hi <displayName> (ref <code>)` filled in (`join_message`). `page` is the same on
+   flow.engineer, for a computer without that app.
 
 `flow chat` and `npm test -- --synthetic` (the test cloud) are for you, to check your own work
 before you hand it back; run them yourself, and do not offer them to the owner as ways to test.
@@ -129,8 +138,9 @@ reach (`iMessage: 1 of 2 people`; `trial.imessage.contacts` `{limit, used}` in `
 ## Shared test numbers and privacy
 
 The free trial runs on Flow's shared Telegram bot, WhatsApp number and iMessage line. Sending an
-agent's join code binds that phone to that agent's app on the shared sender, so the person's
-messages go only to that app; sending another app's join code moves them there. Trial chats are
+agent's join message (`Hi <name> (ref <code>)`, what the link fills in) binds that phone to that
+agent's app on the shared sender, so the person's messages go only to that app; sending another
+app's join message moves them there. Trial chats are
 test data, kept for the account's retention (30 days by default). Do not use the trial for real
 customers' data: connect your own number for that.
 

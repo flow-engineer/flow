@@ -444,14 +444,35 @@ function modelKeyReport(value: (name: string) => string | undefined, trial: Setu
   return { report, line: NO_MODEL_KEY.message, next: NO_MODEL_KEY.nextLine.replace(/^Next: /, "").replace(/\.$/, "") };
 }
 
-/** A non-Telegram try link without /try's Telegram-only bot parameters (`bot`, `bs`). */
-function tryUrlFor(channel: string, url: string): string {
+/** What people call this folder's agent (package.json displayName, from `flow init`), else its package name in words. */
+function agentDisplayName(dir = process.cwd()): string {
+  const file = join(dir, "package.json");
+  const pkg = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as { name?: string; displayName?: string }) : {};
+  const named = typeof pkg.displayName === "string" ? pkg.displayName.trim() : "";
+  return named || (pkg.name ?? basename(dir)).replace(/^@[^/]+\//, "").replace(/-/g, " ");
+}
+
+/** The /try page with the agent's name (`n`), so it fills in "Hi <name> (ref <code>)". */
+function namedPage(url: string, name: string): string {
   const parsed = URL.parse(url);
-  if (channel === "telegram" || !parsed || !(parsed.searchParams.has("bot") || parsed.searchParams.has("bs"))) return url;
-  parsed.searchParams.delete("bot");
-  parsed.searchParams.delete("bs");
+  if (!parsed) return url;
+  parsed.searchParams.set("n", name);
   return parsed.toString();
 }
+
+/** A channel's direct link (t.me, wa.me or sms:), the message it fills in, and its /try page for a computer. */
+interface DirectLink {
+  link: string;
+  message: string;
+  page: string;
+}
+
+/** How to use each channel's direct link. */
+const OPEN_HINT: Record<string, string> = {
+  telegram: "Open it and press Start.",
+  whatsapp: "Open it and send the message it fills in.",
+  imessage: "Open it on an iPhone or a Mac and send the message it fills in.",
+};
 
 interface SetupOptions {
   replace: boolean;
@@ -524,7 +545,16 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   printWarnings(warnings);
 
   const open = CHANNELS.filter((c) => typeof fields[`${c}_sender`] === "string");
-  const links = Object.fromEntries(open.map((c) => [c, tryUrlFor(c, answer.try_urls?.[c] ?? (c === "telegram" && answer.try_url ? answer.try_url : tryLink(url, answer.join_code!, c)))]));
+  const displayName = agentDisplayName(dir);
+  const links = Object.fromEntries(open.map((c) => [c, namedPage(answer.try_urls?.[c] ?? (c === "telegram" && answer.try_url ? answer.try_url : tryLink(url, answer.join_code!, c)), displayName)]));
+  // Said by link instead, which asks for its own; a page that does not answer leaves only the page.
+  const direct: Record<string, DirectLink> = {};
+  if (!forLink) {
+    for (const c of open) {
+      const found = await directLink(links[c]!).catch((error: unknown) => (error instanceof Stop ? undefined : Promise.reject(error)));
+      if (found) direct[c] = found;
+    }
+  }
   // A closed channel's trial counts are not shown: only the open ones'.
   const trial = answer.trial ? Object.fromEntries(Object.entries(answer.trial).filter(([c]) => open.includes(c))) : null;
   const model = modelKeyReport((n) => before.get(n) || process.env[n]?.trim() || undefined, modelKeyOf(fields), true);
@@ -535,7 +565,9 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
     out({
       agent: answer.agent_id, join_code: answer.join_code, env_written: { ".env": written }, minted: answer.minted ?? [],
       dashboard_url: answer.dashboard_url ?? null, try_url: answer.try_url ?? null, telegram_link: answer.telegram_link ?? null,
-      whatsapp_link: answer.whatsapp_link ?? null, imessage_link: answer.imessage_link ?? null, try_urls: links, trial, model_key: model.report,
+      whatsapp_link: answer.whatsapp_link ?? null, imessage_link: answer.imessage_link ?? null, try_urls: links,
+      direct_links: Object.fromEntries(Object.entries(direct).map(([c, d]) => [c, d.link])), join_message: Object.values(direct)[0]?.message ?? null,
+      trial, model_key: model.report,
       // link's own line (or its error) has the run's next steps: one list per run.
       ...(forLink ? {} : { next }), warnings,
     });
@@ -548,7 +580,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const people = trial?.imessage?.contacts;
   if (people && typeof people.used === "number" && typeof people.limit === "number") say(`iMessage: ${people.used} of ${people.limit} people`);
   if (!forLink) {
-    for (const c of open) say(`On ${CHANNEL_NAME[c]}: ${links[c]}${trialNote(trial?.[c])}`);
+    for (const c of open) say(`On ${CHANNEL_NAME[c]}: ${direct[c] ? `${direct[c]!.link} (on a computer: ${links[c]})` : links[c]}${trialNote(trial?.[c])}`);
     const added = addedToRunning((n) => had.get(n) || process.env[n]?.trim(), (n) => before.get(n) || process.env[n]?.trim());
     if (added) say(added);
     say(`Next: ${next.join(", then ")}`);
@@ -717,53 +749,57 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
   if (!joinCode) throw new Stop("no_join_code", `Setup wrote no ${SETUP_ENV.join_code} into .env.`, NEXT.setup, EXIT.refused);
   // The server's own try_url when setup kept one for this join code and channel, else the same page built here.
   const fromServer = value(SETUP_ENV.try_url);
+  const name = agentDisplayName();
   const pageFor = (channel: string) =>
-    fromServer?.includes(`/try/${encodeURIComponent(joinCode)}?`) && URL.parse(fromServer)?.searchParams.get("c") === channel ? tryUrlFor(channel, fromServer) : tryLink(loginUrl(), joinCode, channel);
-  /** The channel's link, or the Stop that says it is not open (no sender in .env, or the try page says channel_not_open). */
-  const open = async (channel: string): Promise<string | Stop> => {
+    namedPage(fromServer?.includes(`/try/${encodeURIComponent(joinCode)}?`) && URL.parse(fromServer)?.searchParams.get("c") === channel ? fromServer : tryLink(loginUrl(), joinCode, channel), name);
+  /** The channel's direct link, or the Stop that says it is not open (no sender in .env, or the try page says channel_not_open). */
+  const open = async (channel: string): Promise<DirectLink | Stop> => {
     if (channel !== "telegram" && !value(SENDER_ENV[channel]!)) {
       return new Stop("channel_not_open", `${CHANNEL_NAME[channel]} is not open on Flow's shared senders yet, so setup got no ${SENDER_ENV[channel]}.`, NEXT.link, EXIT.refused);
     }
-    const url = pageFor(channel);
     try {
-      await checkTryPage(url);
+      return await directLink(pageFor(channel));
     } catch (error) {
       if (error instanceof Stop && error.code === "channel_not_open") return error;
       throw error;
     }
-    return url;
   };
   const model = modelKeyReport(value, trialKey, had !== undefined);
   const asked = await open(options.channel);
-  let links: Array<[string, string]>;
+  let links: Array<[string, DirectLink]>;
   let notOpen: string | undefined;
-  if (typeof asked === "string") links = [[options.channel, asked]];
+  if (!(asked instanceof Stop)) links = [[options.channel, asked]];
   else {
     // The asked-for channel is closed: the others' links instead, each checked the same way.
     links = [];
     for (const c of CHANNELS.filter((c) => c !== options.channel)) {
       const other = await open(c);
-      if (typeof other === "string") links.push([c, other]);
+      if (!(other instanceof Stop)) links.push([c, other]);
     }
     if (!links.length) throw asked;
     notOpen = `${what} isn't open yet; here ${links.length === 1 ? "is your" : "are your"} ${links.map(([c]) => CHANNEL_NAME[c]).join(" and ")} link${links.length === 1 ? "" : "s"}.`;
   }
-  const [channel, url] = links[0]!;
+  const [channel, first] = links[0]!;
   const replyOnly = REPLY_ONLY[channel];
-  const sayToPerson = `${notOpen ? `${what} isn't open yet. ` : ""}Open this on your phone and send the message ${CHANNEL_NAME[channel]} fills in: ${url}${replyOnly ? ` ${replyOnly}` : ""}`;
+  const sayToPerson = `${notOpen ? `${what} isn't open yet. ` : ""}Your ${CHANNEL_NAME[channel]} link: ${first.link} ${OPEN_HINT[channel]} `
+    + `On a computer without ${CHANNEL_NAME[channel]}, open ${first.page} instead.${replyOnly ? ` ${replyOnly}` : ""}`;
   if (json) {
     out({
-      url, channel, join_code: joinCode, reply_only: Boolean(replyOnly), say_to_person: sayToPerson,
-      ...(notOpen ? { not_open: options.channel, message: notOpen, links: Object.fromEntries(links) } : {}),
+      url: first.link, page: first.page, join_message: first.message, channel, join_code: joinCode, reply_only: Boolean(replyOnly), say_to_person: sayToPerson,
+      ...(notOpen ? { not_open: options.channel, message: notOpen, links: Object.fromEntries(links.map(([c, d]) => [c, d.link])) } : {}),
       model_key: model.report, ...(model.next ? { next: model.next } : {}),
     });
   }
   if (notOpen) {
     say(notOpen);
-    for (const [c, u] of links) say(`On ${CHANNEL_NAME[c]}: ${u}`);
-  } else say(url);
+    for (const [c, d] of links) say(`On ${CHANNEL_NAME[c]}: ${d.link} (on a computer: ${d.page})`);
+  } else {
+    say(first.link);
+    say(`On a computer without ${CHANNEL_NAME[channel]}: ${first.page}`);
+  }
   if (model.report.set) say(model.line);
-  say(`Open ${notOpen && links.length > 1 ? "one" : "it"} on a phone and send the message it fills in, with your join code. From then on`);
+  const one = notOpen && links.length > 1 ? "one" : "it";
+  say(`${channel === "telegram" ? `Open ${one} on a phone and press Start` : `Open ${one} on a phone and send the message it fills in, "${first.message}"`}. From then on`);
   // No model key: the agent cannot answer yet, so the phone does not chat with it until there is one.
   say(model.report.set ? "that phone chats with this agent while it runs (npm start), with no public URL or tunnel." : "that phone reaches this agent while it runs (npm start), but it answers only once .env has a model key:");
   if (model.next) say(`${model.line}\nNext: ${model.next}.`);
@@ -773,10 +809,11 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
 }
 
 /**
- * Asks flow.engineer for the try page as JSON: a channel it cannot open yet (or a join code it does
- * not know) answers {"error", "error_description", "next"}, which stops here with that next step.
+ * Asks flow.engineer's /try page for its direct link as JSON ({"channel", "message", "link", "page"}):
+ * a channel it cannot open yet (or a join code it does not know) answers {"error",
+ * "error_description", "next"}, which stops here with that next step.
  */
-async function checkTryPage(url: string): Promise<void> {
+async function directLink(url: string): Promise<DirectLink> {
   let response: Response;
   try {
     response = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
@@ -784,12 +821,16 @@ async function checkTryPage(url: string): Promise<void> {
     if ((error as Error).name === "TimeoutError") throw new TimedOut(url, REQUEST_TIMEOUT_MS);
     throw error;
   }
-  if (response.ok) return void (await response.body?.cancel());
   const text = await response.text();
   let body: Record<string, unknown> = {};
   try {
     body = JSON.parse(text) as Record<string, unknown>;
   } catch {}
+  if (response.ok) {
+    const { link, message, page } = body;
+    if (typeof link === "string" && link && typeof message === "string" && message) return { link, message, page: typeof page === "string" && page ? page : url };
+    throw new Stop("bad_answer", `${url} answered without a link.`, undefined, EXIT.refused);
+  }
   const code = typeof body.error === "string" ? body.error : `http_${response.status}`;
   const detail = typeof body.error_description === "string" ? body.error_description : `${url} answered ${response.status}.`;
   throw new Stop(code, detail, typeof body.next === "string" && body.next ? body.next : undefined, EXIT.refused);
