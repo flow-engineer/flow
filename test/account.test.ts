@@ -103,7 +103,7 @@ function fakeOpener() {
 }
 
 const temp = () => mkdtempSync(join(tmpdir(), "flow-account-"));
-const NO_KEY = "This agent has no model key: npx @flow-engineer/flow setup writes FLOW_MODEL_KEY, Flow's free trial key, into .env in the agent's folder, or put your own on one of the lines OPENROUTER_API_KEY=, OPENAI_API_KEY=, ANTHROPIC_API_KEY= or GEMINI_API_KEY= (an OpenRouter key is made at https://openrouter.ai/keys).";
+const NO_KEY = "This agent has no model key: npx @flow-engineer/flow setup writes FLOW_KEY, the agent's Flow key (with the account's free trial model credit), into .env in the agent's folder, or put your own on one of the lines OPENROUTER_API_KEY=, OPENAI_API_KEY=, ANTHROPIC_API_KEY= or GEMINI_API_KEY= (an OpenRouter key is made at https://openrouter.ai/keys).";
 /** A folder that is an agent's: it has a package.json. */
 const agentDir = (name = "cafe") => {
   const dir = temp();
@@ -617,43 +617,54 @@ test("setup prints each of the server's warnings on stderr (at most 20, strings 
   assert.deepEqual(plain.lines[0]!.warnings, []);
 });
 
-const TRIAL = "fmk_flowtrialsecretQ7w3";
-const MINTED = { env: "FLOW_MODEL_KEY", value: TRIAL, limit_usd: 2, left_usd: 1.87, minted: true, base_url: "https://flow.engineer/llm/framework/v1" };
+/** A fake key in FLOW_KEY's format (flow_test_<kid>_<secret>), obviously not real. */
+const TRIAL = "flow_test_FAKEkid000_0000000000FAKE0000000000FAKE000000Q7w3";
+const SCOPES = ["messaging", "traces", "cloud", "model", "deploy"];
+const MINTED = { env: "FLOW_KEY", value: TRIAL, kid: "FAKEkid000", mode: "test", scopes: SCOPES, agent_id: "agt_1", minted: true, previous_expires_at: null };
+const CREDIT = { limit_usd: 2, left_usd: 1.87, base_url: "https://flow.engineer/llm/framework/v1", default_model: "anthropic/claude-haiku-5.5" };
 
-test("setup writes Flow's trial model key as FLOW_MODEL_KEY at 0600 and prints only the credit left; a provider key of the owner's is named as had, so none is made", async (t) => {
-  const flow = await flowServer([], 200, { setup: { model_key: MINTED, minted: ["model_key"] } });
+test("setup writes the agent's FLOW_KEY at 0600 and prints only its prefix and last 4 and the credit left; FLOW_KEY there is named as had, and a provider key of the owner's wins for the model", async (t) => {
+  const flow = await flowServer([], 200, { setup: { flow_key: MINTED, model_credit: CREDIT, minted: ["flow_key"] } });
   t.after(flow.close);
   const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
   const cwd = agentDir();
-  writeFileSync(join(cwd, ".env"), "OPENROUTER_API_KEY=\nFLOW_MODEL_KEY=\n", { mode: 0o644 });
+  writeFileSync(join(cwd, ".env"), "OPENROUTER_API_KEY=\nFLOW_KEY=\n", { mode: 0o644 });
   chmodSync(join(cwd, ".env"), 0o644);
   const result = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd, env });
   assert.equal(result.code, 0, result.err);
-  assert.ok(!(flow.seen.at(-1)!.body.have as string[]).some((n) => n.endsWith("_API_KEY") || n === "FLOW_MODEL_KEY"), "no model key here, so Flow's is asked for");
-  assert.deepEqual(readFileSync(join(cwd, ".env"), "utf8").split("\n").slice(0, 2), ["OPENROUTER_API_KEY=", `FLOW_MODEL_KEY=${TRIAL}`], "it takes its own empty line");
+  assert.ok(!(flow.seen.at(-1)!.body.have as string[]).some((n) => n.endsWith("_API_KEY") || n === "FLOW_KEY"), "no key here, so FLOW_KEY is made and the credit asked for");
+  assert.deepEqual(readFileSync(join(cwd, ".env"), "utf8").split("\n").slice(0, 2), ["OPENROUTER_API_KEY=", `FLOW_KEY=${TRIAL}`], "it takes its own empty line");
   assert.equal(statSync(join(cwd, ".env")).mode & 0o777, 0o600);
-  assert.deepEqual(result.lines[0]!.model_key, { set: true, env: "FLOW_MODEL_KEY", flow_credit: { limit_usd: 2, left_usd: 1.87, minted: true } });
+  assert.deepEqual(result.lines[0]!.model_key, { set: true, env: "FLOW_KEY", flow_credit: { limit_usd: 2, left_usd: 1.87 } });
+  assert.deepEqual(result.lines[0]!.flow_key, { set: true, minted: true, kid: "FAKEkid000", mode: "test", scopes: SCOPES, previous_expires_at: null });
   assert.equal(result.lines[0]!.next[0], "npm start");
   assert.match(result.err, /^Model: Flow trial credit \(\$1\.87 left\)$/m);
-  assert.match(result.err, /^ {2}FLOW_MODEL_KEY=fmk_…Q7w3 {2}added$/m, "only its prefix and last 4");
-  assert.ok(!result.out.includes(TRIAL) && !result.err.includes(TRIAL), "the model key is never printed");
+  assert.match(result.err, /^ {2}FLOW_KEY=flow_test_…Q7w3 {2}added$/m, "only its prefix and last 4");
+  assert.ok(!result.out.includes(TRIAL) && !result.err.includes(TRIAL), "FLOW_KEY is never printed");
+  assert.ok(!result.out.includes("0000FAKE") && !result.err.includes("0000FAKE"), "nor any part of its secret");
 
   // Set up again: the key there is named as had.
   assert.equal((await run(["setup", "--json"], { url: flow.url, config: temp(), cwd, env })).code, 0);
-  assert.ok((flow.seen.at(-1)!.body.have as string[]).includes("FLOW_MODEL_KEY"));
+  assert.ok((flow.seen.at(-1)!.body.have as string[]).includes("FLOW_KEY"));
+  assert.ok(!("rotate" in flow.seen.at(-1)!.body));
 
-  // The owner's own OpenAI key: only the names actually set are said as had.
+  // The owner's own OpenAI key: only the names actually set are said as had; FLOW_KEY is still
+  // written (the agent's Flow key), and the provider key is the model's.
   const own = agentDir();
   writeFileSync(join(own, ".env"), "OPENAI_API_KEY=sk-mine-openai\n");
-  const kept = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd: own, env });
+  const withOwn = await flowServer([], 200, { setup: { flow_key: MINTED, minted: ["flow_key"] } });
+  t.after(withOwn.close);
+  const kept = await run(["setup", "--json"], { url: withOwn.url, config: temp(), cwd: own, env });
   assert.equal(kept.code, 0, kept.err);
-  assert.deepEqual(flow.seen.at(-1)!.body.have, ["OPENAI_API_KEY"]);
+  assert.deepEqual(withOwn.seen.at(-1)!.body.have, ["OPENAI_API_KEY"]);
+  assert.match(readFileSync(join(own, ".env"), "utf8"), new RegExp(`^FLOW_KEY=${TRIAL}$`, "m"));
+  assert.deepEqual(kept.lines[0]!.model_key, { set: true, env: "OPENAI_API_KEY", flow_credit: null });
   assert.match(kept.err, /^Model: OPENAI_API_KEY is set$/m);
 });
 
 test("with no model key after setup, it says why in one sentence and puts the way to get one first in its one next list", async (t) => {
   const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
-  // Refused (or an older server): no model_key, and a warning.
+  // An older server: no FLOW_KEY and no credit, and a warning.
   const older = await flowServer([], 200, { setup: { warnings: ["Flow's trial credit is not available for this account."] } });
   t.after(older.close);
   const plain = await run(["setup"], { url: older.url, config: temp(), cwd: agentDir(), env });
@@ -661,47 +672,71 @@ test("with no model key after setup, it says why in one sentence and puts the wa
   assert.ok(plain.out.split("\n").includes(NO_KEY));
   assert.deepEqual(plain.out.split("\n").filter((l) => l.startsWith("Next:")), ["Next: add your own model key to .env (flow.engineer gave no trial credit), then npm start, then npx @flow-engineer/flow link --channel telegram"]);
 
-  // The account's credit is used up: no key made.
-  const spent = await flowServer([], 200, { setup: { model_key: { env: "FLOW_MODEL_KEY", limit_usd: 2, left_usd: 0, minted: false } } });
+  // The account's credit is used up: FLOW_KEY is made, but cannot pay for the model.
+  const spent = await flowServer([], 200, { setup: { flow_key: MINTED, model_credit: { ...CREDIT, left_usd: 0 } } });
   t.after(spent.close);
   const out = await run(["setup", "--json"], { url: spent.url, config: temp(), cwd: agentDir(), env });
-  assert.equal(out.lines[0]!.model_key.set, false);
+  assert.equal(out.lines[0]!.model_key.set, true);
   assert.equal(out.lines[0]!.model_key.message, "This account's Flow trial credit is used up.");
   assert.equal(out.lines[0]!.next[0], "add your own model key to .env");
+
+  // No credit for this account (refused): FLOW_KEY is made, no model_credit, the reason in warnings.
+  const refused = await flowServer([], 200, { setup: { flow_key: MINTED, warnings: ["No trial model credit for this account: its email was used before."] } });
+  t.after(refused.close);
+  const none = await run(["setup", "--json"], { url: refused.url, config: temp(), cwd: agentDir(), env });
+  assert.equal(none.code, 0, none.err);
+  assert.deepEqual(none.lines[0]!.model_key, { set: true, env: "FLOW_KEY", flow_credit: null, message: "Flow has no trial model credit for this account, so FLOW_KEY cannot pay for the model." });
+  assert.equal(none.lines[0]!.next[0], "add your own model key to .env");
+  assert.match(none.err, /^No trial model credit for this account/m);
 });
 
-test("a trial model key made in a call that then fails is written to .env before the error, as the other keys are", async (t) => {
-  const flow = await flowServer([], 200, { setupError: { status: 502, body: { error: "messaging_failed", error_description: "Messaging is down.", next: "npx @flow-engineer/flow setup", model_key: MINTED, minted: ["model_key"] } } });
+test("a FLOW_KEY made in a call that then fails is written to .env before the error, as the other keys are", async (t) => {
+  const flow = await flowServer([], 200, { setupError: { status: 502, body: { error: "messaging_failed", error_description: "Messaging is down.", next: "npx @flow-engineer/flow setup", flow_key: MINTED, minted: ["flow_key"] } } });
   t.after(flow.close);
   const cwd = agentDir();
   const result = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
   assert.equal(result.code, 3);
-  assert.equal(readFileSync(join(cwd, ".env"), "utf8"), `FLOW_MODEL_KEY=${TRIAL}\n`);
+  assert.equal(readFileSync(join(cwd, ".env"), "utf8"), `FLOW_KEY=${TRIAL}\n`);
   assert.ok(!result.out.includes(TRIAL) && !result.err.includes(TRIAL));
 });
 
-test("setup --rotate makes the named keys again: model sends rotate [\"model_key\"] and replaces only FLOW_MODEL_KEY, the others leave rotate out, all sends true", async (t) => {
-  const flow = await flowServer([], 200, { setup: { model_key: MINTED } });
+const OLD = "flow_test_FAKEkid999_0000000000FAKE0000000000FAKE000000oldk";
+
+test("setup --rotate makes the named keys again: key sends rotate [\"flow_key\"] and replaces only FLOW_KEY (--now ends the old one at once), cloud sends [\"cloud_key\"], all sends true", async (t) => {
+  const flow = await flowServer([], 200, { setup: { flow_key: { ...MINTED, previous_expires_at: "2026-10-20T12:00:00Z" } } });
   t.after(flow.close);
   const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
   const cwd = agentDir();
-  writeFileSync(join(cwd, ".env"), "OPENROUTER_API_KEY=sk-or-mine\nFLOW_MODEL_KEY=fmk_old\nFLOW_FRAMEWORK_CLOUD_KEY=oci_old\n");
-  const model = await run(["setup", "--rotate", "model"], { url: flow.url, config: temp(), cwd, env });
+  writeFileSync(join(cwd, ".env"), `OPENROUTER_API_KEY=sk-or-mine\nFLOW_KEY=${OLD}\nFLOW_FRAMEWORK_CLOUD_KEY=oci_old\n`);
+  const model = await run(["setup", "--rotate", "key"], { url: flow.url, config: temp(), cwd, env });
   assert.equal(model.code, 0, model.err);
-  assert.deepEqual(flow.seen.at(-1)!.body.rotate, ["model_key"]);
-  assert.ok(!(flow.seen.at(-1)!.body.have as string[]).includes("FLOW_MODEL_KEY"));
-  assert.match(readFileSync(join(cwd, ".env"), "utf8"), new RegExp(`^FLOW_MODEL_KEY=${TRIAL}$`, "m"));
+  assert.deepEqual(flow.seen.at(-1)!.body.rotate, ["flow_key"]);
+  assert.ok(!("rotate_now" in flow.seen.at(-1)!.body));
+  assert.ok(!(flow.seen.at(-1)!.body.have as string[]).includes("FLOW_KEY"));
+  assert.match(readFileSync(join(cwd, ".env"), "utf8"), new RegExp(`^FLOW_KEY=${TRIAL}$`, "m"));
+  assert.match(model.out, /^ {2}FLOW_KEY=flow_test_…Q7w3 {2}replaced$/m);
+  assert.match(model.out, /^The old FLOW_KEY works until 2026-10-20T12:00:00Z\.$/m);
+  assert.ok(!model.out.includes(OLD) && !model.out.includes(TRIAL));
   assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^OPENROUTER_API_KEY=sk-or-mine$/m, "the owner's key is never written over");
   assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_FRAMEWORK_CLOUD_KEY=oci_old$/m, "only what was named");
 
   const cloud = await run(["setup", "--rotate", "cloud"], { url: flow.url, config: temp(), cwd, env });
   assert.equal(cloud.code, 0, cloud.err);
-  assert.ok(!("rotate" in flow.seen.at(-1)!.body), "an older server takes this one: the name is left out of have");
+  assert.deepEqual(flow.seen.at(-1)!.body.rotate, ["cloud_key"], "the name is left out of have and named in rotate");
   assert.ok(!(flow.seen.at(-1)!.body.have as string[]).includes("FLOW_FRAMEWORK_CLOUD_KEY"));
   assert.match(readFileSync(join(cwd, ".env"), "utf8"), new RegExp(`^FLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}$`, "m"));
 
   assert.equal((await run(["setup", "--rotate", "all"], { url: flow.url, config: temp(), cwd, env })).code, 0);
   assert.equal(flow.seen.at(-1)!.body.rotate, true);
+
+  const ended = await flowServer([], 200, { setup: { flow_key: MINTED } });
+  t.after(ended.close);
+  const now = await run(["setup", "--rotate", "key", "--now"], { url: ended.url, config: temp(), cwd, env });
+  assert.equal(now.code, 0, now.err);
+  assert.equal(ended.seen.at(-1)!.body.rotate_now, true);
+  assert.match(now.out, /^The old FLOW_KEY stopped working now\.$/m);
+  assert.equal((await run(["setup", "--now"], { url: ended.url, config: temp(), cwd, env })).code, 1, "--now goes with --rotate key");
+  assert.equal((await run(["setup", "--rotate", "model"], { url: ended.url, config: temp(), cwd, env })).code, 1, "model is gone: the Flow key is key");
   assert.equal((await run(["setup", "--rotate", "everything"], { url: flow.url, config: temp(), cwd, env })).code, 1, "an unknown name is a usage error");
 });
 
@@ -736,6 +771,7 @@ test("status says what the folder has and lacks, never a key's value; signed in,
   assert.equal(flow.seen.length, 0, "not signed in: nothing is asked of flow.engineer");
   assert.equal(out.lines[0]!.signed_in, false);
   assert.deepEqual(out.lines[0]!.model_key, { set: true, env: "OPENROUTER_API_KEY", flow_credit: null });
+  assert.deepEqual(out.lines[0]!.flow_key, { set: false });
   assert.deepEqual(out.lines[0]!.channels.whatsapp, { sender: false, open: null, trial: null });
 
   const signed = await run(["status", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
@@ -745,7 +781,7 @@ test("status says what the folder has and lacks, never a key's value; signed in,
   assert.equal(signed.lines[0]!.channels.imessage.open, false);
   assert.deepEqual(signed.lines[0]!.next, ["npm start", "npx @flow-engineer/flow link --channel whatsapp"]);
   const asked = flow.seen.find((r) => r.path === "/cli/setup")!;
-  for (const name of ["FLOW_FRAMEWORK_CLOUD_KEY", "FLOW_FRAMEWORK_TRACES_KEY", "FLOW_MESSAGING_KEY", "OPENROUTER_API_KEY"]) assert.ok((asked.body.have as string[]).includes(name), `${name} named as had, so nothing is made`);
+  for (const name of ["FLOW_FRAMEWORK_CLOUD_KEY", "FLOW_FRAMEWORK_TRACES_KEY", "FLOW_MESSAGING_KEY", "FLOW_KEY", "OPENROUTER_API_KEY"]) assert.ok((asked.body.have as string[]).includes(name), `${name} named as had, so nothing is made`);
   assert.equal(readFileSync(join(cwd, ".env"), "utf8"), before, "status writes nothing");
   for (const secret of [OWN, KEYS.messaging_key]) assert.ok(!signed.out.includes(secret) && !signed.err.includes(secret));
 
@@ -755,24 +791,26 @@ test("status says what the folder has and lacks, never a key's value; signed in,
   assert.match(human.out, /^Next: run npx @flow-engineer\/flow setup to get Flow's free trial credit, or add your own key, then npx @flow-engineer\/flow link$/m);
 });
 
-test("status with FLOW_MODEL_KEY the active key asks Flow's GET /credit for what is left; a key Flow does not know gets --rotate model, and Flow not reachable never fails status", async (t) => {
+test("status with FLOW_KEY the model's key asks Flow's GET /credit for what is left; a key Flow does not know gets --rotate key, and Flow not reachable never fails status", async (t) => {
   const flow = await flowServer([], 200, { credit: { status: 200, body: { limit_usd: 2, spent_usd: 0.13, left_usd: 1.87, default_model: "anthropic/claude-haiku-5.5", models: ["anthropic/claude-haiku-5.5"] } } });
   t.after(flow.close);
   const cwd = agentDir();
-  writeFileSync(join(cwd, ".env"), `FLOW_MODEL_KEY=${TRIAL}\n`);
+  writeFileSync(join(cwd, ".env"), `FLOW_KEY=${TRIAL}\n`);
   const out = await run(["status", "--json"], { url: flow.url, config: temp(), cwd });
   assert.equal(out.code, 0, out.err);
   assert.deepEqual(flow.seen.map((r) => [r.method, r.path, r.auth]), [["GET", "/llm/framework/v1/credit", `Bearer ${TRIAL}`]], "only the model API, with the model key; nothing else is asked signed out");
-  assert.deepEqual(out.lines[0]!.model_key, { set: true, env: "FLOW_MODEL_KEY", flow_credit: { limit_usd: 2, spent_usd: 0.13, left_usd: 1.87 } });
+  assert.deepEqual(out.lines[0]!.model_key, { set: true, env: "FLOW_KEY", flow_credit: { limit_usd: 2, spent_usd: 0.13, left_usd: 1.87 } });
+  assert.deepEqual(out.lines[0]!.flow_key, { set: true });
   assert.match(out.err, /^Model: Flow trial credit \(\$1\.87 left\)$/m);
   assert.ok(!out.out.includes(TRIAL) && !out.err.includes(TRIAL));
 
   // A provider key set too: it is the active one, and Flow is not asked.
-  writeFileSync(join(cwd, ".env"), `OPENAI_API_KEY=${OWN}\nFLOW_MODEL_KEY=${TRIAL}\n`);
+  writeFileSync(join(cwd, ".env"), `OPENAI_API_KEY=${OWN}\nFLOW_KEY=${TRIAL}\n`);
   const own = await run(["status"], { url: flow.url, config: temp(), cwd });
   assert.match(own.out, /^Model: OPENAI_API_KEY is set$/m);
+  assert.match(own.out, /^FLOW_KEY is set\.$/m);
   assert.equal(flow.seen.length, 1);
-  writeFileSync(join(cwd, ".env"), `FLOW_MODEL_KEY=${TRIAL}\n`);
+  writeFileSync(join(cwd, ".env"), `FLOW_KEY=${TRIAL}\n`);
 
   const spent = await flowServer([], 200, { credit: { status: 200, body: { limit_usd: 2, spent_usd: 2, left_usd: 0 } } });
   t.after(spent.close);
@@ -781,12 +819,25 @@ test("status with FLOW_MODEL_KEY the active key asks Flow's GET /credit for what
   assert.equal(used.lines[0]!.next[0], "add your own model key to .env");
   assert.ok(!used.lines[0]!.next.includes("npm start"));
 
-  const revoked = await flowServer([], 200, { credit: { status: 401, body: { error: { message: "This model key is not valid.", type: "invalid_request_error", code: "invalid_api_key", next: "npx @flow-engineer/flow setup --rotate model" } } } });
+  const revoked = await flowServer([], 200, { credit: { status: 401, body: { error: { message: "This model key is not valid.", type: "invalid_request_error", code: "invalid_api_key", next: "npx @flow-engineer/flow setup --rotate key" } } } });
   t.after(revoked.close);
   const bad = await run(["status", "--json"], { url: revoked.url, config: temp(), cwd });
   assert.equal(bad.code, 0, bad.err);
-  assert.equal(bad.lines[0]!.next[0], "npx @flow-engineer/flow setup --rotate model");
-  assert.match(bad.err, /^FLOW_MODEL_KEY is not a key Flow knows/m);
+  assert.equal(bad.lines[0]!.next[0], "npx @flow-engineer/flow setup --rotate key");
+  assert.match(bad.err, /^FLOW_KEY is not a key Flow knows/m);
+
+  const unscoped = await flowServer([], 200, { credit: { status: 403, body: { error: { message: "This key may not call models.", type: "invalid_request_error", code: "insufficient_scope", next: "npx @flow-engineer/flow setup --rotate key" } } } });
+  t.after(unscoped.close);
+  const scope = await run(["status", "--json"], { url: unscoped.url, config: temp(), cwd });
+  assert.equal(scope.code, 0, scope.err);
+  assert.equal(scope.lines[0]!.next[0], "npx @flow-engineer/flow setup --rotate key");
+
+  const unavailable = await flowServer([], 200, { credit: { status: 402, body: { error: { message: "No trial credit for this account.", type: "insufficient_quota", code: "trial_credit_unavailable", next: "add your own model key to .env" } } } });
+  t.after(unavailable.close);
+  const nocredit = await run(["status", "--json"], { url: unavailable.url, config: temp(), cwd });
+  assert.equal(nocredit.code, 0, nocredit.err);
+  assert.equal(nocredit.lines[0]!.model_key.message, "Flow has no trial model credit for this account, so FLOW_KEY cannot pay for the model.");
+  assert.equal(nocredit.lines[0]!.next[0], "add your own model key to .env");
 
   revoked.close();
   const offline = await run(["status"], { url: revoked.url, config: temp(), cwd });

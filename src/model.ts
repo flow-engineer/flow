@@ -1,6 +1,6 @@
 // Models over the OpenAI-compatible chat API: OpenRouter by default; OpenAI, Gemini, Anthropic or a
-// local server by changing the base URL; or Flow, with the FLOW_MODEL_KEY `flow setup` writes, which
-// needs no provider key and spends the account's Flow trial credit.
+// local server by changing the base URL; or Flow, with the agent's FLOW_KEY that `flow setup` writes,
+// which needs no provider key and spends the account's Flow trial credit.
 
 import OpenAI from "openai";
 import { setting } from "./names.ts";
@@ -20,11 +20,11 @@ export interface OpenAICompatibleOptions {
   contextTokens?: number;
 }
 
-/** Flow's OpenAI-compatible model API, reached with FLOW_MODEL_KEY. */
+/** Flow's OpenAI-compatible model API, reached with FLOW_KEY. */
 export const FLOW_MODEL_URL = "https://flow.engineer/llm/framework/v1";
 
 /**
- * Where FLOW_MODEL_KEY is sent: FLOW_MODEL_URL when set, else the origin of the Flow server the CLI
+ * Where FLOW_KEY is sent for the model: FLOW_MODEL_URL when set, else the origin of the Flow server the CLI
  * signs in to (FLOW_FRAMEWORK_LOGIN_URL) with /llm/framework/v1, else flow.engineer's.
  */
 export function flowModelURL(env: Record<string, string | undefined> = process.env): string {
@@ -36,14 +36,14 @@ export function flowModelURL(env: Record<string, string | undefined> = process.e
 
 /**
  * The first of these with a value is the agent's model. `MODEL` overrides that provider's default id.
- * Flow's key is last, so a provider key the owner adds wins over the trial key setup wrote.
+ * Flow's key is last, so a provider key the owner adds wins over the FLOW_KEY setup wrote.
  */
 const KEYS = [
   { env: "OPENROUTER_API_KEY", baseURL: "https://openrouter.ai/api/v1", model: "anthropic/claude-haiku-5.5" },
   { env: "OPENAI_API_KEY", baseURL: "https://api.openai.com/v1", model: "gpt-6-luna" },
   { env: "ANTHROPIC_API_KEY", baseURL: "https://api.anthropic.com/v1/", model: "claude-haiku-5-5" },
   { env: "GEMINI_API_KEY", baseURL: "https://generativelanguage.googleapis.com/v1beta/openai/", model: "gemini-3.8-flash" },
-  { env: "FLOW_MODEL_KEY", baseURL: FLOW_MODEL_URL, model: "anthropic/claude-haiku-5.5" },
+  { env: "FLOW_KEY", baseURL: FLOW_MODEL_URL, model: "anthropic/claude-haiku-5.5" },
 ] as const;
 
 /** The .env names a model key may be on, in the order they are read. */
@@ -55,7 +55,7 @@ export const MODEL_KEY_NAMES: readonly string[] = KEYS.map((k) => k.env);
  */
 export const NO_MODEL_KEY = {
   code: "no_model_key",
-  message: `This agent has no model key: npx @flow-engineer/flow setup writes FLOW_MODEL_KEY, Flow's free trial key, into .env in the agent's folder, or put your own on one of the lines ${KEYS.slice(0, -2).map((k) => `${k.env}=`).join(", ")} or ${KEYS.at(-2)!.env}= (an OpenRouter key is made at https://openrouter.ai/keys).`,
+  message: `This agent has no model key: npx @flow-engineer/flow setup writes FLOW_KEY, the agent's Flow key (with the account's free trial model credit), into .env in the agent's folder, or put your own on one of the lines ${KEYS.slice(0, -2).map((k) => `${k.env}=`).join(", ")} or ${KEYS.at(-2)!.env}= (an OpenRouter key is made at https://openrouter.ai/keys).`,
   next: "npx @flow-engineer/flow setup",
   nextLine: "Next: run npx @flow-engineer/flow setup to get Flow's free trial credit, or add your own key.",
 } as const;
@@ -68,7 +68,7 @@ export function modelFromKeys(env: Record<string, string | undefined>): { apiKey
   const named = env.MODEL?.trim();
   for (const provider of KEYS) {
     const apiKey = env[provider.env]?.trim();
-    if (apiKey) return { apiKey, baseURL: provider.env === "FLOW_MODEL_KEY" ? flowModelURL(env) : provider.baseURL, model: named || provider.model };
+    if (apiKey) return { apiKey, baseURL: provider.env === "FLOW_KEY" ? flowModelURL(env) : provider.baseURL, model: named || provider.model };
   }
   return { baseURL: KEYS[0].baseURL, model: named || KEYS[0].model };
 }
@@ -125,14 +125,14 @@ export function openAICompatible(options: OpenAICompatibleOptions = {}): Model {
 }
 
 /**
- * The model through Flow: FLOW_MODEL_KEY (written by `flow setup`) at {@link flowModelURL}, the
+ * The model through Flow: FLOW_KEY (written by `flow setup`) at {@link flowModelURL}, the
  * account's Flow trial credit paying. `model` is one Flow offers (default anthropic/claude-haiku-5.5;
  * GET /models lists them). With no key it fails when made, with a next step.
  */
 export function flowModel(options: Omit<OpenAICompatibleOptions, "baseURL"> = {}): Model {
-  const apiKey = options.apiKey?.trim() || process.env.FLOW_MODEL_KEY?.trim();
+  const apiKey = options.apiKey?.trim() || process.env.FLOW_KEY?.trim();
   if (!apiKey) {
-    throw Object.assign(new Error(`FLOW_MODEL_KEY is not set: npx @flow-engineer/flow setup writes it into .env in the agent's folder.\nNext: run ${NO_MODEL_KEY.next}.`), { code: NO_MODEL_KEY.code, next: NO_MODEL_KEY.next });
+    throw Object.assign(new Error(`FLOW_KEY is not set: npx @flow-engineer/flow setup writes it into .env in the agent's folder.\nNext: run ${NO_MODEL_KEY.next}.`), { code: NO_MODEL_KEY.code, next: NO_MODEL_KEY.next });
   }
   return openAICompatible({ ...options, apiKey, baseURL: flowModelURL(process.env), model: options.model?.trim() || process.env.MODEL?.trim() || KEYS.at(-1)!.model });
 }

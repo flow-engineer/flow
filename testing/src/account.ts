@@ -35,15 +35,18 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
                             waiting for the same code, --no-wait returns at once
   flow logout [--json]      End this machine's sign-in and delete its token
   flow whoami [--json]      Show the account you are signed in as
-  flow setup [--replace] [--rotate <keys>] [--ci] [--json]
-                            Write this agent's keys (test cloud, traces, Flow Messaging, and Flow's
-                            trial model key when there is no model key) and each open channel's
-                            sender into ./.env (in an agent's folder: package.json); --rotate
-                            cloud,traces,messaging,model or all makes those keys again
+  flow setup [--replace] [--rotate <keys> [--now]] [--ci] [--json]
+                            Write this agent's keys (its Flow key FLOW_KEY, which also pays for the
+                            model on the account's trial credit when there is no provider key, test
+                            cloud, traces, Flow Messaging) and each open channel's sender into
+                            ./.env (in an agent's folder: package.json); --rotate key,cloud,traces,
+                            messaging or all makes those keys again (the old FLOW_KEY works 24 h
+                            more; --now ends it at once)
   flow link [--channel telegram|whatsapp|imessage] [--timeout <s>] [--no-browser] [--json]
                             Print the link that opens a chat with this agent from a phone; signs in
                             and runs setup first when this folder is not set up yet
-  flow status [--json]      What this folder has and lacks: the model key (never its value), the
+  flow status [--json]      What this folder has and lacks: FLOW_KEY and the model key (never their
+                            values) with the trial credit left, the
                             sign-in, each channel's sender in .env, and, signed in, which channels
                             are open now and their free-trial counts`;
 
@@ -103,7 +106,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
               force: { type: "boolean", default: false },
             }
           : {}),
-        ...(command === "setup" ? { replace: { type: "boolean", default: false }, rotate: { type: "string" }, ci: { type: "boolean", default: false } } : {}),
+        ...(command === "setup" ? { replace: { type: "boolean", default: false }, rotate: { type: "string" }, now: { type: "boolean", default: false }, ci: { type: "boolean", default: false } } : {}),
         ...(command === "link" ? { channel: { type: "string", default: "telegram" } } : {}),
       },
     }));
@@ -130,6 +133,10 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     console.error(`flow setup: --rotate takes ${Object.keys(ROTATE).filter((k) => k !== "all").join(", ")} (comma-separated), or all.\n\n${USAGE}`);
     return EXIT.usage;
   }
+  if (values.now === true && !rotate.includes("key") && !rotate.includes("all")) {
+    console.error(`flow setup: --now goes with --rotate key (or all): it ends the old FLOW_KEY at once.\n\n${USAGE}`);
+    return EXIT.usage;
+  }
   const json = values.json === true;
   // Straight to the file descriptors, never buffered: a coding agent's cut-off command keeps every line.
   const out = (report: unknown) => writeAll(1, `${JSON.stringify(report)}\n`);
@@ -141,7 +148,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     else if (command === "logout") await logout(json, out, say);
     else if (command === "whoami") await showAccount(json, out, say);
     else if (command === "status") await status(json, out, say);
-    else if (command === "setup") await setupEnv({ replace: values.replace === true, rotate, ci: values.ci === true }, json, out, say);
+    else if (command === "setup") await setupEnv({ replace: values.replace === true, rotate, now: values.now === true, ci: values.ci === true }, json, out, say);
     else await link({ channel, noBrowser: values["no-browser"] === true, timeoutSeconds }, json, out, say);
     return EXIT.ok;
   } catch (error) {
@@ -380,7 +387,7 @@ const masked = (name: string, value: string) => (SECRET.has(name) ? `${/^[a-z]+_
 const ENV_LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/;
 
 /** `--rotate`'s names and the answer field each makes again; `all` is every key. */
-const ROTATE: Record<string, string> = { cloud: "cloud_key", traces: "traces_key", messaging: "messaging_key", model: "model_key", all: "" };
+const ROTATE: Record<string, string> = { key: "flow_key", cloud: "cloud_key", traces: "traces_key", messaging: "messaging_key", all: "" };
 
 /** The names set in a .env's lines, with their values unquoted. */
 function envValues(lines: string[]): Map<string, string> {
@@ -408,16 +415,14 @@ function agentFolder(dir: string): void {
     `cd into your agent's folder, or make an agent here first: ${RUN} init`, EXIT.usage);
 }
 
-/** Flow's model key: last in the model keys' order, so a provider key the owner sets wins. */
-const FLOW_MODEL_KEY = MODEL_KEY_NAMES.at(-1)!;
+/** The agent's one Flow key; for the model it is last in the model keys' order, so a provider key the owner sets wins. */
+const FLOW_KEY = MODEL_KEY_NAMES.at(-1)!;
 
 /** The account's Flow trial credit as setup's answer or GET /credit gave it; a field it left out is absent. */
 interface FlowCredit {
   limit_usd?: number;
   left_usd?: number;
   spent_usd?: number;
-  /** From setup: the key was made in this call. */
-  minted?: boolean;
 }
 
 /** Where the agent's model key stands, the same in setup, link and status (never its value). */
@@ -432,17 +437,17 @@ interface ModelKeyReport {
 }
 
 const USED_UP = "This account's Flow trial credit is used up.";
+const NO_CREDIT = `Flow has no trial model credit for this account, so ${FLOW_KEY} cannot pay for the model.`;
 const OWN_KEY = "add your own model key to .env";
 
-/** setup's model_key or GET /credit's answer as FlowCredit: its numbers and minted only. */
-function creditOf(from: SetupAnswer["model_key"] | ModelCredit | undefined): FlowCredit | null {
+/** setup's model_credit or GET /credit's answer as FlowCredit: its numbers only. */
+function creditOf(from: SetupAnswer["model_credit"] | ModelCredit | undefined): FlowCredit | null {
   if (!from) return null;
   const credit: FlowCredit = {};
   for (const field of ["limit_usd", "left_usd", "spent_usd"] as const) {
     const n = (from as Record<string, unknown>)[field];
     if (typeof n === "number" && Number.isFinite(n)) credit[field] = n;
   }
-  if ("minted" in from) credit.minted = from.minted === true;
   return credit;
 }
 
@@ -453,20 +458,22 @@ const dollars = (n: number) => `$${n.toFixed(2)}`;
  * in the run's one `next`. `credit`: Flow's credit from setup's answer or GET /credit. `afterSetup`:
  * setup ran just now, so its answer says why there is none.
  */
-function modelKeyReport(value: (name: string) => string | undefined, credit: SetupAnswer["model_key"] | ModelCredit | undefined, afterSetup: boolean): { report: ModelKeyReport; line: string; next?: string } {
+function modelKeyReport(value: (name: string) => string | undefined, credit: SetupAnswer["model_credit"] | ModelCredit | undefined, afterSetup: boolean): { report: ModelKeyReport; line: string; next?: string } {
   const env = MODEL_KEY_NAMES.find((name) => value(name)) ?? null;
   const flowCredit = creditOf(credit);
   const usedUp = flowCredit?.left_usd !== undefined && flowCredit.left_usd <= 0;
-  if (env && env !== FLOW_MODEL_KEY) return { report: { set: true, env, flow_credit: null }, line: `Model: ${env} is set` };
+  if (env && env !== FLOW_KEY) return { report: { set: true, env, flow_credit: null }, line: `Model: ${env} is set` };
   if (env) {
     if (usedUp) return { report: { set: true, env, flow_credit: flowCredit, message: USED_UP }, line: USED_UP, next: OWN_KEY };
+    // Setup just ran and gave no credit (warnings say why): FLOW_KEY is there, but cannot pay for the model.
+    if (afterSetup && !flowCredit) return { report: { set: true, env, flow_credit: null, message: NO_CREDIT }, line: NO_CREDIT, next: OWN_KEY };
     const left = flowCredit?.left_usd !== undefined ? ` (${dollars(flowCredit.left_usd)} left)` : "";
     return { report: { set: true, env, flow_credit: flowCredit }, line: `Model: Flow trial credit${left}` };
   }
   // No key, and the account's credit is used up: setup made none.
   if (usedUp) return { report: { set: false, env: null, flow_credit: flowCredit, message: USED_UP }, line: USED_UP, next: OWN_KEY };
   const report = { set: false, env: null, flow_credit: null, message: NO_MODEL_KEY.message };
-  // Setup ran and flow.engineer gave no trial key (an older server, or no credit for this account now).
+  // Setup ran and flow.engineer gave no FLOW_KEY (an older server, or none for this account now).
   if (afterSetup) return { report, line: NO_MODEL_KEY.message, next: `${OWN_KEY} (flow.engineer gave no trial credit)` };
   return { report, line: NO_MODEL_KEY.message, next: NO_MODEL_KEY.nextLine.replace(/^Next: /, "").replace(/\.$/, "") };
 }
@@ -482,8 +489,10 @@ function tryUrlFor(channel: string, url: string): string {
 
 interface SetupOptions {
   replace: boolean;
-  /** --rotate's names (cloud, traces, messaging, model, or all). */
+  /** --rotate's names (key, cloud, traces, messaging, or all). */
   rotate: string[];
+  /** --now: the old FLOW_KEY stops working at once instead of 24 h later. */
+  now?: boolean;
   ci: boolean;
 }
 
@@ -512,22 +521,22 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const name = named.replace(/^@[^/]*\//, "").replace(/[^A-Za-z0-9 ._-]/g, "-").slice(0, 64) || "my-agent";
   const all = options.rotate.includes("all");
   const rotated = new Set(all ? Object.values(ROTATE).filter(Boolean) : options.rotate.map((k) => ROTATE[k]!));
-  const rotatedEnv = new Set([...rotated].map((field) => (field === "model_key" ? FLOW_MODEL_KEY : SETUP_ENV[field as keyof typeof SETUP_ENV])));
+  const rotatedEnv = new Set([...rotated].map((field) => (field === "flow_key" ? FLOW_KEY : SETUP_ENV[field as keyof typeof SETUP_ENV])));
   // An empty value (`cp .env.example .env`) is missing: the server mints it. A model key counts in
-  // the shell too (npm start reads both), so Flow's trial key is asked for only when no model key is
-  // named as had: the owner's own provider key, or a FLOW_MODEL_KEY already here.
+  // the shell too (npm start reads both): FLOW_KEY is made only when it is not named as had, and
+  // the trial model credit is given only when no provider key is.
   const have = [
     ...Object.values(SETUP_ENV).filter((n) => n !== SETUP_ENV.try_url && before.get(n)),
     ...MODEL_KEY_NAMES.filter((n) => before.get(n) || process.env[n]?.trim()),
   ].filter((n) => !rotatedEnv.has(n));
-  // Dropping a key's name from `have` makes it again; Flow's trial key also needs `rotate`, since a
-  // provider key still named as had stops one being made (an older server takes only true, so a list
-  // is sent only for the model key).
-  const rotate = all ? true : rotated.has("model_key") ? [...rotated] : undefined;
+  // Dropping a key's name from `have` makes it again; `rotate` names them too, so the server replaces
+  // (and, for FLOW_KEY, ends) the old one rather than adding a second.
+  const rotate = all ? true : rotated.size ? [...rotated] : undefined;
+  const rotateNow = options.now === true && rotated.has("flow_key");
   let answer: SetupAnswer;
   try {
     // Every channel: each comes back with its shared sender only while it is open.
-    answer = await setup(url, token, { name, hostname: hostname(), channels: [...CHANNELS], have, ...(rotate ? { rotate } : {}) });
+    answer = await setup(url, token, { name, hostname: hostname(), channels: [...CHANNELS], have, ...(rotate ? { rotate } : {}), ...(rotateNow ? { rotate_now: true as const } : {}) });
   } catch (error) {
     // The keys minted anyway are not shown again, so whatever the error carries goes into .env first.
     if (error instanceof LoginRefused) {
@@ -539,7 +548,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const fields = answer as unknown as Record<string, unknown>;
   const warnings = warningsOf(fields);
   const had = new Map(before);
-  // --replace takes every new value but a model key: only --rotate model replaces FLOW_MODEL_KEY.
+  // --replace takes every new value but a model key: only --rotate key replaces FLOW_KEY.
   const written = writeEnv(file, lines, before, envEntries(fields), (n) => rotatedEnv.has(n) || (options.replace && !MODEL_KEY_NAMES.includes(n)));
   if (typeof answer.join_code !== "string" || !answer.join_code) {
     const kept = written.filter((w) => w.action === "added" || w.action === "replaced").map((w) => w.name);
@@ -554,7 +563,12 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const links = Object.fromEntries(open.map((c) => [c, tryUrlFor(c, answer.try_urls?.[c] ?? (c === "telegram" && answer.try_url ? answer.try_url : tryLink(url, answer.join_code!, c)))]));
   // A closed channel's trial counts are not shown: only the open ones'.
   const trial = answer.trial ? Object.fromEntries(Object.entries(answer.trial).filter(([c]) => open.includes(c))) : null;
-  const model = modelKeyReport((n) => before.get(n) || process.env[n]?.trim() || undefined, modelKeyOf(fields), true);
+  const model = modelKeyReport((n) => before.get(n) || process.env[n]?.trim() || undefined, objectField<SetupAnswer["model_credit"]>(fields, "model_credit"), true);
+  const flowKey = objectField<SetupAnswer["flow_key"]>(fields, "flow_key");
+  // A rotated FLOW_KEY: when the one it replaced stops working.
+  const previous = rotated.has("flow_key") && flowKey?.minted
+    ? flowKey.previous_expires_at ? `The old ${FLOW_KEY} works until ${flowKey.previous_expires_at}.` : rotateNow ? `The old ${FLOW_KEY} stopped working now.` : undefined
+    : undefined;
   // A first run's order: a model key if there is none, the playground (npm start), then the phone.
   // chat and test --synthetic are the coding agent's own checks, not the owner's way to test.
   const next = [...(model.next ? [model.next] : []), "npm start", ...(answer.next?.length ? answer.next : [NEXT.link])];
@@ -563,12 +577,16 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
       agent: answer.agent_id, join_code: answer.join_code, env_written: { ".env": written }, minted: answer.minted ?? [],
       dashboard_url: answer.dashboard_url ?? null, try_url: answer.try_url ?? null, telegram_link: answer.telegram_link ?? null,
       whatsapp_link: answer.whatsapp_link ?? null, imessage_link: answer.imessage_link ?? null, try_urls: links, trial, model_key: model.report,
+      // FLOW_KEY's state, never its value: made in this call, with its id, mode and scopes.
+      flow_key: { set: Boolean(before.get(FLOW_KEY) || process.env[FLOW_KEY]?.trim()), minted: flowKey?.minted === true,
+        ...(flowKey?.minted ? { kid: flowKey.kid ?? null, mode: flowKey.mode ?? null, scopes: flowKey.scopes ?? [], previous_expires_at: flowKey.previous_expires_at ?? null } : {}) },
       // link's own line (or its error) has the run's next steps: one list per run.
       ...(forLink ? {} : { next }), warnings,
     });
   }
   say(`Agent ${answer.agent_id}. In .env:`);
-  for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}${w.action === "kept" ? (w.name === FLOW_MODEL_KEY ? " (--rotate model makes a new one)" : " (yours differs; --replace takes the new one)") : ""}`);
+  for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}${w.action === "kept" ? (w.name === FLOW_KEY ? " (--rotate key makes a new one)" : " (yours differs; --replace takes the new one)") : ""}`);
+  if (previous) say(previous);
   if (answer.dashboard_url) say(`Its dashboard: ${answer.dashboard_url}`);
   // Said by link instead, once, with its link.
   if (!forLink) say(model.line);
@@ -585,20 +603,20 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
 
 const trialNote = (t: { limit: number | null; used: number } | undefined) => (t && typeof t.limit === "number" ? ` (free trial: ${t.used} of ${t.limit} messages used)` : "");
 
-/** setup's model_key when it is an object, else undefined (an older server sends none). */
-function modelKeyOf(fields: Record<string, unknown>): SetupAnswer["model_key"] | undefined {
-  const key = fields.model_key;
-  return key && typeof key === "object" && !Array.isArray(key) ? (key as SetupAnswer["model_key"]) : undefined;
+/** An answer's field when it is an object (flow_key, model_credit), else undefined (an older server sends none). */
+function objectField<T>(fields: Record<string, unknown>, name: string): T | undefined {
+  const value = fields[name];
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as T) : undefined;
 }
 
 /**
- * The .env lines an answer gives: SETUP_ENV's fields, then Flow's trial model key as FLOW_MODEL_KEY
- * (no other name: a provider key the owner typed is never written over, and wins when both are set).
+ * The .env lines an answer gives: SETUP_ENV's fields, then the agent's Flow key as FLOW_KEY (no
+ * other name: a provider key the owner typed is never written over, and wins for the model).
  */
 function envEntries(fields: Record<string, unknown>): Array<[string, unknown]> {
   const entries: Array<[string, unknown]> = Object.entries(SETUP_ENV).map(([field, envName]) => [envName, fields[field]]);
-  const trial = modelKeyOf(fields);
-  if (trial?.env === FLOW_MODEL_KEY && typeof trial.value === "string") entries.push([FLOW_MODEL_KEY, trial.value]);
+  const key = objectField<SetupAnswer["flow_key"]>(fields, "flow_key");
+  if ((key?.env ?? FLOW_KEY) === FLOW_KEY && typeof key?.value === "string") entries.push([FLOW_KEY, key.value]);
   return entries;
 }
 
@@ -686,7 +704,8 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     ...(model.report.set && !model.next ? ["npm start"] : []),
     ...(!joinCode || !value(SETUP_ENV.messaging_key) ? [NEXT.link] : CHANNELS.filter((c) => channels[c]!.open && !channels[c]!.sender).map((c) => `${NEXT.link} --channel ${c}`)),
   ];
-  if (json) out({ model_key: model.report, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, next });
+  if (json) out({ model_key: model.report, flow_key: { set: Boolean(value(FLOW_KEY)) }, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, next });
+  if (model.report.env && model.report.env !== FLOW_KEY) say(value(FLOW_KEY) ? `${FLOW_KEY} is set.` : `${FLOW_KEY}: not set yet (${RUN} setup writes it).`);
   say(model.line);
   say(account ? `Signed in as ${account.email}.` : current ? "Not signed in here (or flow.engineer could not be reached)." : "Not signed in.");
   for (const c of CHANNELS) {
@@ -704,14 +723,20 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
  */
 async function flowModelStatus(value: (name: string) => string | undefined): Promise<ReturnType<typeof modelKeyReport>> {
   const local = modelKeyReport(value, undefined, false);
-  if (local.report.env !== FLOW_MODEL_KEY) return local;
-  const key = value(FLOW_MODEL_KEY)!;
+  if (local.report.env !== FLOW_KEY) return local;
+  const key = value(FLOW_KEY)!;
   try {
     return modelKeyReport(value, await modelCredit(flowModelURL({ ...process.env, FLOW_MODEL_URL: value("FLOW_MODEL_URL") }), key), false);
   } catch (error) {
-    if (error instanceof LoginRefused && error.status === 401) {
-      const message = `${FLOW_MODEL_KEY} is not a key Flow knows (revoked, or from another server).`;
-      return { report: { ...local.report, message }, line: message, next: `${RUN} setup --rotate model` };
+    if (error instanceof LoginRefused && (error.status === 401 || error.status === 403)) {
+      const message = error.status === 401
+        ? `${FLOW_KEY} is not a key Flow knows (revoked, or from another server).`
+        : `${FLOW_KEY} may not call Flow's models (its scopes lack model).`;
+      return { report: { ...local.report, message }, line: message, next: `${RUN} setup --rotate key` };
+    }
+    if (error instanceof LoginRefused && error.status === 402) {
+      const message = error.code === "trial_credit_used" ? USED_UP : NO_CREDIT;
+      return { report: { ...local.report, flow_credit: error.code === "trial_credit_used" ? { left_usd: 0 } : null, message }, line: message, next: OWN_KEY };
     }
     return { ...local, line: `${local.line} (credit left unknown: Flow could not be reached)` };
   }
@@ -742,7 +767,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
   const what = CHANNEL_NAME[options.channel]!;
   const needsSender = options.channel !== "telegram";
   let value = dotenvValue();
-  let trialKey: SetupAnswer["model_key"] | undefined;
+  let credit: SetupAnswer["model_credit"] | undefined;
   let had: ((name: string) => string | undefined) | undefined;
   if (!value(SETUP_ENV.join_code) || !value(SETUP_ENV.messaging_key) || (needsSender && !value(SENDER_ENV[options.channel]!))) {
     agentFolder(process.cwd());
@@ -752,7 +777,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
     }
     say("Setting up this agent's keys in .env.");
     had = value;
-    ({ answer: { model_key: trialKey } } = await setupEnv({ replace: false, rotate: [], ci: false }, json, out, say, { channel: options.channel }));
+    ({ answer: { model_credit: credit } } = await setupEnv({ replace: false, rotate: [], ci: false }, json, out, say, { channel: options.channel }));
     value = dotenvValue();
   }
   const joinCode = value(SETUP_ENV.join_code);
@@ -775,7 +800,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
     }
     return url;
   };
-  const model = modelKeyReport(value, trialKey, had !== undefined);
+  const model = modelKeyReport(value, credit, had !== undefined);
   const asked = await open(options.channel);
   let links: Array<[string, string]>;
   let notOpen: string | undefined;

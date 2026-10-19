@@ -6,19 +6,23 @@
 //                                                authorization_pending, slow_down, expired_token, access_denied, invalid_grant
 //   POST /cli/revoke (bearer) {}              ends this token
 //   GET  /cli/whoami (bearer)                 -> {account, email, token}
-//   POST /cli/setup (bearer) {name, hostname, channels, have, rotate?}
-//        -> {agent_id, cloud_key?, traces_key?, messaging_key?, join_code, account, app_id, dashboard_url, try_url,
-//            <channel>_sender?, <channel>_link? (telegram, whatsapp, imessage: each only while that shared sender
-//            is open), try_urls?, trial?, model_key?, minted, next}; a 502 carries every field that worked too;
-//        model_key is Flow's trial model key, {env: "FLOW_MODEL_KEY", value, limit_usd, left_usd, base_url, minted: true}
-//        when made now (in every answer of that call, errors too), {env, minted: false, limit_usd, left_usd: 0} when
-//        the account's credit is used up, absent when the server gives none (have names a model key, refused, or
-//        an older server); every folder's setup makes its own key, the credit is the account's;
-//        rotate is true (every key) or the answer fields to make again, such as ["model_key"];
+//   POST /cli/setup (bearer) {name, hostname, channels, have, rotate?, rotate_now?}
+//        -> {agent_id, cloud_key?, traces_key?, messaging_key?, flow_key?, model_credit?, join_code, account, app_id,
+//            dashboard_url, try_url, <channel>_sender?, <channel>_link? (telegram, whatsapp, imessage: each only while
+//            that shared sender is open), try_urls?, trial?, minted, next}; a 502 carries every field that worked too;
+//        flow_key is the agent's one Flow key, {env: "FLOW_KEY", value: "flow_test_...", kid, mode, scopes, agent_id,
+//        minted: true, previous_expires_at}, only when made in this call (in every answer of that call, errors too;
+//        absent when have names FLOW_KEY and rotate does not); for now only the model uses it;
+//        model_credit is the account's Flow trial model credit, {limit_usd, left_usd, base_url, default_model}, when
+//        have names no provider key and the account has the credit (left_usd 0 when used up), else absent with
+//        the reason in warnings; every folder's setup makes its own key, the credit is the account's;
+//        rotate is true (every key) or the answer fields to make again, such as ["flow_key"]; rotate_now: true
+//        ends the old FLOW_KEY at once instead of 24 h later (previous_expires_at);
 //        429 slow_down with Retry-After; 403 for a trial limit (sandbox_allowance_used, ...), its next prose
 //        Any answer may carry warnings: up to 20 strings to show the owner as they are.
-//   GET  <model URL>/credit (bearer FLOW_MODEL_KEY) -> {limit_usd, spent_usd, left_usd, default_model, models};
-//        the model URL is src/model.ts's flowModelURL (flow.engineer/llm/framework/v1), 401 invalid_api_key
+//   GET  <model URL>/credit (bearer FLOW_KEY) -> {limit_usd, spent_usd, left_usd, default_model, models};
+//        the model URL is src/model.ts's flowModelURL (flow.engineer/llm/framework/v1); 401 invalid_api_key,
+//        403 insufficient_scope (the key lacks model), 402 trial_credit_used or trial_credit_unavailable
 // Every error is flat: {"error": "<code>", "error_description": "<sentence>", "next": "<command, URL or sentence>"}
 // (the model API's are OpenAI's shape, {"error": {message, type, code, next}}).
 // The token is opaque (fcli_...), good only for /cli/*, and sent only to the server that issued it,
@@ -152,6 +156,19 @@ export interface Account {
   account: string;
 }
 
+/** setup's flow_key: the agent's one Flow key, for this mode (test or live). */
+export interface FlowKey {
+  env?: string;
+  value?: string;
+  kid?: string;
+  mode?: string;
+  scopes?: string[];
+  agent_id?: string;
+  minted?: boolean;
+  /** When the key it replaced stops working (null: at once, or there was none). */
+  previous_expires_at?: string | null;
+}
+
 export interface SetupAnswer {
   agent_id: string;
   /** Only the keys minted in this call come back (those the request did not say it has). */
@@ -176,8 +193,10 @@ export interface SetupAnswer {
   try_urls?: Record<string, string>;
   /** The account's free-trial counts per channel; limit null is unlimited. iMessage also counts the people it may reach. */
   trial?: Record<string, { limit: number | null; used: number; contacts?: { limit: number; used: number } }>;
-  /** Flow's trial model key: its value only when made in this call (shown once). Absent: no trial credit here. */
-  model_key?: { env?: string; value?: string; limit_usd?: number; left_usd?: number; base_url?: string; minted?: boolean };
+  /** The agent's one Flow key (FLOW_KEY), only when made in this call: its value is shown once. */
+  flow_key?: FlowKey;
+  /** The account's Flow trial model credit, when the agent has no provider key; absent: none (warnings say why). */
+  model_credit?: { limit_usd?: number; left_usd?: number; base_url?: string; default_model?: string };
   /** The answer fields of the keys made in this call. */
   minted?: string[];
   next?: string[];
@@ -309,7 +328,7 @@ export async function whoami(url: string, token: string): Promise<Account> {
   return answer.body as unknown as Account;
 }
 
-export async function setup(url: string, token: string, request: { name: string; hostname: string; channels: string[]; have: string[]; rotate?: true | string[] }): Promise<SetupAnswer> {
+export async function setup(url: string, token: string, request: { name: string; hostname: string; channels: string[]; have: string[]; rotate?: true | string[]; rotate_now?: true }): Promise<SetupAnswer> {
   const answer = await call(url, "/cli/setup", { token, body: request });
   // A 200 is returned whole even without a join code: the keys it minted are shown only now.
   if (answer.status !== 200) throw refused("/cli/setup", answer, url);
@@ -325,7 +344,7 @@ export interface ModelCredit {
   models?: string[];
 }
 
-/** The credit left on the account of a FLOW_MODEL_KEY; `baseURL` is Flow's model API (flowModelURL). */
+/** The credit left on the account of a FLOW_KEY; `baseURL` is Flow's model API (flowModelURL). */
 export async function modelCredit(baseURL: string, key: string): Promise<ModelCredit> {
   let end = baseURL.length;
   while (end > 0 && baseURL[end - 1] === "/") end--;
