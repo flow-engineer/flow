@@ -213,6 +213,8 @@ interface Direct {
   /** A held nudge released because they just wrote: their window is open. */
   theyWrote?: boolean;
   text?: string;
+  /** A text nudge's call to action. */
+  link?: { label: string; url: string };
   template?: Template;
   run?: string;
   nudge?: string;
@@ -255,6 +257,8 @@ export class Conversation {
   private readonly tasks = new Map<string, Task>();
   private taskCount = 0;
   private idleSince = Date.now();
+  /** The turn running now was not started by the person (a nudge, a scheduled message, a background result). */
+  private businessTurn = false;
   private settled: Array<() => void> = [];
   /** Channels where nothing has reached the person since their latest message there. */
   private readonly unanswered = new Set<string>();
@@ -598,7 +602,7 @@ export class Conversation {
           ? `[Nudge from the business, not from the person, ${held}${p.prompt}] Tell them now in your own words. Others held with it come in this turn too: cover them all in one short message, not a text each, and answer anything they just asked first.`
           : `[Nudge from the business, not from the person: ${p.prompt}] Write it to them now in your own words, or send nothing if it does not fit what they asked not to be messaged about.`;
         this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel, address: p.address } });
-      } else this.direct.push({ inbox: row.id, channel: p.channel, address: p.address, text: p.text, template: p.template, nudge: p.nudge, ...(p.theyWrote ? { theyWrote: true } : {}) });
+      } else this.direct.push({ inbox: row.id, channel: p.channel, address: p.address, text: p.text, ...(p.link ? { link: p.link } : {}), template: p.template, nudge: p.nudge, ...(p.theyWrote ? { theyWrote: true } : {}) });
     }
     if (!this.running && this.hasWork()) this.schedule(0);
   }
@@ -919,6 +923,7 @@ export class Conversation {
     this.absorb();
     // A turn the person started (as against a background result, a scheduled message or a nudge).
     const theirs = this.unanswered.size > 0;
+    this.businessTurn = !theirs;
     if (!this.channels.size) {
       // No way to reach them right now (a channel with no adapter, after a restart).
       for (const o of this.owed.splice(0)) this.settle(o, "failed", "no way to reach them on that channel right now");
@@ -1144,6 +1149,8 @@ export class Conversation {
         ...(input.link ? { link: input.link } : {}),
         ...(input.image ? { image: input.image } : {}),
         ...(hasFields ? { fields } : {}),
+        // A turn the person did not start: no link preview leads the notification (types.ts, `preview`).
+        ...(this.businessTurn ? { preview: false as const } : {}),
       });
       const failure = await this.send(channel, outbound);
       if (failure) {
@@ -1252,7 +1259,8 @@ export class Conversation {
       }
     }
     if (covered) return settle("dropped", `no-contact rule ${covered.id}: ${covered.rule}`);
-    const outbound: Outbound = d.template ? { type: "template", ...d.template } : { type: "message", text: d.text ?? "" };
+    // The business started it: its link goes as a button, and no preview leads the notification.
+    const outbound: Outbound = d.template ? { type: "template", ...d.template } : fitMessage(link.info, { type: "message" as const, text: d.text ?? "", ...(d.link ? { link: d.link } : {}), preview: false as const });
     let failure: string | null = null;
     if (this.closed) return settle("failed", "this person was forgotten");
     try { await link.deliver(outbound); } catch (error) { failure = errorText(error); }

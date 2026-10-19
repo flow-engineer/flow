@@ -100,6 +100,8 @@ export interface Message {
   link?: { label: string; url: string };
   /** A photo, the text its caption. Never with a list. */
   image?: { url: string };
+  /** false: send it with link previews off (a message the business started). */
+  preview?: false;
 }
 
 export interface WhatsAppProvider {
@@ -253,6 +255,7 @@ function message(outbound: Extract<Outbound, { type: "message" }>): Message {
     ...(outbound.list ? { list: outbound.list } : {}),
     ...(outbound.link ? { link: outbound.link } : {}),
     ...(outbound.image ? { image: outbound.image } : {}),
+    ...(outbound.preview === false ? { preview: false as const } : {}),
   };
 }
 

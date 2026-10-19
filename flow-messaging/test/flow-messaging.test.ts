@@ -263,7 +263,8 @@ test("contact.deleted forgets the contact's Flow conversation: a later nudge sta
   delete flow.contacts.ct_maya;
 
   assert.equal((await live.agent.nudge({ to: { channel: "whatsapp", address: "+15550100100" }, text: "We kept nothing about you" })).status, "sent");
-  assert.deepEqual((await flow.request(post("/v1/messages"))).body, { sender: "snd_WA", to: { phone: "+15550100100" }, content: { type: "text", text: "We kept nothing about you", format: "plain" } });
+  // A message the business starts goes with link previews off, so its text is the phone's notification.
+  assert.deepEqual((await flow.request(post("/v1/messages"))).body, { sender: "snd_WA", to: { phone: "+15550100100" }, content: { type: "text", text: "We kept nothing about you", format: "plain" }, channel_options: { preview_url: false } });
   assert.equal(flow.sends("/v1/conversations/conv_wa/messages").length, 1, "nothing more into the erased conversation");
 });
 

@@ -211,6 +211,9 @@ to send later. Prefer `prompt`; use `text` only when the wording must be exact. 
 see it.", no values) so a nudge is held until they reply instead of refused (`outside_window`); the
 agent may send a fitting template itself (`send_template`), and `template.missing` events say which
 messages want one. Held nudges (quiet hours, a closed window) settle as `held`, then `sent` or `expired`.
+For a call to action use `link` (`text` with `link: { label, url }`, or the agent's send with
+`link`), never a URL in the text: what the business starts goes with link previews off, since on
+WhatsApp a preview card's title becomes the phone's notification instead of the message.
 
 When the owner's backend is a separate service, mount `nudgeHandler(agent, { token })` (from
 `@flow-engineer/flow`; a token of at least 32 characters, from a secret; `base` is `/nudges` by default) in the

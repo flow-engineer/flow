@@ -3,7 +3,7 @@
 // bearer token each.
 //
 // nudgeHandler:
-//   POST {base}        { to: { channel, address }, text | prompt | template, at?, idempotency_key? }
+//   POST {base}        { to: { channel, address }, text (+ link?) | prompt | template, at?, idempotency_key? }
 //                      → 202 { id, status, reason? } as soon as it is recorded, before any send or turn
 //   GET  {base}/:id    → 200 { id, status, reason? }, its state now; 404 for an id the agent never recorded
 //
@@ -79,6 +79,8 @@ const Body = z
   .object({
     to: z.object({ channel: z.string().min(1), address: z.string().min(1) }).strict(),
     text: z.string().min(1).optional(),
+    /** With text: its call to action, as a link button. */
+    link: z.object({ label: z.string().min(1), url: z.url({ protocol: /^https$/ }) }).strict().optional(),
     prompt: z.string().min(1).optional(),
     template: Template.optional(),
     /** Milliseconds since the epoch, as `agent.nudge()` takes it. */
@@ -91,7 +93,8 @@ const Body = z
   })
   .strict()
   .refine((b) => [b.text, b.prompt, b.template].filter((v) => v !== undefined).length === 1, { message: "give exactly one of text, prompt or template" })
-  .refine((b) => !(b.template && b.at !== undefined), { message: "a template nudge cannot be scheduled yet: leave out at" });
+  .refine((b) => !(b.template && b.at !== undefined), { message: "a template nudge cannot be scheduled yet: leave out at" })
+  .refine((b) => !(b.link && (b.text === undefined || b.at !== undefined)), { message: "link goes with text, sent now (no at)" });
 
 /** What the handler needs from an agent; Flow Framework's Agent is one. */
 export type NudgeAgent = Pick<Agent, "recordNudge" | "nudgeState" | "channels" | "templates">;

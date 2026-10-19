@@ -212,6 +212,8 @@ export interface NudgeInput {
   to: { channel: string; address: string };
   /** Sent as written, with no model call. */
   text?: string;
+  /** With `text`: its call to action, sent as a link button (on channels without one, the URL after the text). Never a URL in the text. */
+  link?: { label: string; url: string };
   /** The agent gets a turn with this note and writes the message itself, or sends nothing. */
   prompt?: string;
   /** A template the owner already set up with the channel, sent as is (also outside WhatsApp's window). */
@@ -971,6 +973,7 @@ export class Agent {
     await this.settings.ready;
     const kinds = [input.text, input.prompt, input.template].filter((v) => v !== undefined).length;
     if (kinds !== 1) throw new Error("flow: a nudge has exactly one of text, prompt or template");
+    if (input.link && (input.text === undefined || input.at !== undefined)) throw new Error("flow: a nudge's link goes with text, sent now (not with `at`)");
     // A declared template whose values don't fit it never goes: Meta would refuse it, the playground would show nonsense.
     const declared = input.template && declaredTemplate(this.options.templates, input.template);
     if (declared) fillTemplate(declared, input.template!);
@@ -1006,7 +1009,7 @@ export class Agent {
       const added = await add({ ...record, body: { text: input.text, prompt: input.prompt, at: input.at }, status: "scheduled" }, schedule);
       return typeof added === "number" ? { id, status: "scheduled" } : added;
     }
-    const body = { address: input.to.address, ...(input.template ? { template: input.template } : input.text !== undefined ? { text: input.text } : { prompt: input.prompt }) };
+    const body = { address: input.to.address, ...(input.template ? { template: input.template } : input.text !== undefined ? { text: input.text, ...(input.link ? { link: input.link } : {}) } : { prompt: input.prompt }) };
     const now = this.now();
     const quietEnds = input.respectQuietHours === false ? null : await this.quietEnd(conversationId, now);
     if (quietEnds !== null) {

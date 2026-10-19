@@ -45,6 +45,20 @@ test("a prompt nudge gives the agent a turn, and it may choose to send nothing",
   assert.equal((await sent).status, "sent");
 });
 
+test("what the business starts never lets a link preview lead: a text nudge's link is a button, and its messages go with previews off", async () => {
+  const h = await withSam({ whatsapp: { info: { ...WHATSAPP, linkButton: { labelMax: 20 } }, phone: true } });
+  assert.equal((await h.agent.nudge({ to: h.to, text: "Your order is out for delivery.", link: { label: "Track", url: "https://example.com/o/1" } })).status, "sent");
+  const prompted = h.agent.nudge({ to: h.to, prompt: "Tell them the shop opens at 9: https://example.com/hours" });
+  (await h.nextCall(1)).answer(respond(call("send_whatsapp", { text: "We open at 9, see https://example.com/hours" })));
+  assert.equal((await prompted).status, "sent");
+  const messages = h.out.flatMap((o) => (o.outbound.type === "message" ? [o.outbound] : []));
+  assert.deepEqual(messages.map((m) => [m.text, m.link?.url ?? null, m.preview ?? null]), [
+    ["Hi!", null, null],
+    ["Your order is out for delivery.", "https://example.com/o/1", false],
+    ["We open at 9, see https://example.com/hours", null, false],
+  ]);
+});
+
 test("a nudge that arrives during a turn waits for it to end", async () => {
   const h = await withSam();
   await h.message("sms", SAM.address, "what's my plan?");
