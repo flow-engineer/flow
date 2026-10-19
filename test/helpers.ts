@@ -100,6 +100,8 @@ export function multi(options: {
   channels: Record<string, { info: ChannelInfo; phone?: boolean; kind?: ChannelKind; keywords?: Keywords }>;
   tools?: ReturnType<typeof tool>[];
   database?: Database;
+  /** Instead of `database`: the agent's store. */
+  store?: AgentOptions["store"];
   resolve?: AgentOptions["resolve"];
   credentials?: AgentOptions["credentials"];
   auth?: AgentOptions["auth"];
@@ -145,7 +147,7 @@ export function multi(options: {
     debounceMs: 0,
     events: [(e) => events.push(e)],
     channels,
-    database,
+    ...(options.store ? { store: options.store } : { database }),
     resolve: options.resolve,
     credentials: options.credentials,
     auth: options.auth,
