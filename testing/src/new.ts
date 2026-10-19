@@ -42,8 +42,10 @@ const TSCONFIG = {
   include: ["src"],
 };
 
-const ENV_EXAMPLE = `# One model key. The first line with a value is the one used. npx @flow-engineer/flow setup
-# writes Flow's free trial key here; or make your own at the provider and paste it. Never commit this file.
+const ENV_EXAMPLE = `# The model key. The first line with a value is the one used. npx @flow-engineer/flow setup writes
+# FLOW_KEY, the agent's one Flow key, which calls models on the account's free trial credit, so no
+# provider key is needed; your own, made at the provider and pasted on its line, wins over it.
+# Never commit this file.
 #   OPENROUTER_API_KEY   https://openrouter.ai/keys
 #   OPENAI_API_KEY       https://platform.openai.com/api-keys
 #   ANTHROPIC_API_KEY    https://console.anthropic.com/settings/keys
@@ -52,6 +54,7 @@ OPENROUTER_API_KEY=
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 GEMINI_API_KEY=
+FLOW_KEY=
 
 # Optional. The model id for that provider; empty is that provider's default.
 # CAFE_MODEL=
@@ -74,9 +77,9 @@ A chat agent on Flow Framework (https://github.com/flow-engineer/flow), started 
   scenarios, \`flow-framework-context\` to gather what the tools are written from out of an existing
   codebase, and \`flow-framework-auth\` for sign-in.
 - \`agent/AGENTS.md\` is the agent's own prompt, not instructions for coding agents.
-- One model key goes in \`.env\` (never read or print it): \`npx @flow-engineer/flow link\` (or \`setup\`)
-  writes Flow's free trial key there, or the owner types their own: \`OPENROUTER_API_KEY\`,
-  \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`. \`npm start\` runs it in the playground,
+- The model key goes in \`.env\` (never read or print it): \`npx @flow-engineer/flow link\` (or \`setup\`)
+  writes \`FLOW_KEY\`, the agent's one Flow key, which calls models on Flow's free trial credit, so no provider key is needed; a key the owner types
+  (\`OPENROUTER_API_KEY\`, \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`) wins over it. \`npm start\` runs it in the playground,
   and \`npx @flow-engineer/flow link\` signs in, puts its other keys in \`.env\` and prints the link that
   reaches it from a phone while \`npm start\` runs.
 - When the owner asks how to test it, recommend first the playground (\`npm start\`, then open the link

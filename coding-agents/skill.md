@@ -20,9 +20,9 @@ and `flow-framework-auth` (`auth-skill.md`) when tools need to know who the pers
 `npx @flow-engineer/flow new <name>` (lowercase letters, digits and dashes) makes `./<name>/` from the café
 example: a complete agent with tools and tests that depends on the `@flow-engineer/flow` package and imports
 `@flow-engineer/flow` and `@flow-engineer/flow/simulators`, with these skills in `.claude/skills/`. Run `npm install` there.
-Build in it, changing Pip's prompt, skills, tools and tests into yours. The owner copies
-`.env.example` to `.env` and puts one model key in it (never read or print it), or runs
-`npx @flow-engineer/flow link` (or `setup`), which writes Flow's free trial key there. Their own key is made
+Build in it, changing Pip's prompt, skills, tools and tests into yours. A provider key is optional:
+`npx @flow-engineer/flow link` (or `setup`) writes `FLOW_KEY`, the agent's one Flow key, into `.env` (never
+read or print it), and the agent calls models through Flow with it on $2 of Flow trial credit. A key of the owner's own wins over it, made
 at the provider: `OPENROUTER_API_KEY` at https://openrouter.ai/keys,
 `OPENAI_API_KEY` at https://platform.openai.com/api-keys, `ANTHROPIC_API_KEY` at
 https://console.anthropic.com/settings/keys, or `GEMINI_API_KEY` at https://aistudio.google.com/apikey.
@@ -96,8 +96,10 @@ is how long a finished tool's result waits for the others of its response; `shar
 guidance with a string.
 
 Models are reached through any OpenAI-compatible API. `openAICompatible()` with no key reads the
-first of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `GEMINI_API_KEY` that has a
-value, and uses that provider's default model (`MODEL` overrides it). With none it stops at once and
+first of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` and
+`FLOW_KEY` (the agent's Flow key, on its trial credit, from `setup`) that has a value, and uses that provider's
+default model (`MODEL` overrides it). `flowModel()` uses Flow alone; when its credit is used up a
+call fails with code `trial_credit_used` and a next step (tell the owner to add their own key). With none it stops at once and
 names them. Pass `apiKey` and `baseURL` for anywhere else (`baseURL` alone for a local server that needs no key).
 
 Which model: recommend Claude Haiku 5.5 (`anthropic/claude-haiku-5.5`, the default above) or OpenAI

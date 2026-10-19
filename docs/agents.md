@@ -42,17 +42,22 @@ When the owner asks how to test the agent, recommend these, in this order:
 `flow chat` and `npm test -- --synthetic` (the test cloud) are for you, to check your own work
 before you hand it back; run them yourself, and do not offer them to the owner as ways to test.
 
-- The model key: `setup` (which `link` runs; alone it needs `login` first) writes Flow's trial model key into `.env`
-  when the folder has no model key (`OPENROUTER_API_KEY`, printed as `Model: Flow trial credit
-  ($N)`, never its value). The owner may use their own instead: one of `OPENROUTER_API_KEY`,
-  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY` in `.env`; a key they set is never
-  written over. With no key, `chat` and `npm start` stop with one sentence and
+- The model key: a provider key is optional. `setup` (which `link` runs; alone it needs `login`
+  first) writes `FLOW_KEY`, the agent's one Flow key, into `.env` (printed only as its prefix and
+  last 4, `FLOW_KEY=flow_test_…abcd  added`; never read or print its value): with no provider key
+  the agent calls models through Flow with it, on the account's $2 of Flow trial credit (printed as
+  `Model: Flow trial credit ($1.87 left)`). The owner may add their own: one of `OPENROUTER_API_KEY`,
+  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY` in `.env` wins over `FLOW_KEY` for the model
+  (to switch back, empty that line), and a key they set is never written over. When the credit is
+  used up, a model call fails with code `trial_credit_used` (`trial_credit_unavailable` when the account gets none) and the next step: add your own key. With no key, `chat` and `npm start` stop with one sentence and
   `Next: run npx @flow-engineer/flow setup to get Flow's free trial credit, or add your own key.`
   (`chat --json`: `{"error":{"code":"no_model_key","message":...,"next":"npx @flow-engineer/flow setup"}}`),
   and `init`, `setup`, `link` and `status` say so too, with the way to get one first in `next`.
-  The trial key is shown once: in a second folder `setup` says it went to the first one
-  (`model_key.flow_trial.minted: false`); `setup --rotate model` makes a new one.
-- `status` reports the model key (never its value), the sign-in, each channel's sender in `.env`
+  Each folder's `setup` makes its own `FLOW_KEY` (the credit is the account's);
+  `setup --rotate key` replaces a leaked one (the old one works 24 h more; `--now` ends it at once).
+- `status` reports `FLOW_KEY` and the model key (never their values; `flow_key.set` in `--json`; with
+  `FLOW_KEY` the model's key, the credit left from Flow, `model_key.flow_credit`; a key Flow does not
+  know gets `setup --rotate key`), the sign-in, each channel's sender in `.env`
   and, signed in, which channels are open now with their trial counts. It writes nothing.
 - `chat` builds the agent from `src/agent.ts` and writes as its first test person. Each reply is
   printed (`agent: ...`) once the turn is over; `--json` gives one JSON line per thing it sends.

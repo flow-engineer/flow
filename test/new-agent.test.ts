@@ -48,7 +48,7 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   assert.equal(readFileSync(join(dir, "CLAUDE.md"), "utf8"), "@AGENTS.md\n");
   assert.ok(existsSync(join(dir, "tests", "scenarios")));
   const env = readFileSync(join(dir, ".env.example"), "utf8");
-  for (const key of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "FLOW_FRAMEWORK_CLOUD_KEY", "FLOW_FRAMEWORK_TRACES_KEY"]) assert.match(env, new RegExp(`^${key}=$`, "m"), key);
+  for (const key of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "FLOW_KEY", "FLOW_FRAMEWORK_CLOUD_KEY", "FLOW_FRAMEWORK_TRACES_KEY"]) assert.match(env, new RegExp(`^${key}=$`, "m"), key);
   assert.match(env, /^FLOW_FRAMEWORK_CLOUD=https:\/\/flow\.engineer\/observe$/m);
   assert.match(env, /^FLOW_FRAMEWORK_TRACES_URL=https:\/\/flow\.engineer\/observe$/m);
   assert.throws(() => newStandalone("my-agent", { into }), /already exists/);
