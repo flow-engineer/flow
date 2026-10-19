@@ -74,7 +74,7 @@ expect:
 - `timezone` (default UTC) and `now`: the test's clock. `now` is when each run starts,
   `YYYY-MM-DDTHH:MM[:SS]`, local to `timezone` unless it ends in `Z` or an offset (`-04:00`); left
   out, it is the real time. Placeholders are filled from it, and the simulated tools and the judge
-  are told it; your agent's clock is not changed: the agent still reads the real time. So set `now` only when the agent takes
+  are told it; outside a business run (below) your agent's clock is not changed: the agent still reads the real time. So set `now` only when the agent takes
   its dates from its tools or its context; otherwise leave it out and placeholders follow the real
   date.
 
@@ -97,6 +97,55 @@ time of day, then `| iso` (the default, with its offset), `| date` (2026-10-16),
 `| weekday` (Thursday): `{{now + 7d | date}}`, `{{now - 2h + 30m | time}}`. They work in `world`,
 `person`, `opening`, `expect` and the tool files' `responses`; the cloud fills them on each run. Any other
 `{{...}}` is plain text.
+
+### Scenarios the business starts
+
+A scenario can start with the business instead of the person: an event its backend sends, a nudge,
+or time passing. Such a run (a business run) gets an agent of its own, built by `buildAgent` with
+the run's clock and the agent's own channels (pass `options.channels` and `options.testing` on to
+`createAgent`, `testing` spread as it is: `now` and `scheduleCheckMs: 0`), so the agent runs on
+the test's clock: quiet hours, held sends, `expiresAt` and caps over days follow it.
+
+```yaml
+timezone: Asia/Kolkata
+now: 2026-10-20T23:30
+person:
+  address: "+15550100001"        # who the events and nudges are for (a made-up number)
+  persona: ...
+  goal: ...
+opening:
+  - event: { type: buying.bid.outbid, delivery: must, subject: "user:u1", data: { user: { phone: "+15550100001" } } }
+  - wait: 8h30m                  # time passes; what came due runs, a minute at a time
+  - say: "ok thanks"             # the person can still write
+  - event: { id: evt_dup, type: ..., subject: ..., data: {...} }
+    signature: bad               # or missing; answer: 401
+    answer: 401                  # what the route must answer (default: any 2xx); { status: 400, field: data.user }
+  - nudge: { prompt: "Tell them the listing ends soon." }   # or text, or template: { name, body: [...] }
+    at: 2026-10-21T15:00         # moves the clock first: a date and time, HH:MM (the next one), or {{now ...}}
+max_turns: 1                     # 1: no turns played after the opening
+tools: { real: [keep_me_posted] }  # their own code runs, for state the agent keeps itself
+expect:
+  sent:                          # what went out, in order (other sends may come between)
+    - { at: "23:30", template: outbid }
+    - { at: "08:00", phrased: true, text: "₹53,000" }
+  not_sent:
+    - { template: outbid_reminder }   # {} is anything at all
+```
+
+- An `event` is sent exactly as a business's backend sends a Flow event: one envelope
+  `{ id, type, occurredAt, subject, delivery?, data }` (`id` and `occurredAt` default to one per
+  step and the clock), as `POST /v1/events` (or the step's `path`) to the agent's `routes`, with
+  `Content-Type: application/json`, `Idempotency-Key: <id>` and
+  `Flow-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "t.{t}.{body}">`, signed with the
+  run's own test secret (`options.testing.eventsSecret`: check signatures with it in a business run).
+  The same `id` twice is a duplicate, as it would be live.
+- A `nudge` is `agent.nudge` to the run's person; `wait` and `at` move the clock (never back).
+- `expect.sent` items: `at` (HH:MM on any day, or a date and time; to the minute), `template`
+  (its name), `phrased: true` (the agent's own words, not a template), `text` (in the message, or in
+  the template's values). Checked by code, like `calls`.
+- A business run where the agent sent nothing is not a failure by itself: `expect` decides.
+- Timers of your own (held sends, reminders timed from your data) go in `createAgent`'s `onTick`,
+  which runs on the agent's clock, never in a `setInterval` of your own.
 
 How fast the agent first replies to each message is measured on every run from timestamps, not
 written in scenarios: the dashboard shows it for the whole run (average, p95, min and max).

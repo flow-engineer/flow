@@ -62,21 +62,25 @@ skill, not in AGENTS.md.
 ## buildAgent
 
 Build the agent in one function that the playground and the tests both call, so they never
-drift apart. Tests pass their own model, events and simulated tools:
+drift apart. Tests pass their own model, events and simulated tools; a test the business starts
+also passes `channels` and `testing` (the run's clock), which go on to `createAgent` as they are
+(the `flow-framework-tests` skill):
 
 ```ts
 import { fileURLToPath } from "node:url";
-import { createAgent, openAICompatible, type EventSink, type Model, type Tool } from "@flow-engineer/flow";
+import { createAgent, openAICompatible, type AgentOptions, type Channel, type EventSink, type Model, type Tool } from "@flow-engineer/flow";
 import { tools as myTools } from "./tools.ts";
 
 export const tools = myTools;
 
-export function buildAgent(options: { model?: Model; events?: EventSink[]; tools?: Tool[] } = {}) {
+export function buildAgent(options: { model?: Model; events?: EventSink[]; tools?: Tool[]; channels?: Channel[]; testing?: Partial<AgentOptions> } = {}) {
   return createAgent({
     dir: fileURLToPath(new URL("../agent", import.meta.url)),
     model: options.model ?? openAICompatible({ model: "anthropic/claude-haiku-5.5" }),
     tools: options.tools ?? myTools,
     events: options.events ?? [],
+    ...(options.channels ? { channels: options.channels } : {}),
+    ...options.testing,
   });
 }
 ```
@@ -92,7 +96,12 @@ and are `message.in`/`message.out` events marked `answered: true`);
 `deadlineMs` (default 60,000) is the longest a reply waits for a tool before it moves to the
 background (set a tool's own `deadlineMs` for a known-slow one); `partialAfterMs` (default 5,000)
 is how long a finished tool's result waits for the others of its response; `shareUpdates` turns live status lines on web and app UIs off, or replaces their
-guidance with a string.
+guidance with a string; `routes` (`{ "/v1/events": (request) => Response }`) are HTTP routes the
+agent serves beside its chat, such as a business's event push, answered by `agent.fetch(request)`
+(and by the test cloud with a test's events); `onTick(now)` is work of your own on the agent's clock
+(held sends, reminders timed from your data), run with each check for due scheduled messages.
+`agent.reach({ channel, address })` makes the conversation of someone the business may message
+before they have written; until they write, only a template reaches them on WhatsApp.
 
 Models are reached through any OpenAI-compatible API. `openAICompatible()` with no key reads the
 first of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `GEMINI_API_KEY` that has a

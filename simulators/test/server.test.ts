@@ -583,3 +583,17 @@ test("ordinary and hosted playgrounds expose no local CLI runner", async () => {
     await new Promise<void>(resolve => hosted.close(() => resolve()));
   }
 });
+
+test("a business run: the agent's sends reach a person's thread before they have written", async () => {
+  const { connection } = fakeAgent();
+  const sims = simulators({ testCloud: true });
+  const server = await sims.listen(connection, 0);
+  try {
+    await sims.deliverer("whatsapp", "p")({ type: "template", name: "outbid", body: ["PS5"] });
+    const lines: Line[] = (await (await fetch(`${server.url}/api/transcript?platform=whatsapp&person=p`)).json()).lines;
+    assert.equal(lines.length, 1);
+    assert.equal(lines[0]!.kind, "out");
+  } finally {
+    await server.close();
+  }
+});

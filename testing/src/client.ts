@@ -12,6 +12,7 @@ import { PROFILE_TOOL, profileTool } from "../../src/conversation.ts";
 import { STAND_IN } from "../../src/tools.ts";
 import type { Command, Opened, WireIncoming, OpenSession, Receipt, RunKey, RunSummary, SessionSummary, ToolCallRequest, ToolCallResult } from "./protocol.ts";
 import { mimeOf, parseScenario, parseToolFile, suiteHash, type SuiteFile } from "./suite.ts";
+import { businessRuns, type BusinessAgent, type BusinessBuild } from "./business.ts";
 
 export interface ConnectOptions {
   /** The cloud's address, such as http://127.0.0.1:8900. */
@@ -22,8 +23,9 @@ export interface ConnectOptions {
   title?: string;
   /** The agent's real tools: only their names, descriptions and inputs are used. */
   tools: Tool[];
-  /** Builds the agent with the tools and events it is given: a Flow Framework Agent, or anything that answers like one (http-agent.ts). */
-  build: (options: { tools: Tool[]; events: EventSink[] }) => AgentUnderTest;
+  /** Builds the agent with the tools and events it is given: a Flow Framework Agent, or anything that answers like one (http-agent.ts).
+   * A business run (protocol.ts) builds one more per run, with its own channels and clock (`BusinessBuild`); that needs a Flow Framework Agent. */
+  build: (options: { tools: Tool[]; events: EventSink[] } & Partial<BusinessBuild>) => AgentUnderTest;
   files: SuiteFile[];
   /** The tests folder: files a scenario attaches are read from here, and never leave this machine. */
   testsDir?: string;
@@ -393,6 +395,8 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
   events.context = true;
   try {
   const agent = options.build({ tools, events: [events] });
+  // Business runs need an agent of this framework: its own channels, routes, clock and nudges.
+  const canBusiness = typeof (agent as Partial<BusinessAgent>).reach === "function" && typeof (agent as Partial<BusinessAgent>).fetch === "function";
 
   const open: OpenSession = {
     agent: { name: options.name, title: options.title, tools: [...options.tools, ...(agent.hasProfile?.() ? standIn : [])].map(toSpec), channels: agent.channels() },
@@ -402,6 +406,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     retries: true,
     resume: true,
     reopen: true,
+    ...(canBusiness ? { business: true } : {}),
     ...(only ? { only } : {}),
   };
   const opened = await openOnce(`${base}/api/sessions`, open, options.openHeaders, controller.signal, postTimeoutMs, openRetryCapMs, log);
@@ -425,6 +430,21 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
   options.onDashboard?.(dashboard, opened.sessionId, typeof opened.agent === "string" && opened.agent ? opened.agent : undefined);
   log(`Watch it: ${opened.dashboard}`);
   session = `${tunnel}/api/sessions/${opened.sessionId}`;
+
+  const business = canBusiness && opened.business === true
+    ? businessRuns({
+      sessionAgent: agent as unknown as BusinessAgent,
+      build: (built) => options.build(built) as unknown as BusinessAgent,
+      tunnelTools: tools,
+      realTools: options.tools,
+      events,
+      post: (path, body, key, what) => postRetry(`${session}/${path}`, body, auth, controller.signal, log, postTimeoutMs, {
+        mode: idempotent ? "idempotent" : path === "outbound" ? "outbound" : "never", key, budgetMs: retryBudgetMs, what,
+      }),
+      watch,
+      log,
+    })
+    : null;
 
   if (failure) throw failure;
   startFlush();
@@ -476,6 +496,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
   /** One command from the stream. Returns the summary once the session has finished. */
   const handle = async (command: Command): Promise<SessionSummary | undefined> => {
     if (draining && (command.type === "message" || command.type === "reaction")) throw new Error("the cloud sent a command after drain");
+    if (business && (business.handle(command, (incoming) => withFiles(incoming, options.testsDir, log)))) return;
     if (command.type === "message") {
       const deliveries: Promise<unknown>[] = [];
       // Not async: register the promise during receive(), before its fire-and-forget

@@ -287,6 +287,8 @@ function localCliRunner(options: LocalCliOptions, base: string): Handler & { clo
 
 export interface TestCloudSimulators {
   events: EventSink;
+  /** Where the agent's sends to one person's thread go, before they have written (a run the business starts). */
+  deliverer(platform: string, person: string): Deliver;
   listen(agent: AgentConnection, port: number): Promise<Listening>;
   handler(agent: AgentConnection, base?: string): Handler;
 }
@@ -693,6 +695,10 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
     const testCloud: TestCloudSimulators = {
       events: cloudEvents,
+      deliverer: (platform, person) => {
+        const p = platformOf(platform);
+        return deliverer(p, key(p.id, person));
+      },
       listen: (agent, port) => serve(guarded((req, res) => handle(agent, req, res, "")), port),
       handler: (agent, base = "") => guarded((req, res) => handle(agent, req, res, base)),
     };
