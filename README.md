@@ -82,7 +82,7 @@ console.log(`Playground: ${url}/`);
 ```
 
 ```bash
-echo "OPENROUTER_API_KEY=sk-or-..." > .env
+npx @flow-engineer/flow setup      # writes FLOW_MODEL_KEY (Flow's trial credit), or: echo "OPENROUTER_API_KEY=sk-or-..." > .env
 node --env-file=.env src/main.ts
 ```
 
@@ -563,7 +563,9 @@ sign-in for your stack (an OAuth provider, Firebase, Supabase, your own login pa
 
 ## Models
 
-Any OpenAI-compatible API. With no `apiKey` or `baseURL`, `openAICompatible` uses the first key that has a value: `OPENROUTER_API_KEY` (OpenRouter), `OPENAI_API_KEY` (OpenAI), `ANTHROPIC_API_KEY` (Anthropic), then `GEMINI_API_KEY` (Gemini); with none it stops at once and names them. `MODEL` sets the model id; each key has its own default. Pass `baseURL` and `apiKey` for any other address; a local server that needs no key needs only `baseURL`. Give `contextTokens` (the model's window) and a long chat's history is kept within it: the latest messages go to every call, older ones are left out (the agent is told).
+Any OpenAI-compatible API. With no `apiKey` or `baseURL`, `openAICompatible` uses the first key that has a value: `OPENROUTER_API_KEY` (OpenRouter), `OPENAI_API_KEY` (OpenAI), `ANTHROPIC_API_KEY` (Anthropic), `GEMINI_API_KEY` (Gemini), then `FLOW_MODEL_KEY` (Flow); with none it stops at once and names them.
+
+A provider key is optional: `npx @flow-engineer/flow setup` writes `FLOW_MODEL_KEY`, which calls models through Flow on $2 of Flow trial credit per account (`npx @flow-engineer/flow status` shows what is left). A provider key in `.env` wins over it. `flowModel({ model })` uses Flow explicitly (default `anthropic/claude-haiku-5.5`; Flow offers a short list of models, `GET /models`); `FLOW_MODEL_URL` points it at another Flow server. When the credit is used up, a call fails with code `trial_credit_used` and the next step. `MODEL` sets the model id; each key has its own default. Pass `baseURL` and `apiKey` for any other address; a local server that needs no key needs only `baseURL`. Give `contextTokens` (the model's window) and a long chat's history is kept within it: the latest messages go to every call, older ones are left out (the agent is told).
 
 For agents with tools we recommend **Claude Haiku 5.5** (`anthropic/claude-haiku-5.5`) or **GPT-6.1 Sol** (`openai/gpt-6.1-sol`, about 3x the cost). In our tests, GPT Luna repeated tool calls and answered twice.
 

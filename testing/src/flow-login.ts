@@ -10,13 +10,17 @@
 //        -> {agent_id, cloud_key?, traces_key?, messaging_key?, join_code, account, app_id, dashboard_url, try_url,
 //            <channel>_sender?, <channel>_link? (telegram, whatsapp, imessage: each only while that shared sender
 //            is open), try_urls?, trial?, model_key?, minted, next}; a 502 carries every field that worked too;
-//        model_key is Flow's trial model key, {env, value, limit_usd, minted: true} when made now (in every answer
-//        of that call, errors too), {env, minted: false, limit_usd} when the account has one already (limit_usd 0:
-//        no credit left), absent when the server gives none (older, off, or have names OPENROUTER_API_KEY);
+//        model_key is Flow's trial model key, {env: "FLOW_MODEL_KEY", value, limit_usd, left_usd, base_url, minted: true}
+//        when made now (in every answer of that call, errors too), {env, minted: false, limit_usd, left_usd: 0} when
+//        the account's credit is used up, absent when the server gives none (have names a model key, refused, or
+//        an older server); every folder's setup makes its own key, the credit is the account's;
 //        rotate is true (every key) or the answer fields to make again, such as ["model_key"];
 //        429 slow_down with Retry-After; 403 for a trial limit (sandbox_allowance_used, ...), its next prose
 //        Any answer may carry warnings: up to 20 strings to show the owner as they are.
-// Every error is flat: {"error": "<code>", "error_description": "<sentence>", "next": "<command, URL or sentence>"}.
+//   GET  <model URL>/credit (bearer FLOW_MODEL_KEY) -> {limit_usd, spent_usd, left_usd, default_model, models};
+//        the model URL is src/model.ts's flowModelURL (flow.engineer/llm/framework/v1), 401 invalid_api_key
+// Every error is flat: {"error": "<code>", "error_description": "<sentence>", "next": "<command, URL or sentence>"}
+// (the model API's are OpenAI's shape, {"error": {message, type, code, next}}).
 // The token is opaque (fcli_...), good only for /cli/*, and sent only to the server that issued it,
 // over https (http only to this machine). Every request gives up after REQUEST_TIMEOUT_MS at most.
 
@@ -173,7 +177,7 @@ export interface SetupAnswer {
   /** The account's free-trial counts per channel; limit null is unlimited. iMessage also counts the people it may reach. */
   trial?: Record<string, { limit: number | null; used: number; contacts?: { limit: number; used: number } }>;
   /** Flow's trial model key: its value only when made in this call (shown once). Absent: no trial credit here. */
-  model_key?: { env?: string; value?: string; limit_usd?: number; minted?: boolean };
+  model_key?: { env?: string; value?: string; limit_usd?: number; left_usd?: number; base_url?: string; minted?: boolean };
   /** The answer fields of the keys made in this call. */
   minted?: string[];
   next?: string[];
@@ -310,6 +314,28 @@ export async function setup(url: string, token: string, request: { name: string;
   // A 200 is returned whole even without a join code: the keys it minted are shown only now.
   if (answer.status !== 200) throw refused("/cli/setup", answer, url);
   return answer.body as unknown as SetupAnswer;
+}
+
+/** GET /credit's answer: the account's Flow trial credit in US dollars. */
+export interface ModelCredit {
+  limit_usd?: number;
+  spent_usd?: number;
+  left_usd?: number;
+  default_model?: string;
+  models?: string[];
+}
+
+/** The credit left on the account of a FLOW_MODEL_KEY; `baseURL` is Flow's model API (flowModelURL). */
+export async function modelCredit(baseURL: string, key: string): Promise<ModelCredit> {
+  let end = baseURL.length;
+  while (end > 0 && baseURL[end - 1] === "/") end--;
+  const answer = await call(baseURL.slice(0, end), "/credit", { token: key, method: "GET" });
+  if (answer.status !== 200) {
+    // OpenAI's error shape: {"error": {message, code, next}}.
+    const inner = answer.body.error && typeof answer.body.error === "object" ? (answer.body.error as Record<string, unknown>) : undefined;
+    throw refused("/credit", inner ? { ...answer, body: { error: inner.code, error_description: inner.message, next: inner.next } } : answer, baseURL);
+  }
+  return answer.body as ModelCredit;
 }
 
 /** The agent's .env names for what setup hands back; only the keys' and the join's names are sent as `have`. */

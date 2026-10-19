@@ -104,7 +104,8 @@ the CHINWAG_ names from before the rename still work):
   FLOW_FRAMEWORK_AGENT_TOKEN
                            With --agent-url: sent to it as authorization: Bearer <token>
   OPENROUTER_API_KEY       The agent's model key, or OPENAI_API_KEY, ANTHROPIC_API_KEY or
-                           GEMINI_API_KEY: the first with a value is used`;
+                           GEMINI_API_KEY: the first with a value is used, else FLOW_MODEL_KEY
+                           (Flow's trial credit; flow setup writes it)`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
 const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}
 ${PLUGIN_LINE}\n${ACCOUNT_LINES}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;

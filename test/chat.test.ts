@@ -70,7 +70,7 @@ export function buildAgent() { return createAgent({ dir: new URL("../agent", imp
 `);
   const human = await chat(dir, "hi\n");
   assert.equal(human.code, 1);
-  assert.match(human.err, /^flow chat: This agent has no model key: put one in \.env in the agent's folder, on one of the lines OPENROUTER_API_KEY=/);
+  assert.match(human.err, /^flow chat: This agent has no model key: npx @flow-engineer\/flow setup writes FLOW_MODEL_KEY, Flow's free trial key, into \.env/);
   assert.match(human.err, /\nNext: run npx @flow-engineer\/flow setup to get Flow's free trial credit, or add your own key\.\n$/);
   const json = await chat(dir, "hi\n", ["--json"]);
   assert.equal(json.code, 1);

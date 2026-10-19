@@ -21,10 +21,10 @@ import { parseArgs } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   currentToken, deleteCredentials, deletePending, LoginRefused, loginUrl, pollToken, readPending, REQUEST_TIMEOUT_MS, revoke, saveCredentials, savePending,
-  SETUP_ENV, setup, startDevice, TimedOut, tryLink, warningsOf, whoami, type Account, type PendingLogin, type SetupAnswer,
+  modelCredit, SETUP_ENV, setup, startDevice, TimedOut, tryLink, warningsOf, whoami, type Account, type ModelCredit, type PendingLogin, type SetupAnswer,
 } from "./flow-login.ts";
 import { packageRoot } from "./new.ts";
-import { hasModelKey, MODEL_KEY_NAMES, NO_MODEL_KEY } from "../../src/model.ts";
+import { flowModelURL, hasModelKey, MODEL_KEY_NAMES, NO_MODEL_KEY } from "../../src/model.ts";
 import { RUN } from "../../src/names.ts";
 
 export const ACCOUNT_COMMANDS = new Set(["login", "logout", "whoami", "setup", "link", "status"]);
@@ -408,39 +408,66 @@ function agentFolder(dir: string): void {
     `cd into your agent's folder, or make an agent here first: ${RUN} init`, EXIT.usage);
 }
 
+/** Flow's model key: last in the model keys' order, so a provider key the owner sets wins. */
+const FLOW_MODEL_KEY = MODEL_KEY_NAMES.at(-1)!;
+
+/** The account's Flow trial credit as setup's answer or GET /credit gave it; a field it left out is absent. */
+interface FlowCredit {
+  limit_usd?: number;
+  left_usd?: number;
+  spent_usd?: number;
+  /** From setup: the key was made in this call. */
+  minted?: boolean;
+}
+
 /** Where the agent's model key stands, the same in setup, link and status (never its value). */
 interface ModelKeyReport {
   set: boolean;
   /** The first name with a value, in .env or the environment. */
   env: string | null;
-  /** Flow's trial credit, when this setup's answer named it. */
-  flow_trial: { limit_usd: number | null; minted: boolean } | null;
-  /** With no key: the sentence that says so. */
+  /** Flow's trial credit, when setup's answer or GET /credit named it. */
+  flow_credit: FlowCredit | null;
+  /** With no key, or Flow's key with no credit left: the sentence that says so. */
   message?: string;
 }
 
+const USED_UP = "This account's Flow trial credit is used up.";
+const OWN_KEY = "add your own model key to .env";
+
+/** setup's model_key or GET /credit's answer as FlowCredit: its numbers and minted only. */
+function creditOf(from: SetupAnswer["model_key"] | ModelCredit | undefined): FlowCredit | null {
+  if (!from) return null;
+  const credit: FlowCredit = {};
+  for (const field of ["limit_usd", "left_usd", "spent_usd"] as const) {
+    const n = (from as Record<string, unknown>)[field];
+    if (typeof n === "number" && Number.isFinite(n)) credit[field] = n;
+  }
+  if ("minted" in from) credit.minted = from.minted === true;
+  return credit;
+}
+
+const dollars = (n: number) => `$${n.toFixed(2)}`;
+
 /**
  * The model key's state: `line` to print, and with no key the step that gets one, which goes first
- * in the run's one `next`. `afterSetup`: setup ran just now, so its answer says why there is none.
+ * in the run's one `next`. `credit`: Flow's credit from setup's answer or GET /credit. `afterSetup`:
+ * setup ran just now, so its answer says why there is none.
  */
-function modelKeyReport(value: (name: string) => string | undefined, trial: SetupAnswer["model_key"] | undefined, afterSetup: boolean): { report: ModelKeyReport; line: string; next?: string } {
+function modelKeyReport(value: (name: string) => string | undefined, credit: SetupAnswer["model_key"] | ModelCredit | undefined, afterSetup: boolean): { report: ModelKeyReport; line: string; next?: string } {
   const env = MODEL_KEY_NAMES.find((name) => value(name)) ?? null;
-  const flowTrial = trial ? { limit_usd: typeof trial.limit_usd === "number" ? trial.limit_usd : null, minted: trial.minted === true } : null;
-  const credit = `Flow trial credit${flowTrial?.limit_usd != null ? ` ($${flowTrial.limit_usd})` : ""}`;
-  if (env) return { report: { set: true, env, flow_trial: flowTrial }, line: flowTrial?.minted && trial?.env === env ? `Model: ${credit}` : `Model: ${env} is set` };
-  if (flowTrial && !flowTrial.minted && flowTrial.limit_usd === 0) {
-    // Rotated with no credit left: there is no trial key to have.
-    const message = "This account's Flow trial credit is used up.";
-    return { report: { set: false, env: null, flow_trial: flowTrial, message }, line: message, next: "add your own model key to .env" };
+  const flowCredit = creditOf(credit);
+  const usedUp = flowCredit?.left_usd !== undefined && flowCredit.left_usd <= 0;
+  if (env && env !== FLOW_MODEL_KEY) return { report: { set: true, env, flow_credit: null }, line: `Model: ${env} is set` };
+  if (env) {
+    if (usedUp) return { report: { set: true, env, flow_credit: flowCredit, message: USED_UP }, line: USED_UP, next: OWN_KEY };
+    const left = flowCredit?.left_usd !== undefined ? ` (${dollars(flowCredit.left_usd)} left)` : "";
+    return { report: { set: true, env, flow_credit: flowCredit }, line: `Model: Flow trial credit${left}` };
   }
-  if (flowTrial && !flowTrial.minted) {
-    // The account's trial key was shown once, to the folder set up first.
-    const message = `This account's ${credit} key went into the .env of the folder that was set up first, and is not shown again.`;
-    return { report: { set: false, env: null, flow_trial: flowTrial, message }, line: message, next: `copy it from there, run ${RUN} setup --rotate model for a new one, or add your own key` };
-  }
-  const report = { set: false, env: null, flow_trial: null, message: NO_MODEL_KEY.message };
+  // No key, and the account's credit is used up: setup made none.
+  if (usedUp) return { report: { set: false, env: null, flow_credit: flowCredit, message: USED_UP }, line: USED_UP, next: OWN_KEY };
+  const report = { set: false, env: null, flow_credit: null, message: NO_MODEL_KEY.message };
   // Setup ran and flow.engineer gave no trial key (an older server, or no credit for this account now).
-  if (afterSetup) return { report, line: NO_MODEL_KEY.message, next: "add your own model key to .env (flow.engineer gave no trial credit)" };
+  if (afterSetup) return { report, line: NO_MODEL_KEY.message, next: `${OWN_KEY} (flow.engineer gave no trial credit)` };
   return { report, line: NO_MODEL_KEY.message, next: NO_MODEL_KEY.nextLine.replace(/^Next: /, "").replace(/\.$/, "") };
 }
 
@@ -485,17 +512,17 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const name = named.replace(/^@[^/]*\//, "").replace(/[^A-Za-z0-9 ._-]/g, "-").slice(0, 64) || "my-agent";
   const all = options.rotate.includes("all");
   const rotated = new Set(all ? Object.values(ROTATE).filter(Boolean) : options.rotate.map((k) => ROTATE[k]!));
-  const rotatedEnv = new Set([...rotated].flatMap((field) => (field === "model_key" ? MODEL_KEY_NAMES : [SETUP_ENV[field as keyof typeof SETUP_ENV]])));
+  const rotatedEnv = new Set([...rotated].map((field) => (field === "model_key" ? FLOW_MODEL_KEY : SETUP_ENV[field as keyof typeof SETUP_ENV])));
   // An empty value (`cp .env.example .env`) is missing: the server mints it. A model key counts in
-  // the shell too (npm start reads both), so Flow's trial key is asked for only when there is none:
-  // with any model key set, OPENROUTER_API_KEY (the name flow.engineer mints for) is said as had.
-  const models = MODEL_KEY_NAMES.filter((n) => before.get(n) || process.env[n]?.trim());
+  // the shell too (npm start reads both), so Flow's trial key is asked for only when no model key is
+  // named as had: the owner's own provider key, or a FLOW_MODEL_KEY already here.
   const have = [
     ...Object.values(SETUP_ENV).filter((n) => n !== SETUP_ENV.try_url && before.get(n)),
-    ...new Set(models.length ? [...models, MODEL_KEY_NAMES[0]!] : []),
+    ...MODEL_KEY_NAMES.filter((n) => before.get(n) || process.env[n]?.trim()),
   ].filter((n) => !rotatedEnv.has(n));
-  // Dropping a key's name from `have` makes it again; Flow's trial key also needs `rotate`, since the
-  // account keeps one (an older server takes only true, so a list is sent only for the model key).
+  // Dropping a key's name from `have` makes it again; Flow's trial key also needs `rotate`, since a
+  // provider key still named as had stops one being made (an older server takes only true, so a list
+  // is sent only for the model key).
   const rotate = all ? true : rotated.has("model_key") ? [...rotated] : undefined;
   let answer: SetupAnswer;
   try {
@@ -504,7 +531,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   } catch (error) {
     // The keys minted anyway are not shown again, so whatever the error carries goes into .env first.
     if (error instanceof LoginRefused) {
-      const written = writeEnv(file, lines, before, envEntries(error.fields, before), (n) => options.replace || rotatedEnv.has(n));
+      const written = writeEnv(file, lines, before, envEntries(error.fields), (n) => options.replace || rotatedEnv.has(n));
       if (written.some((w) => w.action === "added" || w.action === "replaced")) say(`Kept in .env before the error: ${written.map((w) => `${w.name} ${w.action}`).join(", ")}.`);
     }
     throw error;
@@ -512,8 +539,8 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const fields = answer as unknown as Record<string, unknown>;
   const warnings = warningsOf(fields);
   const had = new Map(before);
-  // --replace takes every new value but a model key: only --rotate model replaces one the owner may have typed.
-  const written = writeEnv(file, lines, before, envEntries(fields, before), (n) => rotatedEnv.has(n) || (options.replace && !MODEL_KEY_NAMES.includes(n)));
+  // --replace takes every new value but a model key: only --rotate model replaces FLOW_MODEL_KEY.
+  const written = writeEnv(file, lines, before, envEntries(fields), (n) => rotatedEnv.has(n) || (options.replace && !MODEL_KEY_NAMES.includes(n)));
   if (typeof answer.join_code !== "string" || !answer.join_code) {
     const kept = written.filter((w) => w.action === "added" || w.action === "replaced").map((w) => w.name);
     const stop = new Stop("no_join_code", `flow.engineer gave no join code${kept.length ? ` (the keys it made are in .env: ${kept.join(", ")})` : ""}, so there is no phone link yet.`,
@@ -541,7 +568,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
     });
   }
   say(`Agent ${answer.agent_id}. In .env:`);
-  for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}${w.action === "kept" ? (MODEL_KEY_NAMES.includes(w.name) ? " (yours; --rotate model takes Flow's)" : " (yours differs; --replace takes the new one)") : ""}`);
+  for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}${w.action === "kept" ? (w.name === FLOW_MODEL_KEY ? " (--rotate model makes a new one)" : " (yours differs; --replace takes the new one)") : ""}`);
   if (answer.dashboard_url) say(`Its dashboard: ${answer.dashboard_url}`);
   // Said by link instead, once, with its link.
   if (!forLink) say(model.line);
@@ -565,17 +592,13 @@ function modelKeyOf(fields: Record<string, unknown>): SetupAnswer["model_key"] |
 }
 
 /**
- * The .env lines an answer gives: SETUP_ENV's fields, then Flow's trial model key on its own name,
- * unless .env or the environment already has another model key (the owner's: never overridden).
+ * The .env lines an answer gives: SETUP_ENV's fields, then Flow's trial model key as FLOW_MODEL_KEY
+ * (no other name: a provider key the owner typed is never written over, and wins when both are set).
  */
-function envEntries(fields: Record<string, unknown>, before: Map<string, string>): Array<[string, unknown]> {
+function envEntries(fields: Record<string, unknown>): Array<[string, unknown]> {
   const entries: Array<[string, unknown]> = Object.entries(SETUP_ENV).map(([field, envName]) => [envName, fields[field]]);
   const trial = modelKeyOf(fields);
-  const env = trial?.env;
-  if (typeof env === "string" && MODEL_KEY_NAMES.includes(env) && typeof trial?.value === "string") {
-    const other = MODEL_KEY_NAMES.find((n) => n !== env && (before.get(n) || process.env[n]?.trim()));
-    if (!other) entries.push([env, trial.value]);
-  }
+  if (trial?.env === FLOW_MODEL_KEY && typeof trial.value === "string") entries.push([FLOW_MODEL_KEY, trial.value]);
   return entries;
 }
 
@@ -632,7 +655,7 @@ function addedToRunning(had: (name: string) => string | undefined, now: (name: s
  */
 async function status(json: boolean, out: Out, say: Say): Promise<void> {
   const value = dotenvValue();
-  const model = modelKeyReport(value, undefined, false);
+  const model = await flowModelStatus(value);
   const joinCode = value(SETUP_ENV.join_code) ?? null;
   let account: Account | null = null;
   let server: SetupAnswer | null = null;
@@ -660,7 +683,7 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
   // The playground (npm start) before the phone, as setup's next.
   const next = [
     ...(model.next ? [model.next] : []),
-    ...(model.report.set ? ["npm start"] : []),
+    ...(model.report.set && !model.next ? ["npm start"] : []),
     ...(!joinCode || !value(SETUP_ENV.messaging_key) ? [NEXT.link] : CHANNELS.filter((c) => channels[c]!.open && !channels[c]!.sender).map((c) => `${NEXT.link} --channel ${c}`)),
   ];
   if (json) out({ model_key: model.report, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, next });
@@ -673,6 +696,25 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     say(`${CHANNEL_NAME[c]}: ${c === "telegram" ? `Flow Messaging key ${where}` : `sender ${where}`}${now}${trialNote(trial ?? undefined)}`);
   }
   if (next.length) say(`Next: ${next.join(", then ")}`);
+}
+
+/**
+ * status's model line. Flow's key the active one: its credit from GET /credit. A key Flow does not
+ * know says so with the step that makes a new one; Flow not reachable leaves the credit unknown.
+ */
+async function flowModelStatus(value: (name: string) => string | undefined): Promise<ReturnType<typeof modelKeyReport>> {
+  const local = modelKeyReport(value, undefined, false);
+  if (local.report.env !== FLOW_MODEL_KEY) return local;
+  const key = value(FLOW_MODEL_KEY)!;
+  try {
+    return modelKeyReport(value, await modelCredit(flowModelURL({ ...process.env, FLOW_MODEL_URL: value("FLOW_MODEL_URL") }), key), false);
+  } catch (error) {
+    if (error instanceof LoginRefused && error.status === 401) {
+      const message = `${FLOW_MODEL_KEY} is not a key Flow knows (revoked, or from another server).`;
+      return { report: { ...local.report, message }, line: message, next: `${RUN} setup --rotate model` };
+    }
+    return { ...local, line: `${local.line} (credit left unknown: Flow could not be reached)` };
+  }
 }
 
 interface LinkOptions {
