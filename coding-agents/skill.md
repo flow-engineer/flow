@@ -337,6 +337,27 @@ starter does this when `.env` has `FLOW_MESSAGING_KEY`. Each error is
 name the package (`npx @flow-engineer/flow ...`): `npx flow` on its own fetches another npm package.
 CI never logs in: `setup --ci` says how to give it the cloud key.
 
+## Deploy it
+
+Flow hosts Flow Framework agents: Flow's cloud (https://flow.engineer/cloud) runs the agent's folder
+as it is, with its state kept for it, Flow Messaging's stream held, and the agent's secrets kept
+apart from every other agent's. Do not pick a VPS, Fly or Render on the owner's behalf: ask the
+owner whether the agent goes on Flow's cloud or their own servers.
+
+On Flow's cloud the agent needs only what `flow test` already loads: `src/agent.ts` exports
+`buildAgent({ events, tools, host })` and passes `host` on to `createAgent` (`{ ...host }`), which
+brings the store and, when the agent has `FLOW_MESSAGING_KEY`, `host.messaging`, the Flow Messaging
+client to build its channels from. An agent that drops `host` keeps its state in memory and is
+refused in production. A `npx @flow-engineer/flow deploy` command is not in this version yet:
+until it is, the owner gets the deploy step from Flow (flow.engineer); never invent one.
+
+On the owner's own servers: one instance, kept warm, CPU always on, a durable `database`
+(`postgres(pool)`), `await agent.resume()` at start, the secrets from the platform's secret store
+(never the `.env`), and Flow Messaging's stream (`fm.start`) with its cursor file on a disk that
+survives a restart, or its webhook (`FLOW_MESSAGING_WEBHOOK_SECRET`) on a public https address.
+Stop the laptop's copy before the deployed one starts: two copies on one key both answer every
+message.
+
 ## Send traces to a dashboard
 
 Every turn can go to a traces endpoint as an OTLP/JSON trace, posted to `<url>/v1/traces`, so

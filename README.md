@@ -631,7 +631,7 @@ cd agents/my-agent && npm start
 
 **Which channels are real?** WhatsApp, SMS and your own UI (`customUI`) have production definitions today; you plug in any provider by writing `sendMessage`. Telegram and iMessage are real through Flow Messaging (`fm.telegram()`, `fm.imessage()`, [flow-messaging/README.md](flow-messaging/README.md)); in core they are in the playground for now.
 
-**Does it host my agent?** No. It runs in your Node process, on your machine or servers. You pay your model and messaging providers directly.
+**Does it host my agent?** The framework runs in your Node process, on your machine or servers, and you pay your model and messaging providers directly. Flow's cloud (https://flow.engineer/cloud) can host it instead, from the same `buildAgent` that `flow test` loads; a `deploy` command is not in this version yet.
 
 **Is the data mine?** Yes. State lives in your database, and events go wherever you send them.
 
