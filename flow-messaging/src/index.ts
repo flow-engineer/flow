@@ -184,12 +184,17 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     }
   }
 
-  /** Typing and read receipts are a courtesy: Flow's spec says to ignore their failures. */
+  /**
+   * Typing and read receipts are a courtesy: Flow's spec says to ignore their failures. Outside the
+   * window (iMessage and WhatsApp until the person writes) they are expected to be refused, so that
+   * is not logged; any other failure is, once.
+   */
   async function courtesy(route: Route, to: string, action: "typing" | "read", body: Record<string, unknown>, messageId?: string): Promise<void> {
     try {
       const conversation = await conversationFor(route.name, to, messageId);
       if (conversation) await client.post(`/v1/conversations/${idSegment("conv", conversation)}/${action}`, body, 1);
     } catch (error) {
+      if (error instanceof FlowMessagingError && error.type === "outside_window") return;
       console.warn(`@flow-engineer/flow/flow-messaging: ${action} on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
     }
   }

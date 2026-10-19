@@ -6,10 +6,14 @@
 //                                                authorization_pending, slow_down, expired_token, access_denied, invalid_grant
 //   POST /cli/revoke (bearer) {}              ends this token
 //   GET  /cli/whoami (bearer)                 -> {account, email, token}
-//   POST /cli/setup (bearer) {name, hostname, channels, have}
+//   POST /cli/setup (bearer) {name, hostname, channels, have, rotate?}
 //        -> {agent_id, cloud_key?, traces_key?, messaging_key?, join_code, account, app_id, dashboard_url, try_url,
 //            <channel>_sender?, <channel>_link? (telegram, whatsapp, imessage: each only while that shared sender
-//            is open), try_urls?, trial?, minted, next}; a 502 carries every field that worked too;
+//            is open), try_urls?, trial?, model_key?, minted, next}; a 502 carries every field that worked too;
+//        model_key is Flow's trial model key, {env, value, limit_usd, minted: true} when made now (in every answer
+//        of that call, errors too), {env, minted: false, limit_usd} when the account has one already (limit_usd 0:
+//        no credit left), absent when the server gives none (older, off, or have names OPENROUTER_API_KEY);
+//        rotate is true (every key) or the answer fields to make again, such as ["model_key"];
 //        429 slow_down with Retry-After; 403 for a trial limit (sandbox_allowance_used, ...), its next prose
 //        Any answer may carry warnings: up to 20 strings to show the owner as they are.
 // Every error is flat: {"error": "<code>", "error_description": "<sentence>", "next": "<command, URL or sentence>"}.
@@ -168,6 +172,8 @@ export interface SetupAnswer {
   try_urls?: Record<string, string>;
   /** The account's free-trial counts per channel; limit null is unlimited. iMessage also counts the people it may reach. */
   trial?: Record<string, { limit: number | null; used: number; contacts?: { limit: number; used: number } }>;
+  /** Flow's trial model key: its value only when made in this call (shown once). Absent: no trial credit here. */
+  model_key?: { env?: string; value?: string; limit_usd?: number; minted?: boolean };
   /** The answer fields of the keys made in this call. */
   minted?: string[];
   next?: string[];
@@ -299,7 +305,7 @@ export async function whoami(url: string, token: string): Promise<Account> {
   return answer.body as unknown as Account;
 }
 
-export async function setup(url: string, token: string, request: { name: string; hostname: string; channels: string[]; have: string[] }): Promise<SetupAnswer> {
+export async function setup(url: string, token: string, request: { name: string; hostname: string; channels: string[]; have: string[]; rotate?: true | string[] }): Promise<SetupAnswer> {
   const answer = await call(url, "/cli/setup", { token, body: request });
   // A 200 is returned whole even without a join code: the keys it minted are shown only now.
   if (answer.status !== 200) throw refused("/cli/setup", answer, url);

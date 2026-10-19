@@ -21,8 +21,9 @@ and `flow-framework-auth` (`auth-skill.md`) when tools need to know who the pers
 example: a complete agent with tools and tests that depends on the `@flow-engineer/flow` package and imports
 `@flow-engineer/flow` and `@flow-engineer/flow/simulators`, with these skills in `.claude/skills/`. Run `npm install` there.
 Build in it, changing Pip's prompt, skills, tools and tests into yours. The owner copies
-`.env.example` to `.env` and puts one model key in it (never read or print it). Flow Framework does not
-issue that key; it is made at the provider: `OPENROUTER_API_KEY` at https://openrouter.ai/keys,
+`.env.example` to `.env` and puts one model key in it (never read or print it), or runs
+`npx @flow-engineer/flow link` (or `setup`), which writes Flow's free trial key there. Their own key is made
+at the provider: `OPENROUTER_API_KEY` at https://openrouter.ai/keys,
 `OPENAI_API_KEY` at https://platform.openai.com/api-keys, `ANTHROPIC_API_KEY` at
 https://console.anthropic.com/settings/keys, or `GEMINI_API_KEY` at https://aistudio.google.com/apikey.
 The first one with a value is used, and `CAFE_MODEL` sets the café's model id. Then `npm start`
@@ -312,11 +313,17 @@ from the agent's folder (`npx @flow-engineer/flow init` makes a starter in an em
 `chat` reads stdin; nothing else asks for input or needs a terminal.
 
 ```sh
-printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # locally, no account: one message per line, replies printed
-npx @flow-engineer/flow link --json          # signs in and runs setup when needed, then the link; give its say_to_person to the owner
-npx @flow-engineer/flow test --synthetic     # the tests, on the key setup wrote
-npm start                                    # the agent; the owner texts it while it runs
+npx @flow-engineer/flow link --json          # signs in and runs setup when needed (Flow's trial model key too), then the link; give its say_to_person to the owner
+npm start                                    # the agent: its playground link, and the owner texts it while it runs
+npx @flow-engineer/flow status --json        # what the folder has and lacks, at any time
+printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check: one message per line, replies printed
+npx @flow-engineer/flow test --synthetic     # your own check: the tests, on the key setup wrote
 ```
+
+When the owner asks how to test it, recommend first the playground (`npm start`, then open the
+link it prints: the test people and the channels side by side, with Debug), then their phone (the
+`link`, while `npm start` runs). `chat` and `test --synthetic` are for you to check your own work;
+do not offer them to the owner as ways to test.
 
 `link` runs `login` first when not signed in: it opens the owner's browser itself and prints the
 link and code at once (with `--json` the first line is `{"status":"pending","verification_uri":...,

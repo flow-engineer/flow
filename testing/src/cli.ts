@@ -25,6 +25,7 @@ import { request as httpsRequest } from "node:https";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
+import { hasModelKey, NO_MODEL_KEY } from "../../src/model.ts";
 import { PLUGIN_LINE, pluginCli } from "./plugin.ts";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions } from "./client.ts";
@@ -107,11 +108,17 @@ the CHINWAG_ names from before the rename still work):
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
 const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}
 ${PLUGIN_LINE}\n${ACCOUNT_LINES}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
-const NEXT_STEPS = `  2. Add one model key: cp .env.example .env; the file says where to make one
-  3. npx @flow-engineer/flow chat, and type to it (or npm start for the playground)
-  4. npx @flow-engineer/flow link: signs in, writes the other keys, prints the link for your phone;
-     keep npm start running and text it
-  5. Tell your coding agent what to build: its skills are in .claude/skills/`;
+
+/** What to do after new or init, from step 2; a model key comes first when none is set here. */
+function nextSteps(): string {
+  const steps = [
+    ...(hasModelKey(process.env) ? [] : [`Model key: none yet. ${NO_MODEL_KEY.nextLine.replace(/^Next: r/, "R")} (in .env: cp .env.example .env; the file says where to make one)`]),
+    `npm start, and open the link it prints: try it in the playground as its test people, channels side by side`,
+    `npx @flow-engineer/flow link: signs in, writes the other keys, prints the link for your phone;\n     keep npm start running and text it`,
+    `Tell your coding agent what to build: its skills are in .claude/skills/`,
+  ];
+  return steps.map((step, i) => `  ${i + 2}. ${step}`).join("\n");
+}
 
 checkNode(process.versions.node);
 
@@ -182,7 +189,7 @@ if (command === "new") {
   }
   console.log(`Made ./${name}/ from the café example (Pip). Next:
   1. cd ${name} && npm install
-${NEXT_STEPS}`);
+${nextSteps()}`);
   process.exit(0);
 }
 
@@ -195,9 +202,10 @@ if (command === "init") {
     console.error((error as Error).message);
     process.exit(1);
   }
+  loadEnv(undefined); // a .env already here may hold a model key
   console.log(`Made ${name}, started from the café example (Pip), in this folder. Next:
   1. npm install
-${NEXT_STEPS}`);
+${nextSteps()}`);
   process.exit(0);
 }
 

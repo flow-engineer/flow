@@ -101,6 +101,7 @@ function fakeOpener() {
 }
 
 const temp = () => mkdtempSync(join(tmpdir(), "flow-account-"));
+const NO_KEY = "This agent has no model key: put one in .env in the agent's folder, on one of the lines OPENROUTER_API_KEY=, OPENAI_API_KEY=, ANTHROPIC_API_KEY= or GEMINI_API_KEY= (an OpenRouter key is made at https://openrouter.ai/keys).";
 /** A folder that is an agent's: it has a package.json. */
 const agentDir = (name = "cafe") => {
   const dir = temp();
@@ -262,7 +263,7 @@ test("setup merges the keys into .env, keeps the owner's lines and values, print
   const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
   const first = await run(["setup", "--json"], { url: flow.url, config, cwd, env });
   assert.equal(first.code, 0, first.err);
-  assert.deepEqual(flow.seen.at(-1)!.body, { name: "cafe", hostname: flow.seen.at(-1)!.body.hostname, channels: ["telegram", "whatsapp", "imessage"], have: ["FLOW_MESSAGING_TELEGRAM_SENDER"] });
+  assert.deepEqual(flow.seen.at(-1)!.body, { name: "cafe", hostname: flow.seen.at(-1)!.body.hostname, channels: ["telegram", "whatsapp", "imessage"], have: ["FLOW_MESSAGING_TELEGRAM_SENDER", "OPENROUTER_API_KEY"] });
   const dotenv = readFileSync(join(cwd, ".env"), "utf8");
   assert.equal(dotenv, `OPENROUTER_API_KEY=sk-mine\nFLOW_MESSAGING_TELEGRAM_SENDER=snd_mine\nFLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}\nFLOW_FRAMEWORK_TRACES_KEY=${KEYS.traces_key}\nFLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\nFLOW_FRAMEWORK_TRY_URL=${flow.url}/try/brave-otter-1?c=telegram\n`);
   assert.deepEqual(first.lines[0]!.env_written[".env"], [
@@ -273,12 +274,12 @@ test("setup merges the keys into .env, keeps the owner's lines and values, print
     { name: "FLOW_FRAMEWORK_JOIN_CODE", action: "added", value: "brave-otter-1" },
     { name: "FLOW_FRAMEWORK_TRY_URL", action: "added", value: `${flow.url}/try/brave-otter-1?c=telegram` },
   ]);
-  assert.deepEqual(first.lines[0]!.next, ["npx @flow-engineer/flow test --synthetic", "npm start", "npx @flow-engineer/flow link --channel telegram"], "the server's next step");
+  assert.deepEqual(first.lines[0]!.next, ["npm start", "npx @flow-engineer/flow link --channel telegram"], "a first run's order: the playground, then the server's link step");
   for (const key of Object.values(KEYS)) assert.ok(!first.out.includes(key) && !first.err.includes(key), "no key is printed");
 
   const second = await run(["setup", "--json"], { url: flow.url, config, cwd, env });
   assert.equal(second.code, 0, second.err);
-  assert.equal((flow.seen.at(-1)!.body.have as string[]).length, 5, "every name already in .env is said, so no new key is made");
+  assert.equal((flow.seen.at(-1)!.body.have as string[]).length, 6, "every name already in .env is said, so no new key is made");
   assert.deepEqual(second.lines[0]!.env_written[".env"].map((w: { action: string }) => w.action), ["kept", "unchanged", "unchanged"]);
   assert.equal(readFileSync(join(cwd, ".env"), "utf8"), dotenv);
 
@@ -306,12 +307,18 @@ test("link in a folder not set up signs in, resuming a code already waiting, run
   assert.equal(flow.seen.filter((r) => r.path === "/cli/device").length, 1, "the waiting code was used, not a new one");
   assert.deepEqual(flow.seen.find((r) => r.path === "/cli/setup")!.body.channels, ["telegram", "whatsapp", "imessage"]);
   assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_FRAMEWORK_JOIN_CODE=brave-otter-1$/m);
-  assert.deepEqual(result.lines.at(-1), { url: `${flow.url}/try/brave-otter-1?c=telegram`, channel: "telegram", join_code: "brave-otter-1", reply_only: false, say_to_person: `Open this on your phone and send the message Telegram fills in: ${flow.url}/try/brave-otter-1?c=telegram` });
+  assert.deepEqual(result.lines.at(-1), {
+    url: `${flow.url}/try/brave-otter-1?c=telegram`, channel: "telegram", join_code: "brave-otter-1", reply_only: false, say_to_person: `Open this on your phone and send the message Telegram fills in: ${flow.url}/try/brave-otter-1?c=telegram`,
+    model_key: { set: false, env: null, flow_trial: null, message: NO_KEY }, next: "add your own model key to .env (flow.engineer gave no trial credit)",
+  });
+  assert.ok(!("next" in result.lines[2]!), "setup's next list is not given as well: one next per run");
+  assert.match(result.err, /answers only once \.env has a model key/, "with no model key it does not say the phone chats with it");
+  assert.ok(!/that phone chats with this agent/.test(result.err));
   assert.equal(flow.seen.at(-1)!.accept, "application/json", "the try page is asked for JSON, so a refusal comes with its next step");
   for (const key of Object.values(KEYS)) assert.ok(!result.out.includes(key) && !result.err.includes(key), "no key is printed");
 });
 
-test("link in a folder set up already needs no sign-in: it prints the server's try_url for that channel, else builds one, and a channel the server cannot open yet exits 3 with its next step", async (t) => {
+test("link in a folder set up already needs no sign-in: it prints the server's try_url for that channel, else builds one; a channel the server cannot open yet is said once with the open channels' links, and exits 3 only when none is open", async (t) => {
   const flow = await flowServer();
   t.after(flow.close);
   const cwd = temp();
@@ -321,11 +328,22 @@ test("link in a folder set up already needs no sign-in: it prints the server's t
   assert.equal(served.lines[0]!.url, `${flow.url}/try/brave-otter-1?c=telegram&from=setup`);
   assert.equal(flow.seen.filter((r) => r.path.startsWith("/cli/")).length, 0, "no sign-in and no setup");
 
-  const refused = await run(["link", "--channel", "whatsapp", "--json"], { url: flow.url, config: temp(), cwd });
-  assert.equal(refused.code, 3, refused.err);
-  assert.equal(flow.seen.at(-1)!.path, "/try/brave-otter-1?c=whatsapp");
+  // WhatsApp's sender is in .env but the try page says it is closed: said once, with Telegram's link instead.
+  const closed = await run(["link", "--channel", "whatsapp", "--json"], { url: flow.url, config: temp(), cwd });
+  assert.equal(closed.code, 0, closed.err);
+  assert.ok(flow.seen.some((r) => r.path === "/try/brave-otter-1?c=whatsapp"));
+  assert.equal(closed.lines[0]!.url, `${flow.url}/try/brave-otter-1?c=telegram&from=setup`);
+  assert.equal(closed.lines[0]!.not_open, "whatsapp");
+  assert.deepEqual(closed.lines[0]!.links, { telegram: `${flow.url}/try/brave-otter-1?c=telegram&from=setup` });
+  assert.equal(closed.err.split("\n").filter((l) => /WhatsApp/.test(l)).length, 1, "the closed channel is said once");
+  assert.match(closed.err, /^WhatsApp isn't open yet; here is your Telegram link\.$/m);
+
+  const nothing = await flowServer([], 200, { tryOpen: [] });
+  t.after(nothing.close);
+  writeFileSync(join(cwd, ".env"), `FLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_MESSAGING_WHATSAPP_SENDER=snd_wa\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\n`);
+  const refused = await run(["link", "--channel", "whatsapp", "--json"], { url: nothing.url, config: temp(), cwd });
+  assert.equal(refused.code, 3, "with no channel open at all it is still a refusal");
   assert.deepEqual(refused.lines[0], { error: { code: "channel_not_open", message: "WhatsApp is not open on the sandbox yet.", next: "npx @flow-engineer/flow link --channel telegram" } });
-  assert.match(refused.err, /Next: npx @flow-engineer\/flow link --channel telegram/);
   assert.equal((await run(["link", "--channel", "sms"], { url: flow.url, config: temp(), cwd })).code, 1, "an unknown channel is a usage error");
 });
 
@@ -378,7 +396,7 @@ test("setup fills names that .env has with no value (cp .env.example .env) in pl
   chmodSync(join(cwd, ".env"), 0o644);
   const result = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
   assert.equal(result.code, 0, result.err);
-  assert.deepEqual(flow.seen.at(-1)!.body.have, [], "an empty value is not had, so the server mints it");
+  assert.deepEqual(flow.seen.at(-1)!.body.have, ["OPENROUTER_API_KEY"], "an empty value is not had, so the server mints it");
   const lines = readFileSync(join(cwd, ".env"), "utf8").split("\n");
   assert.deepEqual(lines.slice(0, 4), ["OPENROUTER_API_KEY=sk-mine", `FLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}`, `FLOW_MESSAGING_KEY=${KEYS.messaging_key}`, "# the rest"], "each fills its own line");
   assert.equal(lines.filter((l) => l.startsWith("FLOW_FRAMEWORK_CLOUD_KEY=")).length, 1);
@@ -519,14 +537,18 @@ test("link --channel whatsapp in a folder set up before it had a WhatsApp sender
   assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_MESSAGING_WHATSAPP_SENDER=snd_wa$/m);
   assert.equal(result.lines.at(-1)!.url, `${flow.url}/try/brave-otter-1?c=whatsapp`);
   assert.match(result.err, /within 24 hours of your last message/);
-  assert.match(result.err, /restart it \(npm start\)/);
+  assert.match(result.err, /^If npm start is running, restart it to add WhatsApp\.$/m, "only the channel that is new");
 
-  const closed = await flowServer();
+  // iMessage is not open: no sender comes back, so link says so once and gives the open channels' links, exit 0.
+  const closed = await flowServer([], 200, { setup: { whatsapp_sender: "snd_wa" }, tryOpen: ["telegram", "whatsapp"] });
   t.after(closed.close);
   const none = await run(["link", "--channel", "imessage", "--json"], { url: closed.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
-  assert.equal(none.code, 3, none.err);
-  assert.equal(none.lines.at(-1)!.error.code, "channel_not_open");
-  assert.equal(none.lines.at(-1)!.error.next, "npx @flow-engineer/flow link");
+  assert.equal(none.code, 0, none.err);
+  assert.equal(none.lines.at(-1)!.not_open, "imessage");
+  assert.deepEqual(Object.keys(none.lines.at(-1)!.links), ["telegram", "whatsapp"]);
+  assert.match(none.err, /^iMessage isn't open yet; here are your Telegram and WhatsApp links\.$/m);
+  assert.equal(none.err.split("\n").filter((l) => /iMessage/.test(l)).length, 1, "said once");
+  assert.ok(!/restart it/.test(none.err), "no channel is new, so no restart is asked for");
 });
 
 test("a setup the server asks to wait on (429 slow_down) prints the wait and next, exits 4 like a waiting sign-in, and gives retry_after and the warnings in --json", async (t) => {
@@ -591,4 +613,142 @@ test("setup prints each of the server's warnings on stderr (at most 20, strings 
   t.after(none.close);
   const plain = await run(["setup", "--json"], { url: none.url, config: temp(), cwd: agentDir(), env });
   assert.deepEqual(plain.lines[0]!.warnings, []);
+});
+
+const TRIAL = "sk-or-v1-flowtrialsecretQ7w3";
+
+test("setup writes Flow's trial model key into its empty line at 0600 and prints only the credit; it never takes the place of a model key the owner set", async (t) => {
+  const flow = await flowServer([], 200, { setup: { model_key: { env: "OPENROUTER_API_KEY", value: TRIAL, limit_usd: 5, minted: true } } });
+  t.after(flow.close);
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  const cwd = agentDir();
+  writeFileSync(join(cwd, ".env"), "OPENROUTER_API_KEY=\nOPENAI_API_KEY=\n", { mode: 0o644 });
+  chmodSync(join(cwd, ".env"), 0o644);
+  const result = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd, env });
+  assert.equal(result.code, 0, result.err);
+  assert.ok(!(flow.seen.at(-1)!.body.have as string[]).includes("OPENROUTER_API_KEY"), "no model key here, so Flow's is asked for");
+  assert.deepEqual(readFileSync(join(cwd, ".env"), "utf8").split("\n").slice(0, 2), [`OPENROUTER_API_KEY=${TRIAL}`, "OPENAI_API_KEY="], "it takes its own empty line");
+  assert.equal(statSync(join(cwd, ".env")).mode & 0o777, 0o600);
+  assert.deepEqual(result.lines[0]!.model_key, { set: true, env: "OPENROUTER_API_KEY", flow_trial: { limit_usd: 5, minted: true } });
+  assert.equal(result.lines[0]!.next[0], "npm start");
+  assert.match(result.err, /^Model: Flow trial credit \(\$5\)$/m);
+  assert.ok(!result.out.includes(TRIAL) && !result.err.includes(TRIAL), "the model key is never printed");
+
+  // The owner's own OpenAI key: named as had, and a trial key that comes anyway is not written over it.
+  const own = agentDir();
+  writeFileSync(join(own, ".env"), "OPENAI_API_KEY=sk-mine-openai\n");
+  const kept = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd: own, env });
+  assert.equal(kept.code, 0, kept.err);
+  assert.deepEqual(flow.seen.at(-1)!.body.have, ["OPENAI_API_KEY", "OPENROUTER_API_KEY"], "with a key of their own, OPENROUTER_API_KEY is said as had too, so none is made");
+  assert.ok(!readFileSync(join(own, ".env"), "utf8").includes(TRIAL));
+  assert.match(kept.err, /^Model: OPENAI_API_KEY is set$/m);
+});
+
+test("with no model key after setup, it says why in one sentence and puts the way to get one first in its one next list", async (t) => {
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  // An older server, or trial credit off: no model_key, and a warning.
+  const older = await flowServer([], 200, { setup: { warnings: ["Flow's trial credit is not available right now."] } });
+  t.after(older.close);
+  const plain = await run(["setup"], { url: older.url, config: temp(), cwd: agentDir(), env });
+  assert.equal(plain.code, 0, plain.err);
+  assert.ok(plain.out.split("\n").includes(NO_KEY));
+  assert.deepEqual(plain.out.split("\n").filter((l) => l.startsWith("Next:")), ["Next: add your own model key to .env (flow.engineer gave no trial credit), then npm start, then npx @flow-engineer/flow link --channel telegram"]);
+
+  // The account's trial key went to another folder: minted false, no value.
+  const had = await flowServer([], 200, { setup: { model_key: { env: "OPENROUTER_API_KEY", limit_usd: 5, minted: false } } });
+  t.after(had.close);
+  const again = await run(["setup", "--json"], { url: had.url, config: temp(), cwd: agentDir(), env });
+  assert.equal(again.code, 0, again.err);
+  assert.deepEqual(again.lines[0]!.model_key.flow_trial, { limit_usd: 5, minted: false });
+  assert.equal(again.lines[0]!.model_key.set, false);
+  assert.match(again.lines[0]!.next[0], /setup --rotate model/);
+
+  // Rotated with no credit left.
+  const spent = await flowServer([], 200, { setup: { model_key: { env: "OPENROUTER_API_KEY", limit_usd: 0, minted: false } } });
+  t.after(spent.close);
+  const out = await run(["setup", "--json"], { url: spent.url, config: temp(), cwd: agentDir(), env });
+  assert.equal(out.lines[0]!.model_key.message, "This account's Flow trial credit is used up.");
+  assert.equal(out.lines[0]!.next[0], "add your own model key to .env");
+});
+
+test("a trial model key made in a call that then fails is written to .env before the error, as the other keys are", async (t) => {
+  const flow = await flowServer([], 200, { setupError: { status: 502, body: { error: "messaging_failed", error_description: "Messaging is down.", next: "npx @flow-engineer/flow setup", model_key: { env: "OPENROUTER_API_KEY", value: TRIAL, limit_usd: 2, minted: true }, minted: ["model_key"] } } });
+  t.after(flow.close);
+  const cwd = agentDir();
+  const result = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(result.code, 3);
+  assert.equal(readFileSync(join(cwd, ".env"), "utf8"), `OPENROUTER_API_KEY=${TRIAL}\n`);
+  assert.ok(!result.out.includes(TRIAL) && !result.err.includes(TRIAL));
+});
+
+test("setup --rotate makes the named keys again: model sends rotate [\"model_key\"] and replaces the line, the others leave rotate out, all sends true", async (t) => {
+  const flow = await flowServer([], 200, { setup: { model_key: { env: "OPENROUTER_API_KEY", value: TRIAL, limit_usd: 5, minted: true } } });
+  t.after(flow.close);
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  const cwd = agentDir();
+  writeFileSync(join(cwd, ".env"), "OPENROUTER_API_KEY=sk-or-old\nFLOW_FRAMEWORK_CLOUD_KEY=oci_old\n");
+  const model = await run(["setup", "--rotate", "model"], { url: flow.url, config: temp(), cwd, env });
+  assert.equal(model.code, 0, model.err);
+  assert.deepEqual(flow.seen.at(-1)!.body.rotate, ["model_key"]);
+  assert.ok(!(flow.seen.at(-1)!.body.have as string[]).includes("OPENROUTER_API_KEY"));
+  assert.match(readFileSync(join(cwd, ".env"), "utf8"), new RegExp(`^OPENROUTER_API_KEY=${TRIAL}$`, "m"));
+  assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_FRAMEWORK_CLOUD_KEY=oci_old$/m, "only what was named");
+
+  const cloud = await run(["setup", "--rotate", "cloud"], { url: flow.url, config: temp(), cwd, env });
+  assert.equal(cloud.code, 0, cloud.err);
+  assert.ok(!("rotate" in flow.seen.at(-1)!.body), "an older server takes this one: the name is left out of have");
+  assert.ok(!(flow.seen.at(-1)!.body.have as string[]).includes("FLOW_FRAMEWORK_CLOUD_KEY"));
+  assert.match(readFileSync(join(cwd, ".env"), "utf8"), new RegExp(`^FLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}$`, "m"));
+
+  assert.equal((await run(["setup", "--rotate", "all"], { url: flow.url, config: temp(), cwd, env })).code, 0);
+  assert.equal(flow.seen.at(-1)!.body.rotate, true);
+  assert.equal((await run(["setup", "--rotate", "everything"], { url: flow.url, config: temp(), cwd, env })).code, 1, "an unknown name is a usage error");
+});
+
+test("setup drops Telegram's bot parameters from the other channels' try links, and shows only open channels' trial counts", async (t) => {
+  const sig = "&bot=FlowSandboxBot&bs=abc123";
+  const flow = await flowServer([], 200, {
+    setup: {
+      whatsapp_sender: "snd_wa",
+      try_urls: { telegram: "https://flow.engineer/try/brave-otter-1?c=telegram" + sig, whatsapp: "https://flow.engineer/try/brave-otter-1?c=whatsapp" + sig },
+      trial: { telegram: { limit: null, used: 0 }, whatsapp: { limit: 300, used: 1 }, imessage: { limit: 100, used: 0, contacts: { limit: 2, used: 1 } } },
+    },
+  });
+  t.after(flow.close);
+  const result = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(result.code, 0, result.err);
+  assert.deepEqual(result.lines[0]!.try_urls, { telegram: "https://flow.engineer/try/brave-otter-1?c=telegram" + sig, whatsapp: "https://flow.engineer/try/brave-otter-1?c=whatsapp" });
+  assert.deepEqual(Object.keys(result.lines[0]!.trial), ["telegram", "whatsapp"], "iMessage is closed: its counts are not shown");
+  assert.ok(!/iMessage/.test(result.err), result.err);
+});
+
+test("status says what the folder has and lacks, never a key's value; signed in, it adds which channels are open and their trial counts, minting nothing", async (t) => {
+  const flow = await flowServer([], 200, { setup: { whatsapp_sender: "snd_wa", trial: { telegram: { limit: null, used: 0 }, whatsapp: { limit: 300, used: 12 } } } });
+  t.after(flow.close);
+  const cwd = agentDir();
+  writeFileSync(join(cwd, ".env"), `OPENROUTER_API_KEY=${TRIAL}\nFLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_MESSAGING_TELEGRAM_SENDER=snd_tg\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\n`);
+  const before = readFileSync(join(cwd, ".env"), "utf8");
+
+  const out = await run(["status", "--json"], { url: flow.url, config: temp(), cwd });
+  assert.equal(out.code, 0, out.err);
+  assert.equal(flow.seen.length, 0, "not signed in: nothing is asked of flow.engineer");
+  assert.equal(out.lines[0]!.signed_in, false);
+  assert.deepEqual(out.lines[0]!.model_key, { set: true, env: "OPENROUTER_API_KEY", flow_trial: null });
+  assert.deepEqual(out.lines[0]!.channels.whatsapp, { sender: false, open: null, trial: null });
+
+  const signed = await run(["status", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(signed.code, 0, signed.err);
+  assert.deepEqual(signed.lines[0]!.signed_in, { email: "dev@example.com", account: "uid_1" });
+  assert.deepEqual(signed.lines[0]!.channels.whatsapp, { sender: false, open: true, trial: { limit: 300, used: 12 } });
+  assert.equal(signed.lines[0]!.channels.imessage.open, false);
+  assert.deepEqual(signed.lines[0]!.next, ["npm start", "npx @flow-engineer/flow link --channel whatsapp"]);
+  const asked = flow.seen.find((r) => r.path === "/cli/setup")!;
+  for (const name of ["FLOW_FRAMEWORK_CLOUD_KEY", "FLOW_FRAMEWORK_TRACES_KEY", "FLOW_MESSAGING_KEY", "OPENROUTER_API_KEY"]) assert.ok((asked.body.have as string[]).includes(name), `${name} named as had, so nothing is made`);
+  assert.equal(readFileSync(join(cwd, ".env"), "utf8"), before, "status writes nothing");
+  for (const secret of [TRIAL, KEYS.messaging_key]) assert.ok(!signed.out.includes(secret) && !signed.err.includes(secret));
+
+  const human = await run(["status"], { url: flow.url, config: temp(), cwd: agentDir() });
+  assert.equal(human.code, 0, human.err);
+  assert.ok(human.out.split("\n").includes(NO_KEY));
+  assert.match(human.out, /^Next: run npx @flow-engineer\/flow setup to get Flow's free trial credit, or add your own key, then npx @flow-engineer\/flow link$/m);
 });

@@ -1,8 +1,8 @@
 // covers: src/model.ts
 // The agent's model key: the first of OpenRouter, OpenAI, Anthropic and Gemini that has a value,
 // with MODEL overriding that provider's default id. A blank line is no key, and no key at all fails
-// when the model is made, naming the variables, not on the first message, unless a base URL is named
-// (a local server needs no key).
+// when the model is made, in one sentence naming .env and its lines with a next step, not on the
+// first message, unless a base URL is named (a local server needs no key).
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { modelFromKeys, openAICompatible } from "../src/model.ts";
@@ -17,12 +17,16 @@ test("the first key with a value picks the provider, and MODEL overrides its def
   assert.equal(modelFromKeys({ OPENROUTER_API_KEY: "  ", OPENAI_API_KEY: "sk-openai" }).apiKey, "sk-openai");
 });
 
-test("with no key and no base URL the model fails when it is made, naming every variable it reads", () => {
+test("with no key and no base URL the model fails when it is made: one sentence naming .env's lines and where to get a key, then the next step", () => {
   const names = ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"];
   const saved = names.map((name) => [name, process.env[name]] as const);
   for (const name of names) delete process.env[name];
   try {
-    assert.throws(() => openAICompatible(), { message: "No model key: set one of OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY (in the agent's .env), or pass apiKey, or baseURL for a server that needs none." });
+    assert.throws(() => openAICompatible(), {
+      message: "This agent has no model key: put one in .env in the agent's folder, on one of the lines OPENROUTER_API_KEY=, OPENAI_API_KEY=, ANTHROPIC_API_KEY= or GEMINI_API_KEY= (an OpenRouter key is made at https://openrouter.ai/keys).\nNext: run npx @flow-engineer/flow setup to get Flow's free trial credit, or add your own key.",
+      code: "no_model_key",
+      next: "npx @flow-engineer/flow setup",
+    });
     assert.doesNotThrow(() => openAICompatible({ apiKey: "k" }));
     assert.doesNotThrow(() => openAICompatible({ baseURL: "http://127.0.0.1:11434/v1" }));
   } finally {
