@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { newAgent } from "../scripts/new-agent.ts";
-import { initHere, newStandalone } from "../testing/src/new.ts";
+import { displayNameOf, initHere, newStandalone } from "../testing/src/new.ts";
 
 test("npm run new copies the café under its name, renamed, and refuses bad or taken names", () => {
   const agents = mkdtempSync(join(tmpdir(), "flow-agents-"));
@@ -61,6 +61,7 @@ test("flow init makes the same agent in the folder it runs in, named after it, o
   writeFileSync(join(dir, ".gitignore"), "dist/");
   assert.equal(initHere(dir), "my-shop");
   assert.equal(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).name, "my-shop");
+  assert.equal(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).displayName, "my shop", "no name given: the folder's in words");
   const main = readFileSync(join(dir, "src", "main.ts"), "utf8");
   assert.match(main, /from "@flow-engineer\/flow\/flow-messaging"/);
   assert.match(main, /process\.env\.FLOW_MESSAGING_KEY \? flowMessaging\(\)/);
@@ -82,4 +83,20 @@ test("flow init's next steps lead with getting a model key when none is set, and
   assert.match(none, /^ {2}3\. npm start, and open the link it prints/m);
   assert.match(init({ OPENAI_API_KEY: "sk-shell" }), /^ {2}2\. npm start, and open the link it prints/m);
   assert.doesNotMatch(init({}, "OPENROUTER_API_KEY=sk-mine\n"), /Model key/);
+});
+
+test("the name people call the agent (--display-name) is package.json's displayName: one line, no parentheses, at most 60 characters", () => {
+  const into = mkdtempSync(join(tmpdir(), "flow-named-"));
+  const dir = newStandalone("flatx", { into, displayName: "  FlatX   agent " });
+  assert.equal(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).displayName, "FlatX agent");
+  assert.equal(displayNameOf("Pip (the café)", "cafe"), "Pip the café");
+  assert.equal(displayNameOf("", "my-shop"), "my shop");
+  assert.throws(() => displayNameOf("x".repeat(61), "cafe"), /at most 60 characters/);
+
+  const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
+  const here = mkdtempSync(join(tmpdir(), "flow-init-named-"));
+  const result = spawnSync(process.execPath, [cli, "init", "--display-name", "FlatX agent"], { cwd: here, env: { PATH: process.env.PATH }, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(readFileSync(join(here, "package.json"), "utf8")).displayName, "FlatX agent");
+  assert.match(result.stdout, /a phone reaches it with "Hi FlatX agent \(ref <code>\)"/);
 });
