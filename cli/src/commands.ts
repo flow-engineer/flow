@@ -223,8 +223,8 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     "",
     "## Talking to the agent",
     "",
-    `\`${name} ask "<question>" --json\` sends one message to the agent; \`${name} chat\` opens an interactive loop (Ctrl-D or /exit to leave). Both need sign-in.`,
-    "The CLI keeps its conversation reference in chat.json in its config folder; --new forgets that reference and preserves shared person history. chat without a terminal exits 2: use ask instead.",
+    `\`${name} chat "<message>" --json\` sends one message to the agent; \`${name} chat\` opens an interactive loop (Ctrl-D or /exit to leave). Both need sign-in.`,
+    "The CLI keeps its conversation reference in chat.json in its config folder; --new forgets that reference and preserves shared person history. chat without a message needs a terminal (otherwise exits 2).",
     "",
     "## Commands",
   ];

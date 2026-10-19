@@ -89,6 +89,8 @@ test("a group's help lists its subcommands, and the top level lists groups and c
   const top = io();
   assert.equal(await runCli(cli, ["--help"], top.channel), 0);
   assert.match(top.out, /\n {2}order +list, view\n/, "the group, with its subcommands as its line");
+  assert.match(top.out, /\n {2}chat +Chat with/);
+  assert.doesNotMatch(top.out, /\n {2}ask +/);
   assert.match(top.out, /\n {2}cancel-order +Cancel order\n/, "a tool the file does not name keeps its own name");
   assert.doesNotMatch(top.out.slice(top.out.indexOf("COMMANDS")), /\n {2}(list|view) /, "subcommands are not listed at the top");
 });
@@ -190,7 +192,7 @@ test("CLI tool calls identify their command without adding metadata to tool argu
 });
 
 // MCP command tests never speak to an agent, so they cannot check auth, identity or chat state.
-test("ask and chat use the authenticated agent terminal, preserve identity and never call MCP", async (t) => {
+test("single-message and interactive chat use the authenticated agent terminal, preserve identity and never call MCP", async (t) => {
   const old = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "chinwag-terminal-"));
   t.after(() => { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; });
@@ -201,7 +203,7 @@ test("ask and chat use the authenticated agent terminal, preserve identity and n
   const mine = tool({ name: "mine", description: "Who this is for.", input: z.object({}), run: async (_i, ctx) => { seenKey = ctx.key; assert.equal(await ctx.credentials!.get("api"), "request-bound-backend"); return "the test person's orders"; } });
   agent = createAgent({ files: { "AGENTS.md": "Test agent" }, model: scripted.model, channels: [terminal.channel], tools: [mine], debounceMs: 0, scheduleCheckMs: 0 });
   const base = await listen(async (req, res) => {
-    assert.equal(req.url, "/agent/terminal", "ask/chat must not fetch the MCP tools");
+    assert.equal(req.url, "/agent/terminal", "chat must not fetch the MCP tools");
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const result = await terminal.fetch(new Request(`${base}${req.url}`, { method: req.method, headers: req.headers as Record<string, string>, body: Buffer.concat(chunks) }));
@@ -210,13 +212,13 @@ test("ask and chat use the authenticated agent terminal, preserve identity and n
   const cli = defineCli({ name: "terminal-test", server: `${base}/mcp` });
   const refused = io();
   assert.equal(await runCli(cli, ["chat"], refused.channel), 2);
-  assert.match(refused.err, /use terminal-test ask/);
-  assert.equal(await runCli(cli, ["ask", "who am I?"], io().channel), 3);
+  assert.match(refused.err, /terminal-test chat "<message>"/);
+  assert.equal(await runCli(cli, ["chat", "who am I?"], io().channel), 3);
   const out = io();
-  const ask = runCli(cli, ["ask", "who am I?", "--json", "--token", "test"], out.channel);
-  (await Promise.race([scripted.nextCall(0), ask.then(code => { throw new Error(`ask finished before model call: ${code} ${out.err}`); })])).answer(respond(call("send_terminal", { text: "Checking." }), call("mine", {})));
+  const single = runCli(cli, ["chat", "who am I?", "--json", "--token", "test"], out.channel);
+  (await Promise.race([scripted.nextCall(0), single.then(code => { throw new Error(`chat finished before model call: ${code} ${out.err}`); })])).answer(respond(call("send_terminal", { text: "Checking." }), call("mine", {})));
   (await scripted.nextCall(1)).answer(respond(call("send_terminal", { text: "Here are your orders." })));
-  assert.equal(await ask, 0);
+  assert.equal(await single, 0);
   assert.equal(seenKey, "user-7");
   const first = JSON.parse(out.out);
   assert.equal(first.replies.filter((r: any) => r.type === "message").at(-1).text, "Here are your orders.");

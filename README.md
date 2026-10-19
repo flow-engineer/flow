@@ -716,14 +716,13 @@ requests. Defaults retain the installed CLI's existing environment and config di
 
 ### Terminal conversations
 
-`ask` and `chat` talk directly to the agent, using the same bearer as MCP, not a tool called
-"ask". `defineCli({ name: "acme", server, agent: "https://agent.example.com/agent/terminal" })`
+`chat` talks directly to the agent, using the same bearer as MCP; it is not an MCP tool. `defineCli({ name: "acme", server, agent: "https://agent.example.com/agent/terminal" })`
 overrides the terminal URL; the default is the MCP server's origin plus `/agent/terminal`.
-`acme ask "Which orders are ready?" --json` prints one response; `acme chat` reads a TTY until
-Ctrl-D or `/exit`. Without a TTY use `ask` (chat exits 2); sign-in failures exit 3.
+`acme chat "Which orders are ready?" --json` prints one response; `acme chat` reads a TTY until
+Ctrl-D or `/exit`. Without a TTY pass a message to `chat` (an interactive chat exits 2); sign-in failures exit 3.
 `chat.json` is mode 600 and scoped by terminal endpoint. `--new` forgets the terminal's saved
 reference; the agent keeps its one-person history across channels. It does not erase a person's
-WhatsApp history. Teams can replace either command with their own Stricli command in `commands`.
+WhatsApp history. Teams can replace `chat` with their own Stricli command in `commands`.
 
 Mount the optional terminal handler beside MCP (no model or extra dependency in the CLI):
 

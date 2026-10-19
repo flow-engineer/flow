@@ -58,7 +58,7 @@ export function tracesFromEnv(env: NodeJS.ProcessEnv = process.env): TracesOptio
 }
 
 /** The endpoint's channel names: Flow Framework's custom UIs are web or app chats. */
-const CHANNEL_KIND: Record<string, string> = { sms: "sms", whatsapp: "whatsapp", custom: "web", cli: "cli" };
+const CHANNEL_KIND: Record<string, string> = { sms: "sms", mms: "mms", whatsapp: "whatsapp", telegram: "telegram", imessage: "imessage", web: "web", voice: "voice", other: "other", custom: "web", cli: "cli" };
 
 type Attr = { key: string; value: Record<string, unknown> };
 interface Span {

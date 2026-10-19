@@ -36,12 +36,12 @@ async function fakeEndpoint(status = 200) {
 }
 
 /** An SMS agent with one tool, tracing to `url`. */
-function agentFor(url: string, content: boolean, intercept?: AgentOptions["intercept"]) {
+function agentFor(url: string, content: boolean, intercept?: AgentOptions["intercept"], traceChannel?: string) {
   const dir = mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const sent: string[] = [];
-  const sms = { name: "sms", kind: "sms" as const, info: SMS, phone: true, send: (_: string, o: Outbound) => void (o.type === "message" && sent.push(o.text)) };
+  const sms = { name: "sms", kind: "sms" as const, traceChannel, info: SMS, phone: true, send: (_: string, o: Outbound) => void (o.type === "message" && sent.push(o.text)) };
   const lookup = tool({ name: "lookup", description: "Finds a slot.", input: z.object({ day: z.string() }), run: async ({ day }) => `free on ${day}` });
   const agent = createAgent({ dir, model: scripted.model, tools: [lookup], channels: [sms], debounceMs: 0, scheduleCheckMs: 0, id: "cafe", traces: { url, key: KEY, content, version: "v7" }, intercept });
   return { agent, sent, ...scripted };
@@ -204,5 +204,20 @@ test("standalone calls export one trace each with host metadata and content only
       assert.equal(root["openinference.span.kind"], "TOOL");
       assert.equal(JSON.stringify(spans).includes("private-tool-data"), content);
     } finally { await c.close(); }
+  }
+});
+
+// Existing traces use SMS; they do not cover adapters with explicit channel attribution.
+test("explicit trace channels keep terminal and custom chat sources distinct", async () => {
+  for (const channel of ["cli", "web", "imessage", "telegram"]) {
+    const endpoint = await fakeEndpoint();
+    try {
+      const h = agentFor(endpoint.url, false, undefined, channel);
+      await playTurn(h, "+15550100123");
+      const request = await endpoint.next(1);
+      await h.agent.flushTraces();
+      const root = request.body.resourceSpans[0].scopeSpans[0].spans.find((s: any) => !s.parentSpanId);
+      assert.equal(attrs(root)["chinwag.channel"], channel);
+    } finally { endpoint.close(); }
   }
 });

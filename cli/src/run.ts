@@ -116,7 +116,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
   const { rest, server: given, token: givenToken } = connectionFlags(argv);
   const server = given ?? config.server ?? env[envName(config, "SERVER")];
   const token = givenToken ?? env[tokenEnvOf(config)];
-  if ((rest[0] === "ask" || rest[0] === "chat") && !config.commands?.[rest[0]]) return runTerminal(config, server, token, rest, io);
+  if (rest[0] === "chat" && !config.commands?.[rest[0]]) return runTerminal(config, server, token, rest, io);
   const asksHelp = rest.length === 0 || rest[0] === "-h" || rest[0] === "--help";
 
   let client: Client | undefined;
@@ -268,7 +268,6 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
   const notice = server ? `Server: ${server}` : noServer(config);
   return buildRouteMap({
     routes: { ...top,
-      ask: top.ask ?? buildCommand({ docs: { brief: "Ask the agent one question (ask --help)" }, parameters: {}, func() {} }),
       chat: top.chat ?? buildCommand({ docs: { brief: "Chat with the agent in a terminal (chat --help)" }, parameters: {}, func() {} }),
       tools: toolsCommand(tools, io), skill: skillCommand(config, tools, io), auth: authRoutes(config, server, io) },
     docs: { brief: config.description ?? config.name, fullDescription: `${config.description ?? config.name}\n\n${notice}\n--server <url> and --token <token> work on every command.` },
