@@ -16,10 +16,22 @@ package.
 npx @flow-engineer/flow init                        # the starter agent in this (empty) folder; flow new <name> makes a folder
 npm install
 npx @flow-engineer/flow link --json                 # signs in and sets up if needed (the keys, Flow's trial model key among them), then prints the phone link
-printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # talk to it locally, one message per line
-npm start                                           # keep it running; the owner texts it from the phone
+npm start                                           # keep it running: the playground link it prints, and the phone link reaches it
 npx @flow-engineer/flow status --json               # any time: what the folder has and lacks
+printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check: talk to it locally, one message per line
 ```
+
+## How the owner tests it
+
+When the owner asks how to test the agent, recommend these, in this order:
+
+1. **The playground in the browser**: `npm start`, then open the link it prints. The test people
+   (`testPeople`; Maria, Sam and Priya in the starter) and the channels are side by side, and
+   **Debug** shows each tool call and how fast each message was answered.
+2. **Their phone**: the link from `link` (`say_to_person` in `link --json`), while `npm start` runs.
+
+`flow chat` and `npm test -- --synthetic` (the test cloud) are for you, to check your own work
+before you hand it back; run them yourself, and do not offer them to the owner as ways to test.
 
 - The model key: `setup` (which `link` runs; alone it needs `login` first) writes Flow's trial model key into `.env`
   when the folder has no model key (`OPENROUTER_API_KEY`, printed as `Model: Flow trial credit
@@ -81,8 +93,8 @@ Every error is `{"error":{"code","message","next"}}` on stdout with `--json`, an
 `<message> Next: <next>` on stderr. A waiting sign-in is `{"status":"pending",...,"next":...}`.
 `next` is the exact command or URL to run; when it came from flow.engineer it is the server's.
 A run gives one `next`: `setup --json`'s is a list in order (a model key first when there is
-none, then `chat`, `npm start`, `link`, tests last); inside `link` setup's line has none, and an
-error's `next` replaces it.
+none, then `npm start` for the playground, then `link` for the phone); inside `link` setup's line
+has none, and an error's `next` replaces it.
 Run it, or give it to the owner when it needs them (a browser approval, a page to open). A
 `slow_down` error also has `retry_after` (seconds, or `null` when the server gave none). A
 trial limit's `next` is a sentence, not a command: it is printed on its own line as it came; pass

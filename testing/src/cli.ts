@@ -113,7 +113,7 @@ ${PLUGIN_LINE}\n${ACCOUNT_LINES}\n  flow --version         Show the version\n\n$
 function nextSteps(): string {
   const steps = [
     ...(hasModelKey(process.env) ? [] : [`Model key: none yet. ${NO_MODEL_KEY.nextLine.replace(/^Next: r/, "R")} (in .env: cp .env.example .env; the file says where to make one)`]),
-    `npx @flow-engineer/flow chat, and type to it (or npm start for the playground)`,
+    `npm start, and open the link it prints: try it in the playground as its test people, channels side by side`,
     `npx @flow-engineer/flow link: signs in, writes the other keys, prints the link for your phone;\n     keep npm start running and text it`,
     `Tell your coding agent what to build: its skills are in .claude/skills/`,
   ];

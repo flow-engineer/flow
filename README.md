@@ -38,10 +38,11 @@ npm start
 ```bash
 npx @flow-engineer/flow init                 # the same starter in the current folder; then npm install
 npx @flow-engineer/flow link                 # signs in (opens the browser), writes its keys and Flow's trial model key into .env, prints a link
-printf 'hi\n' | npx @flow-engineer/flow chat  # talk to it in the terminal
-npm start                                    # open the link on your phone and text the agent
+npm start                                    # try it in the playground link it prints, then open the phone link and text the agent
 npx @flow-engineer/flow status               # what the folder has and lacks
 ```
+
+Test it first in the playground (the link `npm start` prints: the test people and the channels side by side), then on your phone. `flow chat` (the agent in the terminal) and `npm test -- --synthetic` are how a coding agent checks its own work.
 
 `flow chat` builds the agent from `src/agent.ts` and writes as its first test person, one message per line of stdin. `flow link` signs in and runs `flow setup` when the folder is not set up yet, then prints the link for `--channel telegram` (the default), `whatsapp` or `imessage`; a channel flow.engineer cannot open yet answers with what to do instead. With `FLOW_MESSAGING_KEY` in `.env`, the starter's `npm start` is on Telegram, plus WhatsApp and iMessage when `.env` has their senders, and connects to Flow Messaging by its outbound event stream, so there is no tunnel or public URL, and messages sent while it was stopped arrive when it starts again ([flow-messaging/README.md](flow-messaging/README.md)). Coding agents: [docs/agents.md](docs/agents.md) (https://flow.engineer/flow-framework/agents.md) has the exit codes and `next` steps.
 

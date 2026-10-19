@@ -274,7 +274,7 @@ test("setup merges the keys into .env, keeps the owner's lines and values, print
     { name: "FLOW_FRAMEWORK_JOIN_CODE", action: "added", value: "brave-otter-1" },
     { name: "FLOW_FRAMEWORK_TRY_URL", action: "added", value: `${flow.url}/try/brave-otter-1?c=telegram` },
   ]);
-  assert.deepEqual(first.lines[0]!.next, ["npx @flow-engineer/flow chat", "npm start", "npx @flow-engineer/flow link --channel telegram", "npx @flow-engineer/flow test --synthetic"], "a first run's order, with the server's link step");
+  assert.deepEqual(first.lines[0]!.next, ["npm start", "npx @flow-engineer/flow link --channel telegram"], "a first run's order: the playground, then the server's link step");
   for (const key of Object.values(KEYS)) assert.ok(!first.out.includes(key) && !first.err.includes(key), "no key is printed");
 
   const second = await run(["setup", "--json"], { url: flow.url, config, cwd, env });
@@ -630,7 +630,7 @@ test("setup writes Flow's trial model key into its empty line at 0600 and prints
   assert.deepEqual(readFileSync(join(cwd, ".env"), "utf8").split("\n").slice(0, 2), [`OPENROUTER_API_KEY=${TRIAL}`, "OPENAI_API_KEY="], "it takes its own empty line");
   assert.equal(statSync(join(cwd, ".env")).mode & 0o777, 0o600);
   assert.deepEqual(result.lines[0]!.model_key, { set: true, env: "OPENROUTER_API_KEY", flow_trial: { limit_usd: 5, minted: true } });
-  assert.equal(result.lines[0]!.next[0], "npx @flow-engineer/flow chat");
+  assert.equal(result.lines[0]!.next[0], "npm start");
   assert.match(result.err, /^Model: Flow trial credit \(\$5\)$/m);
   assert.ok(!result.out.includes(TRIAL) && !result.err.includes(TRIAL), "the model key is never printed");
 
@@ -652,7 +652,7 @@ test("with no model key after setup, it says why in one sentence and puts the wa
   const plain = await run(["setup"], { url: older.url, config: temp(), cwd: agentDir(), env });
   assert.equal(plain.code, 0, plain.err);
   assert.ok(plain.out.split("\n").includes(NO_KEY));
-  assert.deepEqual(plain.out.split("\n").filter((l) => l.startsWith("Next:")), ["Next: add your own model key to .env (flow.engineer gave no trial credit), then npx @flow-engineer/flow chat, then npm start, then npx @flow-engineer/flow link --channel telegram, then npx @flow-engineer/flow test --synthetic"]);
+  assert.deepEqual(plain.out.split("\n").filter((l) => l.startsWith("Next:")), ["Next: add your own model key to .env (flow.engineer gave no trial credit), then npm start, then npx @flow-engineer/flow link --channel telegram"]);
 
   // The account's trial key went to another folder: minted false, no value.
   const had = await flowServer([], 200, { setup: { model_key: { env: "OPENROUTER_API_KEY", limit_usd: 5, minted: false } } });
@@ -741,7 +741,7 @@ test("status says what the folder has and lacks, never a key's value; signed in,
   assert.deepEqual(signed.lines[0]!.signed_in, { email: "dev@example.com", account: "uid_1" });
   assert.deepEqual(signed.lines[0]!.channels.whatsapp, { sender: false, open: true, trial: { limit: 300, used: 12 } });
   assert.equal(signed.lines[0]!.channels.imessage.open, false);
-  assert.deepEqual(signed.lines[0]!.next, ["npx @flow-engineer/flow link --channel whatsapp", "npx @flow-engineer/flow chat", "npm start"]);
+  assert.deepEqual(signed.lines[0]!.next, ["npm start", "npx @flow-engineer/flow link --channel whatsapp"]);
   const asked = flow.seen.find((r) => r.path === "/cli/setup")!;
   for (const name of ["FLOW_FRAMEWORK_CLOUD_KEY", "FLOW_FRAMEWORK_TRACES_KEY", "FLOW_MESSAGING_KEY", "OPENROUTER_API_KEY"]) assert.ok((asked.body.have as string[]).includes(name), `${name} named as had, so nothing is made`);
   assert.equal(readFileSync(join(cwd, ".env"), "utf8"), before, "status writes nothing");

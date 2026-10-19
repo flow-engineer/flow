@@ -75,11 +75,14 @@ A chat agent on Flow Framework (https://github.com/flow-engineer/flow), started 
 - \`agent/AGENTS.md\` is the agent's own prompt, not instructions for coding agents.
 - One model key goes in \`.env\` (never read or print it): \`npx @flow-engineer/flow link\` (or \`setup\`)
   writes Flow's free trial key there, or the owner types their own: \`OPENROUTER_API_KEY\`,
-  \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`. Then \`npx @flow-engineer/flow chat\`
-  talks to it in the terminal, \`npm start\` runs it in the playground, and \`npx @flow-engineer/flow link\`
-  signs in, puts its other keys in \`.env\` and prints the link that reaches it from a phone while
-  \`npm start\` runs. \`npm run typecheck\` checks the types, \`npm test -- --synthetic\` runs the
-  tests in the test cloud at https://flow.engineer/observe with the owner's \`FLOW_FRAMEWORK_CLOUD_KEY\`
+  \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`. \`npm start\` runs it in the playground,
+  and \`npx @flow-engineer/flow link\` signs in, puts its other keys in \`.env\` and prints the link that
+  reaches it from a phone while \`npm start\` runs.
+- When the owner asks how to test it, recommend first the playground (\`npm start\`, then open the link
+  it prints: the test people and the channels side by side), then their phone (the \`link\`).
+- Your own checks, not the owner's way to test: \`npx @flow-engineer/flow chat\` talks to it in the
+  terminal, \`npm run typecheck\` checks the types, \`npm test -- --synthetic\` runs the tests in the
+  test cloud at https://flow.engineer/observe with the owner's \`FLOW_FRAMEWORK_CLOUD_KEY\`
   (\`npx @flow-engineer/flow --help\`).
 - The guide for coding agents, with exit codes and next steps: https://github.com/flow-engineer/flow/blob/main/docs/agents.md
 - \`npm run mcp\` serves the same tools as an MCP server (src/mcp.ts) and \`npm run cli -- --help\` is

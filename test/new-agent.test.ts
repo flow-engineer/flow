@@ -79,7 +79,7 @@ test("flow init's next steps lead with getting a model key when none is set, and
   };
   const none = init();
   assert.match(none, /^ {2}2\. Model key: none yet\. Run npx @flow-engineer\/flow setup to get Flow's free trial credit, or add your own key/m);
-  assert.match(none, /^ {2}3\. npx @flow-engineer\/flow chat/m);
-  assert.match(init({ OPENAI_API_KEY: "sk-shell" }), /^ {2}2\. npx @flow-engineer\/flow chat/m);
+  assert.match(none, /^ {2}3\. npm start, and open the link it prints/m);
+  assert.match(init({ OPENAI_API_KEY: "sk-shell" }), /^ {2}2\. npm start, and open the link it prints/m);
   assert.doesNotMatch(init({}, "OPENROUTER_API_KEY=sk-mine\n"), /Model key/);
 });

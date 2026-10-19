@@ -314,11 +314,16 @@ from the agent's folder (`npx @flow-engineer/flow init` makes a starter in an em
 
 ```sh
 npx @flow-engineer/flow link --json          # signs in and runs setup when needed (Flow's trial model key too), then the link; give its say_to_person to the owner
-printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # locally: one message per line, replies printed
-npm start                                    # the agent; the owner texts it while it runs
+npm start                                    # the agent: its playground link, and the owner texts it while it runs
 npx @flow-engineer/flow status --json        # what the folder has and lacks, at any time
-npx @flow-engineer/flow test --synthetic     # the tests, on the key setup wrote
+printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check: one message per line, replies printed
+npx @flow-engineer/flow test --synthetic     # your own check: the tests, on the key setup wrote
 ```
+
+When the owner asks how to test it, recommend first the playground (`npm start`, then open the
+link it prints: the test people and the channels side by side, with Debug), then their phone (the
+`link`, while `npm start` runs). `chat` and `test --synthetic` are for you to check your own work;
+do not offer them to the owner as ways to test.
 
 `link` runs `login` first when not signed in: it opens the owner's browser itself and prints the
 link and code at once (with `--json` the first line is `{"status":"pending","verification_uri":...,

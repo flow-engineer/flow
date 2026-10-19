@@ -528,8 +528,9 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   // A closed channel's trial counts are not shown: only the open ones'.
   const trial = answer.trial ? Object.fromEntries(Object.entries(answer.trial).filter(([c]) => open.includes(c))) : null;
   const model = modelKeyReport((n) => before.get(n) || process.env[n]?.trim() || undefined, modelKeyOf(fields), true);
-  // A first run's order: a model key if there is none, talk to it, run it, then the phone; tests last.
-  const next = [...(model.next ? [model.next] : []), `${RUN} chat`, "npm start", ...(answer.next?.length ? answer.next : [NEXT.link]), `${RUN} test --synthetic`];
+  // A first run's order: a model key if there is none, the playground (npm start), then the phone.
+  // chat and test --synthetic are the coding agent's own checks, not the owner's way to test.
+  const next = [...(model.next ? [model.next] : []), "npm start", ...(answer.next?.length ? answer.next : [NEXT.link])];
   if (json) {
     out({
       agent: answer.agent_id, join_code: answer.join_code, env_written: { ".env": written }, minted: answer.minted ?? [],
@@ -656,10 +657,11 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     open: server ? typeof fields[`${c}_sender`] === "string" : null,
     trial: server && typeof fields[`${c}_sender`] === "string" ? server.trial?.[c] ?? null : null,
   }]));
+  // The playground (npm start) before the phone, as setup's next.
   const next = [
     ...(model.next ? [model.next] : []),
+    ...(model.report.set ? ["npm start"] : []),
     ...(!joinCode || !value(SETUP_ENV.messaging_key) ? [NEXT.link] : CHANNELS.filter((c) => channels[c]!.open && !channels[c]!.sender).map((c) => `${NEXT.link} --channel ${c}`)),
-    ...(model.report.set ? [`${RUN} chat`, "npm start"] : []),
   ];
   if (json) out({ model_key: model.report, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, next });
   say(model.line);
