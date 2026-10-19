@@ -278,3 +278,23 @@ test("trailing slashes come off the base URL, in linear time even on a long run 
   await channel.send("777", { type: "message", text: "slashes" });
   assert.ok(await flow.request((r) => post("/v1/messages")(r) && r.body.content.text === "slashes"));
 });
+
+test("a nudge's send carries an Idempotency-Key from its id, the same in every process that sends it", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_maya = { address: { phone: "+15550100100" } };
+  flow.templates.push({ id: "tpl_order", sender: "snd_WA", name: "order_update", language: "en_US", status: "approved" });
+  await live.deliver(received(WA, "msg_1", { type: "text", text: "hi" }));
+  (await live.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Hi!" })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+  const to = { channel: "whatsapp", address: "+15550100100" };
+  const path = "/v1/conversations/conv_wa/messages";
+
+  const text = await live.agent.nudge({ to, text: "Your order shipped" });
+  assert.equal(text.status, "sent");
+  assert.equal(flow.sends(path).at(-1)!.headers["idempotency-key"], `nudge:${text.id}`);
+  const template = await live.agent.nudge({ to, template: { name: "order_update", body: ["Maya", "1042"] } });
+  assert.equal(template.status, "sent");
+  assert.equal(flow.sends(path).at(-1)!.headers["idempotency-key"], `nudge:${template.id}`);
+});

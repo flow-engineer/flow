@@ -94,13 +94,15 @@ export type Outbound =
       image?: { url: string };
       /** The channel's own params (see Channel.params), as the agent filled them in. */
       fields?: Record<string, unknown>;
+      /** The same in every process for one send the business starts (a nudge, a scheduled text), for providers that take one. */
+      idempotencyKey?: string;
     }
   /** The agent has picked these messages up (WhatsApp's blue ticks). */
   | { type: "read"; messageIds: string[] }
   /** A reaction on one of the person's messages, by the id Flow Framework gave it. */
   | { type: "reaction"; emoji: string; messageId: string }
   /** A template the owner set up with the channel (WhatsApp), sent as is, even outside its window. */
-  | ({ type: "template" } & Template)
+  | ({ type: "template"; idempotencyKey?: string } & Template)
   /** A short line of what the agent is doing, shown in the loading indicator; null clears it. */
   | { type: "status"; text: string | null }
   | { type: "typing"; on: boolean };

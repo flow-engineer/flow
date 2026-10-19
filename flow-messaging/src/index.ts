@@ -169,14 +169,14 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   /** One message: into the person's conversation, or a new one from the channel's sender. */
-  async function send(route: Route, to: string, content: Record<string, unknown>, replyTo?: string, about = replyTo): Promise<void> {
+  async function send(route: Route, to: string, content: Record<string, unknown>, replyTo?: string, about = replyTo, idempotencyKey?: string): Promise<void> {
     try {
       const conversation = await conversationFor(route.name, to, about);
       let sent: FlowMessage;
-      if (conversation) sent = await client.post(`/v1/conversations/${idSegment("conv", conversation)}/messages`, { content, ...(replyTo ? { reply_to: replyTo } : {}) });
+      if (conversation) sent = await client.post(`/v1/conversations/${idSegment("conv", conversation)}/messages`, { content, ...(replyTo ? { reply_to: replyTo } : {}) }, undefined, idempotencyKey);
       else {
         if (!route.sender) throw new Error(`no conversation with them on ${route.name} yet, and no sender to start one (set FLOW_MESSAGING_${route.kind.toUpperCase()}_SENDER)`);
-        sent = await client.post("/v1/messages", { sender: route.sender, to: recipient(route.kind, to), content });
+        sent = await client.post("/v1/messages", { sender: route.sender, to: recipient(route.kind, to), content }, undefined, idempotencyKey);
       }
       flowConversation.set(key(route.name, to), sent.conversation);
     } catch (error) {
@@ -242,17 +242,18 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     return {
       sendMessage: async (to: string, message: Message) => {
         const [first, ...rest] = contents(route.kind, message);
-        await send(route, to, first, message.replyTo);
-        for (const next of rest) await send(route, to, next);
+        const key = message.idempotencyKey;
+        await send(route, to, first, message.replyTo, message.replyTo, key);
+        for (const [i, next] of rest.entries()) await send(route, to, next, undefined, undefined, key && `${key}:${i + 1}`);
       },
       react: (to: string, messageId: string, emoji: string) => send(route, to, { type: "reaction", message_id: messageId, emoji }, undefined, messageId),
       typing: (to: string, on: boolean) => courtesy(route, to, "typing", { state: on ? "on" : "off" }),
       markRead: (to: string, messageIds: string[]) => courtesy(route, to, "read", { up_to: messageIds.at(-1) }, messageIds.at(-1)),
-      sendTemplate: async (to: string, wanted: Template) => {
+      sendTemplate: async (to: string, wanted: Template, idempotencyKey?: string) => {
         if (!route.sender) throw new Error(`a template needs the channel's sender (set FLOW_MESSAGING_${route.kind.toUpperCase()}_SENDER)`);
         const found = await template(route.sender, wanted);
         const params = templateParams(wanted);
-        await send(route, to, { type: "template", template_id: found.id, language: wanted.language ?? found.language, ...(Object.keys(params).length ? { params } : {}) });
+        await send(route, to, { type: "template", template_id: found.id, language: wanted.language ?? found.language, ...(Object.keys(params).length ? { params } : {}) }, undefined, undefined, idempotencyKey);
       },
     };
   }
@@ -301,6 +302,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
               ...(outbound.buttons && info.buttons ? { buttons: outbound.buttons } : {}),
               ...(outbound.link && info.linkButton ? { link: outbound.link } : {}),
               ...(outbound.image && info.images ? { image: outbound.image } : {}),
+              ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}),
             });
           case "reaction":
             return p.react(to, outbound.messageId, outbound.emoji);

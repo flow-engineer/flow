@@ -148,7 +148,9 @@ Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret
 ## What it does for you
 
 - Every send carries its own Idempotency-Key. A 429 or 5xx is tried again with the same key after
-  a short Retry-After, so a message never goes out twice.
+  a short Retry-After, so a message never goes out twice. A nudge or a scheduled text keeps one key
+  from its id (`nudge:<id>`, `run:<id>`) in every process, so a restart or a second instance does not
+  send it again.
 - Flow's `409 outside_window` becomes the framework's `outside_window`, so the agent knows to send a
   template.
 - A permanent refusal (opted out, no consent, ...) reaches the agent once, with "don't resend it".
