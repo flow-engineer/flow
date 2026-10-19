@@ -15,14 +15,14 @@
 
 import { randomUUID } from "node:crypto";
 import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
-import { Conversation, PROFILE_TOOL, profileTool, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
+import { Conversation, PROFILE_TOOL, profileTool, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
 import { businessSchedule, claimDue, summary } from "./schedules.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
 import { Store, type ConversationRow, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
 import { clock, quietUntil, validZone } from "./time.ts";
-import { STAND_IN, toSpec, type Tool } from "./tools.ts";
+import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } from "./tools.ts";
 import { traces, tracesFromEnv, type Traces, type TracesOptions } from "./traces.ts";
 import type { ChannelInfo, Deliver, Incoming, Model, Outbound, Template, TemplateDefinition, Transcribe } from "./types.ts";
 
@@ -38,6 +38,10 @@ export interface AgentOptions {
    */
   transcribe?: Transcribe;
   tools?: Tool[];
+  /** Backend credentials or clients for a verified person, available only to tool code as context.credentials. */
+  credentials?: CredentialProvider;
+  /** Enforce per-tool signIn in chat and send the brand's login challenge when needed. */
+  auth?: ChatAuth;
   /**
    * Added to the system prompt at the start of every turn, before the model is called: keep it to
    * small facts at hand. It runs on every turn, so a lookup here (an API call, a slow query) delays
@@ -104,9 +108,10 @@ export interface AgentOptions {
   channels?: Channel[];
   /**
    * The owner's own key for a person (a member id), from a channel identity, or null when there is
-   * none. Identities with the same key are one person.
+   * none. Identities with the same key are one person. `phone` is normalized and present only
+   * when this channel verifies phone identities; an arbitrary address is never phone evidence.
    */
-  resolve?: (identity: { channel: string; address: string }) => Promise<string | null> | string | null;
+  resolve?: (identity: { channel: string; address: string; phone?: string }) => Promise<string | null> | string | null;
   /**
    * The calling code ("+91", "+44", "+1") for phone numbers that come without one. Set it when
    * your SMS provider gives national numbers ("098765 43210"): on every phone channel but
@@ -171,7 +176,7 @@ export interface TestPerson {
 }
 
 /** Where the playground shows what the agent sends to a test person who wrote from it. */
-export type PlaygroundSink = (delivery: { conversationId: string; person: TestPerson; channel: string; outbound: Outbound }) => Promise<void> | void;
+export type PlaygroundSink = (delivery: { conversationId: string; person: TestPerson & { key?: string; visitor?: string }; channel: string; outbound: Outbound }) => Promise<void> | void;
 
 export interface AgentStatus {
   busy: boolean;
@@ -284,6 +289,8 @@ export class Agent {
   /** Conversations in the store, known once resume() ran. */
   private readonly rows = new Map<string, ConversationRow>();
   private resumed = false;
+  private readonly requestReplies = new Map<string, Deliver>();
+  private readonly requestCredentials = new Map<string, CredentialProvider>();
   private readonly arriving = new Map<string, Promise<unknown>>();
   /** Callers waiting for a queued nudge to settle: its first call, and any with the same key. */
   private readonly nudgeWaiters = new Map<string, Array<(result: NudgeState) => void>>();
@@ -292,6 +299,7 @@ export class Agent {
   /** Where each identity (channel, address) last wrote from; sends go back the same way. */
   private readonly via = new Map<string, Via>();
   private playgroundSink: PlaygroundSink | null = null;
+  private readonly playgroundVisitors = new Map<string, { key?: string; visitor?: string }>();
   /** Before this, this runner does not ask for the pruning claim again (it, or another runner, had it). */
   private pruneAfter = 0;
   /** `defaultCountryCode`'s digits. */
@@ -315,7 +323,7 @@ export class Agent {
     if (options.defaultCountryCode !== undefined && !/^\+?[1-9]\d{0,2}$/.test(options.defaultCountryCode.trim())) throw new Error(`flow: defaultCountryCode is a calling code such as "+91", not "${options.defaultCountryCode}"`);
     this.countryCode = options.defaultCountryCode?.trim().replace(/^\+/, "");
     const tracing = options.traces ?? tracesFromEnv();
-    this.traces = tracing ? traces(tracing, { service: options.id ?? "flow", kindOf: (name) => this.channelsByName.get(name)?.kind }) : null;
+    this.traces = tracing ? traces(tracing, { service: options.id ?? "flow", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind }) : null;
     const sinks = [...(options.events ?? []), ...(this.traces ? [this.traces.sink] : [])];
     const emit = emitter(sinks);
     if ((options.dir === undefined) === (options.files === undefined)) throw new Error("flow: give an agent exactly one of dir or files");
@@ -331,6 +339,9 @@ export class Agent {
       model: options.model,
       transcribe: options.transcribe,
       tools: new Map(tools.map((t) => [t.name, t])),
+      credentials: options.credentials,
+      credentialProvider: ctx => this.requestCredentials.get(viaKey(ctx.channel, ctx.address ?? "")) ?? options.credentials,
+      auth: options.auth,
       specs: tools.map(toSpec),
       instructions: loadInstructions(files, skills, options.inlineSkills),
       context: options.context,
@@ -385,6 +396,27 @@ export class Agent {
   }
 
   /**
+   * A signed-in HTTP channel's request. `key` must come from verified auth, never the body.
+   * Uses the same person as resolve() on other channels. The caller serializes requests per key.
+   */
+  async request(input: { channel: string; key: string; text: string; conversationId?: string; credentials?: CredentialProvider }): Promise<{ conversationId: string; replies: Outbound[] }> {
+    await this.settings.ready;
+    const adapter = this.channelOf(input.channel);
+    if (adapter.kind !== "custom") throw new Error("chinwag: request needs a custom UI channel");
+    const identity = await this.conversationFor(adapter, input.channel, input.key, undefined, input.key);
+    if (input.conversationId && input.conversationId !== identity.conversationId) throw new Error("chinwag: conversation does not belong to this person");
+    const replies: Outbound[] = [];
+    const address = viaKey(input.channel, input.key);
+    if (input.credentials) this.requestCredentials.set(address, input.credentials);
+    this.requestReplies.set(address, (reply) => { replies.push(reply); });
+    try {
+      await this.released(await this.take(adapter, { channel: input.channel, from: input.key, message: input.text, via: "provider", verifiedKey: input.key }));
+      await this.conversation(identity.conversationId)?.whenIdle();
+      return { conversationId: identity.conversationId, replies };
+    } finally { this.requestReplies.delete(address); this.requestCredentials.delete(address); }
+  }
+
+  /**
    * A message from a test person (by their phone number) in the test playground: exactly what
    * message() does for the same person writing on that channel, but its replies go to the
    * playground. Anyone not in `testPeople` is refused.
@@ -394,6 +426,94 @@ export class Agent {
     if (!person) throw new Error("flow: only the agent's testPeople can be simulated");
     const adapter = this.channelOf(input.channel);
     return this.released(await this.take(adapter, { channel: input.channel, from: this.testAddress(adapter, person), message: input.message, messageId: input.messageId, via: "playground", person }));
+  }
+
+  /**
+   * A playground visitor, signed out or authenticated. `key` is verified by server code, never
+   * accepted from the browser. Replies stay in the simulator; no provider send is made.
+   */
+  async simulateVisitor(input: { key?: string | null; address: string; channel: string; message: string | Incoming }): Promise<{ conversationId: string; messageId: string } | null> {
+    if (!input.address) throw new Error("chinwag: a playground visitor needs a server-issued channel address");
+    return this.released(await this.take(this.channelOf(input.channel), { channel: input.channel, from: input.key ? input.address : `visitor:${input.address}`, message: input.message, via: "playground", verifiedKey: input.key ?? undefined, visitor: input.key ? undefined : input.address }));
+  }
+
+  /**
+   * A completed server-verified login. Bind its channel address to the account before sending a
+   * confirmation with recordNudge/nudge. Never take key from a browser body or model input.
+   * Anonymous history stays separate; an identity belonging to another account is refused.
+   */
+  async linkIdentity(input: { channel: string; address: string; key: string; via?: "provider" | "playground" }): Promise<{ conversationId: string }> {
+    if (!input.address || !input.key) throw new Error("chinwag: linking needs a verified account and channel address");
+    const adapter = this.channelOf(input.channel);
+    const lock = viaKey(input.channel, input.address);
+    const work = (this.arriving.get(lock) ?? Promise.resolve()).then(async () => {
+      await this.settings.ready;
+      const personKey = `key:${input.key}`;
+      let row = await this.store.conversationByKey(personKey);
+      if (!row) {
+        await this.store.createConversation(`p_${randomUUID().slice(0, 12)}`, personKey);
+        row = await this.store.conversationByKey(personKey);
+      }
+      if (!row) throw new Error("chinwag: could not open the verified account conversation");
+      if (!await this.store.linkIdentity(row.id, input.channel, input.address)) throw new Error("chinwag: channel identity belongs to a different person");
+      const identity = (await this.store.identity(input.channel, input.address))!;
+      const via = input.via ?? identity.via;
+      if (identity.via !== via) await this.store.setIdentityVia(input.channel, input.address, via);
+      this.via.set(lock, via);
+      if (via === "playground") this.playgroundVisitors.set(lock, { key: input.key });
+      this.rows.set(row.id, row);
+      this.open(row.id).link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: input.address, deliver: this.deliverer(adapter, input.address, row.id), lastMessageAt: identity.lastMessageAt });
+      return { conversationId: row.id };
+    });
+    this.arriving.set(lock, work.catch(() => undefined));
+    return work;
+  }
+
+  /** Wake the agent after verified sign-in; a repeated completion queues one internal event. */
+  async signInCompleted(input: { channel: string; address: string; key: string; idempotencyKey: string; conversationId?: string; via?: "provider" | "playground" }): Promise<NudgeState> {
+    await this.settings.ready;
+    if (!input.idempotencyKey) throw new Error("chinwag: sign-in completion needs an idempotency key");
+    const earlier = await this.store.nudgeByKey(input.idempotencyKey);
+    if (earlier) {
+      const linked = await this.linkIdentity(input);
+      if (earlier.conversationId !== linked.conversationId || earlier.channel !== input.channel || earlier.body.address !== input.address) throw new Error("chinwag: sign-in completion belongs to a different identity");
+      return this.result(earlier.id, earlier.status, earlier.reason);
+    }
+    const known = await this.store.identity(input.channel, input.address);
+    const anonymous = await this.store.identity(input.channel, `visitor:${input.address}`);
+    let source: { conversationId: string } | null = input.conversationId ? [known, anonymous].find(i => i?.conversationId === input.conversationId) ?? null : known ?? anonymous;
+    if (input.conversationId && !source) {
+      // A previous attempt may have linked this address before the internal event could be queued.
+      const row = await this.store.conversation(input.conversationId);
+      const adapter = this.channelOf(input.channel);
+      const phone = adapter.phone ? normalizePhone(input.address, adapter.kind === "whatsapp" ? undefined : this.countryCode) : "";
+      const allowed = [`key:${input.key}`, `${input.channel}:${input.address}`, `${input.channel}:visitor:${input.address}`, ...(phone ? [`phone:${phone}`] : [])];
+      if (!row || !allowed.includes(row.personKey)) throw new Error("chinwag: sign-in context does not belong to this channel address");
+      source = { conversationId: row.id };
+    }
+    const history = source ? await this.transcript(source.conversationId) : [];
+    const latest = history.findLastIndex(e => e.kind === "in" && e.channel === input.channel);
+    const request = latest >= 0 ? history[latest] : undefined;
+    const after = history.slice(latest + 1);
+    const blocked = request?.kind === "in" && after.some(e => e.kind === "out" && e.channel === input.channel && e.authentication) && after.some(e => {
+      if (e.kind !== "tool") return false;
+      try { const output = JSON.parse(e.output); return output.error === "sign_in_required" && output.executed === false; }
+      catch { return false; }
+    });
+    const { conversationId } = await this.linkIdentity(input);
+    const account = source?.conversationId === conversationId ? history : await this.transcript(conversationId);
+    const newer = request && account.some(e => e.kind === "in" && e.at > request.at);
+    return this.recordNudge({ to: { channel: input.channel, address: input.address },
+      prompt: signInNotice(input.channel, blocked && !newer && request?.kind === "in" ? request.text : undefined),
+      idempotencyKey: input.idempotencyKey, respectQuietHours: false,
+    });
+  }
+
+  /** A verified playground visitor's account history, including messages on other interfaces. */
+  async visitorConversation(key: string | null, identity?: { channel: string; address: string }): Promise<string | null> {
+    await this.settings.ready;
+    if (!key) return identity ? (await this.store.identity(identity.channel, `visitor:${identity.address}`))?.conversationId ?? null : null;
+    return (await this.store.conversationByKey(`key:${key}`))?.id ?? null;
   }
 
   /** They wrote, so they are there: what was held for their quiet hours goes now, in this turn. */
@@ -497,7 +617,12 @@ export class Agent {
 
   private async arrive(adapter: Channel, input: Arrival) {
     await this.settings.ready;
-    const identity = await this.conversationFor(adapter, input.channel, input.from, input.person);
+    const identity = await this.conversationFor(adapter, input.channel, input.from, input.person, input.verifiedKey);
+    if (input.via === "playground") {
+      const address = viaKey(input.channel, input.from);
+      if (input.verifiedKey || input.visitor) this.playgroundVisitors.set(address, { key: input.verifiedKey, visitor: input.visitor });
+      else this.playgroundVisitors.delete(address);
+    }
     const conversationId = identity.conversationId;
     if (input.messageId !== undefined && (await this.store.inboundTaken(conversationId, input.channel, input.messageId))) {
       // The provider sent this message before (a webhook retried): it was taken then. Its id is
@@ -549,17 +674,20 @@ export class Agent {
   }
 
   /** The identity a message comes from, made (and linked to its person's conversation) the first time it writes. */
-  private async conversationFor(adapter: Channel, channel: string, address: string, testPerson?: TestPerson): Promise<IdentityRow> {
+  private async conversationFor(adapter: Channel, channel: string, address: string, testPerson?: TestPerson, verifiedKey?: string): Promise<IdentityRow> {
     const known = await this.store.identity(channel, address);
-    if (known) return known;
+    if (known) {
+      if (verifiedKey && (await this.store.conversation(known.conversationId))?.personKey !== `key:${verifiedKey}`) throw new Error("chinwag: channel identity belongs to a different person");
+      return known;
+    }
     let personKey: string;
     let verifiedBy: string;
     if (testPerson && !adapter.phone) {
       // Not a phone channel: their playground address joins the person their number is.
       [personKey, verifiedBy] = [await this.testPersonKey(testPerson, adapter), "test person"];
     } else {
-      const owner = await this.options.resolve?.({ channel, address });
       const phone = adapter.phone ? normalizePhone(address, adapter.kind === "whatsapp" ? undefined : this.countryCode) : "";
+      const owner = verifiedKey ?? await this.options.resolve?.({ channel, address, ...(phone ? { phone } : {}) });
       [personKey, verifiedBy] = owner ? [`key:${owner}`, "resolver"] : phone ? [`phone:${phone}`, "phone"] : [`${channel}:${address}`, "channel"];
     }
     let row = await this.store.conversationByKey(personKey);
@@ -584,7 +712,7 @@ export class Agent {
   private async testPersonKey(person: TestPerson, adapter: Channel | undefined): Promise<string> {
     const phone = normalizePhone(person.phone);
     const channel = [...this.channelsByName.values()].find((c) => c.phone) ?? adapter;
-    const owner = channel ? await this.options.resolve?.({ channel: channel.name, address: phone }) : null;
+    const owner = channel ? await this.options.resolve?.({ channel: channel.name, address: phone, ...(channel.phone ? { phone } : {}) }) : null;
     return owner ? `key:${owner}` : `phone:${phone}`;
   }
 
@@ -602,11 +730,18 @@ export class Agent {
   /** Sends to one identity: to the playground if it last wrote from there, else through the channel's provider. */
   private deliverer(adapter: Channel, address: string, conversationId: string): Deliver {
     return (outbound) => {
+      const reply = this.requestReplies.get(viaKey(adapter.name, address));
+      if (reply) return reply(outbound);
       if (this.via.get(viaKey(adapter.name, address)) !== "playground") return adapter.send(address, outbound);
+      const visitor = this.playgroundVisitors.get(viaKey(adapter.name, address));
+      if (visitor) return this.playgroundSink?.({ conversationId, person: { name: visitor.key ? "Signed-in user" : "New user", phone: "", ...visitor }, channel: adapter.name, outbound });
       const phone = address.startsWith("test:") ? address.slice(5) : address;
       const person = this.testPerson(phone);
       // With no playground page open, nothing is shown, and the conversation keeps it as sent.
       if (person) return this.playgroundSink?.({ conversationId, person, channel: adapter.name, outbound });
+      const key = this.rows.get(conversationId)?.personKey;
+      if (key?.startsWith("key:")) return this.playgroundSink?.({ conversationId, person: { name: "Signed-in user", phone: "", key: key.slice(4) }, channel: adapter.name, outbound });
+      if (address.startsWith("visitor:")) return this.playgroundSink?.({ conversationId, person: { name: "New user", phone: "", visitor: address.slice(8) }, channel: adapter.name, outbound });
     };
   }
 
@@ -832,7 +967,7 @@ export class Agent {
       const added = await add({ ...record, body: { text: input.text, prompt: input.prompt, at: input.at }, status: "scheduled" }, schedule);
       return typeof added === "number" ? { id, status: "scheduled" } : added;
     }
-    const body = input.template ? { template: input.template } : input.text !== undefined ? { text: input.text } : { prompt: input.prompt };
+    const body = { address: input.to.address, ...(input.template ? { template: input.template } : input.text !== undefined ? { text: input.text } : { prompt: input.prompt }) };
     const now = this.now();
     const quietEnds = input.respectQuietHours === false ? null : await this.quietEnd(conversationId, now);
     if (quietEnds !== null) {
@@ -1010,6 +1145,8 @@ export class Agent {
 }
 
 interface Arrival {
+  verifiedKey?: string;
+  visitor?: string;
   channel: string;
   from: string;
   message: string | Incoming;
@@ -1061,4 +1198,3 @@ export function quietHoursOf(row: Pick<ConversationRow, "quietHours">, agent: Qu
   if (row.quietHours) return row.quietHours;
   return agent === false ? null : (agent ?? DEFAULT_QUIET_HOURS);
 }
-

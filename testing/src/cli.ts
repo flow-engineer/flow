@@ -26,10 +26,12 @@ import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 import { hasModelKey, NO_MODEL_KEY } from "../../src/model.ts";
+import { PLUGIN_LINE, pluginCli } from "./plugin.ts";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions } from "./client.ts";
 import { runPrinter } from "./print-run.ts";
 import { checkEndpointCli } from "./check-endpoint.ts";
+import { CHECK_LINE as TOOLS_CHECK_LINE, checkCli, mcpUpdateCli } from "./check.ts";
 import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
 import { httpAgent } from "./http-agent.ts";
@@ -47,6 +49,10 @@ const TEST_LINE = `  flow test [options]       Run the agent's tests in a test c
 const CHECK_LINE = `  flow check-endpoint <url> [--token-env NAME] [--json]
                             Check an agent's HTTP endpoint against the contract, for --agent-url
                             (flow check-endpoint --help)`;
+const MCP_LINE = `  flow mcp update        Write the tools of the MCP servers the agent uses (mcpTools) to
+                            mcp.lock.json, from the agent's folder; commit it after the tests`;
+const CLI_LINE = `  flow cli --server <url> <command>
+                            Any MCP server's tools as commands (flow cli --server <url> --help)`;
 const NEW_USAGE = `Usage:\n${NEW_LINE}\n\n  -h, --help                Show this help`;
 const TEST_OPTIONS = `Options for test:
   --cloud <url>            The test cloud (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)
@@ -100,7 +106,8 @@ the CHINWAG_ names from before the rename still work):
   OPENROUTER_API_KEY       The agent's model key, or OPENAI_API_KEY, ANTHROPIC_API_KEY or
                            GEMINI_API_KEY: the first with a value is used`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
-const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${ACCOUNT_LINES}\n  flow --version            Show the version\n\n${TEST_OPTIONS}`;
+const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}
+${PLUGIN_LINE}\n${ACCOUNT_LINES}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
 
 /** What to do after new or init, from step 2; a model key comes first when none is set here. */
 function nextSteps(): string {
@@ -115,12 +122,27 @@ function nextSteps(): string {
 
 checkNode(process.versions.node);
 
+if (process.argv[2] === "plugin") process.exit(pluginCli(process.argv.slice(3)));
+
 if (process.argv[2] === "check-endpoint") {
   // Its token may be in the agent folder's .env; no value is ever printed.
   loadEnv(undefined);
   process.exit(await checkEndpointCli(process.argv.slice(3)));
 }
 if (process.argv[2] === "show") process.exit(await showCli(process.argv.slice(3)));
+if (process.argv[2] === "check") process.exit(await checkCli(process.argv.slice(3)));
+if (process.argv[2] === "mcp") {
+  if (process.argv[3] !== "update") {
+    console.error(MCP_LINE.trim());
+    process.exit(1);
+  }
+  process.exit(await mcpUpdateCli());
+}
+if (process.argv[2] === "cli") {
+  // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client, an optional peer.
+  const { defineCli, runCli } = await import("../../cli/src/index.ts");
+  process.exit(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
+}
 if (process.argv[2] === "chat") process.exit(await chatCli(process.argv.slice(3)));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) process.exit(await accountCli(process.argv[2]!, process.argv.slice(3)));
 

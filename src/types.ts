@@ -80,6 +80,8 @@ export type Outbound =
   | {
       type: "message";
       text: string;
+      /** A framework-generated login challenge; its link opens real authentication in simulators. */
+      authentication?: boolean;
       /** The person's message this one quotes (channels with replies). */
       replyTo?: string;
       /** Reply buttons; a tap comes back as the person's message. */

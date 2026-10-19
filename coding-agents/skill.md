@@ -1,6 +1,6 @@
 ---
 name: flow-framework
-description: Build or change a chat agent on Flow Framework (WhatsApp, SMS, iMessage, Telegram, web). Load when creating a Flow Framework agent, editing its prompt or skills, wiring it into the playground, or when code imports @flow-engineer/flow (formerly chinwag). Also load the flow-framework-tools skill (tools-skill.md) before writing tools and flow-framework-tests (test-skill.md) before writing tests.
+description: Build or change a chat agent on Flow Framework (WhatsApp, SMS, iMessage, Telegram, web), and serve its tools as an MCP server for Claude and ChatGPT or as a CLI. Load when creating a Flow Framework agent, editing its prompt or skills, wiring it into the playground, adding MCP or a CLI, or when code imports @flow-engineer/flow. Also load the flow-framework-tools skill (tools-skill.md) before writing tools and flow-framework-tests (test-skill.md) before writing tests.
 ---
 
 # Building an agent on Flow Framework
@@ -10,8 +10,10 @@ reply, acknowledges people fast, runs tools in parallel and waits for them, movi
 background only when the person writes again or it passes its limit.
 You write the agent's prompt, skills and tools; Flow Framework handles the conversation.
 
-Two more skills go with this one: `flow-framework-tools` (`tools-skill.md`) before writing or changing a
-tool, and `flow-framework-tests` (`test-skill.md`) before writing or changing a test.
+More skills go with this one: `flow-framework-tools` (`tools-skill.md`) before writing or changing a
+tool, `flow-framework-tests` (`test-skill.md`) before writing or changing a test, `flow-framework-context`
+(`context-skill.md`) before writing tools for a company that already has an app, API or database,
+and `flow-framework-auth` (`auth-skill.md`) when tools need to know who the person is.
 
 ## Start a new agent
 
@@ -42,6 +44,10 @@ my-agent/
   src/tools.ts                 the agent's tools (see tools-skill.md)
   src/agent.ts                 buildAgent(): the one place the agent is built
   src/main.ts                  runs it in the playground
+  src/mcp.ts                   optional: the tools as an MCP server (below)
+  src/cli.ts                   optional: the CLI file, for the organization's command line (below)
+  context/                     optional: the context pack the tools are written from (context-skill.md)
+  mcp.lock.json                optional: the tools of other MCP servers the agent uses (tools-skill.md)
   tests/tools/*.yaml           how each tool behaves in tests (see tools-skill.md)
   tests/scenarios/*.yaml       the tests (see test-skill.md)
 ```
@@ -295,9 +301,10 @@ To demo what your backend does (an order ships), send the nudge it would send fr
 On a deployed agent, mount it in your own server with a token of at least 32 characters, from a
 secret: `const playground = play.handler(agent, { token: process.env.PLAYGROUND_TOKEN!, base: "/playground" })`,
 and hand it the requests under `/playground` (`if (url.pathname.startsWith("/playground")) return playground(req, res)`).
-Open `/playground/?token=...` once (it becomes an HttpOnly cookie and leaves the URL) or call the API
-with `Authorization: Bearer <token>`. Wrong tokens are limited per address, and every simulated
-message is logged with the person, channel, time and address.
+Open `/playground/?token=...` once (it becomes an HttpOnly, SameSite=Lax cookie and leaves the URL) or call the API
+with `Authorization: Bearer <token>`. The cookie survives a top-level return from sign-in on another site;
+the API still accepts only requests from the playground’s own origin. Wrong tokens are limited per address,
+and every simulated message is logged with the person, channel, time and address.
 
 ## Put it on a phone
 
@@ -353,3 +360,187 @@ touches a chat; call `await agent.flushTraces()` before the process exits. Tests
 `node --test` never send from the environment. Under `flow test` the traces say they are a test's
 (`chinwag.run_kind` is "test", else "production", and each turn names the test session as
 `chinwag.test.session`), so the dashboard keeps them apart from real conversations.
+
+## Serve the tools over MCP
+
+The same tools and skills go to Claude, ChatGPT and any MCP host as an MCP server. Install the
+SDK it runs on (`npm i @modelcontextprotocol/server@2.3.1`, the version Flow Framework pins) and add
+`src/mcp.ts`:
+
+```ts
+import { createServer } from "node:http";
+import { fileURLToPath } from "node:url";
+import { mcpServer } from "@flow-engineer/flow/mcp";
+import { tools } from "./tools.ts";
+
+export const mcp = mcpServer({
+  name: "acme",
+  version: "1.0.0",
+  tools,
+  dir: fileURLToPath(new URL("../agent", import.meta.url)),   // its skills; AGENTS.md is not sent
+  // auth: { issuer, resource, scopes, verify }               // sign-in: the flow-framework-auth skill
+});
+createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamable HTTP at /mcp
+```
+
+- `mcp.fetch(request)` serves a web-standard `Request` instead (Cloudflare Workers, Deno, Bun), so
+  it mounts beside the chat agent in one process or runs on its own: it needs no model, channels
+  or store.
+- Hosts get the skills as the server's instructions (each one's description) and read one with the
+  `read_skill` tool. A skill that tells the chat agent to use `send_*` or `share_updates` makes
+  no sense to a host: `flow check` warns about it.
+- Every part can be changed: `instructions` replaces the instructions, `descriptor(tool, generated)`
+  changes any tool's MCP descriptor, `extend(server)` adds handlers of your own (resources,
+  prompts) to the SDK's server, `path` moves the endpoint, `allowedHosts` checks the Host header.
+- Try it locally with `claude mcp add --transport http acme http://localhost:8790/mcp`.
+- Run `npx flow check` from the agent's folder before serving: it refuses tools that cannot be
+  described exactly (the `flow-framework-tools` skill lists the rules).
+
+## A CLI for the organization
+
+The same tools as commands, over the organization's MCP server, with the same sign-in and gating.
+It runs on Stricli (`@stricli/core`, the framework Sentry's CLI is built on). Every tool is already a
+command under its own name (`place_order` is `acme place-order`); a CLI file adds what needs
+judgement. Install `@modelcontextprotocol/client@2.3.1` and `@stricli/core@1.3.0` (the versions
+Flow Framework pins) and write `src/cli.ts`:
+
+```ts
+#!/usr/bin/env node
+import { fileURLToPath } from "node:url";
+import { defineCli, runCli } from "@flow-engineer/flow/cli";
+
+export const cli = defineCli({
+  name: "acme",
+  server: process.env.ACME_SERVER ?? "https://acme.example.com/mcp",
+  description: "Acme's orders and customers",
+  groups: { order: "Place and track orders" },
+  commands: {
+    "order list": { tool: "list_orders", columns: ["order_id", "status", "total"], alias: "orders" },
+    "order view": { tool: "get_order", args: ["order_id"], examples: ["acme order view BL-1042 --json"] },
+    "order place": { tool: "place_order" },
+  },
+});
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCli(cli, process.argv.slice(2)));
+```
+
+- Words are groups then a verb: `order` is a **command group**, `list`, `view` and `place` its
+  subcommands. `acme order` and `acme order -h` list the group's subcommands, `acme order place -h`
+  that command's flags and examples, and `acme -h` the groups and top-level commands. A word is a
+  group or a command, never both. `groups` gives each group its line in help.
+- `args` are the input fields taken as positional arguments, `columns` a list's table, `view` one
+  record's fields, `alias` another name, `examples` lines for help. Every other input field is a
+  flag (`order_id` is `--order-id`); a list is a repeatable or comma-separated flag; an object or a
+  list of objects takes JSON, or `@file.json`, and its help shows the shape
+  (`JSON list of {item, size, milk?}`).
+- A command of the team's own is any Stricli command: `"report daily": { command: buildCommand({ ... }) }`
+  with `buildCommand` from `@stricli/core`; inside it, `this.cli.call(tool, input)` calls the server's
+  tools and `this.cli.print(value, { json })` prints like the rest.
+- Installed, it is the organization's own command: `"bin": { "acme": "src/cli.ts" }` in its package
+  (node runs `.ts` files outside `node_modules`; publish a compiled `.js` bin to npm). While building
+  it, run it with `npm run cli -- order -h`: npm takes flags before `--` as its own.
+- Every tool command takes `--json` and `--fields a,b`; one that changes things takes `--dry-run`; one
+  that may delete or overwrite asks first in a terminal and needs `--yes` without one. Exit codes: 0
+  done, 1 the tool failed, 2 wrong command or arguments (with the help to read), 3 sign-in needed, 4
+  needs `--yes`, 5 the server could not be reached. `--server <url>` and `--token <token>` work on
+  every command. `acme auth login` signs in on the organization's own login (tokens in
+  `~/.config/acme/`, mode 600), `ACME_TOKEN` is for CI, `acme tools` lists every tool and schema, and
+  `acme skill --write ~/.claude/skills` installs the CLI's SKILL.md, made from the tools and the CLI
+  file, for coding agents. For any MCP server without a CLI file, `npx flow cli --server <url> -h`.
+- `npx flow check` checks the CLI file against the tools: a command naming a tool that does not
+  exist, an `args` field the input lacks, a `columns` or `view` field the output lacks, two commands
+  with one name, a word that is both a command and a group, or one of the CLI's own words (`auth`,
+  `tools`, `skill`) is an error; a tool no command names is a warning (it keeps its own name).
+
+
+### Native plugins and standalone MCP
+
+The standalone `/mcp` endpoint includes the skills list and `read_skill`. Native plugins
+copy the agent's `agent/skills/` folder and connect to `/mcp/plugin`, which serves tools only,
+so a host receives each skill once. Both paths share tools, auth and descriptor overrides.
+`mcpServer({ ..., plugin: false })` disables the plugin path; `plugin: { path: "/native" }`
+moves it. `handle.plugin` exposes its path and descriptors. Your `instructions` override
+applies to both endpoints, and `extend` can add SDK handlers on both.
+
+From the agent folder, run:
+
+```sh
+flow plugin --server https://agent.example.com/mcp --out plugins
+flow check --plugin plugins
+```
+
+`plugins/claude/` uses Claude Code's `.claude-plugin/plugin.json` and `.mcp.json` with
+`type: "http"`. `plugins/agent-plugins/` uses Agent Plugins 1.0.0 root `plugin.json` and
+`mcp.json` with `type: "streamable-http"`; Codex supports this portable format.
+Pass `--name` to override the package name. For a custom plugin route, pass its URL ending
+in `/plugin`, or edit the generated MCP config. No token is written into either package.
+Regenerate after changing a skill or its assets; `check --plugin` compares content hashes.
+Generated files remain plain files in your repository: customize manifests and add components
+alongside them. Regeneration rewrites manifests and source skill copies; keep hand-written
+skills outside those source paths.
+
+Formats checked 18 October 2026: [Agent Plugins 1.0.0](https://agent-plugins.org/specification),
+[OpenAI plugin packaging](https://developers.openai.com/plugins/build/plugins), and
+[Claude Code plugin reference](https://code.claude.com/docs/en/plugins-reference).
+
+MCP calls emit `tool.start`/`tool.end` with surface (`mcp`, `mcp-plugin`, `cli`), client name
+and version, session, person, duration, outcome and error. CLI calls send command and an
+idempotency key in `_meta`; a caller can reuse its key on a retry. `defineCli`'s `version`
+sets its client version (default `"1"`). Neither CLI arguments nor trace credentials go in `_meta`.
+`mcpServer` uses `FLOW_FRAMEWORK_TRACES_*`, like chat agents, or explicit `traces` options;
+`traces: false` disables export without disabling your event sinks. `await handle.flushTraces()`
+flushes its bounded background queue. Each tool call is a root trace without a conversation;
+arguments and results require `FLOW_FRAMEWORK_TRACES_CONTENT=1`. Legacy clients' initialization
+metadata is retained for up to 24 hours in at most 4,096 sessions; bearer tokens are never cached.
+
+### Local playground CLI
+
+To exercise the real CLI on your computer, pass `localCli: { channel: "terminal", config: cli }`
+to `play.listen(agent, port, options)` or a locally mounted `play.handler(agent, options)`.
+`cli` is the team's existing `defineCli` configuration, with its server URL; the named channel
+must exist. This opens an independent CLI session in that tab, with real stdout/stderr, exit
+codes, interactive input and confirmation prompts. It does not use the selected test person's
+identity. Run `auth login`, open the login link and return, then use commands or `chat` (`/exit`
+leaves chat). Reload reconnects. New CLI session discards only this runner's temporary sign-in;
+server restart or 30 minutes without browser activity also ends it. Clear output keeps sign-in.
+An operation already accepted by the agent may still complete after its client session ends.
+
+Enable this only in local startup code. The runner is off by default, rejects non-loopback or
+forwarded connections, and is not part of the hosted test cloud. It calls the actual CLI runner
+only locally. Hosted CLI support is deferred pending security review; do not add it to cloud startup
+or deployment wiring. See the hosted CLI TODO in the README. The runner invokes the CLI
+without a shell: quoting works, pipelines/expansion do not. The browser cannot override server
+or token flags, or use `skill --write` to write onto the developer's computer.
+For other embedded clients, `CliConfig.directory` overrides credential/conversation storage;
+`CliIO.env` overrides the inherited process environment and `CliIO.signal` cancels sign-in and
+terminal HTTP requests. Installed CLI defaults stay unchanged.
+
+### Terminal conversations
+
+`chat` talks directly to the agent, using the same bearer as MCP; it is not an MCP tool. `defineCli({ name: "acme", server, agent: "https://agent.example.com/agent/terminal" })`
+overrides the terminal URL; the default is the MCP server's origin plus `/agent/terminal`.
+`acme chat "Which orders are ready?" --json` prints one response; `acme chat` reads a TTY until
+Ctrl-D or `/exit`. Without a TTY pass a message to `chat` (an interactive chat exits 2); sign-in failures exit 3.
+Human chat shows a `You ›` input prompt, a waiting indicator and agent replies under the CLI's
+name. `--json` keeps stdout as one JSON response per line, without those labels. Embedded CLIs
+can supply `CliIO.lines(prompt?)` and their own output handlers to replace the presentation.
+`chat.json` is mode 600 and scoped by terminal endpoint. `--new` forgets the terminal's saved
+reference; the agent keeps its one-person history across channels. It does not erase a person's
+WhatsApp history. Teams can replace `chat` with their own Stricli command in `commands`.
+
+Mount the optional terminal handler beside MCP (no model or extra dependency in the CLI):
+
+```ts
+import { terminalServer } from "@flow-engineer/flow/mcp";
+const terminal = terminalServer({ agent: () => agent, auth });
+const agent = createAgent({ ...options, channels: [...channels, terminal.channel] });
+// Route terminal.path to terminal.fetch(request), and MCP's paths to mcp.fetch(request).
+```
+
+`terminalServer` accepts `path` and `channel` overrides. It verifies auth on every POST,
+serializes concurrent requests per person, and returns `{ conversationId, replies }` after the
+turn settles. The authenticated key becomes the same person that `resolve` returns on other
+channels. A body cannot choose its own person; a conversation reference from another person is
+refused. Its custom UI uses Markdown and exports turns as channel `cli`.
+For your own HTTP adapters, `agent.request({ channel, key, text, conversationId? })` exposes this
+without the handler. Supply a verified key and serialize calls for that channel and person.
