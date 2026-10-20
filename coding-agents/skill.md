@@ -388,17 +388,18 @@ brings the store and, when the agent has `FLOW_MESSAGING_KEY`, `host.messaging`.
 key is `FLOW_FRAMEWORK_CLOUD_KEY` (`flow setup` writes it into `.env`).
 
 ```sh
-npx @flow-engineer/flow deploy secrets --from-env .env --json   # the agent's keys as secrets (names printed, never values)
-npx @flow-engineer/flow deploy --json                           # staging: packs, builds, follows it to live; run its next
+npx @flow-engineer/flow deploy --json                           # staging, the first time too: sends .env's values as secrets
+                                                                # (names printed, never values), builds, follows it to live; run its next
 npx @flow-engineer/flow deploy promote --json                   # staging's live version to production, once the owner has tried it
 npx @flow-engineer/flow deploy status --json                    # what is live in each environment: version, when, URL
 npx @flow-engineer/flow logs --since 15m                        # the hosted agent's log lines (--follow for new ones)
-printf '%s' "$VALUE" | npx @flow-engineer/flow deploy secret NAME --env production   # one secret, from stdin
+printf '%s' "$VALUE" | npx @flow-engineer/flow deploy secret NAME --env production   # one secret by hand, from stdin
 ```
 
 Promote, or `deploy --env production`, only when the owner says so. A refused deploy lists the
-hosting lint's findings (`deploy.findings`): fix the errors and deploy again. Secrets take effect on
-the next deploy. Stop the laptop's `npm start` once the deployed one is live: two copies on one key
+hosting lint's findings (`deploy.findings`): fix the errors and deploy again. One `deploy` is the whole first deploy: there is no
+separate secrets step (it sends only new or changed `.env` values each time; promote sends them to
+production). Commit first, or the version reads `<sha>+dirty`. Stop the laptop's `npm start` once the deployed one is live: two copies on one key
 both answer every message.
 
 On the owner's own servers: one instance, kept warm, CPU always on, a durable `database`

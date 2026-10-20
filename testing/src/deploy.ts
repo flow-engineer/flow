@@ -1,8 +1,9 @@
 // `flow deploy`: puts the agent in this folder on Flow's hosting, through the cloud (observe's
 // /v1/hosting routes) with the agent's CI key. Node's own modules only.
 //
-//   flow deploy [--env staging|production] [--dir .] [--version <v>] [--json]   pack, upload, build, go live
-//   flow deploy promote [--json]                                                 staging's live version to production
+//   flow deploy [--env staging|production] [--dir .] [--version <v>] [--no-secrets] [--json]
+//                                                                                pack, send .env's new or changed values as secrets, upload, build, go live
+//   flow deploy promote [--no-secrets] [--json]                                  staging's live version to production
 //   flow deploy status [--env staging|production] [--json]                       what is live, its version, when, its URL
 //   flow logs [--env staging|production] [--since 1h] [--follow] [--json]        the hosted agent's log lines
 //   flow deploy secret <NAME> [--env staging|production] [--json]                a secret, its value read from stdin
@@ -13,6 +14,7 @@
 // hosting's lint (its findings are printed here). Nothing here prints a key or a secret's value.
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -21,7 +23,7 @@ import { parseArgs } from "node:util";
 import { RUN } from "../../src/names.ts";
 const DEFAULT_CLOUD = "https://flow.engineer/observe";
 
-export const DEPLOY_LINE = `  flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--json]
+export const DEPLOY_LINE = `  flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--json]
                             Put this agent on Flow's hosting, so it answers while this machine
                             sleeps (flow deploy --help: status, promote, secret, secrets)
   flow logs [--env staging|production] [--since 1h] [--follow] [--json]
@@ -37,22 +39,33 @@ export const LOGS_USAGE = `Usage:
   --dir, --cloud, FLOW_FRAMEWORK_CLOUD_KEY: as for flow deploy (flow deploy --help).`;
 
 export const DEPLOY_USAGE = `Usage:
-  flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--json]
-  flow deploy promote [--json]                             staging's live version to production
+  flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--json]
+                                                           one command, first deploy included: sends the
+                                                           .env's new or changed values as secrets, then
+                                                           packs, builds and follows it to live
+  flow deploy promote [--no-secrets] [--json]              staging's live version to production (the
+                                                           .env's new or changed values sent there first)
   flow deploy status [--env staging|production] [--json]   what is live, its version, when, and its URL
-  flow deploy secret <NAME> [--env staging|production]     the value on stdin
+  flow deploy secret <NAME> [--env staging|production]     one secret, the value on stdin
   flow deploy secrets --from-env [<file>] [--env staging|production]
-                                                           every value in <file> (default: the agent's .env)
+                                                           every value in <file> now (default: the agent's .env);
+                                                           flow deploy does this itself
 
   --env        Where (default: staging). Production takes only an agent whose buildAgent passes
                options.host on to createAgent, with no database of its own.
   --dir        The agent's folder (default: .): package.json, package-lock.json, src/agent.ts.
-  --version    A label for this version (default: the folder's git commit, if any).
+  --version    A label for this version (default: the folder's git commit, if any, with +dirty
+               when the folder has uncommitted changes).
+  --no-secrets Deploy without sending the .env's values as secrets.
   --cloud      The cloud's address (default: FLOW_FRAMEWORK_CLOUD, else ${DEFAULT_CLOUD}).
   --from-env   With secrets: send each non-empty value in the file as a secret (never the CI key,
                the cloud's address, or a name Flow sets itself, such as the
                FLOW_FRAMEWORK_TRACES_* that flow link writes). Prints names only.
   --json       Print one JSON answer on stdout (progress goes to stderr).
+
+flow deploy (and deploy promote, for production) sends each non-empty .env value as a secret (the
+same names as secrets --from-env sends) before the service starts, and later only the new or changed ones: .flow/secrets.json keeps a
+hash per name, never a value. It prints names only.
 
 status shows both environments unless --env names one. The last deploy this folder made is kept
 in .flow/deploys.json (never packed).
@@ -179,6 +192,7 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
         version: { type: "string" },
         cloud: { type: "string" },
         "from-env": { type: "boolean" },
+        "no-secrets": { type: "boolean" },
         since: { type: "string" },
         follow: { type: "boolean", short: "f" },
         json: { type: "boolean" },
@@ -240,15 +254,16 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
     return answer as T;
   };
 
-  const ctx: Ctx = { api, say, json, dir, pollMs: options.pollMs ?? 3000, maxPolls: options.maxPolls, now: options.now ?? Date.now };
+  const ctx: Ctx = { api, say, json, dir, pollMs: options.pollMs ?? 3000, maxPolls: options.maxPolls, now: options.now ?? Date.now, keyId: createHash("sha256").update(key).digest("hex").slice(0, 16) };
   try {
     const [name, extra] = args;
+    if (values["no-secrets"] && command !== undefined && command !== "promote") throw new Usage(`--no-secrets goes with flow deploy and deploy promote\n\n${usage}`);
     if (command === "logs") {
       if (name !== undefined) throw new Usage(`flow logs takes no arguments.\n\n${usage}`);
       return await logs(ctx, environment, values.since ?? "1h", Boolean(values.follow));
     }
     if (extra !== undefined || (name !== undefined && command !== "secret" && command !== "secrets")) throw new Usage(`Too many arguments.\n\n${usage}`);
-    if (command === "promote") return await promote(ctx);
+    if (command === "promote") return await promote(ctx, !values["no-secrets"]);
     if (command === "status") return await status(ctx, given ? [given] : ["staging", "production"]);
     if (command === "secret") return await secret(ctx, name, environment, options.readStdin ?? (() => readFileSync(0, "utf8")));
     if (command === "secrets") {
@@ -256,7 +271,7 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
       return await secretsFromEnv(ctx, resolve(name ? name : join(dir, ".env")), environment);
     }
     if (command !== undefined) throw new Usage(`Unknown command: deploy ${command}\n\n${usage}`);
-    return await deploy(ctx, dir, environment, values.version);
+    return await deploy(ctx, dir, environment, values.version, !values["no-secrets"]);
   } catch (error) {
     if (error instanceof Usage) return fail("usage", error.message, 2);
     if (error instanceof NotAvailable) return fail("not_available", error.message, 1);
@@ -273,13 +288,18 @@ interface Ctx {
   pollMs: number;
   maxPolls: number | undefined;
   now: () => number;
+  /** Which agent (a hash of its CI key), for .flow/secrets.json. */
+  keyId: string;
 }
 
-async function deploy(ctx: Ctx, dir: string, env: string, version: string | undefined): Promise<number> {
+async function deploy(ctx: Ctx, dir: string, env: string, version: string | undefined, withSecrets: boolean): Promise<number> {
   for (const file of ["package.json", "package-lock.json", "src/agent.ts"]) {
     if (!existsSync(join(dir, file))) throw new Usage(`${join(dir, file)} is missing: deploy the agent's folder (npm install makes package-lock.json).`);
   }
-  version ??= gitVersion(dir);
+  if (version === undefined) {
+    version = gitVersion(dir);
+    if (version?.endsWith("+dirty")) console.error("Warning: deploying uncommitted changes; commit first so the version names what runs.");
+  }
   const tmp = mkdtempSync(join(tmpdir(), "flow-deploy-"));
   try {
     const bundle = join(tmp, "agent.tgz");
@@ -288,6 +308,9 @@ async function deploy(ctx: Ctx, dir: string, env: string, version: string | unde
     if (size > MAX_BUNDLE) throw new Usage(`The packed folder is ${mb(size)}, over ${mb(MAX_BUNDLE)}. Leave large files out of it.`);
     ctx.say(`Packed ${dir} (${mb(size)})${version ? `, version ${version}` : ""}.`);
     const made = await ctx.api<{ deploy: Deploy; upload_url: string }>("POST", "/v1/hosting/deploys", { environment: env, ...(version ? { version } : {}) });
+    // The agent exists on the host once its first deploy is made, so its secrets go now, before
+    // the build starts: the service's first version starts with them.
+    if (withSecrets) await secretsFirst(ctx, env, "deploy");
     const put = await fetch(made.upload_url, { method: "PUT", headers: { "content-type": "application/gzip" }, body: readFileSync(bundle) });
     if (!put.ok) throw new Refused(`the upload failed (${put.status})`, "upload_failed");
     await ctx.api("POST", `/v1/hosting/deploys/${made.deploy.id}/start`);
@@ -299,7 +322,27 @@ async function deploy(ctx: Ctx, dir: string, env: string, version: string | unde
   }
 }
 
-async function promote(ctx: Ctx): Promise<number> {
+/**
+ * The .env's new or changed values as secrets for `env`, before what would start without them;
+ * a refused one stops it there. The names sent are printed.
+ */
+async function secretsFirst(ctx: Ctx, env: string, what: "deploy" | "promote"): Promise<void> {
+  const file = join(ctx.dir, ".env");
+  if (!existsSync(file)) return;
+  const sent = await sendSecrets(ctx, file, env, true);
+  if (sent.refused.length) {
+    const one = sent.refused.length === 1;
+    throw new Refused(
+      `${sent.refused.map((r) => r.name).join(", ")} could not be saved as ${one ? "a secret" : "secrets"} for ${env} (${sent.refused.map((r) => `${r.name}: ${r.message}`).join("; ")}), so this ${what} did not start. Fix or remove ${one ? "it" : "them"} in .env, then ${RUN} deploy${what === "promote" ? " promote" : ""} again (or add --no-secrets)`,
+      "secret_refused",
+    );
+  }
+  if (sent.saved.length) ctx.say(`Sent ${sent.saved.length} secret${sent.saved.length === 1 ? "" : "s"} from .env to ${env}: ${sent.saved.join(", ")}.`);
+}
+
+async function promote(ctx: Ctx, withSecrets: boolean): Promise<number> {
+  // Production keeps secrets of its own: the .env's go there first, so the promoted version has them.
+  if (withSecrets) await secretsFirst(ctx, "production", "promote");
   const { deploy } = await ctx.api<{ deploy: Deploy }>("POST", "/v1/hosting/promote");
   remember(ctx.dir, "production", deploy.id);
   ctx.say(`Promoting staging's ${deploy.version ?? "live version"} to production (${deploy.id}).`);
@@ -319,41 +362,99 @@ async function secret(ctx: Ctx, name: string | undefined, env: string, readStdin
   return 0;
 }
 
-/** Every non-empty value in a .env file as a secret, one each; the names only are printed. */
-async function secretsFromEnv(ctx: Ctx, file: string, env: string): Promise<number> {
-  if (!existsSync(file)) throw new Usage(`${file} is missing.`);
+interface Sent {
+  saved: string[];
+  skipped: Array<{ name: string; why: string }>;
+  refused: Array<{ name: string; message: string }>;
+  unchanged: string[];
+}
+
+/** Where flow deploy keeps a hash per secret it sent (never a value), to send only new or changed ones. */
+const SENT = join(".flow", "secrets.json");
+
+const secretHash = (ctx: Ctx, env: string, name: string, value: string) => createHash("sha256").update(`${ctx.keyId}\0${env}\0${name}\0${value}`).digest("hex");
+
+function sentHashes(dir: string): Record<string, Record<string, string>> {
+  try {
+    const known = JSON.parse(readFileSync(join(dir, SENT), "utf8"));
+    return known && typeof known === "object" ? known : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Every non-empty value in a .env file as a secret, one each, the names only printed; with
+ * `onlyChanged`, the ones .flow/secrets.json shows were already sent are left alone. Each one saved
+ * is recorded there as a hash.
+ */
+async function sendSecrets(ctx: Ctx, file: string, env: string, onlyChanged: boolean): Promise<Sent> {
   const entries = [...parseEnv(readFileSync(file, "utf8"))].filter(([, value]) => value !== "");
-  const saved: string[] = [];
-  const skipped: Array<{ name: string; why: string }> = [];
-  const refused: Array<{ name: string; message: string }> = [];
+  const out: Sent = { saved: [], skipped: [], refused: [], unchanged: [] };
+  const all = sentHashes(ctx.dir);
+  const scope = `${ctx.keyId}:${env}`;
+  const known = { ...(all[scope] ?? {}) };
   for (const [name, value] of entries) {
     if (CLI_NAMES.has(name)) continue;
     if (HOST_NAMES.test(name)) {
-      skipped.push({ name, why: "set by Flow" });
-      ctx.say(`  ${name} skipped (set by Flow)`);
+      out.skipped.push({ name, why: "set by Flow" });
+      if (!onlyChanged) ctx.say(`  ${name} skipped (set by Flow)`);
       continue;
     }
     if (!ENV_SECRET_NAME.test(name)) {
-      skipped.push({ name, why: "not upper case letters, digits and _" });
+      out.skipped.push({ name, why: "not upper case letters, digits and _" });
       ctx.say(`  ${name} skipped: a secret's name is upper case letters, digits and _`);
+      continue;
+    }
+    const hash = secretHash(ctx, env, name, value);
+    if (onlyChanged && known[name] === hash) {
+      out.unchanged.push(name);
       continue;
     }
     try {
       await ctx.api("PUT", `/v1/hosting/secrets/${name}`, { environment: env, value });
     } catch (error) {
       if (!(error instanceof Refused)) throw error;
-      refused.push({ name, message: error.message });
-      ctx.say(`  ${name} refused: ${error.message}`);
+      out.refused.push({ name, message: error.message });
+      console.error(`  ${name} refused: ${error.message}`);
       continue;
     }
-    saved.push(name);
-    ctx.say(`  ${name} set`);
+    out.saved.push(name);
+    known[name] = hash;
+    if (!onlyChanged) ctx.say(`  ${name} set`);
   }
-  const next = `${RUN} deploy${env === "production" ? " --env production" : ""}`;
+  if (out.saved.length) {
+    try {
+      mkdirSync(join(ctx.dir, ".flow"), { recursive: true });
+      writeFileSync(join(ctx.dir, SENT), `${JSON.stringify({ ...all, [scope]: known }, null, 2)}\n`);
+    } catch {
+      // only saves sending them again next time
+    }
+  }
+  return out;
+}
+
+/** `flow deploy secrets --from-env`: every non-empty value in a .env file as a secret now. */
+async function secretsFromEnv(ctx: Ctx, file: string, env: string): Promise<number> {
+  if (!existsSync(file)) throw new Usage(`${file} is missing.`);
+  const { saved, skipped, refused } = await sendSecrets(ctx, file, env, false);
+  const deployCmd = `${RUN} deploy${env === "production" ? " --env production" : ""}`;
+  const neverDeployed = refused.length > 0 && refused.every((r) => /never been deployed/.test(r.message));
+  const next = neverDeployed ? `${deployCmd} (it sends the .env's values itself)` : deployCmd;
   if (ctx.json) console.log(JSON.stringify({ ok: refused.length === 0, environment: env, saved, skipped, refused, next }));
-  ctx.say(saved.length ? `Saved ${saved.length} secret${saved.length === 1 ? "" : "s"} for ${env}. They take effect on the next deploy.` : `No secrets saved from ${file}.`);
-  if (saved.length) ctx.say(`Next: ${next}`);
-  return refused.length ? 1 : 0;
+  if (saved.length) ctx.say(`Saved ${saved.length} secret${saved.length === 1 ? "" : "s"} for ${env}. They take effect on the next deploy.`);
+  if (refused.length) {
+    console.error(
+      neverDeployed
+        ? `Refused: this agent has not been deployed yet, so ${env} took no secrets. ${deployCmd} deploys it and sends the .env's values as secrets before it starts.`
+        : `Refused: ${refused.length} secret${refused.length === 1 ? "" : "s"} not saved (${refused.map((r) => r.name).join(", ")}).`,
+    );
+    console.error(`Next: ${next}`);
+    return 1;
+  }
+  if (!saved.length) ctx.say(`No secrets saved from ${file}.`);
+  else ctx.say(`Next: ${next}`);
+  return 0;
 }
 
 /** Follows a deploy until it is live, refused or failed, printing each change. */
@@ -551,11 +652,20 @@ async function logs(ctx: Ctx, environment: string, since: string, followLines: b
   }
 }
 
-function gitVersion(dir: string): string | undefined {
+/** The folder's git commit, with +dirty when the folder has changes not committed (what is packed is the folder as it is). */
+export function gitVersion(dir: string): string | undefined {
+  let sha: string;
   try {
-    return execFileSync("git", ["-C", dir, "rev-parse", "--short", "HEAD"], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim() || undefined;
+    sha = execFileSync("git", ["-C", dir, "rev-parse", "--short", "HEAD"], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
   } catch {
     return undefined;
+  }
+  if (!sha) return undefined;
+  try {
+    const changes = execFileSync("git", ["-C", dir, "status", "--porcelain", "--", "."], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    return changes ? `${sha}+dirty` : sha;
+  } catch {
+    return sha;
   }
 }
 
