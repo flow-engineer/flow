@@ -226,6 +226,14 @@ before any send or turn (`queued`, or `refused`/`dropped`/`scheduled` decided th
 `GET /nudges/<id>` reads its state. Both need `Authorization: Bearer <token>`. Contract:
 `spec/nudges.openapi.yaml`.
 
+When the backend posts what happened (an order shipped, an item is back in stock) rather than what
+to send, mount `flowEvents({ secret, catalog, timezone })` (from `@flow-engineer/flow`): its
+`routes` (`POST /v1/events`, signed with `Flow-Signature`), `onTick` and `context(conversationId)`
+go on `createAgent`, `events.phrasing.check(address, outbound)` in the channel's send (throw its
+reason to refuse), then `events.attach(agent)`. Each type in the catalog has a delivery level
+(critical, standard, optional), its template and its values; the guide is `docs/events.md` in the
+package (`../docs/events.md` from this file).
+
 Templates are WhatsApp only. Declare the ones the owner set up with Meta beside `testPeople`, so
 Flow Framework checks each send against them and the playground shows them as WhatsApp does:
 

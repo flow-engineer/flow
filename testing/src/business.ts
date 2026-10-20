@@ -4,7 +4,8 @@
 // the agent wraps around them and come to the cloud with the run's time. The person writes through
 // agent.message(), as a provider's webhook would, so they are a person the agent can nudge.
 
-import { createHmac, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
+import { signEvent } from "../../src/index.ts";
 import type { Agent, Channel, EventSink, Incoming, Outbound, Tool } from "../../src/index.ts";
 import type { BusinessCommand, BusinessOutbound, Command, Receipt, StepAnswer } from "./protocol.ts";
 
@@ -106,10 +107,9 @@ export function businessRuns(ctx: BusinessContext) {
 
   const event = async (run: Run, command: Extract<BusinessCommand, { type: "event" }>): Promise<Omit<StepAnswer, "conversationId" | "step" | "at">> => {
     const body = JSON.stringify(command.envelope);
-    const t = Math.floor(run.clock / 1000);
     const secret = command.signature === "bad" ? `whsec_test_${randomBytes(18).toString("hex")}` : run.secret;
     const headers: Record<string, string> = { "content-type": "application/json", "idempotency-key": command.envelope.id };
-    if (command.signature !== "missing") headers["flow-signature"] = `t=${t},v1=${createHmac("sha256", secret).update(`t.${t}.${body}`).digest("hex")}`;
+    if (command.signature !== "missing") headers["flow-signature"] = signEvent(secret, body, run.clock);
     const response = await run.agent.fetch(new Request(`http://agent.test${command.path ?? "/v1/events"}`, { method: "POST", headers, body }));
     const text = await response.text();
     let parsed: unknown = text;

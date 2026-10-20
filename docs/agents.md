@@ -173,6 +173,13 @@ preview card's title becomes the phone's notification instead of the message's t
 action use `link` (`agent.nudge({ to, text, link: { label, url } })`, or the agent's send with
 `link`), not a URL in the text.
 
+When the business's backend should tell people what happened (an order shipped, an item is back),
+mount `flowEvents` instead of writing a route: one signed `POST /v1/events`, each event sent by its
+delivery level (critical at once, standard after quiet hours, optional merged or dropped), with the
+agent's own wording checked against the template's values. The envelope, signing, answers and a
+mounting sample are in `docs/events.md` in the package
+(https://github.com/flow-engineer/flow/blob/main/docs/events.md).
+
 ## Shared test numbers and privacy
 
 The free trial runs on Flow's shared Telegram bot, WhatsApp number and iMessage line. Sending an

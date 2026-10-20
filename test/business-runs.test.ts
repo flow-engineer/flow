@@ -9,7 +9,7 @@ import { createHmac } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { createAgent, whatsapp, type Channel, type EventSink, type Tool } from "../src/index.ts";
+import { createAgent, flowEvents, whatsapp, type Channel, type EventSink, type Tool } from "../src/index.ts";
 import { runInCloud, type ConnectOptions } from "../testing/src/client.ts";
 import { isBusiness, parseScenario, waitMs } from "../testing/src/suite.ts";
 import type { BusinessBuild } from "../testing/src/business.ts";
@@ -130,6 +130,38 @@ test("in a business run the person writes as on the channel, so the agent can nu
   assert.deepEqual(receipts, [{ conversationId, messageId: "m1", status: "taken" }]);
   assert.deepEqual(answers.map((a) => [a.step, a.nudge?.status ?? null]), [[0, null], [2, "sent"]]);
   assert.deepEqual(outbound.flatMap((o) => (o.outbound.type === "message" ? [[o.outbound.text, o.at]] : [])), [["Hello!", START], ["Your bid was outbid.", START]]);
+});
+
+test("a business run against flowEvents' own route: a signed event is 202, a wrongly signed one 401, a malformed one 400 naming the field", async () => {
+  const conversationId = "whatsapp:p3";
+  const order = { id: "evt_10", type: "order.shipped", occurredAt: new Date(START).toISOString(), subject: "order:1", data: { user: { phone: PERSON }, consent: { whatsappUpdates: true }, order: "A-100" } };
+  let events: ReturnType<typeof flowEvents> | undefined;
+  const { answers } = await play([
+    { type: "open", conversationId, channelName: "whatsapp", channel: WHATSAPP, address: PERSON, now: START },
+    { type: "event", conversationId, step: 1, envelope: order },
+    { type: "event", conversationId, step: 2, envelope: { ...order, id: "evt_11" }, signature: "bad" },
+    { type: "event", conversationId, step: 3, envelope: { ...order, id: "evt_12", data: { consent: { whatsappUpdates: true }, order: "A-100" } } },
+  ], (options) => {
+    if (!options.testing) return buildAgent(options, []);
+    events = flowEvents({
+      secret: options.testing.eventsSecret,
+      now: options.testing.now,
+      log: () => {},
+      catalog: {
+        "order.shipped": {
+          level: "critical",
+          message: (e) => ({ template: { name: "order_shipped", body: [String(e.data.order)] }, text: `Order ${e.data.order} shipped.`, values: [String(e.data.order)], link: { label: "Track", url: "https://example.com/o/1" } }),
+        },
+      },
+    });
+    const agent = createAgent({ files: { "AGENTS.md": "A test agent." }, model: scriptedModel().model, tools: options.tools, events: options.events, channels: options.channels, now: options.testing.now, scheduleCheckMs: options.testing.scheduleCheckMs, routes: events.routes, onTick: events.onTick });
+    events.attach(agent);
+    return agent;
+  });
+  assert.deepEqual(answers.map((a) => [a.step, a.answer?.status ?? null, a.error ?? null]), [[0, null, null], [1, 202, null], [2, 401, null], [3, 400, null]]);
+  assert.deepEqual(answers[1].answer!.body, { status: "accepted" });
+  assert.deepEqual(answers[3].answer!.body, { field: "data.user.phone", error: "required, E.164" });
+  await events!.idle();
 });
 
 test("the format: a business run's steps parse, and a step that is two things is refused at its line", () => {

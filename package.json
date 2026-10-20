@@ -51,6 +51,7 @@
     "examples/http-agent",
     "flow-messaging/README.md",
     "docs/agents.md",
+    "docs/events.md",
     "coding-agents",
     "spec",
     "README.md",
