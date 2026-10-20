@@ -6,8 +6,8 @@
 //                                                authorization_pending, slow_down, expired_token, access_denied, invalid_grant
 //   POST /cli/revoke (bearer) {}              ends this token
 //   GET  /cli/whoami (bearer)                 -> {account, email, token}
-//   POST /cli/setup (bearer) {name, hostname, channels, have, rotate?, rotate_now?}
-//        -> {agent_id, cloud_key?, traces_key?, messaging_key?, flow_key?, model_credit?, join_code, account, app_id,
+//   POST /cli/setup (bearer) {name, hostname, channels, have, workspace?, rotate?, rotate_now?}
+//        -> {agent_id, workspace_id?, workspace_name?, cloud_key?, traces_key?, messaging_key?, flow_key?, model_credit?, join_code, account, app_id,
 //            dashboard_url, try_url, <channel>_sender?, <channel>_link? (telegram, whatsapp, imessage: each only while
 //            that shared sender is open), try_urls?, trial?, minted, next}; a 502 carries every field that worked too;
 //        flow_key is the agent's one Flow key, {env: "FLOW_KEY", value: "flow_test_...", kid, mode, scopes, agent_id,
@@ -18,6 +18,9 @@
 //        the reason in warnings; every folder's setup makes its own key, the credit is the account's;
 //        rotate is true (every key) or the answer fields to make again, such as ["flow_key"]; rotate_now: true
 //        ends the old FLOW_KEY at once instead of 24 h later (previous_expires_at);
+//        workspace is an observe workspace's acc_ id or name (case-insensitive), 1 to 100 characters; absent: the
+//        personal one; workspace_id and workspace_name are the workspace the agent and its cloud and traces keys are in
+//        (whenever observe answered; an older server sends neither); 403 not_a_member, 409 workspace_ambiguous (pass the id);
 //        429 slow_down with Retry-After; 403 for a trial limit (sandbox_allowance_used, ...), its next prose
 //        Any answer may carry warnings: up to 20 strings to show the owner as they are.
 //   GET  <model URL>/credit (bearer FLOW_KEY) -> {limit_usd, spent_usd, left_usd, default_model, models};
@@ -171,6 +174,9 @@ export interface FlowKey {
 
 export interface SetupAnswer {
   agent_id: string;
+  /** The observe workspace (acc_...) the agent and its cloud and traces keys are in; absent from an older server. */
+  workspace_id?: string;
+  workspace_name?: string;
   /** Only the keys minted in this call come back (those the request did not say it has). */
   cloud_key?: string;
   traces_key?: string;
@@ -328,7 +334,7 @@ export async function whoami(url: string, token: string): Promise<Account> {
   return answer.body as unknown as Account;
 }
 
-export async function setup(url: string, token: string, request: { name: string; hostname: string; channels: string[]; have: string[]; rotate?: true | string[]; rotate_now?: true }): Promise<SetupAnswer> {
+export async function setup(url: string, token: string, request: { name: string; hostname: string; channels: string[]; have: string[]; workspace?: string; rotate?: true | string[]; rotate_now?: true }): Promise<SetupAnswer> {
   const answer = await call(url, "/cli/setup", { token, body: request });
   // A 200 is returned whole even without a join code: the keys it minted are shown only now.
   if (answer.status !== 200) throw refused("/cli/setup", answer, url);

@@ -352,6 +352,8 @@ run again. `--channel telegram|whatsapp|imessage` picks the channel; a channel f
 open yet exits 3 with its `next`. When only observe's part of setup fails (traces and the test cloud),
 `link` still prints the link and exits 0, with one warning saying what is missing and the server's
 fix (`warnings` in `--json`): pass it on to the owner. `login`, `setup` and `link` also run on their own.
+When the owner names a team's observe workspace, pass `--workspace <name|acc_id>` to `setup` or `link`
+once: its `acc_` id is kept in `.env` (`FLOW_FRAMEWORK_WORKSPACE`) for later runs, and `status` shows it.
 
 In `src/main.ts`, put `fm.telegram()` from `@flow-engineer/flow/flow-messaging` in the agent's
 channels and call `fm.start(agent, { cursorFile: ".flow/flow-messaging-cursor" })`: with no webhook

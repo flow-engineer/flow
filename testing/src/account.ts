@@ -36,20 +36,22 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
                             waiting for the same code, --no-wait returns at once
   flow logout [--json]      End this machine's sign-in and delete its token
   flow whoami [--json]      Show the account you are signed in as
-  flow setup [--replace] [--rotate <keys> [--now]] [--display-name <name>] [--ci] [--json]
+  flow setup [--replace] [--rotate <keys> [--now]] [--workspace <name|acc_id>] [--display-name <name>] [--ci] [--json]
                             Write this agent's keys (its Flow key FLOW_KEY, which also pays for the
                             model on the account's trial credit when there is no provider key, test
                             cloud, traces, Flow Messaging) and each open channel's sender into
                             ./.env (in an agent's folder: package.json); --rotate key,cloud,traces,
                             messaging or all makes those keys again (the old FLOW_KEY works 24 h
-                            more; --now ends it at once)
-  flow link [--channel telegram|whatsapp|imessage] [--display-name <name>] [--timeout <s>] [--no-browser] [--json]
+                            more; --now ends it at once). --workspace (here and on link) puts the
+                            agent in that observe workspace of yours, kept in .env as
+                            FLOW_FRAMEWORK_WORKSPACE; a new one makes the cloud and traces keys again
+  flow link [--channel telegram|whatsapp|imessage] [--workspace <name|acc_id>] [--display-name <name>] [--timeout <s>] [--no-browser] [--json]
                             Print the link that opens a chat with this agent from a phone; signs in
                             and runs setup first when this folder is not set up yet. --display-name
                             (here and on setup) renames the agent: package.json's displayName and
                             its prompt, agent/AGENTS.md; the phone link then says "Hi <name>"
   flow status [--json]      What this folder has and lacks: FLOW_KEY and the model key (never their
-                            values) with the trial credit left, the
+                            values) with the trial credit left, the workspace, the
                             sign-in, each channel's sender in .env, and, signed in, which channels
                             are open now and their free-trial counts`;
 
@@ -111,7 +113,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
           : {}),
         ...(command === "setup" ? { replace: { type: "boolean", default: false }, rotate: { type: "string" }, now: { type: "boolean", default: false }, ci: { type: "boolean", default: false } } : {}),
         ...(command === "link" ? { channel: { type: "string", default: "telegram" } } : {}),
-        ...(command === "link" || command === "setup" ? { "display-name": { type: "string" } } : {}),
+        ...(command === "link" || command === "setup" ? { "display-name": { type: "string" }, workspace: { type: "string" } } : {}),
       },
     }));
   } catch (error) {
@@ -141,6 +143,12 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     console.error(`flow setup: --now goes with --rotate key (or all): it ends the old FLOW_KEY at once.\n\n${USAGE}`);
     return EXIT.usage;
   }
+  const workspace = typeof values.workspace === "string" ? values.workspace.trim() : undefined;
+  // flow.engineer takes a workspace's acc_ id or its name: 1 to 100 characters, no control characters.
+  if (workspace !== undefined && (!workspace || workspace.length > 100 || /[\u0000-\u001f\u007f]/.test(workspace))) {
+    console.error(`flow ${command}: --workspace takes a workspace's name or its acc_ id, 1 to 100 characters.\n\n${USAGE}`);
+    return EXIT.usage;
+  }
   const json = values.json === true;
   // Straight to the file descriptors, never buffered: a coding agent's cut-off command keeps every line.
   const out = (report: unknown) => writeAll(1, `${JSON.stringify(report)}\n`);
@@ -166,8 +174,8 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     else if (command === "logout") await logout(json, out, say);
     else if (command === "whoami") await showAccount(json, out, say);
     else if (command === "status") await status(json, out, say);
-    else if (command === "setup") await setupEnv({ replace: values.replace === true, rotate, now: values.now === true, ci: values.ci === true }, json, out, say);
-    else await link({ channel, noBrowser: values["no-browser"] === true, timeoutSeconds, renamed }, json, out, say);
+    else if (command === "setup") await setupEnv({ replace: values.replace === true, rotate, now: values.now === true, ci: values.ci === true, workspace }, json, out, say);
+    else await link({ channel, noBrowser: values["no-browser"] === true, timeoutSeconds, renamed, workspace }, json, out, say);
     return EXIT.ok;
   } catch (error) {
     const stop = asStop(error);
@@ -526,6 +534,19 @@ const OPEN_HINT: Record<string, string> = {
   imessage: "Open it on an iPhone or a Mac and send the message it fills in.",
 };
 
+/** The observe workspace this folder's agent was put in by --workspace (its acc_ id); unset: the personal one. */
+const WORKSPACE_ENV = "FLOW_FRAMEWORK_WORKSPACE";
+/** The answer's workspace_id, under the name setupEnv gives it only when a workspace was asked for. */
+const WORKSPACE_FIELD = "workspace_kept";
+
+/** --workspace names another workspace than the one .env's cloud and traces keys are in (none named yet: the personal one). */
+function movesWorkspace(workspace: string | undefined, value: (name: string) => string | undefined): boolean {
+  if (workspace === undefined) return false;
+  const stored = value(WORKSPACE_ENV);
+  if (stored) return workspace.toLowerCase() !== stored.toLowerCase();
+  return Boolean(value(SETUP_ENV.cloud_key) || value(SETUP_ENV.traces_key));
+}
+
 interface SetupOptions {
   replace: boolean;
   /** --rotate's names (key, cloud, traces, messaging, or all). */
@@ -533,6 +554,8 @@ interface SetupOptions {
   /** --now: the old FLOW_KEY stops working at once instead of 24 h later. */
   now?: boolean;
   ci: boolean;
+  /** --workspace: an observe workspace's name or acc_ id; undefined sends .env's FLOW_FRAMEWORK_WORKSPACE, if any. */
+  workspace?: string;
 }
 
 async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say, forLink?: { channel: string }): Promise<{ answer: SetupAnswer; warnings: string[] }> {
@@ -560,6 +583,12 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const name = named.replace(/^@[^/]*\//, "").replace(/[^A-Za-z0-9 ._-]/g, "-").slice(0, 64) || "my-agent";
   const all = options.rotate.includes("all");
   const rotated = new Set(all ? Object.values(ROTATE).filter(Boolean) : options.rotate.map((k) => ROTATE[k]!));
+  // The workspace asked for: --workspace, else the one an earlier --workspace kept in .env.
+  const workspace = options.workspace ?? (before.get(WORKSPACE_ENV) || undefined);
+  // Another workspace: the cloud and traces keys in .env are the old one's, so they are made again
+  // there (Messaging's key and FLOW_KEY are not bound to a workspace).
+  const moving = movesWorkspace(options.workspace, (n) => before.get(n));
+  if (moving) for (const field of ["cloud_key", "traces_key"]) rotated.add(field);
   const rotatedEnv = new Set([...rotated].map((field) => (field === "flow_key" ? FLOW_KEY : SETUP_ENV[field as keyof typeof SETUP_ENV])));
   // An empty value (`cp .env.example .env`) is missing: the server mints it. A model key counts in
   // the shell too (npm start reads both): FLOW_KEY is made only when it is not named as had, and
@@ -575,18 +604,20 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   // FLOW_FRAMEWORK_TRY_URL is one channel's page: link's channel when it is open, else the server's (Telegram's).
   const withTryUrl = (fields: Record<string, unknown>): Record<string, unknown> => {
     const code = fields.join_code;
+    // The workspace the answer put the agent in, kept only when one was asked for.
+    if (workspace !== undefined && typeof fields.workspace_id === "string" && fields.workspace_id) fields = { ...fields, [WORKSPACE_FIELD]: fields.workspace_id };
     if (!forLink || typeof fields[`${forLink.channel}_sender`] !== "string" || typeof code !== "string" || !code) return fields;
     const pages = fields.try_urls as Record<string, unknown> | undefined;
     const page = typeof pages?.[forLink.channel] === "string" ? (pages[forLink.channel] as string) : tryLink(url, code, forLink.channel);
     return { ...fields, try_url: page };
   };
-  const chosenPage = (n: string) => forLink !== undefined && n === SETUP_ENV.try_url;
+  const chosenPage = (n: string) => (forLink !== undefined && n === SETUP_ENV.try_url) || n === WORKSPACE_ENV;
   let answer: SetupAnswer;
   // For link: the server's refusal when Messaging's part came (a join code) and only observe's failed.
   let observeFailed: { why: string; fix: string | undefined } | undefined;
   try {
     // Every channel: each comes back with its shared sender only while it is open.
-    answer = await setup(url, token, { name, hostname: hostname(), channels: [...CHANNELS], have, ...(rotate ? { rotate } : {}), ...(rotateNow ? { rotate_now: true as const } : {}) });
+    answer = await setup(url, token, { name, hostname: hostname(), channels: [...CHANNELS], have, ...(workspace !== undefined ? { workspace } : {}), ...(rotate ? { rotate } : {}), ...(rotateNow ? { rotate_now: true as const } : {}) });
   } catch (error) {
     // Texting needs only Messaging's part, so link goes on without observe's (traces and the test
     // cloud) and says what is missing; setup alone, whose job is both, still stops.
@@ -608,6 +639,12 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const had = new Map(before);
   // --replace takes every new value but a model key: only --rotate key replaces FLOW_KEY.
   const written = writeEnv(file, lines, before, envEntries(withTryUrl(fields)), (n) => rotatedEnv.has(n) || (options.replace && !MODEL_KEY_NAMES.includes(n)) || chosenPage(n));
+  // An older flow.engineer ignores the field and sets the agent up in the personal workspace.
+  if (workspace !== undefined && !observeFailed && (typeof answer.workspace_id !== "string" || !answer.workspace_id)) {
+    const stop = new Stop("workspace_unsupported", "flow.engineer does not support --workspace yet; the agent was set up in your personal workspace.", undefined, EXIT.refused);
+    stop.warnings = warnings;
+    throw stop;
+  }
   if (typeof answer.join_code !== "string" || !answer.join_code) {
     const kept = written.filter((w) => w.action === "added" || w.action === "replaced").map((w) => w.name);
     const stop = new Stop("no_join_code", `flow.engineer gave no join code${kept.length ? ` (the keys it made are in .env: ${kept.join(", ")})` : ""}, so there is no phone link yet.`,
@@ -616,7 +653,8 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
     throw stop;
   }
   if (observeFailed) {
-    const missing = [SETUP_ENV.cloud_key, SETUP_ENV.traces_key].filter((n) => !before.get(n));
+    // Moving workspaces, the old workspace's keys still in .env do not count.
+    const missing = [SETUP_ENV.cloud_key, SETUP_ENV.traces_key].filter((n) => !before.get(n) || (moving && before.get(n) === had.get(n)));
     const why = observeFailed.why.replace(/\.$/, "");
     warnings.push(`Traces and tests won't work${missing.length ? ` until .env has ${missing.join(" and ")}` : ""}: ${why}.${observeFailed.fix ? ` Then: ${observeFailed.fix}` : ""}`);
   }
@@ -651,6 +689,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
       whatsapp_link: answer.whatsapp_link ?? null, imessage_link: answer.imessage_link ?? null, try_urls: links,
       direct_links: Object.fromEntries(Object.entries(direct).map(([c, d]) => [c, d.link])), join_message: Object.values(direct)[0]?.message ?? null,
       trial, model_key: model.report,
+      workspace: typeof answer.workspace_id === "string" && answer.workspace_id ? { id: answer.workspace_id, name: answer.workspace_name ?? null } : null,
       // FLOW_KEY's state, never its value: made in this call, with its id, mode and scopes.
       flow_key: { set: Boolean(before.get(FLOW_KEY) || process.env[FLOW_KEY]?.trim()), minted: flowKey?.minted === true,
         ...(flowKey?.minted ? { kid: flowKey.kid ?? null, mode: flowKey.mode ?? null, scopes: flowKey.scopes ?? [], previous_expires_at: flowKey.previous_expires_at ?? null } : {}) },
@@ -661,6 +700,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   say(answer.agent_id ? `Agent ${answer.agent_id}. In .env:` : "In .env:");
   for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}${w.action === "kept" ? (w.name === FLOW_KEY ? " (--rotate key makes a new one)" : " (yours differs; --replace takes the new one)") : ""}`);
   if (previous) say(previous);
+  if (answer.workspace_id) say(`Workspace: ${answer.workspace_name ? `${answer.workspace_name} (${answer.workspace_id})` : answer.workspace_id}`);
   if (answer.dashboard_url) say(`Its dashboard: ${answer.dashboard_url}`);
   // Said by link instead, once, with its link.
   if (!forLink) say(model.line);
@@ -696,6 +736,7 @@ function objectField<T>(fields: Record<string, unknown>, name: string): T | unde
  */
 function envEntries(fields: Record<string, unknown>): Array<[string, unknown]> {
   const entries: Array<[string, unknown]> = Object.entries(SETUP_ENV).map(([field, envName]) => [envName, fields[field]]);
+  entries.push([WORKSPACE_ENV, fields[WORKSPACE_FIELD]]);
   const key = objectField<SetupAnswer["flow_key"]>(fields, "flow_key");
   if ((key?.env ?? FLOW_KEY) === FLOW_KEY && typeof key?.value === "string") entries.push([FLOW_KEY, key.value]);
   return entries;
@@ -767,7 +808,8 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
         const named = (JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { name?: string }).name ?? basename(process.cwd());
         const name = named.replace(/^@[^/]*\//, "").replace(/[^A-Za-z0-9 ._-]/g, "-").slice(0, 64) || "my-agent";
         const have = [...Object.values(SETUP_ENV).filter((n) => n !== SETUP_ENV.try_url), ...MODEL_KEY_NAMES];
-        server = await setup(url, current.token, { name, hostname: hostname(), channels: [...CHANNELS], have });
+        const workspace = value(WORKSPACE_ENV);
+        server = await setup(url, current.token, { name, hostname: hostname(), channels: [...CHANNELS], have, ...(workspace ? { workspace } : {}) });
       }
     } catch {
       // Signed out on the server, or not reachable: status says what it can from here.
@@ -785,9 +827,11 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     ...(model.report.set && !model.next ? ["npm start"] : []),
     ...(!joinCode || !value(SETUP_ENV.messaging_key) ? [NEXT.link] : CHANNELS.filter((c) => channels[c]!.open && !channels[c]!.sender).map((c) => `${NEXT.link} --channel ${c}`)),
   ];
-  if (json) out({ model_key: model.report, flow_key: { set: Boolean(value(FLOW_KEY)) }, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, next });
+  const workspace = value(WORKSPACE_ENV) || "personal";
+  if (json) out({ model_key: model.report, flow_key: { set: Boolean(value(FLOW_KEY)) }, workspace, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, next });
   if (model.report.env && model.report.env !== FLOW_KEY) say(value(FLOW_KEY) ? `${FLOW_KEY} is set.` : `${FLOW_KEY}: not set yet (${RUN} setup writes it).`);
   say(model.line);
+  say(`Workspace: ${workspace}`);
   say(account ? `Signed in as ${account.email}.` : current ? "Not signed in here (or flow.engineer could not be reached)." : "Not signed in.");
   for (const c of CHANNELS) {
     const { sender, open, trial } = channels[c]!;
@@ -829,6 +873,8 @@ interface LinkOptions {
   timeoutSeconds: number;
   /** --display-name changed the name just now, which a running agent reads only when it starts. */
   renamed?: boolean;
+  /** --workspace: setup runs again when it names another workspace than .env's. */
+  workspace?: string;
 }
 
 /** The names set in ./.env, with what the environment sets winning. */
@@ -855,7 +901,8 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
   let trial: SetupAnswer["trial"] | undefined;
   let had: ((name: string) => string | undefined) | undefined;
   let warnings: string[] = [];
-  if (!value(SETUP_ENV.join_code) || !value(SETUP_ENV.messaging_key) || (needsSender && !value(SENDER_ENV[options.channel]!))) {
+  const newWorkspace = options.workspace !== undefined && (movesWorkspace(options.workspace, value) || !value(WORKSPACE_ENV));
+  if (newWorkspace || !value(SETUP_ENV.join_code) || !value(SETUP_ENV.messaging_key) || (needsSender && !value(SENDER_ENV[options.channel]!))) {
     agentFolder(process.cwd());
     if (!(await signedInAccount(loginUrl()))) {
       say("Not signed in to flow.engineer yet: signing in first.");
@@ -863,7 +910,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
     }
     say("Setting up this agent's keys in .env.");
     had = value;
-    ({ answer: { model_credit: credit, trial }, warnings } = await setupEnv({ replace: false, rotate: [], ci: false }, json, out, say, { channel: options.channel }));
+    ({ answer: { model_credit: credit, trial }, warnings } = await setupEnv({ replace: false, rotate: [], ci: false, workspace: options.workspace }, json, out, say, { channel: options.channel }));
     value = dotenvValue();
   }
   const joinCode = value(SETUP_ENV.join_code);
