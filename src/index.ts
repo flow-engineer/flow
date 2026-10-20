@@ -28,7 +28,7 @@ export { sqlite, type Database } from "./db.ts";
 export { postgres, type PostgresPool } from "./postgres.ts";
 export { jsonlSink, type EventSink, type FlowEvent, type ChinwagEvent } from "./events.ts";
 export { choosePort, markRunning } from "./local.ts";
-export { flowModel, flowModelURL, openAICompatible, type OpenAICompatibleOptions } from "./model.ts";
+export { flowModel, flowModelURL, flowTranscribe, openAICompatible, type FlowTranscribeOptions, type OpenAICompatibleOptions } from "./model.ts";
 export { Store, type StoreApi } from "./store.ts";
 export type { AgentFiles } from "./skills.ts";
 export type { TracesOptions } from "./traces.ts";

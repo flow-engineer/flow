@@ -4,12 +4,13 @@
 // overriding that provider's default id. A blank line is no key, and no key at all fails when the
 // model is made, in one sentence naming .env and its lines with a next step, not on the first
 // message, unless a base URL is named (a local server needs no key). Flow's typed errors (credit
-// used up, ...) come back as its message and next step.
+// used up, ...) come back as its message and next step. flowTranscribe posts the audio to Flow's
+// /audio/transcriptions with the same key and address, and reports Flow's errors the same way.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { flowModel, modelFromKeys, openAICompatible } from "../src/model.ts";
+import { flowModel, flowTranscribe, modelFromKeys, openAICompatible } from "../src/model.ts";
 
 /** Fake Flow keys in FLOW_KEY's format (flow_test_<kid>_<secret>), obviously not real. */
 const FAKE = "flow_test_FAKEkid000_0000000000FAKE0000000000FAKE000000abcd";
@@ -93,4 +94,34 @@ test("a model through Flow sends FLOW_KEY and the default model, reads PDFs, and
     }
   });
   assert.deepEqual(seen, [{ auth: `Bearer ${FAKE_TRIAL}`, model: "anthropic/claude-haiku-5.5" }, { auth: `Bearer ${FAKE_TRIAL}`, model: "anthropic/claude-haiku-5.5" }], "a 402 is not tried again");
+});
+
+test("flowTranscribe posts the audio and language as multipart with FLOW_KEY, returns { text }, and reports Flow's typed error with its next step", async (t) => {
+  const sent: Array<{ url: string; auth?: string; file: File; language: FormDataEntryValue | null }> = [];
+  const answers = [
+    new Response(JSON.stringify({ text: "see you at 6" }), { status: 200 }),
+    new Response(JSON.stringify({ text: "" }), { status: 200 }),
+    new Response(JSON.stringify({ error: { message: "The audio is over 15 MB.", type: "invalid_request_error", code: "file_too_large", next: "send a shorter recording" } }), { status: 413 }),
+  ];
+  t.mock.method(globalThis, "fetch", async (url: string, init: RequestInit) => {
+    const form = init.body as FormData;
+    sent.push({ url, auth: (init.headers as Record<string, string>).authorization, file: form.get("file") as File, language: form.get("language") });
+    return answers.shift()!;
+  });
+  await withEnv({ FLOW_KEY: FAKE, FLOW_FRAMEWORK_LOGIN_URL: "http://127.0.0.1:8000/" }, async () => {
+    assert.deepEqual(await flowTranscribe(new Uint8Array([1, 2, 3]), { language: "pt-BR" }), { text: "see you at 6" });
+    assert.deepEqual(await flowTranscribe(new Blob([new Uint8Array([4])], { type: "audio/mpeg" }), { filename: "note.mp3" }), { text: "" });
+    await assert.rejects(flowTranscribe(new ArrayBuffer(1), { mimeType: "audio/wav" }), {
+      message: "The audio is over 15 MB.\nNext: send a shorter recording",
+      code: "file_too_large",
+      next: "send a shorter recording",
+      status: 413,
+    });
+  });
+  assert.deepEqual(sent.map((s) => [s.url, s.auth, s.file.name, s.file.type, s.file.size, s.language]), [
+    ["http://127.0.0.1:8000/llm/framework/v1/audio/transcriptions", `Bearer ${FAKE}`, "audio.ogg", "", 3, "pt-BR"],
+    ["http://127.0.0.1:8000/llm/framework/v1/audio/transcriptions", `Bearer ${FAKE}`, "note.mp3", "audio/mpeg", 1, null],
+    ["http://127.0.0.1:8000/llm/framework/v1/audio/transcriptions", `Bearer ${FAKE}`, "audio.ogg", "audio/wav", 1, null],
+  ]);
+  await withEnv({}, () => assert.rejects(flowTranscribe(new Uint8Array([1])), { code: "no_model_key", next: "npx @flow-engineer/flow setup" }));
 });

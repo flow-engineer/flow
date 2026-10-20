@@ -110,6 +110,8 @@ first of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_AP
 default model (`MODEL` overrides it). `flowModel()` uses Flow alone; when its credit is used up a
 call fails with code `trial_credit_used` and a next step (tell the owner to add their own key). With none it stops at once and
 names them. Pass `apiKey` and `baseURL` for anywhere else (`baseURL` alone for a local server that needs no key).
+`flowTranscribe(audio, { language })` turns a voice note (at most 15 MB) into `{ text }` through Flow
+with FLOW_KEY, failing the same way.
 
 Which model: recommend Claude Haiku 5.5 (`anthropic/claude-haiku-5.5`, the default above) or OpenAI
 GPT-6.1 Sol (`openai/gpt-6.1-sol`, about 3x the cost, the most exact). If the owner asks for Luna
