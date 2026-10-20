@@ -1,4 +1,4 @@
-// Business events: a business's backend posts what happened (an order shipped, a bid was beaten) to
+// Business events: a business's backend posts what happened (an order shipped, a price dropped) to
 // one route, signed; the agent turns each into a message by its delivery level. Critical goes at
 // once; standard waits for the end of quiet hours; optional also merges by collapseKey, one a day
 // per key, and is dropped when its topic closes. A newer event with the same collapseKey replaces
@@ -64,7 +64,7 @@ export interface NotificationType {
   message(event: BusinessEvent): EventMessage | { missing: string };
   /** Its button acts on a live topic: dropped once the topic closes, whatever the level. */
   liveOnly?: boolean;
-  /** What the message is about (a listing, an order): how watches raise it, closing drops it, caps count it. */
+  /** What the message is about (an order, a product): how watches raise it, closing drops it, caps count it. */
   topic?(event: BusinessEvent): string | undefined;
   /** The topic's name, to find a watch when the event names no topic. */
   title?(event: BusinessEvent): string | undefined;
@@ -185,7 +185,7 @@ export interface FlowEventsOptions<W extends Watch = Watch> {
   channel?: string;
   /** The zone quiet hours and copies' times are read in. Default UTC. */
   timezone?: string;
-  /** How the zone reads in log reasons and notes ("India time"). Default the zone's name. */
+  /** How the zone reads in log reasons and notes ("Pacific time"). Default the zone's name. */
   timezoneName?: string;
   /** Default 22:00 to 08:00; null: none. */
   quietHours?: EventQuietHours | null;
@@ -196,7 +196,7 @@ export interface FlowEventsOptions<W extends Watch = Watch> {
   state?: EventState<W>;
   /** Who may post copies (`sentBy`); none: sentBy is refused. */
   sentBy?: string | string[];
-  /** The business's name in log reasons ("Vingo"). Default the first sentBy, else "the business". */
+  /** The business's name in log reasons ("Acme"). Default the first sentBy, else "the business". */
   businessName?: string;
   /** Off production, who a business-started send may go to (eventTestList). */
   testList?: { allows(address: string): boolean };
@@ -206,8 +206,10 @@ export interface FlowEventsOptions<W extends Watch = Watch> {
   log?(fields: Record<string, unknown>): void;
   /** The default log line's msg. Default "flow event". */
   logName?: string;
-  /** What a topic is called in log reasons ("listing"). Default "topic". */
+  /** What a topic is called in log reasons ("order"). Default "topic". */
   topicNoun?: string;
+  /** The log reason for a muted nudge. Default "muted (not interested)". */
+  mutedReason?: string;
   /** Where a notification's person is. Default data.user.phone. */
   addressOf?(event: BusinessEvent): string | undefined;
   /** Whether they agreed to messages. Default data.consent.whatsappUpdates === true. */
@@ -280,6 +282,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
   const watchMs = (options.watchDays ?? 30) * DAY;
   const noun = options.topicNoun ?? "topic";
   const zoneName = options.timezoneName ?? zone;
+  const mutedReason = options.mutedReason ?? "muted (not interested)";
   const senders = options.sentBy === undefined ? [] : Array.isArray(options.sentBy) ? options.sentBy : [options.sentBy];
   const business = options.businessName ?? (options.sentBy === undefined ? "the business" : [options.sentBy].flat()[0]!);
   const stopLine = options.wording?.stopLine ?? "Reply *not interested* to stop these.";
@@ -294,7 +297,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
   const report =
     options.log ??
     ((fields: Record<string, unknown>) => {
-      // A key may carry a number (`<event>:N5:+91...`): masked, as every number is.
+      // A key may carry a number (`<event>:<nudge>:+1555...`): masked, as every number is.
       console.log(JSON.stringify({ severity: fields.outcome === "failed" ? "WARNING" : "INFO", msg: logName, ...fields }).replace(/\+\d{8,15}/g, "+<phone>"));
     });
   const phrasing = createPhrasing();
@@ -413,13 +416,13 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     if (closed && p.liveOnly) return `${noun} closed`;
     if (p.delivery === "critical") return null;
     if (closed && !p.raised) return `${noun} closed`;
-    if (p.raised) return p.delivery === "nudge" && muted(p.address, p.topic) ? "muted (Not interested, or they bid)" : null;
+    if (p.raised) return p.delivery === "nudge" && muted(p.address, p.topic) ? mutedReason : null;
     if (p.delivery === "optional") {
       const last = state.optionalLast.get(`${p.address} ${p.collapseKey ?? p.eventId}`);
       if (last !== undefined && now() - last < DAY) return "optional: one a day per collapse key";
     }
     if (p.delivery === "nudge") {
-      if (muted(p.address, p.topic)) return "muted (Not interested, or they bid)";
+      if (muted(p.address, p.topic)) return mutedReason;
       const mine = state.nudges.filter((n) => n.address === p.address);
       const t = now();
       if (mine.filter((n) => t - n.at < DAY).length >= caps.perDay) return `cap: ${caps.perDay} nudges a day`;
