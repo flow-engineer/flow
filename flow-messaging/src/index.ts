@@ -169,14 +169,15 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   /** One message: into the person's conversation, or a new one from the channel's sender. */
-  async function send(route: Route, to: string, content: Record<string, unknown>, replyTo?: string, about = replyTo, idempotencyKey?: string): Promise<void> {
+  async function send(route: Route, to: string, content: Record<string, unknown>, replyTo?: string, about = replyTo, idempotencyKey?: string, channelOptions?: Record<string, unknown>): Promise<void> {
     try {
       const conversation = await conversationFor(route.name, to, about);
+      const options = channelOptions ? { channel_options: channelOptions } : {};
       let sent: FlowMessage;
-      if (conversation) sent = await client.post(`/v1/conversations/${idSegment("conv", conversation)}/messages`, { content, ...(replyTo ? { reply_to: replyTo } : {}) }, undefined, idempotencyKey);
+      if (conversation) sent = await client.post(`/v1/conversations/${idSegment("conv", conversation)}/messages`, { content, ...(replyTo ? { reply_to: replyTo } : {}), ...options }, undefined, idempotencyKey);
       else {
         if (!route.sender) throw new Error(`no conversation with them on ${route.name} yet, and no sender to start one (set FLOW_MESSAGING_${route.kind.toUpperCase()}_SENDER)`);
-        sent = await client.post("/v1/messages", { sender: route.sender, to: recipient(route.kind, to), content }, undefined, idempotencyKey);
+        sent = await client.post("/v1/messages", { sender: route.sender, to: recipient(route.kind, to), content, ...options }, undefined, idempotencyKey);
       }
       flowConversation.set(key(route.name, to), sent.conversation);
     } catch (error) {
@@ -241,10 +242,12 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   function provider(route: Route) {
     return {
       sendMessage: async (to: string, message: Message) => {
+        // A message the business started: on WhatsApp, no link preview (its card's title would be the phone's notification).
+        const options = (content: Record<string, unknown>) => (message.preview === false && route.kind === "whatsapp" && content.type === "text" ? { preview_url: false } : undefined);
         const [first, ...rest] = contents(route.kind, message);
         const key = message.idempotencyKey;
-        await send(route, to, first, message.replyTo, message.replyTo, key);
-        for (const [i, next] of rest.entries()) await send(route, to, next, undefined, undefined, key && `${key}:${i + 1}`);
+        await send(route, to, first, message.replyTo, message.replyTo, key, options(first));
+        for (const [i, next] of rest.entries()) await send(route, to, next, undefined, undefined, key && `${key}:${i + 1}`, options(next));
       },
       react: (to: string, messageId: string, emoji: string) => send(route, to, { type: "reaction", message_id: messageId, emoji }, undefined, messageId),
       typing: (to: string, on: boolean) => courtesy(route, to, "typing", { state: on ? "on" : "off" }),

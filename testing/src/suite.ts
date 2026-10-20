@@ -101,6 +101,99 @@ const expectedCall = z.union(
   { error: "a tool name, or { tool: <name>, args: { <field>: <value> } }" },
 );
 
+/** "8h30m", "2d", "45m": how long a `wait` step lets pass. */
+const WAIT = /^(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?$/;
+
+/** A wait's length in ms, or null when it is not one. */
+export function waitMs(text: string): number | null {
+  const m = WAIT.exec(text.trim());
+  if (!m || !(m[1] || m[2] || m[3])) return null;
+  const ms = (Number(m[1] ?? 0) * 24 * 60 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0)) * 60_000;
+  return ms > 0 ? ms : null;
+}
+
+/** A moment on the test's clock: a date and time (local to the scenario's timezone unless it has an offset),
+ * HH:MM (the next time the clock shows it), or a `{{now ...}}` placeholder. */
+const moment = z.string().refine(
+  (t) => isDateTime(t) || /^([01]\d|2[0-3]):[0-5]\d$/.test(t) || (/^\s*\{\{[\s\S]*\}\}\s*$/.test(t) && placeholderProblem(t) === null),
+  "a time on the test's clock: 2026-10-20T23:30, 2026-10-20T23:30+05:30, 23:30, or {{now + 1d @ 08:00}}",
+);
+
+const template = z.strictObject({
+  name: z.string().min(1),
+  language: z.string().optional(),
+  body: z.array(z.string()).optional(),
+  buttons: z.array(z.strictObject({ index: z.number().int().min(0), value: z.string() })).optional(),
+});
+
+/** A Flow event as the business's backend sends it; `id` and `occurredAt` default to one per step and the clock. */
+const flowEvent = withClock(
+  z.strictObject({
+    id: z.string().min(1).optional(),
+    type: z.string().min(1),
+    occurredAt: z.string().optional(),
+    subject: z.string().min(1),
+    delivery: z.string().optional(),
+    data: z.record(z.string(), z.unknown()),
+  }),
+);
+
+const businessNudge = withClock(
+  z
+    .strictObject({
+      text: z.string().min(1).optional(),
+      prompt: z.string().min(1).optional(),
+      template: template.optional(),
+      respectQuietHours: z.boolean().optional(),
+      expiresAt: moment.optional(),
+    })
+    .refine((n) => [n.text, n.prompt, n.template].filter((v) => v !== undefined).length === 1, "exactly one of text, prompt or template"),
+);
+
+/** What the agent's route must answer an event: a status, or a status and the field a 400 names. */
+const answer = z.union([z.number().int().min(100).max(599), z.strictObject({ status: z.number().int().min(100).max(599), field: z.string().min(1).optional() })]);
+
+/** One thing the agent sent (`expect.sent`), or must not have (`expect.not_sent`; `{}` is anything at all). */
+const sentItem = z.strictObject({
+  /** When, on the test's clock: HH:MM (any day), or a date and time; to the minute. */
+  at: moment.optional(),
+  /** A template by name. */
+  template: z.string().min(1).optional(),
+  /** The agent's own words rather than a template. */
+  phrased: z.literal(true).optional(),
+  /** Text the message (or the template's values) holds. */
+  text: withClock(z.string().min(1)).optional(),
+});
+
+const openingStep = z
+  .object({
+    say: withClock(z.string()).optional(),
+    /** A file the person sends with it (say is its caption): a path in the tests folder. */
+    attach: z.object({ kind: z.enum(["image", "audio", "document"]), file: z.string().refine(inTests, "a path inside the tests folder, such as fixtures/receipt.jpg") }).optional(),
+    after_ms: z.number().int().min(0).optional(),
+    /** The business's backend sends this event, to the agent's own route. */
+    event: flowEvent.optional(),
+    /** The route the event goes to; /v1/events when left out. */
+    path: z.string().regex(/^\/[^\s?#]*$/, "a path such as /v1/events").optional(),
+    /** bad: signed with another secret; missing: no Flow-Signature header. */
+    signature: z.enum(["bad", "missing"]).optional(),
+    /** What the route must answer; anything 2xx when left out. */
+    answer: answer.optional(),
+    /** The business nudges the person. */
+    nudge: businessNudge.optional(),
+    /** Time passes on the test's clock. */
+    wait: z.string().refine((t) => waitMs(t) !== null, 'a length of time such as 8h30m, 45m or 2d').optional(),
+    /** Move the test's clock to this time before the step. */
+    at: moment.optional(),
+  })
+  .superRefine((step, ctx) => {
+    const kinds = [step.say !== undefined || step.attach ? "say" : null, step.event ? "event" : null, step.nudge ? "nudge" : null, step.wait !== undefined ? "wait" : null].filter(Boolean);
+    if (kinds.length !== 1) ctx.addIssue({ code: "custom", message: kinds.length ? `one of say, event, nudge or wait per step, not ${kinds.join(" and ")}` : "say something, attach a file, send an event, nudge, or wait" });
+    if (!step.event && (step.path || step.signature || step.answer !== undefined)) ctx.addIssue({ code: "custom", message: "path, signature and answer belong to an event step" });
+    if (kinds[0] === "say" && !step.say && !step.attach) ctx.addIssue({ code: "custom", message: "say something, attach a file, or both" });
+  })
+  .transform((step) => (step.event || step.nudge || step.wait !== undefined ? step : { ...step, say: step.say ?? "" }));
+
 const scenarioSchema = z.object({
   id: z.string().min(1),
   title: z.string().optional(),
@@ -114,22 +207,15 @@ const scenarioSchema = z.object({
     .preprocess((v) => (v instanceof Date ? v.toISOString().replace(/\.\d+Z$/, "Z") : v), z.string().refine(isDateTime, "not a date and time: write YYYY-MM-DDTHH:MM, with :SS, Z or an offset such as -04:00 if needed"))
     .optional(),
   person: z.object({
+    /** Their address on the run's channel (a phone number on phone channels): who a business run's events and nudges are for. */
+    address: z.string().min(1).optional(),
     persona: withClock(z.string()),
     goal: withClock(z.string()),
     knows: z.array(withClock(z.string())).optional(),
   }),
-  opening: z
-    .array(
-      z
-        .object({
-          say: withClock(z.string()).default(""),
-          /** A file the person sends with it (say is its caption): a path in the tests folder. */
-          attach: z.object({ kind: z.enum(["image", "audio", "document"]), file: z.string().refine(inTests, "a path inside the tests folder, such as fixtures/receipt.jpg") }).optional(),
-          after_ms: z.number().int().min(0).optional(),
-        })
-        .refine((step) => step.say || step.attach, "say something, attach a file, or both"),
-    )
-    .min(1),
+  opening: z.array(openingStep).min(1),
+  /** Tools whose own code runs in this scenario, in place of the cloud's simulation (state the agent keeps itself). */
+  tools: z.strictObject({ real: z.array(z.string().min(1)).min(1) }).optional(),
   world: withClock(z.string()).optional(),
   max_turns: z.number().int().min(1).max(50).default(8),
   expect: z
@@ -140,6 +226,10 @@ const scenarioSchema = z.object({
       calls: z.array(expectedCall).optional(),
       /** None may be called. */
       never: z.array(expectedCall).optional(),
+      /** What the agent sent, in order (other sends may come between): checked by code, with the test's clock. */
+      sent: z.array(sentItem).optional(),
+      /** None of these was sent; `{}` is anything at all. */
+      not_sent: z.array(sentItem).optional(),
     })
     .default({}),
 });
@@ -172,6 +262,13 @@ export function mimeOf(path: string): string {
 }
 
 export type Scenario = z.infer<typeof scenarioSchema>;
+export type OpeningStep = Scenario["opening"][number];
+export type SentItem = z.infer<typeof sentItem>;
+
+/** The business starts something in it (an event, a nudge, time passing), or it checks what was sent: a business run. */
+export function isBusiness(scenario: Scenario): boolean {
+  return scenario.opening.some((s) => s.event || s.nudge || s.wait !== undefined || s.at !== undefined) || !!scenario.expect.sent || !!scenario.expect.not_sent || !!scenario.tools;
+}
 export type ToolFile = z.infer<typeof toolFileSchema>;
 export type ExpectedCall = z.infer<typeof expectedCall>;
 

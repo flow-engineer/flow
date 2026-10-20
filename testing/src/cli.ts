@@ -301,7 +301,8 @@ if (agentUrl) {
   if (typeof module.buildAgent !== "function" || !Array.isArray(module.tools)) {
     invalid("src/agent.ts must export buildAgent({ model, events, tools }) and tools, or pass --agent-url to test an agent by its HTTP endpoint.");
   }
-  agent = { tools: module.tools, build: ({ tools, events }) => module.buildAgent({ tools, events }) };
+  // A business run's agent also gets its channels and clock (testing/src/business.ts); buildAgent passes them on to createAgent.
+  agent = { tools: module.tools, build: ({ tools, events, channels, testing }) => module.buildAgent({ tools, events, ...(channels ? { channels, testing } : {}) }) };
 }
 
 /** With --agent-url the agent's own tools run for real: the suite's tool simulators do not apply. */

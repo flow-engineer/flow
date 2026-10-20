@@ -150,6 +150,18 @@ export interface AgentOptions {
   /** The clock (tests move it). */
   now?: () => number;
   /**
+   * Work of your own that runs on the agent's clock: called (and awaited) each time due scheduled
+   * messages are looked for (every `scheduleCheckMs`, and each `runDue()`), with the time now. A
+   * test that moves the clock runs it at each step, so your own timers (held sends, reminders
+   * timed from your data) follow the test's clock. An error is logged, never thrown.
+   */
+  onTick?: (now: number) => Promise<void> | void;
+  /**
+   * HTTP routes the agent serves beside its chat, by path ("/v1/events": a business's event push),
+   * answered by `agent.fetch(request)`. The test cloud calls them in-process with a test's events.
+   */
+  routes?: Record<string, (request: Request) => Response | Promise<Response>>;
+  /**
    * The people who may write from the test playground (`simulate`), and no one else. Each is a
    * real person to the agent, by their phone number: the same conversation whether they write from
    * the playground or, once a channel is live, from the provider.
@@ -200,6 +212,8 @@ export interface NudgeInput {
   to: { channel: string; address: string };
   /** Sent as written, with no model call. */
   text?: string;
+  /** With `text`: its call to action, sent as a link button (on channels without one, the URL after the text). Never a URL in the text. */
+  link?: { label: string; url: string };
   /** The agent gets a turn with this note and writes the message itself, or sends nothing. */
   prompt?: string;
   /** A template the owner already set up with the channel, sent as is (also outside WhatsApp's window). */
@@ -314,6 +328,7 @@ export class Agent {
     // named key or phone would make a channel identity read as one of the other two.
     for (const name of ["key", "phone"]) if (this.channelsByName.has(name)) throw new Error(`flow: "${name}" is reserved; give the channel another name`);
     this.now = options.now ?? Date.now;
+    for (const path of Object.keys(options.routes ?? {})) if (!path.startsWith("/")) throw new Error(`flow: a route is a path starting with /, not "${path}"`);
     if (options.fallbackTemplate) {
       const declared = declaredTemplate(options.templates, options.fallbackTemplate);
       if (!declared) throw new Error(`flow: fallbackTemplate ${options.fallbackTemplate.name} is not one of the declared templates`);
@@ -537,7 +552,7 @@ export class Agent {
       if (!writer && (body.holdUntil ?? Infinity) > now) continue;
       // Released because they just wrote: their window is open, though their message may not have landed yet.
       const inbox = await this.store.releaseNudge(writer ? { ...n, body: { ...n.body, theyWrote: true } } : n);
-      if (inbox !== null) this.wake(n.conversationId, inbox);
+      if (inbox !== null) await this.wake(n.conversationId, inbox);
     }
   }
 
@@ -918,6 +933,32 @@ export class Agent {
     return this.options.profile !== undefined;
   }
 
+  /**
+   * A person the business may message before they have written (they gave it their number): their
+   * conversation, made the first time, with no message in it. Until they write, their WhatsApp
+   * window is closed, so only a template reaches them there.
+   */
+  async reach(to: { channel: string; address: string }): Promise<{ conversationId: string }> {
+    await this.settings.ready;
+    const adapter = this.channelOf(to.channel);
+    const identity = await this.conversationFor(adapter, to.channel, to.address);
+    const conversation = this.open(identity.conversationId);
+    conversation.link({ name: to.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: to.address, deliver: this.deliverer(adapter, to.address, identity.conversationId), lastMessageAt: identity.lastMessageAt });
+    return { conversationId: identity.conversationId };
+  }
+
+  /** A channel the agent was given, by name, as it was given (the test cloud plays a copy of it). */
+  channel(name: string): Channel | undefined {
+    return this.channelsByName.get(name);
+  }
+
+  /** Answers a request to one of `routes` by its path; 404 for any other. */
+  async fetch(request: Request): Promise<Response> {
+    const route = this.options.routes?.[new URL(request.url).pathname];
+    if (!route) return Response.json({ error: "no such route" }, { status: 404 });
+    return route(request);
+  }
+
   async nudge(input: NudgeInput): Promise<NudgeResult> {
     // outcome() waits while it is queued, so what it resolves is settled.
     return (await this.outcome(await this.recordNudge(input))) as NudgeResult;
@@ -932,6 +973,7 @@ export class Agent {
     await this.settings.ready;
     const kinds = [input.text, input.prompt, input.template].filter((v) => v !== undefined).length;
     if (kinds !== 1) throw new Error("flow: a nudge has exactly one of text, prompt or template");
+    if (input.link && (input.text === undefined || input.at !== undefined)) throw new Error("flow: a nudge's link goes with text, sent now (not with `at`)");
     // A declared template whose values don't fit it never goes: Meta would refuse it, the playground would show nonsense.
     const declared = input.template && declaredTemplate(this.options.templates, input.template);
     if (declared) fillTemplate(declared, input.template!);
@@ -967,7 +1009,7 @@ export class Agent {
       const added = await add({ ...record, body: { text: input.text, prompt: input.prompt, at: input.at }, status: "scheduled" }, schedule);
       return typeof added === "number" ? { id, status: "scheduled" } : added;
     }
-    const body = { address: input.to.address, ...(input.template ? { template: input.template } : input.text !== undefined ? { text: input.text } : { prompt: input.prompt }) };
+    const body = { address: input.to.address, ...(input.template ? { template: input.template } : input.text !== undefined ? { text: input.text, ...(input.link ? { link: input.link } : {}) } : { prompt: input.prompt }) };
     const now = this.now();
     const quietEnds = input.respectQuietHours === false ? null : await this.quietEnd(conversationId, now);
     if (quietEnds !== null) {
@@ -989,7 +1031,7 @@ export class Agent {
     }
     const added = await add({ ...record, body, status: "queued" });
     if (typeof added !== "number") return added;
-    this.wake(conversationId, added);
+    void this.wake(conversationId, added);
     return { id, status: "queued" };
   }
 
@@ -1034,8 +1076,10 @@ export class Agent {
       if (!identity) return `no way to reach them on ${s.channel}`;
       return windowClosed({ info: this.infoOf(s.channel, s.conversationId), lastMessageAt: identity.lastMessageAt }, now) ? "outside_window" : null;
     });
-    for (const q of queued) this.wake(q.conversationId, q.inbox);
+    // Awaited, so a caller that then waits for the conversation (a test moving the clock) sees the turn.
+    await Promise.all(queued.map((q) => this.wake(q.conversationId, q.inbox)));
     await this.releaseHeld(now);
+    if (this.options.onTick) await Promise.resolve().then(() => this.options.onTick!(now)).catch((error) => console.warn("flow: onTick:", error));
     await this.pruneMessageIds(now).catch((error) => console.warn("flow: pruning message ids:", error));
     return queued.length;
   }
@@ -1078,16 +1122,15 @@ export class Agent {
   }
 
   /** An inbox row for a conversation: handed to it in memory, or found when it loads. */
-  private wake(conversationId: string, inbox: number): void {
+  private wake(conversationId: string, inbox: number): Promise<void> {
     const resident = this.conversations.get(conversationId);
     if (!resident) {
-      void this.store.conversation(conversationId).then((row) => {
+      return this.store.conversation(conversationId).then((row) => {
         if (row) this.rows.set(conversationId, row);
         this.open(conversationId);
       });
-      return;
     }
-    void this.store.openInbox(conversationId).then((rows) => {
+    return this.store.openInbox(conversationId).then((rows) => {
       const row = rows.find((r) => r.id === inbox);
       if (row) resident.enqueue(row);
     });

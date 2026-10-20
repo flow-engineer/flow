@@ -154,6 +154,14 @@ reach (`iMessage: 1 of 2 people`; `trial.imessage.contacts` `{limit, used}` in `
   with `FLOW_FRAMEWORK_LOGIN_URL` naming another server, commands stop with `signed_in_elsewhere`.
 - CI never signs in: `npx @flow-engineer/flow setup --ci` says how to give it the test cloud key.
 
+## Messages the business starts
+
+A nudge, a scheduled message or any turn the person did not start goes with link previews off
+(`preview: false` on the message; Flow Messaging's WhatsApp `preview_url: false`): on WhatsApp a
+preview card's title becomes the phone's notification instead of the message's text. For a call to
+action use `link` (`agent.nudge({ to, text, link: { label, url } })`, or the agent's send with
+`link`), not a URL in the text.
+
 ## Shared test numbers and privacy
 
 The free trial runs on Flow's shared Telegram bot, WhatsApp number and iMessage line. Sending an

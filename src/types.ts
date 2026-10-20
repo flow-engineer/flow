@@ -94,6 +94,12 @@ export type Outbound =
       image?: { url: string };
       /** The channel's own params (see Channel.params), as the agent filled them in. */
       fields?: Record<string, unknown>;
+      /**
+       * false: no link preview. Set on every message the business starts (a nudge, a scheduled
+       * message, a turn the person did not start): on WhatsApp a preview card's title would become
+       * the phone's notification instead of the message's text. Its call to action goes as `link`.
+       */
+      preview?: false;
       /** The same in every process for one send the business starts (a nudge, a scheduled text), for providers that take one. */
       idempotencyKey?: string;
     }
