@@ -35,3 +35,4 @@ export type { TracesOptions } from "./traces.ts";
 export { tool, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Credentials, type SignIn, type Tool, type ToolContext, type ToolHints } from "./tools.ts";
 export type { Attachment, ChannelInfo, ChatMessage, Deliver, Incoming, ListRow, Media, Model, ModelRequest, ModelResponse, Outbound, PersonMessage, Template, TemplateButton, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 export { z } from "zod";
+export * from "./business-events/index.ts";
