@@ -2,13 +2,30 @@
 
 This guide is at https://flow.engineer/flow-framework/agents.md: that is the link to give.
 
-You are building or changing a chat agent for a person (the owner) so they can text it from their
-phone while it runs on their laptop. No tunnel, no public URL, and no key the owner copies by hand.
+You are building or changing an agent for a person (the owner) on Flow Framework: a chat agent people
+text on WhatsApp, iMessage, Telegram or SMS, and the same tools as an MCP server (Claude, ChatGPT,
+Cursor, Codex) and a CLI. No tunnel, no public URL, and no key the owner copies by hand.
 Every command here runs without a terminal and never reads stdin, except `chat`, which reads the
 messages you pipe to it.
 
 Always name the package: `npx @flow-engineer/flow ...`. `npx flow` on its own fetches another npm
 package.
+
+## Starting from the owner's product
+
+When the owner has a product (a codebase), the agent is built from it:
+
+1. Read the product's code (what it does, who uses it, its API, how users sign in). Not in its
+   folder? Ask the owner for the project's path or a few lines about it.
+2. Propose what goes first and wait for a yes: an MCP server and a CLI for a business or developer
+   product (SaaS, B2B, a dev tool); a WhatsApp and iMessage agent, plus the MCP server and CLI, for a
+   consumer app. Ask what to call the agent in the same message.
+3. `npx @flow-engineer/flow@latest new <name>-agent --display-name "<name>"` beside the product's
+   code (never inside its package), then `npm install` there.
+4. Read the skills as files, `.claude/skills/<skill>/SKILL.md` in that folder: `flow-framework`,
+   `flow-framework-context`, `flow-framework-tools`, `flow-framework-auth`, `flow-framework-tests`.
+5. Replace the café with the product: context, tools, `agent/AGENTS.md`, sign-in, then check it
+   (`npx @flow-engineer/flow check`, `npm run mcp`, `npm run cli -- --help`, and the phone below).
 
 ## The flow
 
