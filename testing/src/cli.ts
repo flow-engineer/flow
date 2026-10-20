@@ -30,6 +30,7 @@ import { hasModelKey } from "../../src/model.ts";
 import { PLUGIN_LINE, pluginCli } from "./plugin.ts";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions } from "./client.ts";
+import type { SessionLimits } from "./protocol.ts";
 import { runPrinter } from "./print-run.ts";
 import { checkEndpointCli } from "./check-endpoint.ts";
 import { CHECK_LINE as TOOLS_CHECK_LINE, checkCli, mcpUpdateCli } from "./check.ts";
@@ -84,6 +85,13 @@ const TEST_OPTIONS = `Options for test:
                            platform each run plays, such as whatsapp or sms)
   --agent-timeout <s>      With --agent-url: how long one message waits for its answer (default: 60)
   -h, --help               Show this help
+
+Limits: a hosted cloud plays a set number of runs at once per session, allows a number of
+sessions at once per workspace, and has a daily test budget (the last 24 hours of test and
+grading spend). They depend on the workspace; when the session opens the CLI prints them on one
+line ("Up to 8 runs at once · daily test budget: $5 ($3.75 left) · 2 sessions at once on this
+workspace") and --json reports them as limits (null from a cloud that does not send them).
+A suite with more runs than that plays them in turn, so its time grows with the run count.
 
 Exit status:
   0    Every run passed
@@ -251,6 +259,8 @@ let picked: Set<string> | undefined;
 let perScenario = 1;
 let sessionId = "";
 let dashboard = "";
+/** The cloud's limits for this workspace, from the open (none from an older cloud). */
+let limits: SessionLimits | null = null;
 let agentId = "";
 const seen: RunSummary[] = [];
 /** Set when the cloud ended the whole session scenario_invalid. */
@@ -371,6 +381,7 @@ try {
     log: say,
     verbose: values.verbose,
     onRun: (run) => { seen.push(run); printRun(run); },
+    onLimits: (sent) => { limits = sent; },
     onDashboard: (url, id, cloudAgent) => { dashboard = url; sessionId = id; agentId = cloudAgent ?? agentId; process.env.FLOW_FRAMEWORK_TEST_SESSION = id; },
   });
 } catch (error) {
@@ -532,6 +543,7 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       runs,
       invalid: invalidScenarios(runs),
       sessionInvalid: endedInvalid,
+      limits,
     };
     writeAll(`${JSON.stringify(report)}\n`);
   }

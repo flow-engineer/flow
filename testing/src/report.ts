@@ -3,6 +3,7 @@
 
 import { existsSync } from "node:fs";
 import { CloudEnded, isTransportFailure, PostError, SessionStopped } from "./client.ts";
+import type { SessionLimits } from "./protocol.ts";
 
 /** How a `flow test` ended, one per exit status (0 passed; 1 failed, invalid; 2 errored, transport; 3 refused; 130 interrupted). */
 export type Outcome = "passed" | "failed" | "errored" | "transport" | "refused" | "interrupted" | "invalid";
@@ -68,6 +69,8 @@ export interface JsonReport {
   invalid: InvalidScenario[];
   /** Set when the cloud ended the whole session scenario_invalid; else null. */
   sessionInvalid: SessionInvalid | null;
+  /** The cloud's limits for the workspace (runs and sessions at once, the daily test budget); null when it sent none. */
+  limits: SessionLimits | null;
 }
 
 /** A run's verdict: errored when the cloud names an error for it or ended it run_failed, since the cloud

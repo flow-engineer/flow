@@ -262,7 +262,10 @@ test("with --json, every exit prints one report on stdout and every other line o
     ],
     invalid: [],
     sessionInvalid: null,
+    limits: null,
   });
+  // A cloud that sends no limits gets no limits line.
+  assert.doesNotMatch(result.stderr, /at once/);
   // The results file agrees with the report, and keeps the cloud's agent id for flow show.
   const last = lastSession(dir);
   assert.equal(last.agent, "agt_1");
@@ -276,6 +279,27 @@ test("with --json, every exit prints one report on stdout and every other line o
   const unreachable = await cliStreams(["test", "--json", "--cloud", "http://127.0.0.1:9"], dir);
   assert.equal(unreachable.code, 2);
   assert.deepEqual([JSON.parse(unreachable.stdout).outcome, JSON.parse(unreachable.stdout).error.message], ["transport", "Could not reach http://127.0.0.1:9: ECONNREFUSED."]);
+});
+
+test("the cloud's limits are printed on one line when the session opens and kept in --json", { timeout: 20_000 }, async () => {
+  const dir = agentDir();
+  const runs = [runOf({ runId: "trn_1", scenario: "hello", passed: true })];
+  const finished = { type: "finished", summary: { sessionId: "s1", suiteHash: "h", testModel: "m", runs, dashboard: "http://dash/s1" } };
+  const capped = await cloud(false, [finished], "s1", { limits: { runsAtOnce: 8, sessionsAtOnce: 2, dailyUsd: 5, leftUsd: 3.75 } });
+  let result;
+  try {
+    result = await cliStreams(["test", "--cloud", capped.url, "--json"], dir);
+  } finally { capped.close(); }
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /^Up to 8 runs at once · daily test budget: \$5 \(\$3\.75 left\) · 2 sessions at once on this workspace$/m);
+  assert.deepEqual(JSON.parse(result.stdout).limits, { runsAtOnce: 8, sessionsAtOnce: 2, dailyUsd: 5, leftUsd: 3.75 });
+
+  const uncapped = await cloud(false, [finished], "s1", { limits: { runsAtOnce: 8, sessionsAtOnce: 20, dailyUsd: null, leftUsd: null, later: "x" } });
+  try {
+    result = await cliStreams(["test", "--cloud", uncapped.url], dir);
+  } finally { uncapped.close(); }
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout + result.stderr, /^Up to 8 runs at once · daily test budget: uncapped · 20 sessions at once on this workspace$/m);
 });
 
 test("a run the cloud names an error for is errored, whatever it ended as: ERROR on its line, errored in --json and the results, and exit 2 when none failed", { timeout: 20_000 }, async () => {
