@@ -1,6 +1,7 @@
 // Models over the OpenAI-compatible chat API: OpenRouter by default; OpenAI, Gemini, Anthropic or a
 // local server by changing the base URL; or Flow, with the agent's FLOW_KEY that `flow setup` writes,
-// which needs no provider key and spends the account's Flow trial credit.
+// which needs no provider key and spends the account's Flow trial credit. Flow also turns audio into
+// text with the same key (flowTranscribe).
 
 import OpenAI from "openai";
 import { setting } from "./names.ts";
@@ -130,11 +131,56 @@ export function openAICompatible(options: OpenAICompatibleOptions = {}): Model {
  * GET /models lists them). With no key it fails when made, with a next step.
  */
 export function flowModel(options: Omit<OpenAICompatibleOptions, "baseURL"> = {}): Model {
-  const apiKey = options.apiKey?.trim() || process.env.FLOW_KEY?.trim();
+  const apiKey = flowKey(options.apiKey);
+  return openAICompatible({ ...options, apiKey, baseURL: flowModelURL(process.env), model: options.model?.trim() || process.env.MODEL?.trim() || KEYS.at(-1)!.model });
+}
+
+/** The key sent to Flow: the one given, else FLOW_KEY; with neither it fails with the next step. */
+function flowKey(given?: string): string {
+  const apiKey = given?.trim() || process.env.FLOW_KEY?.trim();
   if (!apiKey) {
     throw Object.assign(new Error(`FLOW_KEY is not set: npx @flow-engineer/flow setup writes it into .env in the agent's folder.\nNext: run ${NO_MODEL_KEY.next}.`), { code: NO_MODEL_KEY.code, next: NO_MODEL_KEY.next });
   }
-  return openAICompatible({ ...options, apiKey, baseURL: flowModelURL(process.env), model: options.model?.trim() || process.env.MODEL?.trim() || KEYS.at(-1)!.model });
+  return apiKey;
+}
+
+export interface FlowTranscribeOptions {
+  /** The language spoken, as a code ("en", "hi", "pt-BR"); when omitted it is detected. */
+  language?: string;
+  /** The file's name sent with it, whose extension tells its format. Default "audio.ogg". */
+  filename?: string;
+  /** The file's media type ("audio/ogg"), used when `audio` is not already a Blob that has one. */
+  mimeType?: string;
+}
+
+/**
+ * A voice note or other audio as text, through Flow: FLOW_KEY at {@link flowModelURL}'s
+ * /audio/transcriptions, the account's Flow credit paying. Files are at most 15 MB. Resolves to
+ * `{ text }` (empty when nothing was said); Flow's typed errors (file_too_large, trial_credit_used,
+ * rate_limit_exceeded, ...) reject with their message and next step, and `code` and `status` on the
+ * error. With no key it fails at once, as flowModel does.
+ */
+export async function flowTranscribe(audio: Blob | ArrayBuffer | Uint8Array, options: FlowTranscribeOptions = {}): Promise<{ text: string }> {
+  const apiKey = flowKey();
+  const file = audio instanceof Blob && !options.mimeType ? audio : new Blob([audio as BlobPart], { type: options.mimeType ?? (audio instanceof Blob ? audio.type : "") });
+  const form = new FormData();
+  form.append("file", file, options.filename ?? (typeof File !== "undefined" && audio instanceof File && audio.name ? audio.name : "audio.ogg"));
+  if (options.language?.trim()) form.append("language", options.language.trim());
+  const response = await fetch(`${flowModelURL(process.env).replace(/\/+$/, "")}/audio/transcriptions`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${apiKey}` },
+    body: form,
+  });
+  const body = (await response.json().catch(() => undefined)) as { text?: unknown; error?: { message?: unknown; code?: unknown; next?: unknown } } | undefined;
+  if (response.ok && typeof body?.text === "string") return { text: body.text };
+  const error = body?.error;
+  const message = typeof error?.message === "string" && error.message.trim() ? error.message.trim() : `Flow could not transcribe the audio (HTTP ${response.status}).`;
+  const next = typeof error?.next === "string" && error.next ? error.next : undefined;
+  throw Object.assign(new Error(next ? `${message}\nNext: ${next}` : message), {
+    code: typeof error?.code === "string" ? error.code : `http_${response.status}`,
+    ...(next ? { next } : {}),
+    status: response.status,
+  });
 }
 
 /**
