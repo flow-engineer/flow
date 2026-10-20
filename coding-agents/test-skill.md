@@ -114,7 +114,7 @@ person:
   persona: ...
   goal: ...
 opening:
-  - event: { type: buying.bid.outbid, delivery: must, subject: "user:u1", data: { user: { phone: "+15550100001" } } }
+  - event: { type: buying.bid.outbid, delivery: critical, subject: "user:u1", data: { user: { phone: "+15550100001" } } }
   - wait: 8h30m                  # time passes; what came due runs, a minute at a time
   - say: "ok thanks"             # the person can still write
   - event: { id: evt_dup, type: ..., subject: ..., data: {...} }

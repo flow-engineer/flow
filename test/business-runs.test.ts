@@ -100,7 +100,7 @@ async function play(script: Command[], build: ConnectOptions["build"]) {
 
 test("a business run: its own clock and channels, a signed event, and a held send at 08:00", async () => {
   const conversationId = "whatsapp:p1";
-  const envelope = { id: "evt_1", type: "test.outbid", occurredAt: new Date(START).toISOString(), subject: "user:1", delivery: "should", data: { phone: PERSON } };
+  const envelope = { id: "evt_1", type: "test.outbid", occurredAt: new Date(START).toISOString(), subject: "user:1", delivery: "standard", data: { phone: PERSON } };
   const wrapped: string[] = [];
   const { opened, answers, outbound } = await play([
     { type: "open", conversationId, channelName: "whatsapp", channel: WHATSAPP, address: PERSON, now: START },
@@ -135,7 +135,7 @@ test("in a business run the person writes as on the channel, so the agent can nu
 test("the format: a business run's steps parse, and a step that is two things is refused at its line", () => {
   const scenario = (opening: string, expect = "") => ({ path: "scenarios/b.yaml", content: `id: b\nchannels: [whatsapp]\nperson: { address: "+15550100001", persona: p, goal: g }\nopening:\n${opening}\n${expect}` });
   const ok = parseScenario(scenario(
-    `  - event: { type: test.outbid, delivery: must, subject: "user:1", data: { phone: "+15550100001" } }\n    at: "23:30"\n  - wait: 8h30m\n  - event: { id: e1, type: t, subject: s, data: {} }\n    signature: bad\n    answer: 401\n  - nudge: { template: { name: outbid, body: [PS5] } }\n  - say: ok`,
+    `  - event: { type: test.outbid, delivery: critical, subject: "user:1", data: { phone: "+15550100001" } }\n    at: "23:30"\n  - wait: 8h30m\n  - event: { id: e1, type: t, subject: s, data: {} }\n    signature: bad\n    answer: 401\n  - nudge: { template: { name: outbid, body: [PS5] } }\n  - say: ok`,
     `expect:\n  sent: [{ at: "08:00", template: outbid }, { phrased: true, text: PS5 }]\n  not_sent: [{}]`,
   ));
   assert.ok(isBusiness(ok));

@@ -152,7 +152,7 @@ export interface FlowEventEnvelope {
   occurredAt: string;
   /** What it is about: "user:<id>", "listing:<slug>". */
   subject: string;
-  /** How binding a send it asks for: must, should or may. */
+  /** How binding a send it asks for, e.g. critical, standard or optional; the agent decides what each means. */
   delivery?: string;
   data: Record<string, unknown>;
 }
