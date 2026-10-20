@@ -1,4 +1,4 @@
-// Which Flow Messaging channels Pip is on: Telegram always, WhatsApp and iMessage when .env names
+// Which Flow Messaging channels the agent is on: Telegram always, WhatsApp and iMessage when .env names
 // their sender (FLOW_MESSAGING_WHATSAPP_SENDER, FLOW_MESSAGING_IMESSAGE_SENDER).
 
 import type { flowMessaging } from "../../../flow-messaging/src/index.ts";

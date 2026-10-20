@@ -20,7 +20,7 @@ and `flow-framework-auth` (`auth-skill.md`) when tools need to know who the pers
 `npx @flow-engineer/flow new <name>` (lowercase letters, digits and dashes) makes `./<name>/` from the café
 example: a complete agent with tools and tests that depends on the `@flow-engineer/flow` package and imports
 `@flow-engineer/flow` and `@flow-engineer/flow/simulators`, with these skills in `.claude/skills/`. Run `npm install` there.
-Build in it, changing Pip's prompt, skills, tools and tests into yours. A provider key is optional:
+Build in it, changing the café agent's prompt, skills, tools and tests into yours. A provider key is optional:
 `npx @flow-engineer/flow link` (or `setup`) writes `FLOW_KEY`, the agent's one Flow key, into `.env` (never
 read or print it), and the agent calls models through Flow with it on $2 of Flow trial credit. A key of the owner's own wins over it, made
 at the provider: `OPENROUTER_API_KEY` at https://openrouter.ai/keys,
@@ -349,7 +349,9 @@ kept: give the owner the link and code, and run `link` again (it polls the same 
 `setup`, which writes the test cloud, traces and Flow Messaging keys into `.env`, prints names and
 last 4 characters only, keeps values already there (`--replace` takes the new ones), and is safe to
 run again. `--channel telegram|whatsapp|imessage` picks the channel; a channel flow.engineer cannot
-open yet exits 3 with its `next`. `login`, `setup` and `link` also run on their own.
+open yet exits 3 with its `next`. When only observe's part of setup fails (traces and the test cloud),
+`link` still prints the link and exits 0, with one warning saying what is missing and the server's
+fix (`warnings` in `--json`): pass it on to the owner. `login`, `setup` and `link` also run on their own.
 
 In `src/main.ts`, put `fm.telegram()` from `@flow-engineer/flow/flow-messaging` in the agent's
 channels and call `fm.start(agent, { cursorFile: ".flow/flow-messaging-cursor" })`: with no webhook

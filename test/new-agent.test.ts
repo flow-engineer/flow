@@ -1,8 +1,8 @@
-// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/src/main.ts examples/cafe/src/mcp.ts src/local.ts
+// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/src/main.ts examples/cafe/src/mcp.ts src/local.ts examples/cafe/src/agent.ts examples/cafe/src/tools.ts examples/cafe/src/channels.ts coding-agents/skill.md
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer, type AddressInfo } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -104,13 +104,16 @@ test("the name people call the agent (--display-name) is package.json's displayN
   assert.match(result.stdout, /a phone reaches it with "Hi FlatX agent \(ref <code>\)"/);
 });
 
-test("the display name takes Pip's place in the agent's prompt, and renaming later replaces it again (whole words only)", () => {
+test("the display name takes Pip's place in the agent's prompt, no other file of a new agent names Pip, and renaming later replaces it again (whole words only)", () => {
   const into = mkdtempSync(join(tmpdir(), "flow-named-prompt-"));
   const dir = newStandalone("juniper", { into, displayName: "Juniper" });
   const prompt = readFileSync(join(dir, "agent", "AGENTS.md"), "utf8");
   assert.match(prompt, /^# Juniper$/m);
   assert.match(prompt, /^You are Juniper, the ordering assistant/m);
   assert.doesNotMatch(prompt, /\bPip\b/);
+  // Nor anywhere else a coding agent reads: the template's code and comments, the skills.
+  const named = readdirSync(dir, { recursive: true, encoding: "utf8" }).filter((f) => statSync(join(dir, f)).isFile() && /\bPip\b/.test(readFileSync(join(dir, f), "utf8")));
+  assert.deepEqual(named, [], "no file in a new agent names the café's Pip");
   // The playground and the MCP server read the name from package.json, so they never say Pip.
   for (const file of ["main.ts", "mcp.ts"]) assert.match(readFileSync(join(dir, "src", file), "utf8"), /displayName/, file);
   assert.deepEqual(setDisplayName(dir, "Pip Jr"), { displayName: "Pip Jr", prompt: true });

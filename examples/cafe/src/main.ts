@@ -12,7 +12,7 @@ import { buildAgent } from "./agent.ts";
 import { channelNames, flowChannels } from "./channels.ts";
 
 // What people call it: package.json's displayName (`npx @flow-engineer/flow link --display-name <name>` changes it).
-const { displayName: name = "Pip" } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { displayName?: string };
+const { displayName: name = "your agent" } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { displayName?: string };
 const play = simulators({ title: `${name} · Bean & Leaf` });
 const fm = process.env.FLOW_MESSAGING_KEY ? flowMessaging() : undefined;
 const channels = fm ? flowChannels(fm) : [];
