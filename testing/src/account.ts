@@ -69,6 +69,8 @@ Exit status: 0 done, 1 usage or not signed in, 2 network, 3 refused, denied or e
 
 const NEXT = { login: `${RUN} login`, wait: `${RUN} login --wait`, setup: `${RUN} setup`, link: `${RUN} link` };
 const CHANNELS = ["telegram", "whatsapp", "imessage"];
+/** After link and status: the step that keeps the agent answering once this machine sleeps. */
+const DEPLOY_HINT = `To keep it answering while this machine sleeps: ${RUN} deploy (Flow's hosting, staging first).`;
 const EXIT = { ok: 0, usage: 1, network: 2, refused: 3, pending: 4 } as const;
 
 class Stop extends Error {
@@ -840,6 +842,7 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     say(`${CHANNEL_NAME[c]}: ${c === "telegram" ? `Flow Messaging key ${where}` : `sender ${where}`}${now}${trialNote(trial ?? undefined)}`);
   }
   if (next.length) say(`Next: ${next.join(", then ")}`);
+  say(DEPLOY_HINT);
 }
 
 /**
@@ -996,6 +999,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
   if (model.next) say(model.line);
   for (const [c] of links) if (REPLY_ONLY[c]) say(REPLY_ONLY[c]!);
   say(`Next: ${next.join(", then ")}.`);
+  say(DEPLOY_HINT);
 }
 
 /**

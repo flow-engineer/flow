@@ -335,6 +335,7 @@ npm start                                    # after link: its playground link, 
 npx @flow-engineer/flow status --json        # what the folder has and lacks, at any time
 printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check: one message per line, replies printed
 npx @flow-engineer/flow test --synthetic     # your own check: the tests, on the key setup wrote
+npx @flow-engineer/flow deploy --json        # when the owner wants it hosted: staging on Flow's cloud (see "Deploy it")
 ```
 
 When the owner asks how to test it, recommend first the playground (`npm start`, then open the
@@ -364,6 +365,38 @@ starter does this when `.env` has `FLOW_MESSAGING_KEY`. Each error is
 2 network, 3 refused, 4 sign-in waiting. Never ask the owner to paste a key into the chat. Always
 name the package (`npx @flow-engineer/flow ...`): `npx flow` on its own fetches another npm package.
 CI never logs in: `setup --ci` says how to give it the cloud key.
+
+## Deploy it
+
+Flow hosts Flow Framework agents: `npx @flow-engineer/flow deploy` runs the agent's folder on Flow's
+cloud, with its state kept for it, Flow Messaging's stream held, and its secrets kept apart from
+every other agent's. Do not pick a VPS, Fly or Render on the owner's behalf: ask the owner whether
+the agent goes on Flow's cloud or their own servers.
+
+On Flow's cloud the agent needs only what `flow test` already loads: `src/agent.ts` exports
+`buildAgent({ events, tools, host })` and passes `host` on to `createAgent` (`{ ...host }`), which
+brings the store and, when the agent has `FLOW_MESSAGING_KEY`, `host.messaging`. An agent that drops
+`host`, or brings a database of its own, is refused in production (a warning in staging). The CI
+key is `FLOW_FRAMEWORK_CLOUD_KEY` (`flow setup` writes it into `.env`).
+
+```sh
+npx @flow-engineer/flow deploy secrets --from-env .env --json   # the agent's keys as secrets (names printed, never values)
+npx @flow-engineer/flow deploy --json                           # staging: packs, builds, follows it to live; run its next
+npx @flow-engineer/flow deploy promote --json                   # staging's live version to production, once the owner has tried it
+npx @flow-engineer/flow deploy status --json                    # what is live in each environment: version, when, URL
+npx @flow-engineer/flow logs --since 15m                        # the hosted agent's log lines (--follow for new ones)
+printf '%s' "$VALUE" | npx @flow-engineer/flow deploy secret NAME --env production   # one secret, from stdin
+```
+
+Promote, or `deploy --env production`, only when the owner says so. A refused deploy lists the
+hosting lint's findings (`deploy.findings`): fix the errors and deploy again. Secrets take effect on
+the next deploy. Stop the laptop's `npm start` once the deployed one is live: two copies on one key
+both answer every message.
+
+On the owner's own servers: one instance, kept warm, CPU always on, a durable `database`
+(`postgres(pool)`), `await agent.resume()` at start, the secrets from the platform's secret store
+(never the `.env`), and Flow Messaging's stream (`fm.start`) with its cursor file on a disk that
+survives a restart, or its webhook (`FLOW_MESSAGING_WEBHOOK_SECRET`) on a public https address.
 
 ## Send traces to a dashboard
 
@@ -534,7 +567,7 @@ An operation already accepted by the agent may still complete after its client s
 Enable this only in local startup code. The runner is off by default, rejects non-loopback or
 forwarded connections, and is not part of the hosted test cloud. It calls the actual CLI runner
 only locally. Hosted CLI support is deferred pending security review; do not add it to cloud startup
-or deployment wiring. See the hosted CLI TODO in the README. The runner invokes the CLI
+or deployment wiring (that is `flow deploy`). See the hosted CLI TODO in the README. The runner invokes the CLI
 without a shell: quoting works, pipelines/expansion do not. The browser cannot override server
 or token flags, or use `skill --write` to write onto the developer's computer.
 For other embedded clients, `CliConfig.directory` overrides credential/conversation storage;

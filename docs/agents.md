@@ -190,4 +190,41 @@ version in `package.json` for production.
 
 ## Host it
 
-Coming soon: `npx @flow-engineer/flow deploy`, to keep the agent answering while the laptop sleeps.
+`npx @flow-engineer/flow deploy` puts the agent on Flow's hosting, so it answers while the laptop
+sleeps. It needs `package.json`, `package-lock.json` and `src/agent.ts`, whose `buildAgent` passes
+`options.host` on to `createAgent`, and the agent's CI key in `FLOW_FRAMEWORK_CLOUD_KEY` (the
+environment, else `.env`; `flow setup` writes it).
+
+```sh
+npx @flow-engineer/flow deploy secrets --from-env .env [--env staging|production] [--json]
+npx @flow-engineer/flow deploy [--env staging|production] [--version <v>] [--json]
+npx @flow-engineer/flow deploy promote [--json]
+npx @flow-engineer/flow deploy status [--env staging|production] [--json]
+npx @flow-engineer/flow logs [--env staging|production] [--since 1h] [--follow] [--json]
+npx @flow-engineer/flow deploy secret NAME [--env staging|production] < value.txt
+```
+
+- `deploy` packs the folder (without `node_modules`, `.git`, `.env*` and `.flow`, at most 50 MB),
+  uploads it, and follows the build until it is live, refused or failed. The default is staging;
+  production refuses an agent that ignores `host` or brings its own database, and the build
+  refuses an agent on a newer framework than Flow hosts yet. `--json` prints
+  `{ ok, deploy: { id, environment, status, version, findings, error }, url, next }` on stdout
+  (`url` is null when the cloud does not say it yet; the human output then says "URL: not available
+  on this Flow yet"); progress goes to stderr. The deploy's id is kept in `.flow/deploys.json`.
+- `promote` moves staging's live version to production, with no new build.
+- `status` shows, per environment (both unless `--env`), the deploy serving it (`status`, `version`,
+  `id`, `updated_at`), its URL and a newer one still building. `--json` prints
+  `{ ok, environments: { staging: { deploy, pending, url, from } | null, production: ... }, next }`;
+  `from` is `list` (the cloud's list) or `this_folder` (the last deploy from `.flow/deploys.json`, on
+  a Flow whose cloud does not list deploys to a CI key yet).
+- `logs` prints the hosted agent's log lines from `--since` (30s, 15m, 1h, 2d; default 1h), and with
+  `--follow` keeps printing new ones; `--json` is one `{ time, severity, text }` per line. On a Flow
+  whose cloud has no logs route yet it says so: `error.code` `not_available`, exit 1.
+- `secrets --from-env` sends each non-empty value in the file as a secret, never the CI key, the
+  cloud's address or a name Flow sets itself (`FLOW_FRAMEWORK_TRACES_*`, `FLOW_STORE_*`, `PORT`, ...);
+  `--json` prints `{ ok, environment, saved, skipped, refused, next }`. `secret NAME` reads one value
+  from stdin. Names only are printed, never values; a secret takes effect on the next deploy.
+- Exit codes: 0 live or saved, 1 refused, failed or not reachable, 2 a usage problem (no CI key, a
+  missing file, a bad name). On an error, `--json` prints `{ ok: false, error: { code, message }, next }`.
+
+Run each answer's `next`. Promote, or deploy to production, only when the owner says so.
