@@ -350,7 +350,7 @@ test("a scenario the cloud could not play is named with its file and reason, and
       stopped = await cliStreams(["test", "--cloud", ended.url, "--json"], dir);
     } finally { ended.close(); }
     assert.equal(stopped.code, 2, stopped.out);
-    assert.match(stopped.stderr, new RegExp(`^The test cloud could not play this suite${reason ? `: ${reason.replace(/[.]/g, "\\.")}$` : " and gave no reason\\.$"}`, "m"));
+    assert.ok(stopped.stderr.split("\n").includes(`The test cloud could not play this suite${reason ? `: ${reason}` : " and gave no reason."}`), stopped.stderr);
     assert.equal(/^the test cloud may be older than this client$/m.test(stopped.stderr), olderCloud, stopped.stderr);
     assert.match(stopped.stderr, /^Scenarios sent: b \(scenarios\/b\.yaml\), hello \(scenarios\/hello\.yaml\)$/m);
     const json = JSON.parse(stopped.stdout);
