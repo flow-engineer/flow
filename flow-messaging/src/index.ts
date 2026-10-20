@@ -299,6 +299,21 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     return custom(register("imessage", o), IMESSAGE, o);
   }
 
+  /**
+   * Flow's channels this app is on: Telegram always, WhatsApp and iMessage when their sender is set
+   * (FLOW_MESSAGING_WHATSAPP_SENDER, FLOW_MESSAGING_IMESSAGE_SENDER). `except` leaves out the names an
+   * agent declares itself; createAgent's `host.messaging` uses it.
+   */
+  function channels(o: { except?: string[]; env?: Record<string, string | undefined> } = {}): Channel[] {
+    const skip = new Set(o.except ?? []);
+    const env = o.env ?? process.env;
+    return [
+      ...(skip.has("telegram") ? [] : [telegram()]),
+      ...(!skip.has("whatsapp") && env.FLOW_MESSAGING_WHATSAPP_SENDER ? [whatsapp()] : []),
+      ...(!skip.has("imessage") && env.FLOW_MESSAGING_IMESSAGE_SENDER ? [imessage()] : []),
+    ];
+  }
+
   /** A Flow channel Flow Framework has no kind for: text, quotes, buttons and links as `info` allows, photos, reactions, typing, read receipts. */
   function custom(route: Route, info: ChannelInfo, o: FlowChannelOptions): Channel {
     const p = provider(route);
@@ -624,7 +639,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     return { mode: "webhook", stopped: new Promise<StreamStop>(() => {}), close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
   }
 
-  return { whatsapp, telegram, imessage, sms, webhook, receive, stream, start };
+  return { whatsapp, telegram, imessage, sms, channels, webhook, receive, stream, start };
 }
 
 function readCursor(file: string): string | undefined {

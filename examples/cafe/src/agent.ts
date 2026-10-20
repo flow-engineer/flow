@@ -2,7 +2,7 @@
 // model, events and (simulated) tools.
 
 import { fileURLToPath } from "node:url";
-import { createAgent, customUI, openAICompatible, sms, whatsapp, type AgentOptions, type Channel, type EventSink, type Model, type Tool } from "../../../src/index.ts";
+import { createAgent, customUI, openAICompatible, sms, whatsapp, type Channel, type EventSink, type HostOptions, type Model, type Tool } from "../../../src/index.ts";
 import { tools as cafeTools } from "./tools.ts";
 
 export interface BuildOptions {
@@ -11,8 +11,8 @@ export interface BuildOptions {
   tools?: Tool[];
   /** Channels that are connected, such as Telegram through Flow Messaging (main.ts adds them when .env has its key); one named whatsapp replaces the unconnected one. */
   channels?: Channel[];
-  /** Where the agent runs, for a host with no file system (Cloudflare): its files as text, its database, no schedule timer. */
-  host?: Pick<AgentOptions, "files" | "database" | "scheduleCheckMs">;
+  /** What the place running it supplies (Flow's hosting: its store and Flow Messaging; Cloudflare: files and a database), passed to createAgent as it is. */
+  host?: HostOptions;
 }
 
 export const tools = cafeTools;
@@ -26,9 +26,11 @@ const provider = { sendMessage: notConnected, react: notConnected, typing: notCo
 
 export function buildAgent(options: BuildOptions = {}) {
   const connected = options.channels ?? [];
-  const unconnected = [whatsapp(provider), sms(provider), customUI("web", provider)].filter((c) => !connected.some((k) => k.name === c.name));
+  // Hosted on Flow Messaging, its channels are the real ones (createAgent adds them from host.messaging).
+  const unconnected = options.host?.messaging ? [] : [whatsapp(provider), sms(provider), customUI("web", provider)].filter((c) => !connected.some((k) => k.name === c.name));
   return createAgent({
-    ...(options.host ?? { dir: fileURLToPath(new URL("../agent", import.meta.url)) }),
+    dir: fileURLToPath(new URL("../agent", import.meta.url)),
+    host: options.host,
     model: options.model ?? openAICompatible({ model: process.env.CAFE_MODEL }),
     tools: options.tools ?? cafeTools,
     events: options.events ?? [],

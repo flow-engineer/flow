@@ -26,6 +26,30 @@ import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } f
 import { traces, tracesFromEnv, type Traces, type TracesOptions } from "./traces.ts";
 import type { ChannelInfo, Deliver, Incoming, Model, Outbound, Template, TemplateDefinition, Transcribe } from "./types.ts";
 
+/** What a host supplies to an agent: `createAgent({ ..., host })`. */
+export interface HostOptions {
+  files?: AgentFiles;
+  database?: Database;
+  store?: StoreApi;
+  scheduleCheckMs?: number;
+  /** A Flow Messaging client (`flowMessaging()` from @flow-engineer/flow/flow-messaging). */
+  messaging?: { channels(options?: { except?: string[] }): Channel[] };
+}
+
+/** The agent's options with what its host supplies in place of its own. */
+function withHost(options: AgentOptions): AgentOptions {
+  const host = options.host;
+  if (!host) return options;
+  const declared = options.channels ?? [];
+  return {
+    ...options,
+    ...(host.files ? { dir: undefined, files: host.files } : {}),
+    ...(host.store ? { store: host.store, database: undefined, id: undefined } : host.database ? { database: host.database, store: undefined } : {}),
+    ...(host.scheduleCheckMs !== undefined ? { scheduleCheckMs: host.scheduleCheckMs } : {}),
+    channels: [...declared, ...(host.messaging?.channels({ except: declared.map((c) => c.name) }) ?? [])],
+  };
+}
+
 export interface AgentOptions {
   /** Folder holding AGENTS.md and skills/<name>/SKILL.md. Give this or `files`. */
   dir?: string;
@@ -161,6 +185,13 @@ export interface AgentOptions {
    * answered by `agent.fetch(request)`. The test cloud calls them in-process with a test's events.
    */
   routes?: Record<string, (request: Request) => Response | Promise<Response>>;
+  /**
+   * What the place running the agent supplies: Flow's hosting gives its `store` and its Flow Messaging
+   * client, a host with no file system (Cloudflare) its `files` and `database`. Pass `buildAgent`'s
+   * `options.host` here as it is. Each part it gives replaces the agent's own (`files` its `dir`, `store`
+   * or `database` its database); `messaging` adds Flow's channels (`channels()`) the agent does not declare.
+   */
+  host?: HostOptions;
   /**
    * The people who may write from the test playground (`simulate`), and no one else. Each is a
    * real person to the agent, by their phone number: the same conversation whether they write from
@@ -321,6 +352,7 @@ export class Agent {
   private readonly traces: Traces | null;
 
   constructor(options: AgentOptions) {
+    options = withHost(options);
     this.options = options;
     this.channelsByName = new Map((options.channels ?? []).map((c) => [c.name, c]));
     if (this.channelsByName.size !== (options.channels ?? []).length) throw new Error("flow: two channels have the same name");

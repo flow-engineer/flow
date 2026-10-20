@@ -391,8 +391,11 @@ every other agent's. Do not pick a VPS, Fly or Render on the owner's behalf: ask
 the agent goes on Flow's cloud or their own servers.
 
 On Flow's cloud the agent needs only what `flow test` already loads: `src/agent.ts` exports
-`buildAgent({ events, tools, host })` and passes `host` on to `createAgent` (`{ ...host }`), which
-brings the store and, when the agent has `FLOW_MESSAGING_KEY`, `host.messaging`. An agent that drops
+`buildAgent({ events, tools, host })` and passes it to `createAgent` as `host: options.host`, keeping
+its own `dir`. Hosting's `host` brings the store, which replaces the agent's database, and, when the
+agent has `FLOW_MESSAGING_KEY`, `host.messaging`, whose channels (Telegram, plus WhatsApp and iMessage
+with their senders) `createAgent` adds unless the agent declares one of that name itself. Do not
+spread `host` into the options: `createAgent` reads it as one option. An agent that drops
 `host`, or brings a database of its own, is refused in production (a warning in staging). The CI
 key is `FLOW_FRAMEWORK_CLOUD_KEY` (`flow setup` writes it into `.env`).
 

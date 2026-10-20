@@ -199,7 +199,7 @@ version in `package.json` for production.
 
 `npx @flow-engineer/flow deploy` puts the agent on Flow's hosting, so it answers while the laptop
 sleeps. It needs `package.json`, `package-lock.json` and `src/agent.ts`, whose `buildAgent` passes
-`options.host` on to `createAgent`, and the agent's CI key in `FLOW_FRAMEWORK_CLOUD_KEY` (the
+`options.host` to `createAgent` as `host: options.host` (never spread into its options), and the agent's CI key in `FLOW_FRAMEWORK_CLOUD_KEY` (the
 environment, else `.env`; `flow setup` writes it).
 
 One command deploys, the first time included:
