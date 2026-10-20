@@ -603,7 +603,13 @@
       f.textContent = "📎 " + (a.name || { image: "Photo", audio: "Voice note", document: "Document" }[a.kind]);
       b.appendChild(f);
     }
-    if (line.image) {
+    if (line.image && !line.image.url) {
+      // A photo by the provider's file id: the simulator cannot fetch it.
+      const f = document.createElement("div");
+      f.className = "file";
+      f.textContent = "🖼 Photo " + line.image.fileId;
+      b.appendChild(f);
+    } else if (line.image) {
       // A photo, the text under it its caption. Loaded from its URL, as the platform would fetch it.
       const img = document.createElement("img");
       img.className = "photo"; img.src = line.image.url; img.alt = "Photo"; img.loading = "lazy"; img.referrerPolicy = "no-referrer";
@@ -1009,7 +1015,7 @@
     else if (e.type === "ack.required") { tag = "held"; cls = "ack"; text = `${e.held.join(", ")} held until they're acknowledged`; }
     else if (e.type === "model.call") { text = `model ${e.ms} ms` + (e.toolCalls.length ? ` → ${e.toolCalls.join(", ")}` : " → (nothing)"); }
     else if (e.type === "message.in") { text = `in [${e.messageId}]: ${e.text}`; }
-    else if (e.type === "message.out") { text = `out: ${e.text}` + (e.buttons ? ` [${e.buttons.join(" | ")}]` : "") + (e.list ? ` [list: ${e.list.rows.length} rows]` : "") + (e.link ? ` [link: ${e.link.label} → ${e.link.url}]` : "") + (e.image ? ` [image: ${e.image.url}]` : "") + (e.fields ? ` [${Object.keys(e.fields).join(", ")}]` : ""); }
+    else if (e.type === "message.out") { text = `out: ${e.text}` + (e.buttons ? ` [${e.buttons.join(" | ")}]` : "") + (e.list ? ` [list: ${e.list.rows.length} rows]` : "") + (e.link ? ` [link: ${e.link.label} → ${e.link.url}]` : "") + (e.image ? ` [image: ${e.image.url || e.image.fileId}]` : "") + (e.carousel ? ` [carousel: ${e.carousel.length} cards]` : "") + (e.fields ? ` [${Object.keys(e.fields).join(", ")}]` : ""); }
     else if (e.type === "reaction") { text = `reacted ${e.emoji} to ${e.messageId}`; }
     else if (e.type === "reaction.in") { text = `they reacted ${e.emoji}`; }
     else if (e.type === "status") { text = `status: ${e.text}`; }

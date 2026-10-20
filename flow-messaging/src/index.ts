@@ -18,7 +18,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
-import { sms as smsChannel, whatsapp as whatsappChannel, type Agent, type Attachment, type Channel, type ChannelInfo, type Incoming, type Message, type Template, type WhatsAppFeature } from "../../src/index.ts";
+import { carouselMessages, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type Template, type WhatsAppFeature } from "../../src/index.ts";
 import { Client, FlowMessagingError, idSegment, verifySignature } from "./client.ts";
 
 export { API_VERSION, FlowMessagingError, verifySignature } from "./client.ts";
@@ -73,7 +73,7 @@ export interface StreamHandle {
   stopped: Promise<StreamStop>;
 }
 
-/** Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos, Markdown, no read receipts for bots. */
+/** Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos (one with buttons is one message), carousels (Flow sends their cards one by one), Markdown, no read receipts for bots. */
 export const TELEGRAM: ChannelInfo = {
   reactions: true,
   status: false,
@@ -83,6 +83,7 @@ export const TELEGRAM: ChannelInfo = {
   buttons: { max: 10, labelMax: 20 },
   linkButton: { labelMax: 20 },
   images: { captionMax: 1024 },
+  carousels: WHATSAPP_CAROUSELS,
   readReceipts: false,
 };
 
@@ -202,19 +203,30 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   /**
    * A message as Flow content. A link is a url button (WhatsApp's cta_url), a photo a media message
-   * with the text as its caption. Flow's button messages have no image header, so a photo with
-   * buttons or a link goes just before them, on its own.
+   * with the text as its caption; a photo with buttons or a link is their message's image header.
    */
-  function contents(kind: Kind, message: Message): Array<Record<string, unknown>> {
+  function content(kind: Kind, message: Message): Record<string, unknown> {
     const buttons = message.link
       ? [{ url: message.link.url, label: message.link.label }]
       : message.buttons?.length
         ? message.buttons.map((label) => ({ id: label, label }))
         : message.list?.rows.map((row) => ({ id: row.id, label: row.title }));
-    const photo = message.image && { type: "media", kind: "image", url: message.image.url };
-    if (photo && !buttons) return [{ ...photo, ...(message.text ? { caption: message.text } : {}) }];
-    const main = buttons ? { type: "buttons", text: message.text, buttons } : { type: "text", text: message.text, format: kind === "telegram" ? "markdown" : "plain" };
-    return photo ? [photo, main] : [main];
+    if (buttons) return { type: "buttons", text: message.text, buttons, ...(message.image ? { header: { type: "image", ...file(message.image) } } : {}) };
+    if (message.image) return { type: "media", kind: "image", ...file(message.image), ...(message.text ? { caption: message.text } : {}) };
+    return { type: "text", text: message.text, format: kind === "telegram" ? "markdown" : "plain" };
+  }
+
+  /** A carousel as Flow content: each card's photo is its header. */
+  function carouselContent(carousel: Carousel): Record<string, unknown> {
+    return {
+      type: "carousel",
+      text: carousel.text,
+      cards: carousel.cards.map((card) => ({
+        header: { type: "image", ...file(card.image) },
+        ...(card.text ? { text: card.text } : {}),
+        buttons: card.link ? [{ url: card.link.url, label: card.link.label }] : (card.buttons ?? []).map((label) => ({ id: label, label })),
+      })),
+    };
   }
 
   async function template(sender: string, wanted: Template): Promise<{ id: string; language: string }> {
@@ -243,12 +255,11 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     return {
       sendMessage: async (to: string, message: Message) => {
         // A message the business started: on WhatsApp, no link preview (its card's title would be the phone's notification).
-        const options = (content: Record<string, unknown>) => (message.preview === false && route.kind === "whatsapp" && content.type === "text" ? { preview_url: false } : undefined);
-        const [first, ...rest] = contents(route.kind, message);
-        const key = message.idempotencyKey;
-        await send(route, to, first, message.replyTo, message.replyTo, key, options(first));
-        for (const [i, next] of rest.entries()) await send(route, to, next, undefined, undefined, key && `${key}:${i + 1}`, options(next));
+        const sent = content(route.kind, message);
+        const options = message.preview === false && route.kind === "whatsapp" && sent.type === "text" ? { preview_url: false } : undefined;
+        await send(route, to, sent, message.replyTo, message.replyTo, message.idempotencyKey, options);
       },
+      sendCarousel: (to: string, carousel: Carousel) => send(route, to, carouselContent(carousel), carousel.replyTo, carousel.replyTo, carousel.idempotencyKey),
       react: (to: string, messageId: string, emoji: string) => send(route, to, { type: "reaction", message_id: messageId, emoji }, undefined, messageId),
       typing: (to: string, on: boolean) => courtesy(route, to, "typing", { state: on ? "on" : "off" }),
       markRead: (to: string, messageIds: string[]) => courtesy(route, to, "read", { up_to: messageIds.at(-1) }, messageIds.at(-1)),
@@ -261,7 +272,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     };
   }
 
-  /** WhatsApp from a Flow sender: buttons (a list past 3), lists, link buttons, photos, quotes, reactions, typing, blue ticks, templates. */
+  /** WhatsApp from a Flow sender: buttons (a list past 3), lists, link buttons, photos (as the header of buttons or a link), carousels, quotes, reactions, typing, blue ticks, templates. */
   function whatsapp(o: FlowChannelOptions & { disable?: WhatsAppFeature[] } = {}): Channel {
     const route = register("whatsapp", o);
     const channel = whatsappChannel(provider(route), { name: route.name, disable: o.disable, instructions: o.instructions });
@@ -307,6 +318,13 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
               ...(outbound.image && info.images ? { image: outbound.image } : {}),
               ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}),
             });
+          case "carousel": {
+            const { type: _type, ...carousel } = outbound;
+            if (info.carousels) return p.sendCarousel(to, carousel);
+            return (async () => {
+              for (const m of carouselMessages(info, carousel)) await p.sendMessage(to, m);
+            })();
+          }
           case "reaction":
             return p.react(to, outbound.messageId, outbound.emoji);
           case "typing":
@@ -621,6 +639,11 @@ function readCursor(file: string): string | undefined {
 function writeCursor(file: string, id: string | undefined): void {
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, id ? `${id}\n` : "");
+}
+
+/** A photo as Flow takes it: by URL, or by a file uploaded to Flow. */
+function file(image: Photo): { url: string } | { file_id: string } {
+  return "url" in image ? { url: image.url } : { file_id: image.fileId };
 }
 
 /** The text of a message's content, as the agent knew it. */

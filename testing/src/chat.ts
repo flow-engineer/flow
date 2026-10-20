@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import type { Agent, FlowEvent, Outbound } from "../../src/index.ts";
+import type { Agent, FlowEvent, Outbound, Photo } from "../../src/index.ts";
 import { NO_MODEL_KEY } from "../../src/model.ts";
 import { loadEnv } from "./report.ts";
 
@@ -91,14 +91,20 @@ export async function chatCli(args: string[], input: NodeJS.ReadableStream = pro
   return 0;
 }
 
+const photoText = (image: Photo) => ("url" in image ? image.url : image.fileId);
+
 /** One thing the agent sent, as a person would read it (or one JSON line). */
 function print(outbound: Outbound, channel: string, json: boolean): void {
   if (outbound.type === "typing" || outbound.type === "status" || outbound.type === "read") return;
   if (json) return void process.stdout.write(`${JSON.stringify({ channel, ...outbound })}\n`);
   if (outbound.type === "reaction") return void process.stdout.write(`agent reacted ${outbound.emoji}\n`);
   if (outbound.type === "template") return void process.stdout.write(`agent: [template ${outbound.name}]\n`);
+  if (outbound.type === "carousel") {
+    const cards = outbound.cards.map((c) => `[card ${photoText(c.image)}${c.text ? ` ${c.text}` : ""}${c.link ? ` [${c.link.label}: ${c.link.url}]` : ""}${c.buttons ? ` ${c.buttons.map((b) => `[${b}]`).join(" ")}` : ""}]`);
+    return void process.stdout.write(`agent: ${[outbound.text, ...cards].join(" ")}\n`);
+  }
   const extra = [
-    outbound.image && `[photo ${outbound.image.url}]`,
+    outbound.image && `[photo ${photoText(outbound.image)}]`,
     outbound.link && `[${outbound.link.label}: ${outbound.link.url}]`,
     outbound.buttons?.map((b) => `[${b}]`).join(" "),
     outbound.list && `[${outbound.list.button}: ${outbound.list.rows.map((r) => r.title).join(" | ")}]`,

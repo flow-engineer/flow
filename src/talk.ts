@@ -10,7 +10,7 @@
 
 import { z } from "zod";
 import { toSpec, tool } from "./tools.ts";
-import type { ChannelInfo, ToolSpec } from "./types.ts";
+import type { CarouselCard, ChannelInfo, Photo, ToolSpec } from "./types.ts";
 
 export const REACT = "react";
 export const UPDATE = "share_updates";
@@ -37,6 +37,8 @@ export function sendToolName(channel: string): string {
 }
 
 const https = z.url({ protocol: /^https$/ });
+/** A photo by URL, or by a file id a tool gave (the provider's own). */
+const photo = z.union([z.object({ url: https }), z.object({ file_id: z.string().min(1) })]);
 
 /** A send tool's input on this channel: only the features it has, with its limits, and its own params. */
 export function sendInput(channel: ChannelInfo, several = false, params: Record<string, z.ZodType> = {}) {
@@ -80,10 +82,25 @@ export function sendInput(channel: ChannelInfo, several = false, params: Record<
     .optional()
     .describe(channel.linkButton ? "A button that opens a page, by a URL you were given; not with buttons or a list" : "A page, by a URL you were given: it goes on a line after your text; not with buttons or a list");
   if (channel.images) {
-    shape.image = z
-      .object({ url: https })
+    shape.image = photo
       .optional()
-      .describe(`A photo, by a URL you were given; your text is its caption, up to ${channel.images.captionMax} characters${channel.lists ? "; not with a list" : ""}`);
+      .describe(`A photo, by a URL or file id you were given; your text is its caption, up to ${channel.images.captionMax} characters${channel.lists ? "; not with a list" : ""}`);
+  }
+  if (channel.carousels) {
+    const c = channel.carousels;
+    shape.carousel = z
+      .array(
+        z.object({
+          image: photo,
+          text: z.string().max(c.cardTextMax).optional(),
+          buttons: z.array(z.string().min(1).max(c.labelMax)).min(1).max(c.buttons).optional(),
+          link: z.object({ label: z.string().min(1).max(c.labelMax), url: https }).optional(),
+        }),
+      )
+      .min(2)
+      .max(c.maxCards)
+      .optional()
+      .describe(`Up to ${c.maxCards} cards they swipe through under your text: each a photo, up to ${c.cardTextMax} characters, and 1 to ${c.buttons} reply buttons or one link, the same on every card; not with buttons, a list, a link or an image`);
   }
   for (const [name, schema] of Object.entries(params)) shape[name] = schema.optional();
   return z.object(shape);
@@ -95,13 +112,39 @@ export type SendInput = {
   buttons?: string[];
   list?: { button: string; rows: Array<{ id: string; title: string; description?: string }> };
   link?: { label: string; url: string };
-  image?: { url: string };
+  image?: { url: string } | { file_id: string };
+  carousel?: Array<{ image: { url: string } | { file_id: string }; text?: string; buttons?: string[]; link?: { label: string; url: string } }>;
   confirm?: boolean;
 };
+
+/** A photo as the send tool took it, as channels take it. */
+export function photoOf(image: { url: string } | { file_id: string }): Photo {
+  return "url" in image ? { url: image.url } : { fileId: image.file_id };
+}
+
+/** A carousel's cards as the send tool took them, as channels take them. */
+export function cardsOf(cards: NonNullable<SendInput["carousel"]>): CarouselCard[] {
+  return cards.map((card) => ({
+    image: photoOf(card.image),
+    ...(card.text ? { text: card.text } : {}),
+    ...(card.buttons?.length ? { buttons: card.buttons } : {}),
+    ...(card.link ? { link: card.link } : {}),
+  }));
+}
 
 /** Why a send that fits its schema still cannot go out as written (WhatsApp's rules), or null. */
 export function sendRefusal(channel: ChannelInfo, input: SendInput): string | null {
   if (input.link && (input.buttons?.length || input.list)) return "Not sent: a message with a link cannot also have buttons or a list. Send them in separate messages.";
+  if (input.carousel) {
+    if (input.buttons?.length || input.list || input.link || input.image) return "Not sent: a carousel goes alone, without buttons, a list, a link or an image. Send them in separate messages.";
+    const kind = (card: NonNullable<SendInput["carousel"]>[number]) => (card.link && card.buttons?.length ? "both" : card.link ? "link" : `${card.buttons?.length ?? 0} buttons`);
+    const kinds = new Set(input.carousel.map(kind));
+    if (kinds.has("both") || kinds.has("0 buttons")) return "Not sent: every card needs reply buttons or one link, not both.";
+    if (kinds.size > 1) return "Not sent: every card of a carousel has the same kind and number of buttons.";
+    const max = channel.carousels?.textMax ?? 1024;
+    if (input.text.length > max) return `Not sent: a carousel's text is at most ${max} characters. Shorten it, or send the rest in another message.`;
+    return null;
+  }
   if (input.image && input.list) return "Not sent: a message with an image cannot also have a list. Send them in separate messages.";
   if (input.image && channel.images && input.text.length > channel.images.captionMax) {
     return `Not sent: with an image, your text is its caption, at most ${channel.images.captionMax} characters. Shorten it, or send the rest in another message.`;

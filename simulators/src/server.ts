@@ -37,6 +37,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import type { TLSSocket } from "node:tls";
 import {
+  carouselMessages,
   declaredTemplate,
   fillTemplate,
   fitMessage,
@@ -49,6 +50,7 @@ import {
   type Incoming,
   type ListRow,
   type Outbound,
+  type Photo,
   type FlowEvent,
   type PlaygroundSink,
   type Template,
@@ -307,7 +309,7 @@ export type Line =
       link?: { label: string; url: string };
       authentication?: boolean;
       /** A photo above the text, which is its caption. */
-      image?: { url: string };
+      image?: Photo;
       /** The channel's own params the agent filled in (an app_link): shown under the message. */
       fields?: Record<string, unknown>;
       /**
@@ -469,7 +471,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
   /** What the platform does with one thing the agent sends. Throws when it would not arrive. */
   function deliverer(p: Platform, k: string, templates: TemplateDefinition[] = []) {
-    return (outbound: Outbound) => {
+    const deliver = (outbound: Outbound): void => {
       const t = thread(k);
       if (outbound.type === "template") {
         const { type: _type, ...sent } = outbound;
@@ -484,6 +486,12 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
         }
         const { body, ...shown } = filled ?? { body: valuesOf(sent) };
         emitLine(k, { kind: "out", id: `a${++t.agentCount}`, text: body, at: Date.now(), template: { name: sent.name, ...shown } });
+        return;
+      }
+      if (outbound.type === "carousel") {
+        // Shown as the cards one by one, as a channel without carousels gets them.
+        const { type: _type, ...carousel } = outbound;
+        for (const m of carouselMessages(channelOf(p), carousel)) deliver({ type: "message", ...m });
         return;
       }
       if (outbound.type === "message") {
@@ -515,6 +523,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       }
       push(k, { ...outbound, at: Date.now() });
     };
+    return deliver;
   }
 
   /** The SMS carrier's own handling of STOP, START and HELP. The text still reaches the agent. */
@@ -764,9 +773,12 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       } else if (e.kind === "reaction") lines.push({ kind: "reaction", messageId: e.messageId, emoji: e.emoji, at: e.at, by: "agent" });
       else {
         // The agent's message as this platform showed it (a link's URL in the text where it has no link button).
-        const { kind: _kind, channel: _channel, template: _template, ...rest } = fitMessage(channel.info, e);
-        const sms = p.segments ? smsSegments(rest.text) : undefined;
-        lines.push({ kind: "out", id: `a${++count}`, ...rest, ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}) });
+        const { kind: _kind, channel: _channel, template: _template, carousel, ...sent } = e;
+        const shown = carousel ? carouselMessages(channel.info, { text: sent.text, cards: carousel }) : [fitMessage(channel.info, sent)];
+        for (const rest of shown) {
+          const sms = p.segments ? smsSegments(rest.text) : undefined;
+          lines.push({ kind: "out", id: `a${++count}`, at: e.at, ...rest, ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}) });
+        }
       }
     }
     const stored = new Set(lines.flatMap((l) => (l.kind === "in" && l.id ? [l.id] : [])));

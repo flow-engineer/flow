@@ -126,8 +126,12 @@ Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret
 - Reply buttons and lists, sent as Flow `buttons`. WhatsApp shows up to 3 reply buttons, or a list
   for 4 to 10. Telegram shows an inline keyboard. iMessage has none, so the agent is not offered them.
 - A link: one URL button (WhatsApp's call-to-action button); on iMessage, the URL on its own line.
-- A photo: a media message with the text as its caption. Flow's button messages have no image
-  header, so a photo with buttons or a link goes just before them.
+- A photo (by URL, or a Flow file ID from `POST /v1/files`): a media message with the text as its
+  caption; with buttons or a link, the image header of that same message (on Telegram, one photo
+  with its keyboard).
+- A carousel (WhatsApp and Telegram): Flow `carousel` content, 2 to 10 cards, each a photo, up to 160
+  characters and 1 or 2 reply buttons or one link, the same on every card. WhatsApp shows the cards
+  side by side; Telegram gets them one by one, in order. On iMessage the agent is not offered one.
 - Quotes (`reply_to`), reactions (tapbacks on iMessage), typing, and read receipts (WhatsApp, iMessage).
 - WhatsApp templates, by name or `tpl_` ID, with their header (text, or media by URL or file ID),
   body values (`{{1}}`, `{{2}}`, ...) and button values (URL suffixes, quick-reply payloads).

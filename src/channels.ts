@@ -10,7 +10,7 @@
 //   customUI("app", new MyApp())                         your own web or mobile UI, with your params
 
 import type { z } from "zod";
-import type { ChannelInfo, ListRow, Outbound, Template, TemplateDefinition } from "./types.ts";
+import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, Template, TemplateDefinition } from "./types.ts";
 
 export type ChannelKind = "sms" | "whatsapp" | "custom";
 
@@ -98,16 +98,27 @@ export interface Message {
   list?: { button: string; rows: ListRow[] };
   /** A button that opens this page. Never with buttons or a list. */
   link?: { label: string; url: string };
-  /** A photo, the text its caption. Never with a list. */
-  image?: { url: string };
+  /** A photo, the text its caption; with buttons or a link it heads the same message. Never with a list. */
+  image?: Photo;
   /** false: send it with link previews off (a message the business started). */
   preview?: false;
   /** Given for a send the business starts (a nudge, a scheduled text): the same in every process, so a provider that takes one sends it once. */
   idempotencyKey?: string;
 }
 
+/** A carousel, as the agent's send tool wrote it. */
+export interface Carousel {
+  text: string;
+  cards: CarouselCard[];
+  replyTo?: string;
+  preview?: false;
+  idempotencyKey?: string;
+}
+
 export interface WhatsAppProvider {
   sendMessage(to: string, message: Message): Promise<void>;
+  /** A media carousel; without it the agent is never offered one. */
+  sendCarousel?(to: string, carousel: Carousel): Promise<void>;
   /** Which parts of a message this provider can send. Default: all. */
   features?: { buttons?: boolean; lists?: boolean; replies?: boolean; links?: boolean; images?: boolean };
   react?(to: string, messageId: string, emoji: string): Promise<void>;
@@ -128,6 +139,8 @@ export interface CustomUIProvider {
   /** Your own guidance for the agent on this channel, such as how to use your params. */
   instructions?: string;
   sendMessage(to: string, message: Message & Record<string, unknown>): Promise<void>;
+  /** A carousel, on a UI whose info declares carousels; without it the cards go one by one through sendMessage. */
+  sendCarousel?(to: string, carousel: Carousel): Promise<void>;
   react?(to: string, messageId: string, emoji: string): Promise<void>;
   typing?(to: string, on: boolean): Promise<void>;
   markRead?(to: string, messageIds: string[]): Promise<void>;
@@ -152,10 +165,13 @@ export const WHATSAPP: ChannelInfo = {
   replyWindowHours: 24,
 };
 
+/** WhatsApp's media carousel: 2 to 10 cards, each a photo, up to 160 characters and 1 or 2 reply buttons (or one URL button). */
+export const WHATSAPP_CAROUSELS: NonNullable<ChannelInfo["carousels"]> = { maxCards: 10, textMax: 1024, cardTextMax: 160, buttons: 2, labelMax: 20 };
+
 /** SMS: plain text; providers join up to 10 segments into one text (1,530 GSM-7 characters). */
 export const SMS: ChannelInfo = { reactions: false, status: false, formatting: "plain", maxLength: 1530 };
 
-export type WhatsAppFeature = "buttons" | "lists" | "links" | "images" | "replies" | "reactions" | "typing" | "readReceipts" | "templates";
+export type WhatsAppFeature = "buttons" | "lists" | "links" | "images" | "carousels" | "replies" | "reactions" | "typing" | "readReceipts" | "templates";
 
 export function whatsapp(provider: WhatsAppProvider, options: { name?: string; disable?: WhatsAppFeature[]; instructions?: string; keywords?: false | Partial<Keywords> } = {}): Channel {
   const off = new Set(options.disable ?? []);
@@ -170,6 +186,7 @@ export function whatsapp(provider: WhatsAppProvider, options: { name?: string; d
     lists: has("lists", f.lists !== false) ? WHATSAPP.lists : undefined,
     linkButton: has("links", f.links !== false) ? WHATSAPP.linkButton : undefined,
     images: has("images", f.images !== false) ? WHATSAPP.images : undefined,
+    carousels: has("carousels", Boolean(provider.sendCarousel)) ? WHATSAPP_CAROUSELS : undefined,
   };
   return {
     name: options.name ?? "whatsapp",
@@ -182,6 +199,8 @@ export function whatsapp(provider: WhatsAppProvider, options: { name?: string; d
       switch (outbound.type) {
         case "message":
           return provider.sendMessage(to, message(outbound));
+        case "carousel":
+          return info.carousels && provider.sendCarousel ? provider.sendCarousel(to, carouselOf(outbound)) : sendCards(info, carouselOf(outbound), (m) => provider.sendMessage(to, m));
         case "reaction":
           return info.reactions ? provider.react?.(to, outbound.messageId, outbound.emoji) : undefined;
         case "typing":
@@ -210,6 +229,7 @@ export function sms(provider: SmsProvider, options: { name?: string; instruction
     phone: true,
     send: (to, outbound) => {
       if (outbound.type === "message") return provider.sendMessage(to, { text: outbound.text, ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}) });
+      if (outbound.type === "carousel") return sendCards(SMS, carouselOf(outbound), (m) => provider.sendMessage(to, { text: m.text, ...(m.idempotencyKey ? { idempotencyKey: m.idempotencyKey } : {}) }));
       if (outbound.type === "template") throw new Error("SMS has no templates");
       // Reactions, typing, read receipts and status do not exist on SMS.
     },
@@ -234,6 +254,8 @@ export function customUI(name: string, provider: CustomUIProvider): Channel {
       switch (outbound.type) {
         case "message":
           return provider.sendMessage(to, { ...message(outbound), ...outbound.fields });
+        case "carousel":
+          return info.carousels && provider.sendCarousel ? provider.sendCarousel(to, carouselOf(outbound)) : sendCards(info, carouselOf(outbound), (m) => provider.sendMessage(to, { ...m }));
         case "reaction":
           return provider.react?.(to, outbound.messageId, outbound.emoji);
         case "typing":
@@ -262,11 +284,44 @@ function message(outbound: Extract<Outbound, { type: "message" }>): Message {
   };
 }
 
+function carouselOf(outbound: Extract<Outbound, { type: "carousel" }>): Carousel {
+  const { type: _type, ...carousel } = outbound;
+  return carousel;
+}
+
+/**
+ * A carousel as messages one after another, for a channel that cannot show one: its text, then
+ * each card (its photo with its text as caption, its buttons or link), each fitted to the channel.
+ * A send the business started keeps one idempotency key per message (key, key:1, key:2, ...).
+ */
+export function carouselMessages(info: ChannelInfo, carousel: Carousel): Message[] {
+  const keyed = (i: number) => (carousel.idempotencyKey ? { idempotencyKey: i ? `${carousel.idempotencyKey}:${i}` : carousel.idempotencyKey } : {});
+  const preview = carousel.preview === false ? { preview: false as const } : {};
+  const cards = carousel.cards.map((card, i) =>
+    fitMessage(info, {
+      text: card.text ?? "",
+      image: card.image,
+      ...(card.buttons?.length && info.buttons ? { buttons: card.buttons } : {}),
+      ...(card.link ? { link: card.link } : {}),
+      ...preview,
+      ...keyed(i + 1),
+    }),
+  );
+  const first = { text: carousel.text, ...(carousel.replyTo ? { replyTo: carousel.replyTo } : {}), ...preview, ...keyed(0) };
+  // A card with nothing this channel shows (no text, its photo dropped) is not sent.
+  return [first, ...cards.filter((m) => m.text || m.image)];
+}
+
+/** Sends a carousel's messages one by one, in order, each after the last went. */
+async function sendCards(info: ChannelInfo, carousel: Carousel, send: (message: Message) => Promise<void>): Promise<void> {
+  for (const m of carouselMessages(info, carousel)) await send(m);
+}
+
 /**
  * A message as this channel can show it: without a link button the link's URL goes on a line after
  * the text, and without images the text goes alone. So a provider only gets what it declared.
  */
-export function fitMessage<M extends { text: string; link?: { label: string; url: string }; image?: { url: string } }>(info: ChannelInfo, message: M): M {
+export function fitMessage<M extends { text: string; link?: { label: string; url: string }; image?: Photo }>(info: ChannelInfo, message: M): M {
   const { link, image, ...rest } = message;
   return {
     ...rest,

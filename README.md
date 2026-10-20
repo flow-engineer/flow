@@ -174,7 +174,8 @@ A channel is a definition: Flow Framework knows the platform's rules, your provi
 
 ```ts
 const wa = whatsapp({
-  sendMessage: (to, m) => api.send(to, m),            // m: { text, replyTo?, buttons?, list?, link?, image? }
+  sendMessage: (to, m) => api.send(to, m),            // m: { text, replyTo?, buttons?, list?, link?, image?: { url } | { fileId } }
+  sendCarousel: (to, c) => api.carousel(to, c),       // optional: offers carousels; c: { text, cards: [{ image, text?, buttons? | link? }] }
   react: (to, id, emoji) => api.react(to, id, emoji),
 });
 const text = sms({ sendMessage: (to, m) => smsApi.send(to, m.text) });

@@ -38,7 +38,7 @@ test("a WhatsApp message reaches the agent with its quote, and the reply, read r
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
-test("a link goes as a url button and a photo as media with its caption; a photo with buttons goes just before them", async (t) => {
+test("a link goes as a url button and a photo as media with its caption; a photo with buttons or a link is their message's image header, by URL or Flow file id", async (t) => {
   const flow = await fakeFlow();
   const live = await liveAgent(flow);
   t.after(() => (flow.close(), live.close()));
@@ -50,20 +50,53 @@ test("a link goes as a url button and a photo as media with its caption; a photo
       call("send_whatsapp", { text: "Book it here", link: { label: "Book", url: "https://example.com/book" } }),
       call("send_whatsapp", { text: "The sea view room", image: { url: photo } }),
       call("send_whatsapp", { text: "Want it?", image: { url: photo }, buttons: ["Yes", "No"] }),
+      call("send_whatsapp", { text: "Or this one", image: { file_id: "file_7" }, link: { label: "Book", url: "https://example.com/book" } }),
     ),
   );
   const path = "/v1/conversations/conv_wa/messages";
-  await flow.request((r) => post(path)(r) && r.body.content.text === "Want it?");
+  await flow.request((r) => post(path)(r) && r.body.content.text === "Or this one");
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
   assert.deepEqual(
     flow.sends(path).map((r) => r.body.content),
     [
       { type: "buttons", text: "Book it here", buttons: [{ url: "https://example.com/book", label: "Book" }] },
       { type: "media", kind: "image", url: photo, caption: "The sea view room" },
-      { type: "media", kind: "image", url: photo },
-      { type: "buttons", text: "Want it?", buttons: [{ id: "Yes", label: "Yes" }, { id: "No", label: "No" }] },
+      { type: "buttons", text: "Want it?", buttons: [{ id: "Yes", label: "Yes" }, { id: "No", label: "No" }], header: { type: "image", url: photo } },
+      { type: "buttons", text: "Or this one", buttons: [{ url: "https://example.com/book", label: "Book" }], header: { type: "image", file_id: "file_7" } },
     ],
   );
+});
+
+test("a carousel goes as one Flow carousel, each card's photo its header", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_maya = { address: { phone: "+15550100100" } };
+  await live.deliver(received(WA, "msg_1", { type: "text", text: "what rooms?" }));
+  const first = await live.nextCall(0);
+  const tool = first.request.tools.find((x) => x.name === "send_whatsapp");
+  assert.ok(JSON.stringify(tool).includes('"carousel"'), "WhatsApp on Flow offers carousels");
+  first.answer(
+    respond(
+      call("send_whatsapp", {
+        text: "Two rooms free tonight",
+        carousel: [
+          { image: { url: "https://example.com/sea.jpg" }, text: "Sea view", buttons: ["Book sea"] },
+          { image: { file_id: "file_9" }, buttons: ["Book garden"] },
+        ],
+      }),
+    ),
+  );
+  const sent = await flow.request(post("/v1/conversations/conv_wa/messages"));
+  assert.deepEqual(sent.body.content, {
+    type: "carousel",
+    text: "Two rooms free tonight",
+    cards: [
+      { header: { type: "image", url: "https://example.com/sea.jpg" }, text: "Sea view", buttons: [{ id: "Book sea", label: "Book sea" }] },
+      { header: { type: "image", file_id: "file_9" }, buttons: [{ id: "Book garden", label: "Book garden" }] },
+    ],
+  });
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
 test("a photo arrives as an attachment whose bytes come from Flow's files API with the app key", async (t) => {

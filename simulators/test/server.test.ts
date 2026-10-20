@@ -109,6 +109,28 @@ test("WhatsApp and web show a link button and a photo the agent sends; SMS offer
   }
 });
 
+test("a carousel shows as its text, then each card as a message, in order", async () => {
+  const { fake, server, send, lines } = await start();
+  try {
+    await send("whatsapp", "what rooms?");
+    await fake.deliver!({
+      type: "carousel",
+      text: "Two rooms",
+      cards: [
+        { image: { url: "https://example.com/sea.jpg" }, text: "Sea view", buttons: ["Book sea"] },
+        { image: { fileId: "file_9" }, text: "Garden", buttons: ["Book garden"] },
+      ],
+    });
+    const out = (await lines("whatsapp")).filter((l) => l.kind === "out");
+    assert.deepEqual(
+      out.map((l) => l.kind === "out" && [l.text, l.image, l.buttons]),
+      [["Two rooms", undefined, undefined], ["Sea view", { url: "https://example.com/sea.jpg" }, ["Book sea"]], ["Garden", { fileId: "file_9" }, ["Book garden"]]],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
 test("the web simulator plays the agent's own custom UI, and shows the params it sent", async () => {
   const app: ChannelSummary = { name: "app", kind: "custom", info: { reactions: false, status: true, formatting: "markdown" } };
   const { fake, server, send, lines } = await start(undefined, [app]);

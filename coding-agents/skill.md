@@ -156,10 +156,17 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   Store(postgres(pool), agentId)`.
 - Every send tool can carry a `link` ({ label, url }, https): a URL button where the channel has
   one (`linkButton`, WhatsApp's cta_url), else Flow Framework puts the URL on a line after the text. Channels
-  with `images` also offer an `image` ({ url }, https), the text its caption; elsewhere the text
-  goes alone. WhatsApp's rules hold everywhere: a link never with buttons or a list, an image never
-  with a list. A provider without them says so (`features: { links: false, images: false }`) and
-  never gets them; the URLs come from your tools' results, like app_link's.
+  with `images` also offer an `image` ({ url }, https, or { file_id }, the provider's own id for a
+  file it holds), the text its caption; with buttons or a link the photo heads that same message.
+  The provider gets it as `image: { url }` or `image: { fileId }`; elsewhere the text goes alone.
+  WhatsApp's rules hold everywhere: a link never with buttons or a list, an image never with a
+  list. A provider without them says so (`features: { links: false, images: false }`) and never
+  gets them; the URLs and file ids come from your tools' results, like app_link's.
+- Carousels (WhatsApp's media carousel): a WhatsApp provider with `sendCarousel(to, { text, cards })`,
+  or a customUI whose `info` has `carousels`, offers the agent a `carousel` of 2 to 10 cards, each
+  `{ image, text?, buttons? | link? }` with the same kind and number of buttons on every card
+  (`WHATSAPP_CAROUSELS` has WhatsApp's limits). A channel that gets a carousel without a way to show
+  one sends its text, then each card as a message, in order (`carouselMessages`).
 - The simulators and the test cloud play an agent's own channels with these definitions (the web
   simulator plays a customUI), so the model sees the production tools; they show params such as
   app_link under the message instead of calling your sendMessage.
