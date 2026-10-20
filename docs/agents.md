@@ -80,6 +80,14 @@ before you hand it back; run them yourself, and do not offer them to the owner a
   and WhatsApp links"), with the open channels' links, and exits 0: `link --json` then has
   `not_open` (the channel asked for), `links` (each open channel's) and `url`/`channel` for the
   first of them. Only when no channel is open does it exit 3 (`channel_not_open`).
+- Texting needs only Flow Messaging's part of setup (and a model key). When setup's answer has it
+  (the join code, the Messaging key and senders) but observe's part failed (traces and the test
+  cloud: `observe_failed`, or observe's own limit), `link` prints one warning line on stderr,
+  `Traces and tests won't work until .env has FLOW_FRAMEWORK_CLOUD_KEY and FLOW_FRAMEWORK_TRACES_KEY:
+  <the server's reason>. Then: <its next>`, then the link, the channel's trial line and its `Next:`
+  as usual, and exits 0; `link --json` has the line in `warnings`, on setup's line and on its own.
+  Give it to the owner; `setup` makes the missing keys once it is fixed. Run again, `link` finds
+  Messaging's part in `.env` and does not run setup. `setup` on its own still exits 3 for it.
 - On WhatsApp and iMessage the agent can only reply after the owner writes first (WhatsApp: within
   24 hours of their last message); it cannot message them first. `link --json` says so
   (`reply_only: true`, and in `say_to_person`): tell the owner.
@@ -105,7 +113,7 @@ before you hand it back; run them yourself, and do not offer them to the owner a
 | 0 | Done | Go on |
 | 1 | Usage, not signed in, not an agent's folder, or a login URL that is not https | Fix the command, or run `next` |
 | 2 | flow.engineer could not be reached, or did not answer in time (`timeout`) | Try again |
-| 3 | Refused: denied, expired, a product failed, no channel open yet (one closed while others are open is exit 0 with their links), a server with no CLI sign-in (`server_unsupported`), or a free-trial limit (`sandbox_allowance_used`, the iMessage people cap; HTTP 403) | Run `next`; for a trial limit `next` is a sentence: give it to the owner as it is |
+| 3 | Refused: denied, expired, a product failed (for `link`, only when Messaging's part did: observe's alone is exit 0 with a warning), no channel open yet (one closed while others are open is exit 0 with their links), a server with no CLI sign-in (`server_unsupported`), or a free-trial limit (`sandbox_allowance_used`, the iMessage people cap; HTTP 403) | Run `next`; for a trial limit `next` is a sentence: give it to the owner as it is |
 | 4 | Sign-in still waiting for the owner's approval, or flow.engineer asked to wait (`slow_down`, HTTP 429) | Approval: ask the owner to approve, then run `next` (the same code is kept). `slow_down`: wait `retry_after` seconds (printed as `Wait <n> s`), then run `next` |
 
 `login` and `link` wait at most `--timeout` seconds (120 by default) before exit 4, and no single

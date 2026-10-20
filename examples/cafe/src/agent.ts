@@ -1,4 +1,4 @@
-// Builds Pip. The playground (main.ts) and the tests build it the same way; tests pass their own
+// Builds the agent. The playground (main.ts) and the tests build it the same way; tests pass their own
 // model, events and (simulated) tools.
 
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ export interface BuildOptions {
   tools?: Tool[];
   /** Channels that are connected, such as Telegram through Flow Messaging (main.ts adds them when .env has its key); one named whatsapp replaces the unconnected one. */
   channels?: Channel[];
-  /** Where Pip runs, for a host with no file system (Cloudflare): its files as text, its database, no schedule timer. */
+  /** Where the agent runs, for a host with no file system (Cloudflare): its files as text, its database, no schedule timer. */
   host?: Pick<AgentOptions, "files" | "database" | "scheduleCheckMs">;
 }
 
@@ -20,7 +20,7 @@ export const tools = cafeTools;
 // The café's numbers and web chat are not connected yet, so every provider refuses to send. Test
 // people write from the playground, and replies to them go back there, never through these.
 const notConnected = async () => {
-  throw new Error("not connected yet: only test people in the playground reach Pip for now");
+  throw new Error("not connected yet: only test people in the playground reach the agent for now");
 };
 const provider = { sendMessage: notConnected, react: notConnected, typing: notConnected, markRead: notConnected, status: notConnected };
 

@@ -535,7 +535,7 @@ interface SetupOptions {
   ci: boolean;
 }
 
-async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say, forLink?: { channel: string }): Promise<{ answer: SetupAnswer }> {
+async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say, forLink?: { channel: string }): Promise<{ answer: SetupAnswer; warnings: string[] }> {
   if (options.ci) {
     const steps = [
       `CI never signs in. It runs the tests with the agent's test cloud key, ${SETUP_ENV.cloud_key}, as a secret.`,
@@ -545,7 +545,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
     ];
     if (json) out({ ci: { secret: SETUP_ENV.cloud_key, steps } });
     for (const line of steps) say(line);
-    return { answer: {} as SetupAnswer };
+    return { answer: {} as SetupAnswer, warnings: [] };
   }
   const dir = process.cwd();
   agentFolder(dir);
@@ -582,16 +582,26 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   };
   const chosenPage = (n: string) => forLink !== undefined && n === SETUP_ENV.try_url;
   let answer: SetupAnswer;
+  // For link: the server's refusal when Messaging's part came (a join code) and only observe's failed.
+  let observeFailed: { why: string; fix: string | undefined } | undefined;
   try {
     // Every channel: each comes back with its shared sender only while it is open.
     answer = await setup(url, token, { name, hostname: hostname(), channels: [...CHANNELS], have, ...(rotate ? { rotate } : {}), ...(rotateNow ? { rotate_now: true as const } : {}) });
   } catch (error) {
-    // The keys minted anyway are not shown again, so whatever the error carries goes into .env first.
-    if (error instanceof LoginRefused) {
+    // Texting needs only Messaging's part, so link goes on without observe's (traces and the test
+    // cloud) and says what is missing; setup alone, whose job is both, still stops.
+    if (forLink && error instanceof LoginRefused && typeof error.fields.join_code === "string" && error.fields.join_code) {
+      const { error: _code, error_description: why, next: fix, ...rest } = error.fields;
+      answer = rest as unknown as SetupAnswer;
+      observeFailed = { why: typeof why === "string" && why ? why : error.message, fix: typeof fix === "string" && fix ? fix : error.next };
+    } else {
+      // The keys minted anyway are not shown again, so whatever the error carries goes into .env first.
+      if (error instanceof LoginRefused) {
       const written = writeEnv(file, lines, before, envEntries(withTryUrl(error.fields)), (n) => options.replace || rotatedEnv.has(n) || chosenPage(n));
-      if (written.some((w) => w.action === "added" || w.action === "replaced")) say(`Kept in .env before the error: ${written.map((w) => `${w.name} ${w.action}`).join(", ")}.`);
+        if (written.some((w) => w.action === "added" || w.action === "replaced")) say(`Kept in .env before the error: ${written.map((w) => `${w.name} ${w.action}`).join(", ")}.`);
+      }
+      throw error;
     }
-    throw error;
   }
   const fields = answer as unknown as Record<string, unknown>;
   const warnings = warningsOf(fields);
@@ -604,6 +614,11 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
       answer.next?.[0] ?? NEXT.setup, EXIT.refused);
     stop.warnings = warnings;
     throw stop;
+  }
+  if (observeFailed) {
+    const missing = [SETUP_ENV.cloud_key, SETUP_ENV.traces_key].filter((n) => !before.get(n));
+    const why = observeFailed.why.replace(/\.$/, "");
+    warnings.push(`Traces and tests won't work${missing.length ? ` until .env has ${missing.join(" and ")}` : ""}: ${why}.${observeFailed.fix ? ` Then: ${observeFailed.fix}` : ""}`);
   }
   printWarnings(warnings);
 
@@ -643,7 +658,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
       ...(forLink ? {} : { next }), warnings,
     });
   }
-  say(`Agent ${answer.agent_id}. In .env:`);
+  say(answer.agent_id ? `Agent ${answer.agent_id}. In .env:` : "In .env:");
   for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}${w.action === "kept" ? (w.name === FLOW_KEY ? " (--rotate key makes a new one)" : " (yours differs; --replace takes the new one)") : ""}`);
   if (previous) say(previous);
   if (answer.dashboard_url) say(`Its dashboard: ${answer.dashboard_url}`);
@@ -658,7 +673,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
     if (added) say(`If npm start is running, restart it to add ${added}.`);
     say(`Next: ${next.join(", then ")}`);
   }
-  return { answer };
+  return { answer, warnings };
 }
 
 /** iMessage's count of the people it may reach on the trial, as a line; undefined when the answer had none. */
@@ -828,7 +843,8 @@ function dotenvValue(): (name: string) => string | undefined {
  * in .env, or no sender for a WhatsApp or iMessage link): it signs in first when it has to (the same
  * login, resuming a code already waiting) and runs setup, then asks flow.engineer for the channel's
  * page. A channel that is not open yet is said once, with the links of the channels that are (exit
- * 0); with none open, it stops with the server's next step.
+ * 0); with none open, it stops with the server's next step. A setup whose observe part failed but
+ * whose Messaging part came goes on the same way, with one warning (setupEnv).
  */
 async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Promise<void> {
   const again = `${NEXT.link}${options.channel === "telegram" ? "" : ` --channel ${options.channel}`}`;
@@ -838,6 +854,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
   let credit: SetupAnswer["model_credit"] | undefined;
   let trial: SetupAnswer["trial"] | undefined;
   let had: ((name: string) => string | undefined) | undefined;
+  let warnings: string[] = [];
   if (!value(SETUP_ENV.join_code) || !value(SETUP_ENV.messaging_key) || (needsSender && !value(SENDER_ENV[options.channel]!))) {
     agentFolder(process.cwd());
     if (!(await signedInAccount(loginUrl()))) {
@@ -846,7 +863,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
     }
     say("Setting up this agent's keys in .env.");
     had = value;
-    ({ answer: { model_credit: credit, trial } } = await setupEnv({ replace: false, rotate: [], ci: false }, json, out, say, { channel: options.channel }));
+    ({ answer: { model_credit: credit, trial }, warnings } = await setupEnv({ replace: false, rotate: [], ci: false }, json, out, say, { channel: options.channel }));
     value = dotenvValue();
   }
   const joinCode = value(SETUP_ENV.join_code);
@@ -903,6 +920,8 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
       url: first.link, page: first.page, join_message: first.message, channel, join_code: joinCode, reply_only: Boolean(replyOnly), say_to_person: sayToPerson,
       ...(notOpen ? { not_open: options.channel, message: notOpen, links: Object.fromEntries(links.map(([c, d]) => [c, d.link])) } : {}),
       model_key: model.report, running: running ? { url: running.url } : false, next: next.join(", then "),
+      // Setup's warnings when it ran just now (also on its own line above), such as observe's part failing.
+      ...(warnings.length ? { warnings } : {}),
     });
   }
   if (notOpen) {

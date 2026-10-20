@@ -18,7 +18,7 @@ export const mcp = mcpServer({
 });
 
 // What people call it: package.json's displayName.
-const { displayName: name = "Pip" } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { displayName?: string };
+const { displayName: name = "your agent" } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { displayName?: string };
 // MCP_PORT, else 8790 or the next free port above it.
 let port: number;
 try {

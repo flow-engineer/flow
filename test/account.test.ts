@@ -376,6 +376,38 @@ test("a setup that fails in one product still writes the keys it minted, then ex
   assert.ok(!result.out.includes(KEYS.cloud_key) && !result.err.includes(KEYS.cloud_key), "no key is printed");
 });
 
+test("link goes on when only observe's part of setup failed: the phone link, the channel's trial line and its next, plus one warning naming what is missing, exit 0; run again it needs no setup", async (t) => {
+  const why = "observe failed: this workspace has 10 agents, the most it can make itself; delete one in the dashboard or ask the Flow team (limit)";
+  const body = {
+    error: "observe_failed", error_description: why, next: "npx @flow-engineer/flow setup", messaging_key: KEYS.messaging_key, telegram_sender: "snd_tg", whatsapp_sender: "snd_wa",
+    join_code: "brave-otter-1", trial: { telegram: { limit: null, used: 0 }, whatsapp: { limit: 300, used: 3 } }, flow_key: MINTED, model_credit: CREDIT, minted: ["messaging_key", "flow_key"], account: { account: "uid_1", email: "dev@example.com" },
+  };
+  const flow = await flowServer([], 200, { setupError: { status: 502, body }, tryOpen: ["telegram", "whatsapp"] });
+  t.after(flow.close);
+  const warning = `Traces and tests won't work until .env has FLOW_FRAMEWORK_CLOUD_KEY and FLOW_FRAMEWORK_TRACES_KEY: ${why}. Then: npx @flow-engineer/flow setup`;
+  const cwd = agentDir();
+  const result = await run(["link", "--channel", "whatsapp"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(result.code, 0, result.err);
+  assert.equal(result.err.split("\n").filter((l) => l === warning).length, 1, "one warning line, with the server's own fix");
+  assert.match(result.out, /^https:\/\/wa\.me\/15550100001\?text=/m, "the phone link");
+  assert.match(result.out, /^WhatsApp free trial: 3 of 300 messages used$/m);
+  assert.match(result.out, /^Next: .*npm start, then send the link above\.$/m);
+  assert.match(result.out, /that phone chats with this agent/, "FLOW_KEY came with Messaging's part, so the agent answers");
+  assert.doesNotMatch(result.out + result.err, /undefined/);
+  for (const key of Object.values(KEYS)) assert.ok(!result.out.includes(key) && !result.err.includes(key), "no key is printed");
+
+  const json = await run(["link", "--channel", "whatsapp", "--json"], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(json.code, 0, json.err);
+  assert.deepEqual(json.lines.at(-2)!.warnings, [warning], "setup's line has it");
+  assert.deepEqual(json.lines.at(-1)!.warnings, [warning], "and link's own line");
+  assert.equal(json.lines.at(-1)!.channel, "whatsapp");
+
+  const setups = flow.seen.filter((r) => r.path === "/cli/setup").length;
+  const again = await run(["link", "--channel", "whatsapp"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(again.code, 0, again.err);
+  assert.equal(flow.seen.filter((r) => r.path === "/cli/setup").length, setups, ".env has Messaging's part, so link (npm start's pointer) does not run setup again");
+});
+
 test("every next step and hint the account commands print names the package, never a bare npx flow (another npm package)", async (t) => {
   const flow = await flowServer(() => ({ error: "authorization_pending" }));
   t.after(flow.close);

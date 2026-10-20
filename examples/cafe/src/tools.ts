@@ -1,4 +1,4 @@
-// Pip's tools, over a tiny in-memory café. Placing an order is slow on purpose (a real point-of-sale
+// The agent's tools, over a tiny in-memory café. Placing an order is slow on purpose (a real point-of-sale
 // takes seconds), so it shows a tool moving to the background.
 
 import { tool, z } from "../../../src/index.ts";
