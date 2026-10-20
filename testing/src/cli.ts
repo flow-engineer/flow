@@ -17,7 +17,8 @@
 // scenarios that did not pass. --json prints one report (testing/src/report.ts) on stdout at every exit,
 // and `flow show <run>` prints one run's record from the cloud (testing/src/show.ts).
 // `flow login`, `logout`, `whoami`, `setup` and `link` sign in to flow.engineer and get the agent's
-// keys and its phone link (testing/src/account.ts).
+// keys and its phone link (testing/src/account.ts). `flow deploy` puts the agent on Flow's hosting
+// (testing/src/deploy.ts).
 
 import { mkdirSync, existsSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -34,6 +35,7 @@ import { checkEndpointCli } from "./check-endpoint.ts";
 import { CHECK_LINE as TOOLS_CHECK_LINE, checkCli, mcpUpdateCli } from "./check.ts";
 import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
+import { DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
@@ -114,7 +116,7 @@ the CHINWAG_ names from before the rename still work):
                            (the agent's Flow key, on its trial credit; flow setup writes it)`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
 const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}
-${PLUGIN_LINE}\n${ACCOUNT_LINES}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
+${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${DEPLOY_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
 
 /** What to do after new or init, from step 2; a model key comes first when none is set here. */
 function nextSteps(): string {
@@ -151,6 +153,8 @@ if (process.argv[2] === "cli") {
   const { defineCli, runCli } = await import("../../cli/src/index.ts");
   process.exit(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
 }
+if (process.argv[2] === "deploy") process.exit(await deployCli(process.argv.slice(3)));
+if (process.argv[2] === "logs") process.exit(await logsCli(process.argv.slice(3)));
 if (process.argv[2] === "chat") process.exit(await chatCli(process.argv.slice(3)));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) process.exit(await accountCli(process.argv[2]!, process.argv.slice(3)));
 

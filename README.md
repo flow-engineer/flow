@@ -50,7 +50,7 @@ Test it first in the playground (the link `npm start` prints: the test people an
 
 **Stability.** 0.x: the CLI's commands, `--json` fields and exit codes in [docs/agents.md](docs/agents.md) stay compatible within 0.2.x; a breaking change comes with a minor version bump and a release note. Pin the version in `package.json` for production.
 
-**Host it.** Coming soon: `npx @flow-engineer/flow deploy`, to keep the agent answering while the laptop sleeps.
+**Host it.** `npx @flow-engineer/flow deploy` puts the agent on Flow's hosting, so it keeps answering while the laptop sleeps: staging first, then `deploy promote` to production; `deploy secrets --from-env .env` sends its keys as secrets. `deploy status` shows what is live and its URL, `flow logs` its log lines. It needs the agent's CI key (`FLOW_FRAMEWORK_CLOUD_KEY`, which `flow setup` writes) and a `buildAgent` that passes `options.host` on to `createAgent` ([docs/agents.md](docs/agents.md), "Host it").
 
 ### In a folder of your own
 
@@ -648,7 +648,7 @@ cd agents/my-agent && npm start
 
 **Which channels are real?** WhatsApp, SMS and your own UI (`customUI`) have production definitions today; you plug in any provider by writing `sendMessage`. Telegram and iMessage are real through Flow Messaging (`fm.telegram()`, `fm.imessage()`, [flow-messaging/README.md](flow-messaging/README.md)); in core they are in the playground for now.
 
-**Does it host my agent?** No. It runs in your Node process, on your machine or servers. You pay your model and messaging providers directly.
+**Does it host my agent?** The framework runs in your Node process, on your machine or servers, and you pay your model and messaging providers directly. Flow's hosting can run it instead, from the same `buildAgent` that `flow test` loads: `npx @flow-engineer/flow deploy`.
 
 **Is the data mine?** Yes. State lives in your database, and events go wherever you send them.
 
