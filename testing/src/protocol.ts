@@ -230,6 +230,9 @@ export interface RunSummary {
   /** The cloud's code when it could not play or judge the run (judge_failed, spend_cap, simulator_failed, ...).
    * The run then says nothing about the agent, whatever `passed` and `ended` say. */
   error?: string;
+  /** With error scenario_invalid: the scenario file the cloud could not play, and what is wrong in it
+   * (`unsupported: ...` when the cloud does not know a key). */
+  invalid?: { path: string; reason: string };
 }
 
 export interface SessionSummary {

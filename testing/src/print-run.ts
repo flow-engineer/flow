@@ -1,5 +1,5 @@
 import type { RunSummary } from "./protocol.ts";
-import { runVerdict } from "./report.ts";
+import { runVerdict, unsupported } from "./report.ts";
 
 const usd = (n: number) => `$${n.toFixed(4)}`;
 
@@ -10,6 +10,11 @@ export function runPrinter(log: (line: string) => void = console.log): (run: Run
     if (printed.has(r.runId)) return;
     printed.add(r.runId);
     const verdict = runVerdict(r);
+    // A scenario the cloud could not play: its file and what is wrong in it, not a run of the agent.
+    if (r.invalid) {
+      log(`INVALID  ${r.scenario} #${r.run} (${r.channel}) ${r.runId}: the cloud could not play this scenario: ${r.invalid.path}: ${r.invalid.reason}${unsupported(r.invalid.reason)}`);
+      return;
+    }
     const gaveUp = verdict === "passed" && r.ended === "gave_up" ? " (passed, the person gave up)" : "";
     const retried = r.retried ? "; tried once more" : "";
     // An errored run: the cloud could not play or judge it, so its checks say nothing about the agent.

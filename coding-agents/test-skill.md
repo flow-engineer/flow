@@ -183,13 +183,18 @@ connects out to the cloud, which plays the person and the tools and judges.
    `runId`, `scenario`, `channel`, `run`, `verdict`, `error` (the cloud's code when it could not play
    or judge the run, such as `judge_failed`; the run is then `errored` and its line reads `ERROR`,
    whatever it ended as), `ended`, `turns`, `watch` and `failedChecks` (`kind`, `text` and the judge's
-   `reason`). Each session that opened also leaves
+   `reason`), and `invalid` (`{ path, reason }` for a scenario the cloud could not play, its error
+   `scenario_invalid` and its line `INVALID`; else `null`); top-level `invalid` lists those scenarios
+   once each (`scenario`, `path`, `reason`: fix the file; `unsupported: ...` means the cloud does not
+   know that key), and `sessionInvalid` (`reason`, `olderCloud`, `sent`) is set when the cloud ended
+   the whole session `scenario_invalid`. Each session that opened also leaves
    `.flow/last-session.json` in the agent's folder (its path is printed on every exit): `sessionId`,
    `agent`, `dashboard`, `suiteHash`, `endedAt`, `ended` (`finished`, `stopped` or `interrupted`),
    `only` (the scenarios it was limited to, else `null`) and per run `scenario` (file name without
    `.yaml`), `channel`, `run`, `runId`, `verdict` (`passed`, `failed`, `errored`: the cloud could not
    play or judge it, such as a failed tool simulator or person model, which is not a failure of your
-   agent, or `not_played`: the session ended first) and `failedChecks` (with reasons).
+   agent, or `not_played`: the session ended first), `failedChecks` (with reasons) and `invalid`
+   when the cloud could not play the scenario, plus `sessionInvalid` as in `--json`.
    Read these instead of parsing the printed lines.
    Exit status: 0 all passed; 1 a run failed, or nothing was sent (a wrong flag, a test file that does
    not parse, no key); 2 the connection or the cloud failed, or runs errored and none failed; 3 the
