@@ -1,10 +1,13 @@
-// `flow new <name>`: makes ./<name>/, an agent of its own started from the café example (Pip),
+// `flow new <name>`: makes ./<name>/, an agent of its own started from the café example,
 // that depends on the @flow-engineer/flow package. Its imports become "@flow-engineer/flow",
 // "@flow-engineer/flow/simulators" and "@flow-engineer/flow/flow-messaging", and the coding-agent
 // skills go in .claude/skills/, with an AGENTS.md (and a CLAUDE.md importing it) pointing at them.
 // `flow init` makes the same agent in the current folder. Inside a clone, `npm run new -- <name>`
 // makes agents/<name>/ instead. `--display-name` is what people call the agent ("FlatX agent"), kept
 // as package.json's displayName: the message a phone sends to reach it is "Hi <it> (ref <code>)".
+// The café's agent is Pip; the display name takes Pip's place in its prompt (agent/AGENTS.md), and
+// its playground and MCP server read the name from package.json. `flow link --display-name` (and
+// `setup`) renames an agent made already, the same way (setDisplayName).
 
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -70,13 +73,15 @@ FLOW_FRAMEWORK_TRACES_KEY=
 
 const agentsMd = (name: string) => `# ${name}
 
-A chat agent on Flow Framework (https://github.com/flow-engineer/flow), started from its café example (Pip).
+A chat agent on Flow Framework (https://github.com/flow-engineer/flow), started from its café example.
 
 - Load the skills in \`.claude/skills/\` before changing it: \`flow-framework\` to build the agent (and its MCP
   server and CLI), \`flow-framework-tools\` for its tools and their test files, \`flow-framework-tests\` for its test
   scenarios, \`flow-framework-context\` to gather what the tools are written from out of an existing
   codebase, and \`flow-framework-auth\` for sign-in.
-- \`agent/AGENTS.md\` is the agent's own prompt, not instructions for coding agents.
+- \`agent/AGENTS.md\` is the agent's own prompt, not instructions for coding agents. What people call
+  the agent is package.json's \`displayName\`; \`npx @flow-engineer/flow link --display-name <name>\`
+  changes it there and in that prompt.
 - The model key goes in \`.env\` (never read or print it): \`npx @flow-engineer/flow link\` (or \`setup\`)
   writes \`FLOW_KEY\`, the agent's one Flow key, which calls models on Flow's free trial credit, so no provider key is needed; a key the owner types
   (\`OPENROUTER_API_KEY\`, \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`) wins over it. \`npm start\` runs it in the playground,
@@ -101,6 +106,40 @@ export function displayNameOf(given: string | undefined, packageName: string): s
   const name = (given ?? "").replace(/[()]/g, " ").replace(/\s+/g, " ").trim();
   if (name.length > MAX_DISPLAY_NAME) throw new Error(`--display-name is at most ${MAX_DISPLAY_NAME} characters, such as "FlatX agent".`);
   return name || packageName.replace(/-/g, " ");
+}
+
+/** The café's name for its agent, in its prompt; a new agent's display name takes its place. */
+const TEMPLATE_NAME = "Pip";
+
+/** Puts `to` in place of each of `from` (whole words, the longest first, in one pass) in the agent's prompt; true when it changed. */
+function renameInPrompt(dir: string, from: string[], to: string): boolean {
+  const file = join(dir, "agent", "AGENTS.md");
+  const names = [...new Set(from.filter((n) => n && n !== to))].sort((a, b) => b.length - a.length);
+  if (!names.length || !existsSync(file)) return false;
+  const text = readFileSync(file, "utf8");
+  const word = new RegExp(`(?<![\\p{L}\\p{N}_])(?:${names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\p{L}\\p{N}_])`, "gu");
+  const renamed = text.replace(word, () => to);
+  if (renamed === text) return false;
+  writeFileSync(file, renamed);
+  return true;
+}
+
+/**
+ * Renames the agent in `dir`: package.json's displayName, and in its prompt the old display name
+ * (and the café's Pip) become the new one. Returns the name and whether the prompt changed (a prompt
+ * rewritten by hand may name neither).
+ */
+export function setDisplayName(dir: string, given: string): { displayName: string; prompt: boolean } {
+  const file = join(dir, "package.json");
+  const pkg = JSON.parse(readFileSync(file, "utf8")) as { name?: string; displayName?: string };
+  const displayName = displayNameOf(given, pkg.name ?? folderName(dir));
+  const before = typeof pkg.displayName === "string" ? pkg.displayName : "";
+  if (before !== displayName) {
+    // displayName stays right after name, where flow init puts it.
+    const { name, displayName: _, ...rest } = pkg;
+    writeFileSync(file, `${JSON.stringify({ ...(name !== undefined ? { name } : {}), displayName, ...rest }, null, 2)}\n`);
+  }
+  return { displayName, prompt: renameInPrompt(dir, [before, TEMPLATE_NAME], displayName) };
 }
 
 interface MakeOptions {
@@ -139,6 +178,7 @@ export function initHere(dir = process.cwd(), options: MakeOptions = {}): string
 function makeAgent(dir: string, name: string, displayName: string, root: string): void {
   const cafe = join(root, "examples", "cafe");
   for (const part of ["agent", "src", "tests"]) cpSync(join(cafe, part), join(dir, part), { recursive: true });
+  renameInPrompt(dir, [TEMPLATE_NAME], displayName);
 
   for (const file of readdirSync(join(dir, "src"), { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts"))) {
     const path = join(dir, "src", file);
@@ -148,8 +188,8 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
       .replace(/(["'])(\.\.\/)+flow-messaging\/src\/index\.ts\1/g, '"@flow-engineer/flow/flow-messaging"')
       .replace(/(["'])(\.\.\/)+mcp\/src\/index\.ts\1/g, '"@flow-engineer/flow/mcp"')
       .replace(/(["'])(\.\.\/)+cli\/src\/index\.ts\1/g, '"@flow-engineer/flow/cli"');
-    // The CLI is the agent's own command, named after it.
-    const text = file === "cli.ts" ? source.replace(/name: "cafe"/, `name: "${name}"`).replace(/CAFE_SERVER/g, `${name.toUpperCase().replace(/-/g, "_")}_SERVER`) : source;
+    // The CLI is the agent's own command, named after it (and so is its server's setting, which mcp.ts names too).
+    const text = (file === "cli.ts" ? source.replace(/name: "cafe"/, `name: "${name}"`) : source).replace(/CAFE_SERVER/g, `${name.toUpperCase().replace(/-/g, "_")}_SERVER`);
     if (/["']\.\.\/\.\.\//.test(text)) throw new Error(`flow: ${file} imports a file outside the agent; only Flow Framework's public entries can be rewritten.`);
     writeFileSync(path, text);
   }

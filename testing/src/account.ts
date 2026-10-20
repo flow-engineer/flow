@@ -23,9 +23,10 @@ import {
   currentToken, deleteCredentials, deletePending, LoginRefused, loginUrl, pollToken, readPending, REQUEST_TIMEOUT_MS, revoke, saveCredentials, savePending,
   modelCredit, SETUP_ENV, setup, startDevice, TimedOut, tryLink, warningsOf, whoami, type Account, type ModelCredit, type PendingLogin, type SetupAnswer,
 } from "./flow-login.ts";
-import { packageRoot } from "./new.ts";
+import { packageRoot, setDisplayName } from "./new.ts";
 import { flowModelURL, hasModelKey, MODEL_KEY_NAMES, NO_MODEL_KEY } from "../../src/model.ts";
 import { RUN } from "../../src/names.ts";
+import { runningAgent } from "../../src/local.ts";
 
 export const ACCOUNT_COMMANDS = new Set(["login", "logout", "whoami", "setup", "link", "status"]);
 
@@ -35,16 +36,18 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
                             waiting for the same code, --no-wait returns at once
   flow logout [--json]      End this machine's sign-in and delete its token
   flow whoami [--json]      Show the account you are signed in as
-  flow setup [--replace] [--rotate <keys> [--now]] [--ci] [--json]
+  flow setup [--replace] [--rotate <keys> [--now]] [--display-name <name>] [--ci] [--json]
                             Write this agent's keys (its Flow key FLOW_KEY, which also pays for the
                             model on the account's trial credit when there is no provider key, test
                             cloud, traces, Flow Messaging) and each open channel's sender into
                             ./.env (in an agent's folder: package.json); --rotate key,cloud,traces,
                             messaging or all makes those keys again (the old FLOW_KEY works 24 h
                             more; --now ends it at once)
-  flow link [--channel telegram|whatsapp|imessage] [--timeout <s>] [--no-browser] [--json]
+  flow link [--channel telegram|whatsapp|imessage] [--display-name <name>] [--timeout <s>] [--no-browser] [--json]
                             Print the link that opens a chat with this agent from a phone; signs in
-                            and runs setup first when this folder is not set up yet
+                            and runs setup first when this folder is not set up yet. --display-name
+                            (here and on setup) renames the agent: package.json's displayName and
+                            its prompt, agent/AGENTS.md; the phone link then says "Hi <name>"
   flow status [--json]      What this folder has and lacks: FLOW_KEY and the model key (never their
                             values) with the trial credit left, the
                             sign-in, each channel's sender in .env, and, signed in, which channels
@@ -108,6 +111,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
           : {}),
         ...(command === "setup" ? { replace: { type: "boolean", default: false }, rotate: { type: "string" }, now: { type: "boolean", default: false }, ci: { type: "boolean", default: false } } : {}),
         ...(command === "link" ? { channel: { type: "string", default: "telegram" } } : {}),
+        ...(command === "link" || command === "setup" ? { "display-name": { type: "string" } } : {}),
       },
     }));
   } catch (error) {
@@ -141,7 +145,21 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
   // Straight to the file descriptors, never buffered: a coding agent's cut-off command keeps every line.
   const out = (report: unknown) => writeAll(1, `${JSON.stringify(report)}\n`);
   const say = (line: string) => writeAll(json ? 2 : 1, `${line}\n`);
+  let renamed = false;
   try {
+    if (typeof values["display-name"] === "string" && values.ci !== true) {
+      agentFolder(process.cwd());
+      const before = agentDisplayName();
+      let named: ReturnType<typeof setDisplayName>;
+      try {
+        named = setDisplayName(process.cwd(), values["display-name"]);
+      } catch (error) {
+        throw new Stop("bad_display_name", (error as Error).message, undefined, EXIT.usage);
+      }
+      renamed = named.displayName !== before || named.prompt;
+      if (json) out({ display_name: named.displayName, prompt_renamed: named.prompt });
+      say(`People call it "${named.displayName}" now (package.json displayName${named.prompt ? " and agent/AGENTS.md" : "; agent/AGENTS.md named neither the old name nor Pip, so it is as it was"}).`);
+    }
     if (command === "login") {
       await login({ noBrowser: values["no-browser"] === true, wait: values.wait === true, noWait: values["no-wait"] === true, force: values.force === true, timeoutSeconds }, json, out, say);
     }
@@ -149,7 +167,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     else if (command === "whoami") await showAccount(json, out, say);
     else if (command === "status") await status(json, out, say);
     else if (command === "setup") await setupEnv({ replace: values.replace === true, rotate, now: values.now === true, ci: values.ci === true }, json, out, say);
-    else await link({ channel, noBrowser: values["no-browser"] === true, timeoutSeconds }, json, out, say);
+    else await link({ channel, noBrowser: values["no-browser"] === true, timeoutSeconds, renamed }, json, out, say);
     return EXIT.ok;
   } catch (error) {
     const stop = asStop(error);
@@ -554,6 +572,15 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   // (and, for FLOW_KEY, ends) the old one rather than adding a second.
   const rotate = all ? true : rotated.size ? [...rotated] : undefined;
   const rotateNow = options.now === true && rotated.has("flow_key");
+  // FLOW_FRAMEWORK_TRY_URL is one channel's page: link's channel when it is open, else the server's (Telegram's).
+  const withTryUrl = (fields: Record<string, unknown>): Record<string, unknown> => {
+    const code = fields.join_code;
+    if (!forLink || typeof fields[`${forLink.channel}_sender`] !== "string" || typeof code !== "string" || !code) return fields;
+    const pages = fields.try_urls as Record<string, unknown> | undefined;
+    const page = typeof pages?.[forLink.channel] === "string" ? (pages[forLink.channel] as string) : tryLink(url, code, forLink.channel);
+    return { ...fields, try_url: page };
+  };
+  const chosenPage = (n: string) => forLink !== undefined && n === SETUP_ENV.try_url;
   let answer: SetupAnswer;
   try {
     // Every channel: each comes back with its shared sender only while it is open.
@@ -561,7 +588,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   } catch (error) {
     // The keys minted anyway are not shown again, so whatever the error carries goes into .env first.
     if (error instanceof LoginRefused) {
-      const written = writeEnv(file, lines, before, envEntries(error.fields), (n) => options.replace || rotatedEnv.has(n));
+      const written = writeEnv(file, lines, before, envEntries(withTryUrl(error.fields)), (n) => options.replace || rotatedEnv.has(n) || chosenPage(n));
       if (written.some((w) => w.action === "added" || w.action === "replaced")) say(`Kept in .env before the error: ${written.map((w) => `${w.name} ${w.action}`).join(", ")}.`);
     }
     throw error;
@@ -570,7 +597,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const warnings = warningsOf(fields);
   const had = new Map(before);
   // --replace takes every new value but a model key: only --rotate key replaces FLOW_KEY.
-  const written = writeEnv(file, lines, before, envEntries(fields), (n) => rotatedEnv.has(n) || (options.replace && !MODEL_KEY_NAMES.includes(n)));
+  const written = writeEnv(file, lines, before, envEntries(withTryUrl(fields)), (n) => rotatedEnv.has(n) || (options.replace && !MODEL_KEY_NAMES.includes(n)) || chosenPage(n));
   if (typeof answer.join_code !== "string" || !answer.join_code) {
     const kept = written.filter((w) => w.action === "added" || w.action === "replaced").map((w) => w.name);
     const stop = new Stop("no_join_code", `flow.engineer gave no join code${kept.length ? ` (the keys it made are in .env: ${kept.join(", ")})` : ""}, so there is no phone link yet.`,
@@ -622,15 +649,22 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   if (answer.dashboard_url) say(`Its dashboard: ${answer.dashboard_url}`);
   // Said by link instead, once, with its link.
   if (!forLink) say(model.line);
-  const people = trial?.imessage?.contacts;
-  if (people && typeof people.used === "number" && typeof people.limit === "number") say(`iMessage: ${people.used} of ${people.limit} people`);
+  // link says its own channel's trial line instead.
   if (!forLink) {
+    const people = peopleLine(trial?.imessage);
+    if (people) say(people);
     for (const c of open) say(`On ${CHANNEL_NAME[c]}: ${direct[c] ? `${direct[c]!.link} (on a computer: ${links[c]})` : links[c]}${trialNote(trial?.[c])}`);
     const added = addedToRunning((n) => had.get(n) || process.env[n]?.trim(), (n) => before.get(n) || process.env[n]?.trim());
-    if (added) say(added);
+    if (added) say(`If npm start is running, restart it to add ${added}.`);
     say(`Next: ${next.join(", then ")}`);
   }
   return { answer };
+}
+
+/** iMessage's count of the people it may reach on the trial, as a line; undefined when the answer had none. */
+function peopleLine(t: { contacts?: { limit: number; used: number } } | undefined): string | undefined {
+  const people = t?.contacts;
+  return people && typeof people.used === "number" && typeof people.limit === "number" ? `iMessage: ${people.used} of ${people.limit} people` : undefined;
 }
 
 const trialNote = (t: { limit: number | null; used: number } | undefined) => (t && typeof t.limit === "number" ? ` (free trial: ${t.used} of ${t.limit} messages used)` : "");
@@ -683,8 +717,8 @@ function writeEnv(file: string, lines: string[], before: Map<string, string>, en
 
 /**
  * What a running agent (npm start reads .env once, when it starts) lacks after .env changed from
- * `had` to `now`: the channels it is not on yet and a model key, as one sentence; undefined when
- * nothing it uses is new.
+ * `had` to `now`: the channels it is not on yet and a model key, as words ("Telegram and the model
+ * key"); undefined when nothing it uses is new.
  */
 function addedToRunning(had: (name: string) => string | undefined, now: (name: string) => string | undefined): string | undefined {
   // The starter is on Telegram whenever it has the Flow Messaging key, and on WhatsApp and iMessage
@@ -694,7 +728,7 @@ function addedToRunning(had: (name: string) => string | undefined, now: (name: s
   const model = !MODEL_KEY_NAMES.some((n) => had(n)) && MODEL_KEY_NAMES.some((n) => now(n)) ? ["the model key"] : [];
   const what = [...channels, ...model];
   if (!what.length) return undefined;
-  return `If npm start is running, restart it to add ${what.length === 1 ? what[0] : `${what.slice(0, -1).join(", ")} and ${what.at(-1)}`}.`;
+  return `${what.length === 1 ? what[0] : `${what.slice(0, -1).join(", ")} and ${what.at(-1)}`}`;
 }
 
 /**
@@ -778,6 +812,8 @@ interface LinkOptions {
   channel: string;
   noBrowser: boolean;
   timeoutSeconds: number;
+  /** --display-name changed the name just now, which a running agent reads only when it starts. */
+  renamed?: boolean;
 }
 
 /** The names set in ./.env, with what the environment sets winning. */
@@ -800,6 +836,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
   const needsSender = options.channel !== "telegram";
   let value = dotenvValue();
   let credit: SetupAnswer["model_credit"] | undefined;
+  let trial: SetupAnswer["trial"] | undefined;
   let had: ((name: string) => string | undefined) | undefined;
   if (!value(SETUP_ENV.join_code) || !value(SETUP_ENV.messaging_key) || (needsSender && !value(SENDER_ENV[options.channel]!))) {
     agentFolder(process.cwd());
@@ -809,7 +846,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
     }
     say("Setting up this agent's keys in .env.");
     had = value;
-    ({ answer: { model_credit: credit } } = await setupEnv({ replace: false, rotate: [], ci: false }, json, out, say, { channel: options.channel }));
+    ({ answer: { model_credit: credit, trial } } = await setupEnv({ replace: false, rotate: [], ci: false }, json, out, say, { channel: options.channel }));
     value = dotenvValue();
   }
   const joinCode = value(SETUP_ENV.join_code);
@@ -850,11 +887,22 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
   const replyOnly = REPLY_ONLY[channel];
   const sayToPerson = `${notOpen ? `${what} isn't open yet. ` : ""}Your ${CHANNEL_NAME[channel]} link: ${first.link} ${OPEN_HINT[channel]} `
     + `On a computer without ${CHANNEL_NAME[channel]}, open ${first.page} instead.${replyOnly ? ` ${replyOnly}` : ""}`;
+  const added = had ? addedToRunning(had, value) : undefined;
+  // npm start reads .env and its name once, when it starts. Not running: start it. Running (its
+  // .flow/running.json names a live process): restart it when setup wrote .env, the name changed
+  // just now or a model key is still to come, else it is ready as it is.
+  const running = runningAgent();
+  const runStep = !running
+    ? "npm start, then send the link above"
+    : had || options.renamed || model.next
+      ? `restart npm start (it runs at ${running.url}${added ? ` and lacks ${added}` : " and reads .env and its name only when it starts"}), then send the link above`
+      : `send the link above (npm start is running at ${running.url})`;
+  const next = [...(model.next ? [model.next] : []), runStep];
   if (json) {
     out({
       url: first.link, page: first.page, join_message: first.message, channel, join_code: joinCode, reply_only: Boolean(replyOnly), say_to_person: sayToPerson,
       ...(notOpen ? { not_open: options.channel, message: notOpen, links: Object.fromEntries(links.map(([c, d]) => [c, d.link])) } : {}),
-      model_key: model.report, ...(model.next ? { next: model.next } : {}),
+      model_key: model.report, running: running ? { url: running.url } : false, next: next.join(", then "),
     });
   }
   if (notOpen) {
@@ -864,15 +912,24 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
     say(first.link);
     say(`On a computer without ${CHANNEL_NAME[channel]}: ${first.page}`);
   }
+  // The trial's counts for the channel the link is on, when setup just gave them; no other channel's.
+  const counts = trial?.[channel];
+  if (counts) {
+    const note = trialNote(counts);
+    if (note) say(`${CHANNEL_NAME[channel]} ${note.trim().slice(1, -1)}`); // "WhatsApp free trial: 3 of 300 messages used"
+    if (channel === "imessage") {
+      const people = peopleLine(counts);
+      if (people) say(people);
+    }
+  }
   if (model.report.set) say(model.line);
   const one = notOpen && links.length > 1 ? "one" : "it";
   say(`${channel === "telegram" ? `Open ${one} on a phone and press Start` : `Open ${one} on a phone and send the message it fills in, "${first.message}"`}. From then on`);
   // No model key: the agent cannot answer yet, so the phone does not chat with it until there is one.
   say(model.report.set ? "that phone chats with this agent while it runs (npm start), with no public URL or tunnel." : "that phone reaches this agent while it runs (npm start), but it answers only once .env has a model key:");
-  if (model.next) say(`${model.line}\nNext: ${model.next}.`);
+  if (model.next) say(model.line);
   for (const [c] of links) if (REPLY_ONLY[c]) say(REPLY_ONLY[c]!);
-  const added = had ? addedToRunning(had, value) : undefined;
-  if (added) say(added);
+  say(`Next: ${next.join(", then ")}.`);
 }
 
 /**

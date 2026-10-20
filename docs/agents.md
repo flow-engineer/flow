@@ -15,16 +15,24 @@ package.
 ```sh
 npx @flow-engineer/flow init --display-name "FlatX agent"   # the starter in this (empty) folder; ask the owner what to call it first
 npm install
-npx @flow-engineer/flow link --json                 # signs in and sets up if needed (the keys, Flow's trial model key among them), then prints the phone link
-npm start                                           # keep it running: the playground link it prints, and the phone link reaches it
+npx @flow-engineer/flow link --channel telegram --json   # or whatsapp, imessage: signs in and sets up if needed (the keys, Flow's trial model key among them), then prints the phone link
+npm start                                           # after link: keep it running; the playground link it prints, and the phone link reaches it
 npx @flow-engineer/flow status --json               # any time: what the folder has and lacks
 printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check: talk to it locally, one message per line
 ```
 
 Before `init` (or `flow new <folder>`), ask the owner what people should call their agent, such as
 "FlatX agent", and pass it as `--display-name`. It is kept as `displayName` in `package.json`, and
-the message their phone sends to reach the agent is `Hi FlatX agent (ref <code>)`; change it there
-any time. Without the flag, `init` asks in a terminal and otherwise uses the folder's name in words.
+the message their phone sends to reach the agent is `Hi FlatX agent (ref <code>)`. The name takes the
+starter's (Pip) place in the agent's prompt, `agent/AGENTS.md`, and the playground and MCP server
+read it from `package.json`. To rename an agent made already, `link --display-name "<name>"` (or
+`setup --display-name`) changes both; restart `npm start` after it. Without the flag, `init` asks in
+a terminal and otherwise uses the folder's name in words.
+
+`npm start` listens on `PORT`, else 8788: with 8788 taken and no `PORT` set it takes the next free
+port and says so, and the playground link it prints has the port it uses. With `PORT` set to a port
+that is taken it prints one line, `Port 8788 is in use. Run: PORT=8798 npm start`, and exits 1.
+`npm run mcp` does the same with `MCP_PORT` (else 8790).
 
 ## How the owner tests it
 
@@ -64,7 +72,8 @@ before you hand it back; run them yourself, and do not offer them to the owner a
 - `link` does the rest when the folder is not set up (no `FLOW_FRAMEWORK_JOIN_CODE` or
   `FLOW_MESSAGING_KEY` in `.env`, or no sender for the WhatsApp or iMessage link asked for): it
   runs `login` (opens the owner's browser itself and prints the link and code at once), then
-  `setup` (writes the keys and each open channel's sender into `.env`), then prints the link.
+  `setup` (writes the keys and each open channel's sender into `.env`, and the chosen channel's
+  page as `FLOW_FRAMEWORK_TRY_URL`), then prints the link and that channel's free-trial line only.
   `--channel telegram|whatsapp|imessage` picks the channel (Telegram by default). Run it in the
   agent's folder: `setup` and `link` refuse a folder with no `package.json` (`not_an_agent_folder`).
 - A channel that is not open yet is said once ("iMessage isn't open yet; here are your Telegram
@@ -75,9 +84,13 @@ before you hand it back; run them yourself, and do not offer them to the owner a
   24 hours of their last message); it cannot message them first. `link --json` says so
   (`reply_only: true`, and in `say_to_person`): tell the owner.
 - The starter's `npm start` is on Telegram, plus WhatsApp and iMessage when `.env` has their senders
-  (`FLOW_MESSAGING_WHATSAPP_SENDER`, `FLOW_MESSAGING_IMESSAGE_SENDER`), and reads `.env` once. When
-  `setup` or `link` adds a channel (or the model key) it says so: "If npm start is running, restart
-  it to add iMessage."
+  (`FLOW_MESSAGING_WHATSAPP_SENDER`, `FLOW_MESSAGING_IMESSAGE_SENDER`), and reads `.env` once.
+  `npm start` marks itself running in `.flow/running.json`, so `link` ends with the step that fits:
+  `Next: npm start, then send the link above` when it is not running; when it is, `Next: restart npm
+  start (it runs at <url> and lacks iMessage), then send the link above` if `link` just wrote `.env`
+  or renamed it, else `Next: send the link above (npm start is running at <url>)` (`link --json`:
+  `running`, `false` or `{"url"}`, and `next`). `setup` alone says "If npm start is running, restart it to add
+  iMessage."
 - Give the owner `say_to_person` from `link --json`, and the sign-in link and code from the
   `pending` line while you wait.
 - `npm start` connects to Flow Messaging by an outbound event stream. Messages sent while it was
@@ -108,7 +121,8 @@ Every error is `{"error":{"code","message","next"}}` on stdout with `--json`, an
 `next` is the exact command or URL to run; when it came from flow.engineer it is the server's.
 A run gives one `next`: `setup --json`'s is a list in order (a model key first when there is
 none, then `npm start` for the playground, then `link` for the phone); inside `link` setup's line
-has none, and an error's `next` replaces it.
+has none, and `link`'s `next` is one string (a model key first when there is none, then starting or
+restarting `npm start`); an error's `next` replaces it.
 Run it, or give it to the owner when it needs them (a browser approval, a page to open). A
 `slow_down` error also has `retry_after` (seconds, or `null` when the server gave none). A
 trial limit's `next` is a sentence, not a command: it is printed on its own line as it came; pass

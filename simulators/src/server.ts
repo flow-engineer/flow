@@ -544,7 +544,9 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
   function serve(handle: Handler, port: number): Promise<Listening> {
     const server = createServer(handle);
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      // A port taken since it was chosen rejects, as an error the caller can print, never an unhandled 'error' event.
+      server.once("error", reject);
       server.listen(port, "127.0.0.1", () =>
         resolve({
           // The bound port, so port 0 (any free port) works too.
