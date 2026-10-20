@@ -909,7 +909,7 @@ test("link --channel whatsapp writes WhatsApp's page as FLOW_FRAMEWORK_TRY_URL a
   const cwd = agentDir();
   const result = await run(["link", "--channel", "whatsapp"], { url: signed.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
   assert.equal(result.code, 0, result.err);
-  assert.match(readFileSync(join(cwd, ".env"), "utf8"), new RegExp(`^FLOW_FRAMEWORK_TRY_URL=${signed.url.replace(/[.]/g, "\\.")}/try/brave-otter-1\\?c=whatsapp&from=setup$`, "m"), "the server's page for the chosen channel");
+  assert.ok(readFileSync(join(cwd, ".env"), "utf8").split("\n").includes(`FLOW_FRAMEWORK_TRY_URL=${signed.url}/try/brave-otter-1?c=whatsapp&from=setup`), "the server's page for the chosen channel");
   assert.match(result.out, /^WhatsApp free trial: 3 of 300 messages used$/m);
   assert.ok(!/iMessage: 1 of 2 people/.test(result.out), "no other channel's trial line");
   assert.match(result.out, /^Next: .*npm start, then send the link above\.$/m);
