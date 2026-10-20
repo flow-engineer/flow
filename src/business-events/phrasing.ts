@@ -27,6 +27,7 @@ export function createPhrasing() {
     /** Why this message may not go during a notification turn, or null. */
     check(address: string, outbound: Outbound): string | null {
       const e = open.get(key(address));
+      if (e && outbound.type === "carousel") return "a notification goes as one message with its link, not a carousel";
       if (!e || outbound.type !== "message") return null;
       if (e.delivered) return "the notification already went; send nothing more this turn";
       const lost = e.values.filter((v) => !(outbound.text ?? "").includes(v));

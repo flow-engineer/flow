@@ -75,6 +75,19 @@ export interface ListRow {
   description?: string;
 }
 
+/** A photo by https URL, or by the provider's own id for a file it holds (Flow Messaging's file_..., WhatsApp's media id). */
+export type Photo = { url: string } | { fileId: string };
+
+/** One card of a carousel: its photo, a short text, and either reply buttons or one link button (the same kind and number on every card). */
+export interface CarouselCard {
+  image: Photo;
+  text?: string;
+  /** Reply buttons; a tap comes back as the person's message. */
+  buttons?: string[];
+  /** One button that opens this https page. */
+  link?: { label: string; url: string };
+}
+
 /** What a conversation sends to its channel. */
 export type Outbound =
   | {
@@ -90,8 +103,8 @@ export type Outbound =
       list?: { button: string; rows: ListRow[] };
       /** A button that opens this https page; only on channels with linkButton (elsewhere Flow Framework puts the URL in the text). */
       link?: { label: string; url: string };
-      /** A photo by https URL, the text its caption; only on channels with images (elsewhere the text goes alone). */
-      image?: { url: string };
+      /** A photo, the text its caption (with buttons or a link, the photo heads the same message); only on channels with images (elsewhere the text goes alone). */
+      image?: Photo;
       /** The channel's own params (see Channel.params), as the agent filled them in. */
       fields?: Record<string, unknown>;
       /**
@@ -103,6 +116,11 @@ export type Outbound =
       /** The same in every process for one send the business starts (a nudge, a scheduled text), for providers that take one. */
       idempotencyKey?: string;
     }
+  /**
+   * Cards side by side the person swipes through, under a text (WhatsApp's media carousel); only on
+   * channels with carousels. A channel that cannot show one sends the text, then each card as a message, in order.
+   */
+  | { type: "carousel"; text: string; cards: CarouselCard[]; replyTo?: string; preview?: false; idempotencyKey?: string }
   /** The agent has picked these messages up (WhatsApp's blue ticks). */
   | { type: "read"; messageIds: string[] }
   /** A reaction on one of the person's messages, by the id Flow Framework gave it. */
@@ -171,6 +189,8 @@ export interface ChannelInfo {
   linkButton?: { labelMax: number };
   /** Photos sent by URL, with the message's text as their caption. */
   images?: { captionMax: number };
+  /** Carousels: 2 to maxCards cards, each a photo, up to cardTextMax characters and 1 to `buttons` reply buttons (or one link). */
+  carousels?: { maxCards: number; textMax: number; cardTextMax: number; buttons: number; labelMax: number };
   /** The channel shows the person when their message has been read. */
   readReceipts?: boolean;
   /**

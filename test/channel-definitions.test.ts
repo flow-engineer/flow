@@ -73,6 +73,65 @@ test("one send call reaches the provider's sendMessage with everything; reaction
   assert.deepEqual(typing, [true, false]);
 });
 
+test("a carousel is offered only with the provider's sendCarousel, checked for the same buttons on every card, and sent to it; photos by file id go as fileId", async () => {
+  const r = recorder({ sendCarousel: async (to, carousel) => void r.calls.push(["sendCarousel", to, carousel]) });
+  const h = agentWith([whatsapp(r.provider)]);
+  const a = await h.agent.message({ channel: "whatsapp", from: "+15550100100", message: "what rooms?" });
+  const first = await h.nextCall(0);
+  assert.ok(props(first.request.tools.find((t) => t.name === "send_whatsapp")!).includes("carousel"));
+  const sea = { image: { url: "https://example.com/sea.jpg" }, text: "Sea view", buttons: ["Book sea"] };
+  first.answer(respond(call("send_whatsapp", { text: "Two rooms", carousel: [sea, { image: { file_id: "file_9" }, buttons: ["Book", "More"] }] })));
+  const second = await h.nextCall(1);
+  assert.match(last(second.request.messages).content, /same kind and number of buttons/);
+  second.answer(
+    respond(
+      call("send_whatsapp", { text: "Two rooms", carousel: [sea, { image: { file_id: "file_9" }, buttons: ["Book garden"] }] }),
+      call("send_whatsapp", { text: "The garden room", image: { file_id: "file_9" }, buttons: ["Book it"] }),
+    ),
+  );
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.deepEqual(r.calls, [
+    ["sendCarousel", "+15550100100", { text: "Two rooms", cards: [sea, { image: { fileId: "file_9" }, buttons: ["Book garden"] }] }],
+    ["sendMessage", "+15550100100", { text: "The garden room", buttons: ["Book it"], image: { fileId: "file_9" } }],
+  ]);
+});
+
+test("a channel that cannot show a carousel gets its text, then each card as a message, in order, each after the last went", async () => {
+  const sent: unknown[] = [];
+  const gates: Array<() => void> = [];
+  let arrived = () => {};
+  let called = new Promise<void>((resolve) => (arrived = resolve));
+  const channel = whatsapp({
+    sendMessage: (_to, message) => {
+      sent.push(message);
+      arrived();
+      return new Promise<void>((resolve) => gates.push(resolve));
+    },
+  });
+  assert.equal(channel.info.carousels, undefined, "no sendCarousel, no carousels offered");
+  const done = channel.send("+15550100100", {
+    type: "carousel",
+    text: "Two rooms",
+    idempotencyKey: "k",
+    cards: [
+      { image: { url: "https://example.com/sea.jpg" }, text: "Sea view", buttons: ["Book sea"] },
+      { image: { fileId: "file_9" }, link: { label: "Book", url: "https://example.com/book" } },
+    ],
+  });
+  for (let i = 0; i < 3; i++) {
+    await called;
+    called = new Promise<void>((resolve) => (arrived = resolve));
+    assert.equal(sent.length, i + 1, "the next card waits for the last send");
+    gates[i]();
+  }
+  await done;
+  assert.deepEqual(sent, [
+    { text: "Two rooms", idempotencyKey: "k" },
+    { text: "Sea view", image: { url: "https://example.com/sea.jpg" }, buttons: ["Book sea"], idempotencyKey: "k:1" },
+    { text: "", image: { fileId: "file_9" }, link: { label: "Book", url: "https://example.com/book" }, idempotencyKey: "k:2" },
+  ]);
+});
+
 test("a custom UI's params are on its send tool only, checked, handed to its provider, and left out when empty", async () => {
   const sent: unknown[] = [];
   const app = customUI("app", {

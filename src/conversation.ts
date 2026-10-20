@@ -44,10 +44,10 @@ import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { scheduleTools } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
-import { REACT, UPDATE, reactInput, sendInput, sendRefusal, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
+import { REACT, UPDATE, cardsOf, photoOf, reactInput, sendInput, sendRefusal, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
-import type { Attachment, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, PersonMessage, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
+import type { Attachment, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, PersonMessage, Photo, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 
 export interface ConversationSettings {
   model: Model;
@@ -1147,18 +1147,27 @@ export class Conversation {
       if (input.reply_to && this.messageIds.get(input.reply_to) !== channel) return refused(`Not sent: there is no message ${input.reply_to} on ${channel} to reply to.`);
       const refusal = sendRefusal(link.info, input);
       if (refusal) return refused(refusal);
-      const outbound = fitMessage(link.info, {
-        type: "message" as const,
-        text: input.text,
-        ...(input.reply_to ? { replyTo: input.reply_to } : {}),
-        ...(input.buttons?.length ? { buttons: input.buttons } : {}),
-        ...(input.list ? { list: input.list } : {}),
-        ...(input.link ? { link: input.link } : {}),
-        ...(input.image ? { image: input.image } : {}),
-        ...(hasFields ? { fields } : {}),
-        // A turn the person did not start: no link preview leads the notification (types.ts, `preview`).
-        ...(this.businessTurn ? { preview: false as const } : {}),
-      });
+      // A turn the person did not start: no link preview leads the notification (types.ts, `preview`).
+      const preview = this.businessTurn ? { preview: false as const } : {};
+      const outbound: Outbound = input.carousel
+        ? {
+            type: "carousel",
+            text: input.text,
+            cards: cardsOf(input.carousel),
+            ...(input.reply_to ? { replyTo: input.reply_to } : {}),
+            ...preview,
+          }
+        : fitMessage(link.info, {
+            type: "message" as const,
+            text: input.text,
+            ...(input.reply_to ? { replyTo: input.reply_to } : {}),
+            ...(input.buttons?.length ? { buttons: input.buttons } : {}),
+            ...(input.list ? { list: input.list } : {}),
+            ...(input.link ? { link: input.link } : {}),
+            ...(input.image ? { image: photoOf(input.image) } : {}),
+            ...(hasFields ? { fields } : {}),
+            ...preview,
+          });
       const failure = await this.send(channel, outbound);
       if (failure) {
         this.undelivered(input.text, failure);
@@ -1169,8 +1178,8 @@ export class Conversation {
         channel,
         buttons: input.buttons,
         list: input.list,
-        link: outbound.link,
-        image: outbound.image,
+        ...(outbound.type === "message" ? { link: outbound.link, image: outbound.image } : {}),
+        ...(outbound.type === "carousel" ? { carousel: outbound.cards } : {}),
         replyTo: input.reply_to,
         ...(hasFields ? { fields } : {}),
       });
@@ -1545,7 +1554,9 @@ export type TranscriptEntry =
       list?: { button: string; rows: Array<{ id: string; title: string; description?: string }> };
       /** As the agent sent them: fitMessage shows them as a channel can. */
       link?: { label: string; url: string };
-      image?: { url: string };
+      image?: Photo;
+      /** A carousel's cards; its text is `text`. */
+      carousel?: CarouselCard[];
       /** The channel's own params the agent filled in. */
       fields?: Record<string, unknown>;
       /** A WhatsApp template the business sent, by name; the text is its body when it was declared. */
@@ -1554,7 +1565,7 @@ export type TranscriptEntry =
   | { kind: "reaction"; channel: string; messageId: string; emoji: string; at: number }
   | { kind: "tool"; callId: string; tool: string; input: unknown; output: string; ok: boolean; at: number };
 
-const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "confirm"]);
+const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "carousel", "confirm"]);
 
 /**
  * The history as the person saw it: their messages (with their ids and channels), what the agent
@@ -1604,7 +1615,8 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
           ...(Array.isArray(args.buttons) && args.buttons.length ? { buttons: args.buttons as string[] } : {}),
           ...(args.list ? { list: args.list as never } : {}),
           ...(args.link ? { link: args.link as never } : {}),
-          ...(args.image ? { image: args.image as never } : {}),
+          ...(args.image ? { image: photoOf(args.image as never) } : {}),
+          ...(Array.isArray(args.carousel) ? { carousel: cardsOf(args.carousel as never) } : {}),
           ...(Object.keys(fields).length ? { fields } : {}),
         });
       } else if (call.name === REACT) {
