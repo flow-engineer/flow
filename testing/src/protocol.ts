@@ -106,6 +106,20 @@ export interface Opened {
   reopen?: boolean;
   /** This cloud plays business runs; the client sent `business`. Absent on an older cloud. */
   business?: boolean;
+  /** What this workspace may do, printed when the session opens. Absent on an older cloud. */
+  limits?: SessionLimits;
+}
+
+/** A hosted cloud's limits for the workspace that opened the session. */
+export interface SessionLimits {
+  /** Runs this session plays at once. */
+  runsAtOnce?: number;
+  /** Sessions the workspace may have running at once. */
+  sessionsAtOnce?: number;
+  /** The daily test budget in USD (the last 24 hours of test and grading spend); null: uncapped. */
+  dailyUsd?: number | null;
+  /** What is left of it before this session; null: uncapped. */
+  leftUsd?: number | null;
 }
 
 export interface UploadFile {

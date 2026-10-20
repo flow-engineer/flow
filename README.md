@@ -463,7 +463,7 @@ Always name the package: `npx flow` on its own fetches another npm package. By h
 4. Put it in the agent's `.env` as `FLOW_FRAMEWORK_CLOUD_KEY` (never on the command line).
 5. `npx @flow-engineer/flow test --cloud https://flow.engineer/observe --synthetic` from the agent's folder (`--cloud` is that address by default).
 
-Your agent runs on your machine with your own model key. The cloud's person simulator, tool simulator and judge are free up to $5 a day per workspace, with 2 sessions at once; test data only (`--synthetic`), and records are deleted after 30 days.
+Your agent runs on your machine with your own model key. The cloud's person simulator, tool simulator and judge are free within the workspace's limits: runs at once per session, sessions at once and a daily test budget. They depend on the workspace; `flow test` prints them on one line when a session opens (`--json` reports them as `limits`); test data only (`--synthetic`), and records are deleted after 30 days.
 
 `--cloud` (or `FLOW_FRAMEWORK_CLOUD`) points at another test cloud. A hosted cloud takes its key in `FLOW_FRAMEWORK_CLOUD_KEY` and `--synthetic`, your attestation that the test files hold no real customer data; without the key the command stops and says where to make one.
 

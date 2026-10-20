@@ -10,7 +10,7 @@ import { basename, relative, resolve } from "node:path";
 import { toSpec, type Agent, type Incoming, type EventSink, type Outbound, type FlowEvent, type Tool } from "../../src/index.ts";
 import { PROFILE_TOOL, profileTool } from "../../src/conversation.ts";
 import { STAND_IN } from "../../src/tools.ts";
-import type { Command, Opened, WireIncoming, OpenSession, Receipt, RunKey, RunSummary, SessionSummary, ToolCallRequest, ToolCallResult } from "./protocol.ts";
+import type { Command, Opened, WireIncoming, OpenSession, Receipt, RunKey, RunSummary, SessionLimits, SessionSummary, ToolCallRequest, ToolCallResult } from "./protocol.ts";
 import { mimeOf, parseScenario, parseToolFile, suiteHash, type SuiteFile } from "./suite.ts";
 import { businessRuns, type BusinessAgent, type BusinessBuild } from "./business.ts";
 
@@ -37,6 +37,8 @@ export interface ConnectOptions {
   onRun?: (run: RunSummary) => void;
   /** Called once the session has opened, with its dashboard link, its id, and the cloud's id for the agent (a hosted cloud answers one). */
   onDashboard?: (url: string, sessionId: string, agent?: string) => void;
+  /** Called once the session has opened, with the limits the cloud sent (none from an older cloud). */
+  onLimits?: (limits: SessionLimits) => void;
   /** How long one POST waits before the size allowance. Default 30s, plus 1s per 100KB of body. A tool call waits {@link CLOUD_MODEL_BUDGET_MS} plus the simulator's latency, unless this is set. */
   postTimeoutMs?: number;
   /** How long the stream may sit with no bytes, including the cloud's 15s ping. Default 45s. */
@@ -429,6 +431,12 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     });
   }
   log(`Session ${opened.sessionId}: suite ${suiteHash(options.files).slice(0, 12)}, ${options.files.length} files (${uploads.length} new to the cloud, the rest it already had).`);
+  const limits = sessionLimits(opened.limits);
+  if (limits) {
+    const line = limitsLine(limits);
+    if (line) log(line);
+    options.onLimits?.(limits);
+  }
   dashboard = opened.dashboard;
   options.onDashboard?.(dashboard, opened.sessionId, typeof opened.agent === "string" && opened.agent ? opened.agent : undefined);
   log(`Watch it: ${opened.dashboard}`);
@@ -954,4 +962,32 @@ function readAttachment(testsDir: string | undefined, file: string): Promise<Uin
   const inside = testsDir && !relative(resolve(testsDir), path).startsWith("..") && path !== resolve(testsDir);
   if (!inside) return Promise.reject(new Error(`${file} is not a file in the tests folder`));
   return readFile(path).then((bytes) => new Uint8Array(bytes));
+}
+
+const count = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+const money = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+const dollars = (v: number) => `$${Number.isInteger(v) ? v : v.toFixed(2)}`;
+
+/** The well-formed fields of the cloud's Opened.limits, or undefined when it sent none. */
+export function sessionLimits(raw: unknown): SessionLimits | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: SessionLimits = {};
+  if (count(r.runsAtOnce)) out.runsAtOnce = r.runsAtOnce;
+  if (count(r.sessionsAtOnce)) out.sessionsAtOnce = r.sessionsAtOnce;
+  if (r.dailyUsd === null || money(r.dailyUsd)) out.dailyUsd = r.dailyUsd;
+  if (r.leftUsd === null || money(r.leftUsd)) out.leftUsd = r.leftUsd;
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** One line for the limits, such as "Up to 8 runs at once · daily test budget: $5 ($3.75 left) · 2 sessions at once on this workspace". */
+export function limitsLine(limits: SessionLimits): string {
+  const parts: string[] = [];
+  if (limits.runsAtOnce) parts.push(`Up to ${limits.runsAtOnce} run${limits.runsAtOnce === 1 ? "" : "s"} at once`);
+  if (limits.dailyUsd === null) parts.push("daily test budget: uncapped");
+  else if (limits.dailyUsd !== undefined) parts.push(`daily test budget: ${dollars(limits.dailyUsd)}${typeof limits.leftUsd === "number" ? ` (${dollars(limits.leftUsd)} left)` : ""}`);
+  if (limits.sessionsAtOnce) parts.push(`${limits.sessionsAtOnce} session${limits.sessionsAtOnce === 1 ? "" : "s"} at once on this workspace`);
+  if (!parts.length) return "";
+  parts[0] = parts[0][0].toUpperCase() + parts[0].slice(1);
+  return parts.join(" · ");
 }

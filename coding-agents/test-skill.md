@@ -239,7 +239,7 @@ The owner does these; never ask for the key in chat or print it:
 4. Put it in the agent's `.env` as `FLOW_FRAMEWORK_CLOUD_KEY` (never on the command line).
 5. `npx @flow-engineer/flow test --cloud https://flow.engineer/observe --synthetic` from the agent's folder (`--cloud` is that address by default).
 
-Your agent runs on your machine with your own model key. The cloud's person simulator, tool simulator and judge are free up to $5 a day per workspace, with 2 sessions at once; test data only (`--synthetic`), and records are deleted after 30 days. `--synthetic` is the promise that the test files hold no real customer or member data;
+Your agent runs on your machine with your own model key. The cloud's person simulator, tool simulator and judge are free within the workspace's limits: runs at once per session, sessions at once and a daily test budget. They depend on the workspace; `flow test` prints them on one line when a session opens (`--json` reports them as `limits`); test data only (`--synthetic`), and records are deleted after 30 days. `--synthetic` is the promise that the test files hold no real customer or member data;
 the CLI refuses a hosted cloud without it and the key. `--environment staging` or `production` is
 kept with the session.
 
