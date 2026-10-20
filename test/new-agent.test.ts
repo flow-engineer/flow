@@ -1,13 +1,15 @@
-// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/src/main.ts
+// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/src/main.ts examples/cafe/src/mcp.ts src/local.ts
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer, type AddressInfo } from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { newAgent } from "../scripts/new-agent.ts";
-import { displayNameOf, initHere, newStandalone } from "../testing/src/new.ts";
+import { displayNameOf, initHere, newStandalone, setDisplayName } from "../testing/src/new.ts";
+import { choosePort, runningAgent } from "../src/local.ts";
 
 test("npm run new copies the café under its name, renamed, and refuses bad or taken names", () => {
   const agents = mkdtempSync(join(tmpdir(), "flow-agents-"));
@@ -69,20 +71,21 @@ test("flow init makes the same agent in the folder it runs in, named after it, o
   assert.throws(() => initHere(dir), /has package\.json, tsconfig\.json, src, agent, tests/);
 });
 
-test("flow init's next steps lead with getting a model key when none is set, and leave that step out when .env or the shell has one", () => {
+test("flow init's next steps: npm install, then link (which signs in and writes the model key), then npm start", () => {
   const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
-  const init = (env: Record<string, string> = {}, dotenv?: string) => {
+  const init = (env: Record<string, string> = {}) => {
     const dir = mkdtempSync(join(tmpdir(), "flow-init-cli-"));
-    if (dotenv !== undefined) writeFileSync(join(dir, ".env"), dotenv);
     const result = spawnSync(process.execPath, [cli, "init"], { cwd: dir, env: { PATH: process.env.PATH, ...env }, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
     return result.stdout;
   };
   const none = init();
-  assert.match(none, /^ {2}2\. Model key: none yet\. Run npx @flow-engineer\/flow setup to get Flow's free trial credit, or add your own key/m);
+  assert.match(none, /^ {2}1\. npm install$/m);
+  assert.match(none, /^ {2}2\. npx @flow-engineer\/flow link --channel telegram \(or whatsapp, imessage\): signs in, writes the keys$/m);
+  assert.match(none, /or put your own model key in \.env/);
   assert.match(none, /^ {2}3\. npm start, and open the link it prints/m);
-  assert.match(init({ OPENAI_API_KEY: "sk-shell" }), /^ {2}2\. npm start, and open the link it prints/m);
-  assert.doesNotMatch(init({}, "OPENROUTER_API_KEY=sk-mine\n"), /Model key/);
+  assert.doesNotMatch(none, /flow setup|\(Pip\)/, "link runs setup itself");
+  assert.match(init({ OPENAI_API_KEY: "sk-shell" }), /your own model key in \.env still wins/);
 });
 
 test("the name people call the agent (--display-name) is package.json's displayName: one line, no parentheses, at most 60 characters", () => {
@@ -99,4 +102,66 @@ test("the name people call the agent (--display-name) is package.json's displayN
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(readFileSync(join(here, "package.json"), "utf8")).displayName, "FlatX agent");
   assert.match(result.stdout, /a phone reaches it with "Hi FlatX agent \(ref <code>\)"/);
+});
+
+test("the display name takes Pip's place in the agent's prompt, and renaming later replaces it again (whole words only)", () => {
+  const into = mkdtempSync(join(tmpdir(), "flow-named-prompt-"));
+  const dir = newStandalone("juniper", { into, displayName: "Juniper" });
+  const prompt = readFileSync(join(dir, "agent", "AGENTS.md"), "utf8");
+  assert.match(prompt, /^# Juniper$/m);
+  assert.match(prompt, /^You are Juniper, the ordering assistant/m);
+  assert.doesNotMatch(prompt, /\bPip\b/);
+  // The playground and the MCP server read the name from package.json, so they never say Pip.
+  for (const file of ["main.ts", "mcp.ts"]) assert.match(readFileSync(join(dir, "src", file), "utf8"), /displayName/, file);
+  assert.deepEqual(setDisplayName(dir, "Pip Jr"), { displayName: "Pip Jr", prompt: true });
+  assert.match(readFileSync(join(dir, "agent", "AGENTS.md"), "utf8"), /^You are Pip Jr, the ordering/m, "one pass: the new name is not renamed again");
+  const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+  assert.deepEqual(Object.keys(pkg).slice(0, 2), ["name", "displayName"]);
+  assert.equal(pkg.displayName, "Pip Jr");
+  writeFileSync(join(dir, "agent", "AGENTS.md"), "# Someone\n");
+  assert.deepEqual(setDisplayName(dir, "Ash"), { displayName: "Ash", prompt: false }, "a prompt that names neither is left as it is");
+});
+
+/** A port taken on 127.0.0.1 for the test; resolves to it and its closer. */
+async function takePort(port = 0): Promise<{ port: number; close: () => Promise<void> }> {
+  const server = createServer();
+  await new Promise<void>((done) => server.listen(port, "127.0.0.1", done));
+  return { port: (server.address() as AddressInfo).port, close: () => new Promise<void>((done) => server.close(() => done())) };
+}
+
+test("choosePort: an unset port moves to the next free one and says so; a port set and taken is one line naming a free one", async () => {
+  const taken = await takePort();
+  try {
+    const moved = await choosePort("PORT", taken.port, { command: "npm start", env: {} });
+    assert.ok(moved.port > taken.port, "a free port above it");
+    assert.equal(moved.note, `Port ${taken.port} is in use, so this runs on ${moved.port} (PORT=<port> picks one).`);
+    assert.deepEqual(await choosePort("MCP_PORT", moved.port, { command: "npm run mcp", env: {} }), { port: moved.port }, "a free default is used as it is");
+    await assert.rejects(choosePort("PORT", 8788, { command: "npm start", env: { PORT: String(taken.port) } }), { message: `Port ${taken.port} is in use. Run: PORT=${moved.port} npm start` });
+    await assert.rejects(choosePort("MCP_PORT", 8790, { command: "npm run mcp", env: { MCP_PORT: "web" } }), /MCP_PORT must be a port number/);
+  } finally {
+    await taken.close();
+  }
+});
+
+test("npm start on a taken PORT prints one line and exits 1, no stack; on a free one it prints the name from package.json and marks itself running for flow link", async (t) => {
+  const main = fileURLToPath(new URL("../examples/cafe/src/main.ts", import.meta.url));
+  const cwd = mkdtempSync(join(tmpdir(), "flow-start-"));
+  const env = { PATH: process.env.PATH, OPENROUTER_API_KEY: "sk-test-not-used" };
+  const taken = await takePort();
+  t.after(taken.close);
+  const refused = spawnSync(process.execPath, [main], { cwd, env: { ...env, PORT: String(taken.port) }, encoding: "utf8" });
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, new RegExp(`^Port ${taken.port} is in use\\. Run: PORT=\\d+ npm start\\n$`));
+
+  const child = spawn(process.execPath, [main], { cwd, env: { ...env, PORT: "0" } });
+  t.after(() => child.kill());
+  const line = await new Promise<string>((done) => {
+    let out = "";
+    child.stdout.on("data", (c) => {
+      out += c;
+      const found = /^Pip's playground: (\S+)\/$/m.exec(out);
+      if (found) done(found[1]!);
+    });
+  });
+  assert.deepEqual(runningAgent(cwd), { pid: child.pid, url: line });
 });

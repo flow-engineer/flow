@@ -25,7 +25,7 @@ import { request as httpsRequest } from "node:https";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
-import { hasModelKey, NO_MODEL_KEY } from "../../src/model.ts";
+import { hasModelKey } from "../../src/model.ts";
 import { PLUGIN_LINE, pluginCli } from "./plugin.ts";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions } from "./client.ts";
@@ -118,10 +118,11 @@ ${PLUGIN_LINE}\n${ACCOUNT_LINES}\n  flow --version         Show the version\n\n$
 
 /** What to do after new or init, from step 2; a model key comes first when none is set here. */
 function nextSteps(): string {
+  // link signs in and writes the keys first, FLOW_KEY (the model, on Flow's free trial credit) among
+  // them, so npm start comes after it and has the model key and the channels from its first start.
   const steps = [
-    ...(hasModelKey(process.env) ? [] : [`Model key: none yet. ${NO_MODEL_KEY.nextLine.replace(/^Next: r/, "R")} (in .env: cp .env.example .env; the file says where to make one)`]),
-    `npm start, and open the link it prints: try it in the playground as its test people, channels side by side`,
-    `npx @flow-engineer/flow link: signs in, writes the other keys, prints the link for your phone;\n     keep npm start running and text it`,
+    `npx @flow-engineer/flow link --channel telegram (or whatsapp, imessage): signs in, writes the keys\n     into .env (FLOW_KEY pays for the model on Flow's free trial credit; ${hasModelKey(process.env) ? "your own model key in .env still wins" : "or put your own model key in .env"}) and prints the link for your phone`,
+    `npm start, and open the link it prints: try it in the playground as its test people, channels side by side;\n     keep it running and text it from your phone`,
     `Tell your coding agent what to build: its skills are in .claude/skills/`,
   ];
   return steps.map((step, i) => `  ${i + 2}. ${step}`).join("\n");
@@ -200,7 +201,7 @@ async function askDisplayName(given: string | undefined, packageName: string): P
 
 const namedLine = (dir: string) => {
   const displayName = (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { displayName?: string }).displayName;
-  return `People call it "${displayName}" (package.json displayName): a phone reaches it with "Hi ${displayName} (ref <code>)".`;
+  return `People call it "${displayName}" (package.json displayName, and its prompt agent/AGENTS.md): a phone reaches it with "Hi ${displayName} (ref <code>)".`;
 };
 
 const displayNameFlag = (values as { "display-name"?: string })["display-name"];
@@ -215,7 +216,7 @@ if (command === "new") {
     console.error((error as Error).message);
     process.exit(1);
   }
-  console.log(`Made ./${name}/ from the café example (Pip). ${namedLine(dir)} Next:
+  console.log(`Made ./${name}/ from the café example. ${namedLine(dir)} Next:
   1. cd ${name} && npm install
 ${nextSteps()}`);
   process.exit(0);
@@ -231,7 +232,7 @@ if (command === "init") {
     process.exit(1);
   }
   loadEnv(undefined); // a .env already here may hold a model key
-  console.log(`Made ${name}, started from the café example (Pip), in this folder. ${namedLine(process.cwd())} Next:
+  console.log(`Made ${name}, started from the café example, in this folder. ${namedLine(process.cwd())} Next:
   1. npm install
 ${nextSteps()}`);
   process.exit(0);

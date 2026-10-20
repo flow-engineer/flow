@@ -313,12 +313,13 @@ and every simulated message is logged with the person, channel, time and address
 To chat with the agent from the owner's phone, with no tunnel and no key made by hand, run these
 from the agent's folder (`npx @flow-engineer/flow init --display-name "<name>"` makes a starter in
 an empty one: first ask the owner what people should call their agent, such as "FlatX agent"; the
-phone's first message is `Hi FlatX agent (ref <code>)`, and `package.json`'s `displayName` keeps it).
+phone's first message is `Hi FlatX agent (ref <code>)`, and `package.json`'s `displayName` keeps it;
+`link --display-name "<name>"` renames it later, in `package.json` and `agent/AGENTS.md`).
 Only `chat` reads stdin; `init` asks for the name only in a terminal, and nothing else asks for input.
 
 ```sh
-npx @flow-engineer/flow link --json          # signs in and runs setup when needed (Flow's trial model key too), then the channel's own link (t.me, wa.me, sms:); give its say_to_person to the owner
-npm start                                    # the agent: its playground link, and the owner texts it while it runs
+npx @flow-engineer/flow link --channel telegram --json   # or whatsapp, imessage: signs in and runs setup when needed (Flow's trial model key too), then the channel's own link (t.me, wa.me, sms:); give its say_to_person to the owner, and run its next
+npm start                                    # after link: its playground link, and the owner texts it while it runs (PORT, else 8788 or the next free port)
 npx @flow-engineer/flow status --json        # what the folder has and lacks, at any time
 printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check: one message per line, replies printed
 npx @flow-engineer/flow test --synthetic     # your own check: the tests, on the key setup wrote

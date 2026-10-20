@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage } from "node:http";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, watch, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -324,7 +324,8 @@ test("link in a folder not set up signs in, resuming a code already waiting, run
   assert.deepEqual(result.lines.at(-1), {
     url: "https://t.me/FlowSandboxBot?start=brave-otter-1", page, join_message: "Hi cafe (ref brave-otter-1)", channel: "telegram", join_code: "brave-otter-1", reply_only: false,
     say_to_person: `Your Telegram link: https://t.me/FlowSandboxBot?start=brave-otter-1 Open it and press Start. On a computer without Telegram, open ${page} instead.`,
-    model_key: { set: false, env: null, flow_credit: null, message: NO_KEY }, next: "add your own model key to .env (flow.engineer gave no trial credit)",
+    model_key: { set: false, env: null, flow_credit: null, message: NO_KEY }, running: false,
+    next: "add your own model key to .env (flow.engineer gave no trial credit), then npm start, then send the link above",
   });
   assert.ok(!("next" in result.lines[2]!), "setup's next list is not given as well: one next per run");
   assert.match(result.err, /answers only once \.env has a model key/, "with no model key it does not say the phone chats with it");
@@ -558,7 +559,24 @@ test("link --channel whatsapp in a folder set up before it had a WhatsApp sender
   assert.equal(result.lines.at(-1)!.url, "https://wa.me/15550100001?text=Hi%20cafe%20%28ref%20brave-otter-1%29");
   assert.equal(result.lines.at(-1)!.page, `${flow.url}/try/brave-otter-1?c=whatsapp&n=cafe`);
   assert.match(result.err, /within 24 hours of your last message/);
-  assert.match(result.err, /^If npm start is running, restart it to add WhatsApp\.$/m, "only the channel that is new");
+  assert.match(result.err, /^Next: add your own model key to \.env \(flow\.engineer gave no trial credit\), then npm start, then send the link above\.$/m, "npm start is not running here: one Next line, to start it");
+  assert.ok(!/restart/.test(result.err), "nothing to restart");
+
+  // Running (its .flow/running.json names a live process, this test's): the Next line says to restart
+  // it, for the channel that is new only.
+  rmSync(join(cwd, ".env"));
+  writeFileSync(join(cwd, ".env"), `FLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}\nFLOW_FRAMEWORK_TRACES_KEY=${KEYS.traces_key}\nFLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\n`);
+  mkdirSync(join(cwd, ".flow"));
+  writeFileSync(join(cwd, ".flow", "running.json"), JSON.stringify({ pid: process.pid, url: "http://127.0.0.1:8799" }));
+  const running = await run(["link", "--channel", "whatsapp", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(running.code, 0, running.err);
+  assert.match(running.err, /^Next: add your own model key to \.env \(flow\.engineer gave no trial credit\), then restart npm start \(it runs at http:\/\/127\.0\.0\.1:8799 and lacks WhatsApp\), then send the link above\.$/m);
+  assert.deepEqual(running.lines.at(-1)!.running, { url: "http://127.0.0.1:8799" });
+  // Set up already and running: nothing to restart for; a new name, though, is read only at start.
+  const ready = await run(["link", "--channel", "whatsapp"], { url: flow.url, config: temp(), cwd, env: { OPENROUTER_API_KEY: "sk-test-not-used" } });
+  assert.match(ready.out, /^Next: send the link above \(npm start is running at http:\/\/127\.0\.0\.1:8799\)\.$/m);
+  const renamed = await run(["link", "--channel", "whatsapp", "--display-name", "Rowan"], { url: flow.url, config: temp(), cwd });
+  assert.match(renamed.out, /^Next: .*restart npm start \(it runs at http:\/\/127\.0\.0\.1:8799 and reads \.env and its name only when it starts\), then send the link above\.$/m);
 
   // iMessage is not open: no sender comes back, so link says so once and gives the open channels' links, exit 0.
   const closed = await flowServer([], 200, { setup: { whatsapp_sender: "snd_wa" }, tryOpen: ["telegram", "whatsapp"] });
@@ -878,4 +896,54 @@ test("link fills in the name people call the agent (package.json displayName): H
   assert.equal(result.lines[0]!.url, "sms:+15550100002?&body=Hi%20FlatX%20agent%20%28ref%20brave-otter-1%29");
   assert.equal(result.lines[0]!.page, `${flow.url}/try/brave-otter-1?c=imessage&n=FlatX+agent`);
   assert.match(result.err, /^Open it on a phone and send the message it fills in, "Hi FlatX agent \(ref brave-otter-1\)"\. From then on$/m);
+});
+
+test("link --channel whatsapp writes WhatsApp's page as FLOW_FRAMEWORK_TRY_URL and prints only WhatsApp's trial line, though setup opened every channel", async (t) => {
+  const trial = { telegram: { limit: null, used: 0 }, whatsapp: { limit: 300, used: 3 }, imessage: { limit: 100, used: 3, contacts: { limit: 2, used: 1 } } };
+  const flow = await flowServer([], 200, { setup: { whatsapp_sender: "snd_wa", imessage_sender: "snd_im", trial }, tryOpen: ["telegram", "whatsapp", "imessage"] });
+  t.after(flow.close);
+  const try_urls: Record<string, string> = {};
+  const signed = await flowServer([], 200, { setup: { whatsapp_sender: "snd_wa", imessage_sender: "snd_im", trial, try_urls }, tryOpen: ["telegram", "whatsapp", "imessage"] });
+  t.after(signed.close);
+  for (const c of ["telegram", "whatsapp", "imessage"]) try_urls[c] = `${signed.url}/try/brave-otter-1?c=${c}&from=setup`;
+  const cwd = agentDir();
+  const result = await run(["link", "--channel", "whatsapp"], { url: signed.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(result.code, 0, result.err);
+  assert.ok(readFileSync(join(cwd, ".env"), "utf8").split("\n").includes(`FLOW_FRAMEWORK_TRY_URL=${signed.url}/try/brave-otter-1?c=whatsapp&from=setup`), "the server's page for the chosen channel");
+  assert.match(result.out, /^WhatsApp free trial: 3 of 300 messages used$/m);
+  assert.ok(!/iMessage: 1 of 2 people/.test(result.out), "no other channel's trial line");
+  assert.match(result.out, /^Next: .*npm start, then send the link above\.$/m);
+
+  // Without the server's try_urls, the page is built for the chosen channel the same way.
+  const built = agentDir();
+  const plain = await run(["link", "--channel", "imessage"], { url: flow.url, config: temp(), cwd: built, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(plain.code, 0, plain.err);
+  assert.match(readFileSync(join(built, ".env"), "utf8"), /^FLOW_FRAMEWORK_TRY_URL=\S+\/try\/brave-otter-1\?c=imessage$/m);
+  assert.match(plain.out, /^iMessage free trial: 3 of 100 messages used$/m);
+  assert.match(plain.out, /^iMessage: 1 of 2 people$/m, "iMessage's own people count, on iMessage's link");
+});
+
+test("link and setup --display-name rename the agent: package.json's displayName and its prompt, then the phone link says Hi <name>", async (t) => {
+  const flow = await flowServer([], 200, { tryOpen: ["telegram"] });
+  t.after(flow.close);
+  const cwd = temp();
+  writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "flatx", displayName: "Juniper", version: "0.1.0" }));
+  mkdirSync(join(cwd, "agent"));
+  writeFileSync(join(cwd, "agent", "AGENTS.md"), "# Juniper\n\nYou are Juniper, the ordering assistant. Junipers grow here.\n");
+  writeFileSync(join(cwd, ".env"), `FLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\n`);
+  const result = await run(["link", "--display-name", "Rowan", "--json"], { url: flow.url, config: temp(), cwd });
+  assert.equal(result.code, 0, result.err);
+  assert.deepEqual(result.lines[0], { display_name: "Rowan", prompt_renamed: true });
+  assert.equal(result.lines.at(-1)!.join_message, "Hi Rowan (ref brave-otter-1)");
+  assert.deepEqual(JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")), { name: "flatx", displayName: "Rowan", version: "0.1.0" });
+  assert.equal(readFileSync(join(cwd, "agent", "AGENTS.md"), "utf8"), "# Rowan\n\nYou are Rowan, the ordering assistant. Junipers grow here.\n", "whole words only");
+
+  const bad = await run(["setup", "--display-name", "x".repeat(61)], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /at most 60 characters/);
+  assert.equal(JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")).displayName, "Rowan", "nothing changed");
+  const setup = await run(["setup", "--display-name", "Ash"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(setup.code, 0, setup.err);
+  assert.match(setup.out, /^People call it "Ash" now \(package\.json displayName and agent\/AGENTS\.md\)\.$/m);
+  assert.match(readFileSync(join(cwd, "agent", "AGENTS.md"), "utf8"), /^# Ash$/m);
 });

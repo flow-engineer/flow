@@ -27,17 +27,17 @@ Node 22.18 or later. Your agent is TypeScript that Node runs as it is, with no b
 
 ```bash
 npx @flow-engineer/flow new my-agent --display-name "My agent" && cd my-agent && npm install
-npx @flow-engineer/flow link   # signs in; writes Flow's free trial model key and a phone link (or put your own key in .env)
+npx @flow-engineer/flow link --channel telegram   # or whatsapp, imessage: signs in; writes Flow's free trial model key and a phone link (or put your own key in .env)
 npm start
 ```
 
-`flow new <name>` makes `./<name>/` from the café example (lowercase letters, digits and dashes); `--display-name` is what people call it, kept as `displayName` in its `package.json`, and a phone reaches it by sending `Hi <that name> (ref <code>)`. Open the link `npm start` prints and text Pip, a café ordering assistant: your starting point. Pick a platform at the top (SMS, WhatsApp, iMessage, Telegram, web), and turn on **Debug** to see every tool call and how fast each message was answered. A model call that fails (a wrong or expired key, say) shows in the chat, in Debug and on the terminal. The café's `src/agent.ts` reads its model id from `CAFE_MODEL` (default: the model for the key you set, see [Models](#models)). The new folder has the coding-agent skills in `.claude/skills/` and an `AGENTS.md` pointing at them, so you can tell Claude Code, Codex or any coding agent what to build.
+`flow new <name>` makes `./<name>/` from the café example (lowercase letters, digits and dashes); `--display-name` is what people call it, kept as `displayName` in its `package.json`, and a phone reaches it by sending `Hi <that name> (ref <code>)`. Open the link `npm start` prints (it uses `PORT`, else 8788 or the next free port) and text your agent, the café's ordering assistant under the name you gave it (Pip in the example): your starting point; `flow link --display-name <name>` renames it later. Pick a platform at the top (SMS, WhatsApp, iMessage, Telegram, web), and turn on **Debug** to see every tool call and how fast each message was answered. A model call that fails (a wrong or expired key, say) shows in the chat, in Debug and on the terminal. The café's `src/agent.ts` reads its model id from `CAFE_MODEL` (default: the model for the key you set, see [Models](#models)). The new folder has the coding-agent skills in `.claude/skills/` and an `AGENTS.md` pointing at them, so you can tell Claude Code, Codex or any coding agent what to build.
 
 ### On your phone, from your laptop
 
 ```bash
 npx @flow-engineer/flow init                 # the same starter in the current folder; then npm install
-npx @flow-engineer/flow link                 # signs in (opens the browser), writes its keys and Flow's trial model key into .env, prints a link
+npx @flow-engineer/flow link --channel telegram   # signs in (opens the browser), writes its keys and Flow's trial model key into .env, prints a link
 npm start                                    # try it in the playground link it prints, then open the phone link and text the agent
 npx @flow-engineer/flow status               # what the folder has and lacks
 ```
