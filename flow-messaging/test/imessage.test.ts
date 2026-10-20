@@ -108,3 +108,23 @@ test("a start to a phone number on iMessage names the phone; a link goes as its 
   await channel.send("+15550100100", { type: "message", text: "Or here", link });
   assert.deepEqual((await flow.request((r) => post("/v1/messages")(r) && r.body.content.text === "Or here")).body.content, { type: "text", text: "Or here", format: "plain" });
 });
+
+test("a read receipt or typing refused outside the window is expected and not logged; any other courtesy failure is a warning", async (t) => {
+  const flow = await fakeFlow();
+  t.after(() => flow.close());
+  flow.messages.msg_1 = { id: "msg_1", conversation: IM.id, direction: "in", content: { type: "text", text: "hi" } };
+  const channel = flowMessaging({ apiKey: "fk_test_key", baseUrl: flow.url }).imessage({ sender: IM.sender });
+  const warn = t.mock.method(console, "warn", () => {});
+  const outside = { error: { type: "outside_window", message: "Outside the conversation window.", hint: "", doc_url: "" } };
+  flow.queued.push({ match: post("/v1/conversations/conv_im/read"), status: 409, body: outside });
+  flow.queued.push({ match: post("/v1/conversations/conv_im/typing"), status: 409, body: outside });
+  await channel.send("+15550100100", { type: "read", messageIds: ["msg_1"] });
+  await channel.send("+15550100100", { type: "typing", on: true });
+  assert.equal(flow.sends("/v1/conversations/conv_im/read").length, 1);
+  assert.equal(flow.sends("/v1/conversations/conv_im/typing").length, 1);
+  assert.equal(warn.mock.callCount(), 0);
+
+  flow.queued.push({ match: post("/v1/conversations/conv_im/typing"), status: 400, body: { error: { type: "invalid_request", message: "Bad state.", hint: "", doc_url: "" } } });
+  await channel.send("+15550100100", { type: "typing", on: false });
+  assert.deepEqual(warn.mock.calls.map((c) => c.arguments[0]), ["@flow-engineer/flow/flow-messaging: typing on imessage failed (invalid_request)"]);
+});

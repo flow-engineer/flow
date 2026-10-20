@@ -1,9 +1,11 @@
 # Flow Framework for coding agents
 
+This guide is at https://flow.engineer/flow-framework/agents.md: that is the link to give.
+
 You are building or changing a chat agent for a person (the owner) so they can text it from their
-phone while it runs on their laptop. No tunnel, no public URL, and no key the owner copies by hand
-except their model key. Every command here runs without a terminal and never reads stdin, except
-`chat`, which reads the messages you pipe to it.
+phone while it runs on their laptop. No tunnel, no public URL, and no key the owner copies by hand.
+Every command here runs without a terminal and never reads stdin, except `chat`, which reads the
+messages you pipe to it.
 
 Always name the package: `npx @flow-engineer/flow ...`. `npx flow` on its own fetches another npm
 package.
@@ -11,14 +13,52 @@ package.
 ## The flow
 
 ```sh
-npx @flow-engineer/flow init                        # the starter agent in this (empty) folder; flow new <name> makes a folder
+npx @flow-engineer/flow init --display-name "FlatX agent"   # the starter in this (empty) folder; ask the owner what to call it first
 npm install
-# the owner puts one model key in .env (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY or GEMINI_API_KEY)
-printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # talk to it locally: no account, one message per line
-npx @flow-engineer/flow link --json                 # signs in and sets up if needed, then prints the phone link
-npm start                                           # keep it running; the owner texts it from the phone
+npx @flow-engineer/flow link --json                 # signs in and sets up if needed (the keys, Flow's trial model key among them), then prints the phone link
+npm start                                           # keep it running: the playground link it prints, and the phone link reaches it
+npx @flow-engineer/flow status --json               # any time: what the folder has and lacks
+printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check: talk to it locally, one message per line
 ```
 
+Before `init` (or `flow new <folder>`), ask the owner what people should call their agent, such as
+"FlatX agent", and pass it as `--display-name`. It is kept as `displayName` in `package.json`, and
+the message their phone sends to reach the agent is `Hi FlatX agent (ref <code>)`; change it there
+any time. Without the flag, `init` asks in a terminal and otherwise uses the folder's name in words.
+
+## How the owner tests it
+
+When the owner asks how to test the agent, recommend these, in this order:
+
+1. **The playground in the browser**: `npm start`, then open the link it prints. The test people
+   (`testPeople`; Maria, Sam and Priya in the starter) and the channels are side by side, and
+   **Debug** shows each tool call and how fast each message was answered.
+2. **Their phone**: the link from `link` (`say_to_person` in `link --json`), while `npm start` runs.
+   It is the channel's own link (`url`): `https://t.me/<bot>?start=<code>` (press Start),
+   `https://wa.me/<number>?text=...` or, for iMessage, `sms:<number>?&body=...` (an iPhone or a Mac),
+   each with `Hi <displayName> (ref <code>)` filled in (`join_message`). `page` is the same on
+   flow.engineer, for a computer without that app.
+
+`flow chat` and `npm test -- --synthetic` (the test cloud) are for you, to check your own work
+before you hand it back; run them yourself, and do not offer them to the owner as ways to test.
+
+- The model key: a provider key is optional. `setup` (which `link` runs; alone it needs `login`
+  first) writes `FLOW_KEY`, the agent's one Flow key, into `.env` (printed only as its prefix and
+  last 4, `FLOW_KEY=flow_test_…abcd  added`; never read or print its value): with no provider key
+  the agent calls models through Flow with it, on the account's $2 of Flow trial credit (printed as
+  `Model: Flow trial credit ($1.87 left)`). The owner may add their own: one of `OPENROUTER_API_KEY`,
+  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY` in `.env` wins over `FLOW_KEY` for the model
+  (to switch back, empty that line), and a key they set is never written over. When the credit is
+  used up, a model call fails with code `trial_credit_used` (`trial_credit_unavailable` when the account gets none) and the next step: add your own key. With no key, `chat` and `npm start` stop with one sentence and
+  `Next: run npx @flow-engineer/flow setup to get Flow's free trial credit, or add your own key.`
+  (`chat --json`: `{"error":{"code":"no_model_key","message":...,"next":"npx @flow-engineer/flow setup"}}`),
+  and `init`, `setup`, `link` and `status` say so too, with the way to get one first in `next`.
+  Each folder's `setup` makes its own `FLOW_KEY` (the credit is the account's);
+  `setup --rotate key` replaces a leaked one (the old one works 24 h more; `--now` ends it at once).
+- `status` reports `FLOW_KEY` and the model key (never their values; `flow_key.set` in `--json`; with
+  `FLOW_KEY` the model's key, the credit left from Flow, `model_key.flow_credit`; a key Flow does not
+  know gets `setup --rotate key`), the sign-in, each channel's sender in `.env`
+  and, signed in, which channels are open now with their trial counts. It writes nothing.
 - `chat` builds the agent from `src/agent.ts` and writes as its first test person. Each reply is
   printed (`agent: ...`) once the turn is over; `--json` gives one JSON line per thing it sends.
 - `link` does the rest when the folder is not set up (no `FLOW_FRAMEWORK_JOIN_CODE` or
@@ -27,12 +67,17 @@ npm start                                           # keep it running; the owner
   `setup` (writes the keys and each open channel's sender into `.env`), then prints the link.
   `--channel telegram|whatsapp|imessage` picks the channel (Telegram by default). Run it in the
   agent's folder: `setup` and `link` refuse a folder with no `package.json` (`not_an_agent_folder`).
+- A channel that is not open yet is said once ("iMessage isn't open yet; here are your Telegram
+  and WhatsApp links"), with the open channels' links, and exits 0: `link --json` then has
+  `not_open` (the channel asked for), `links` (each open channel's) and `url`/`channel` for the
+  first of them. Only when no channel is open does it exit 3 (`channel_not_open`).
 - On WhatsApp and iMessage the agent can only reply after the owner writes first (WhatsApp: within
   24 hours of their last message); it cannot message them first. `link --json` says so
   (`reply_only: true`, and in `say_to_person`): tell the owner.
 - The starter's `npm start` is on Telegram, plus WhatsApp and iMessage when `.env` has their senders
-  (`FLOW_MESSAGING_WHATSAPP_SENDER`, `FLOW_MESSAGING_IMESSAGE_SENDER`). If it was running when
-  `link` added one, restart it.
+  (`FLOW_MESSAGING_WHATSAPP_SENDER`, `FLOW_MESSAGING_IMESSAGE_SENDER`), and reads `.env` once. When
+  `setup` or `link` adds a channel (or the model key) it says so: "If npm start is running, restart
+  it to add iMessage."
 - Give the owner `say_to_person` from `link --json`, and the sign-in link and code from the
   `pending` line while you wait.
 - `npm start` connects to Flow Messaging by an outbound event stream. Messages sent while it was
@@ -40,12 +85,14 @@ npm start                                           # keep it running; the owner
 
 ## Exit codes (login, setup, link)
 
+`status` exits 0 whatever it finds (1 for a wrong flag): read its fields.
+
 | Code | Meaning | What to do |
 |---|---|---|
 | 0 | Done | Go on |
 | 1 | Usage, not signed in, not an agent's folder, or a login URL that is not https | Fix the command, or run `next` |
 | 2 | flow.engineer could not be reached, or did not answer in time (`timeout`) | Try again |
-| 3 | Refused: denied, expired, a product failed, a channel not open yet, a server with no CLI sign-in (`server_unsupported`), or a free-trial limit (`sandbox_allowance_used`, the iMessage people cap; HTTP 403) | Run `next`; for a trial limit `next` is a sentence: give it to the owner as it is |
+| 3 | Refused: denied, expired, a product failed, no channel open yet (one closed while others are open is exit 0 with their links), a server with no CLI sign-in (`server_unsupported`), or a free-trial limit (`sandbox_allowance_used`, the iMessage people cap; HTTP 403) | Run `next`; for a trial limit `next` is a sentence: give it to the owner as it is |
 | 4 | Sign-in still waiting for the owner's approval, or flow.engineer asked to wait (`slow_down`, HTTP 429) | Approval: ask the owner to approve, then run `next` (the same code is kept). `slow_down`: wait `retry_after` seconds (printed as `Wait <n> s`), then run `next` |
 
 `login` and `link` wait at most `--timeout` seconds (120 by default) before exit 4, and no single
@@ -59,6 +106,9 @@ sign-in, and so is a code from another login URL.
 Every error is `{"error":{"code","message","next"}}` on stdout with `--json`, and
 `<message> Next: <next>` on stderr. A waiting sign-in is `{"status":"pending",...,"next":...}`.
 `next` is the exact command or URL to run; when it came from flow.engineer it is the server's.
+A run gives one `next`: `setup --json`'s is a list in order (a model key first when there is
+none, then `npm start` for the playground, then `link` for the phone); inside `link` setup's line
+has none, and an error's `next` replaces it.
 Run it, or give it to the owner when it needs them (a browser approval, a page to open). A
 `slow_down` error also has `retry_after` (seconds, or `null` when the server gave none). A
 trial limit's `next` is a sentence, not a command: it is printed on its own line as it came; pass
@@ -71,11 +121,17 @@ an error line has it when there were any. Pass them on to the owner.
 `setup` also shows the free trial: messages used per channel, and on iMessage the people it may
 reach (`iMessage: 1 of 2 people`; `trial.imessage.contacts` `{limit, used}` in `--json`).
 
+`chat` exits 1 for anything that stops it before the first message: `no_model_key`, `no_agent`
+(no `src/agent.ts`), `not_built`, `no_test_people`, `no_channel`; with `--json` as
+`{"error":{"code","message","next"}}` on stdout.
+
 ## Keys
 
 - Never ask the owner to paste a key into the chat, and never print, read aloud or commit `.env`.
   `setup` writes the keys itself and prints only their last 4 characters.
-- The model key is the owner's: they type it into `.env` themselves.
+- The model key: Flow's trial key from `setup`, or the owner's own, typed into `.env` themselves.
+- `setup --rotate cloud,traces,messaging,model` (or `all`) makes those keys again and replaces
+  their lines in `.env`.
 - `setup` keeps every value already in `.env` (`--replace` takes the new ones), but a name there
   with no value (`cp .env.example .env`) counts as missing and is filled on its own line. Keys
   flow.engineer made are written even when the rest of setup fails, since they are shown only once.
@@ -91,3 +147,22 @@ A nudge, a scheduled message or any turn the person did not start goes with link
 preview card's title becomes the phone's notification instead of the message's text. For a call to
 action use `link` (`agent.nudge({ to, text, link: { label, url } })`, or the agent's send with
 `link`), not a URL in the text.
+
+## Shared test numbers and privacy
+
+The free trial runs on Flow's shared Telegram bot, WhatsApp number and iMessage line. Sending an
+agent's join message (`Hi <name> (ref <code>)`, what the link fills in) binds that phone to that
+agent's app on the shared sender, so the person's messages go only to that app; sending another
+app's join message moves them there. Trial chats are
+test data, kept for the account's retention (30 days by default). Do not use the trial for real
+customers' data: connect your own number for that.
+
+## Stability
+
+Flow Framework is 0.x. The commands, `--json` fields and exit codes in this guide stay compatible
+within 0.2.x; a breaking change comes with a minor version bump and a note in the release. Pin the
+version in `package.json` for production.
+
+## Host it
+
+Coming soon: `npx @flow-engineer/flow deploy`, to keep the agent answering while the laptop sleeps.

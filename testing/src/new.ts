@@ -3,7 +3,8 @@
 // "@flow-engineer/flow/simulators" and "@flow-engineer/flow/flow-messaging", and the coding-agent
 // skills go in .claude/skills/, with an AGENTS.md (and a CLAUDE.md importing it) pointing at them.
 // `flow init` makes the same agent in the current folder. Inside a clone, `npm run new -- <name>`
-// makes agents/<name>/ instead.
+// makes agents/<name>/ instead. `--display-name` is what people call the agent ("FlatX agent"), kept
+// as package.json's displayName: the message a phone sends to reach it is "Hi <it> (ref <code>)".
 
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
@@ -41,8 +42,10 @@ const TSCONFIG = {
   include: ["src"],
 };
 
-const ENV_EXAMPLE = `# One model key. The first line with a value is the one used.
-# Make it at the provider, then paste it here. Never commit this file.
+const ENV_EXAMPLE = `# The model key. The first line with a value is the one used. npx @flow-engineer/flow setup writes
+# FLOW_KEY, the agent's one Flow key, which calls models on the account's free trial credit, so no
+# provider key is needed; your own, made at the provider and pasted on its line, wins over it.
+# Never commit this file.
 #   OPENROUTER_API_KEY   https://openrouter.ai/keys
 #   OPENAI_API_KEY       https://platform.openai.com/api-keys
 #   ANTHROPIC_API_KEY    https://console.anthropic.com/settings/keys
@@ -51,6 +54,7 @@ OPENROUTER_API_KEY=
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 GEMINI_API_KEY=
+FLOW_KEY=
 
 # Optional. The model id for that provider; empty is that provider's default.
 # CAFE_MODEL=
@@ -73,40 +77,66 @@ A chat agent on Flow Framework (https://github.com/flow-engineer/flow), started 
   scenarios, \`flow-framework-context\` to gather what the tools are written from out of an existing
   codebase, and \`flow-framework-auth\` for sign-in.
 - \`agent/AGENTS.md\` is the agent's own prompt, not instructions for coding agents.
-- The owner puts one model key in \`.env\` (never read or print it): \`OPENROUTER_API_KEY\`,
-  \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`. Then \`npx @flow-engineer/flow chat\`
-  talks to it in the terminal, \`npm start\` runs it in the playground, and \`npx @flow-engineer/flow link\`
-  signs in, puts its other keys in \`.env\` and prints the link that reaches it from a phone while
-  \`npm start\` runs. \`npm run typecheck\` checks the types, \`npm test -- --synthetic\` runs the
-  tests in the test cloud at https://flow.engineer/observe with the owner's \`FLOW_FRAMEWORK_CLOUD_KEY\`
+- The model key goes in \`.env\` (never read or print it): \`npx @flow-engineer/flow link\` (or \`setup\`)
+  writes \`FLOW_KEY\`, the agent's one Flow key, which calls models on Flow's free trial credit, so no provider key is needed; a key the owner types
+  (\`OPENROUTER_API_KEY\`, \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`) wins over it. \`npm start\` runs it in the playground,
+  and \`npx @flow-engineer/flow link\` signs in, puts its other keys in \`.env\` and prints the link that
+  reaches it from a phone while \`npm start\` runs.
+- When the owner asks how to test it, recommend first the playground (\`npm start\`, then open the link
+  it prints: the test people and the channels side by side), then their phone (the \`link\`).
+- Your own checks, not the owner's way to test: \`npx @flow-engineer/flow chat\` talks to it in the
+  terminal, \`npm run typecheck\` checks the types, \`npm test -- --synthetic\` runs the tests in the
+  test cloud at https://flow.engineer/observe with the owner's \`FLOW_FRAMEWORK_CLOUD_KEY\`
   (\`npx @flow-engineer/flow --help\`).
 - The guide for coding agents, with exit codes and next steps: https://github.com/flow-engineer/flow/blob/main/docs/agents.md
 - \`npm run mcp\` serves the same tools as an MCP server (src/mcp.ts) and \`npm run cli -- --help\` is
   its command line (src/cli.ts). \`npx flow check\` checks the tools and the CLI file for both.
 `;
 
+/** The longest display name: the join message carries it (flow.engineer's /try cuts it there too). */
+export const MAX_DISPLAY_NAME = 60;
+
+/** The name people call the agent, from the package name when none was given: "my-shop" is "my shop". */
+export function displayNameOf(given: string | undefined, packageName: string): string {
+  const name = (given ?? "").replace(/[()]/g, " ").replace(/\s+/g, " ").trim();
+  if (name.length > MAX_DISPLAY_NAME) throw new Error(`--display-name is at most ${MAX_DISPLAY_NAME} characters, such as "FlatX agent".`);
+  return name || packageName.replace(/-/g, " ");
+}
+
+interface MakeOptions {
+  root?: string;
+  /** What people call the agent; the package name in words when not given. */
+  displayName?: string;
+}
+
 /** Makes `<into>/<name>` (the current folder by default) and returns it. */
-export function newStandalone(name: string, options: { into?: string; root?: string } = {}): string {
+export function newStandalone(name: string, options: MakeOptions & { into?: string } = {}): string {
   checkName(name);
+  const displayName = displayNameOf(options.displayName, name);
   const dir = join(options.into ?? process.cwd(), name);
   if (existsSync(dir)) throw new Error(`${dir} already exists: pick another name or remove it.`);
-  makeAgent(dir, name, options.root ?? packageRoot());
+  makeAgent(dir, name, displayName, options.root ?? packageRoot());
   return dir;
 }
 
 /** What `flow init` writes into a folder; it refuses a folder that holds any of them, so nothing is overwritten. */
 const MADE = ["package.json", "tsconfig.json", "src", "agent", "tests", ".env.example", "AGENTS.md", "CLAUDE.md", ".npmrc"];
 
+/** The package name `flow init` gives the agent in `dir`: the folder's name in lowercase and dashes. */
+export function folderName(dir: string): string {
+  return basename(dir).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "my-agent";
+}
+
 /** Makes the agent in `dir` (the current folder by default), named after the folder; returns its name. */
-export function initHere(dir = process.cwd(), options: { root?: string } = {}): string {
+export function initHere(dir = process.cwd(), options: MakeOptions = {}): string {
   const taken = MADE.filter((f) => existsSync(join(dir, f)));
   if (taken.length) throw new Error(`${dir} has ${taken.join(", ")} already: run flow init in an empty folder, or flow new <name> to make one.`);
-  const name = basename(dir).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "my-agent";
-  makeAgent(dir, name, options.root ?? packageRoot());
+  const name = folderName(dir);
+  makeAgent(dir, name, displayNameOf(options.displayName, name), options.root ?? packageRoot());
   return name;
 }
 
-function makeAgent(dir: string, name: string, root: string): void {
+function makeAgent(dir: string, name: string, displayName: string, root: string): void {
   const cafe = join(root, "examples", "cafe");
   for (const part of ["agent", "src", "tests"]) cpSync(join(cafe, part), join(dir, part), { recursive: true });
 
@@ -127,6 +157,8 @@ function makeAgent(dir: string, name: string, root: string): void {
   const own = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const pkg = {
     name,
+    // What people call it: the message a phone sends to reach it is "Hi <displayName> (ref <code>)".
+    displayName,
     version: "0.1.0",
     private: true,
     description: `${name}: a Flow Framework agent, started from the café example.`,

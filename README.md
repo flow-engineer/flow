@@ -26,23 +26,31 @@ Flow Framework makes the chat behaviour the default. You write the agent's promp
 Node 22.18 or later. Your agent is TypeScript that Node runs as it is, with no build step.
 
 ```bash
-npx @flow-engineer/flow new my-agent && cd my-agent && npm install
-cp .env.example .env        # then put one model key in it; the file says where to make one
+npx @flow-engineer/flow new my-agent --display-name "My agent" && cd my-agent && npm install
+npx @flow-engineer/flow link   # signs in; writes Flow's free trial model key and a phone link (or put your own key in .env)
 npm start
 ```
 
-`flow new <name>` makes `./<name>/` from the café example (lowercase letters, digits and dashes). Open the link `npm start` prints and text Pip, a café ordering assistant: your starting point. Pick a platform at the top (SMS, WhatsApp, iMessage, Telegram, web), and turn on **Debug** to see every tool call and how fast each message was answered. A model call that fails (a wrong or expired key, say) shows in the chat, in Debug and on the terminal. The café's `src/agent.ts` reads its model id from `CAFE_MODEL` (default: the model for the key you set, see [Models](#models)). The new folder has the coding-agent skills in `.claude/skills/` and an `AGENTS.md` pointing at them, so you can tell Claude Code, Codex or any coding agent what to build.
+`flow new <name>` makes `./<name>/` from the café example (lowercase letters, digits and dashes); `--display-name` is what people call it, kept as `displayName` in its `package.json`, and a phone reaches it by sending `Hi <that name> (ref <code>)`. Open the link `npm start` prints and text Pip, a café ordering assistant: your starting point. Pick a platform at the top (SMS, WhatsApp, iMessage, Telegram, web), and turn on **Debug** to see every tool call and how fast each message was answered. A model call that fails (a wrong or expired key, say) shows in the chat, in Debug and on the terminal. The café's `src/agent.ts` reads its model id from `CAFE_MODEL` (default: the model for the key you set, see [Models](#models)). The new folder has the coding-agent skills in `.claude/skills/` and an `AGENTS.md` pointing at them, so you can tell Claude Code, Codex or any coding agent what to build.
 
 ### On your phone, from your laptop
 
 ```bash
-npx @flow-engineer/flow init                 # the same starter in the current folder; then npm install and the model key
-printf 'hi\n' | npx @flow-engineer/flow chat  # talk to it in the terminal: no account
-npx @flow-engineer/flow link                 # signs in (opens the browser), writes its keys into .env, prints a link
-npm start                                    # open the link on your phone and text the agent
+npx @flow-engineer/flow init                 # the same starter in the current folder; then npm install
+npx @flow-engineer/flow link                 # signs in (opens the browser), writes its keys and Flow's trial model key into .env, prints a link
+npm start                                    # try it in the playground link it prints, then open the phone link and text the agent
+npx @flow-engineer/flow status               # what the folder has and lacks
 ```
 
-`flow chat` builds the agent from `src/agent.ts` and writes as its first test person, one message per line of stdin. `flow link` signs in and runs `flow setup` when the folder is not set up yet, then prints the link for `--channel telegram` (the default), `whatsapp` or `imessage`; a channel flow.engineer cannot open yet answers with what to do instead. With `FLOW_MESSAGING_KEY` in `.env`, the starter's `npm start` is on Telegram, plus WhatsApp and iMessage when `.env` has their senders, and connects to Flow Messaging by its outbound event stream, so there is no tunnel or public URL, and messages sent while it was stopped arrive when it starts again ([flow-messaging/README.md](flow-messaging/README.md)). Coding agents: [docs/agents.md](docs/agents.md) has the exit codes and `next` steps.
+Test it first in the playground (the link `npm start` prints: the test people and the channels side by side), then on your phone. `flow chat` (the agent in the terminal) and `npm test -- --synthetic` are how a coding agent checks its own work.
+
+`flow chat` builds the agent from `src/agent.ts` and writes as its first test person, one message per line of stdin. `flow link` signs in and runs `flow setup` when the folder is not set up yet, then prints the link for `--channel telegram` (the default), `whatsapp` or `imessage`; a channel flow.engineer cannot open yet answers with what to do instead. With `FLOW_MESSAGING_KEY` in `.env`, the starter's `npm start` is on Telegram, plus WhatsApp and iMessage when `.env` has their senders, and connects to Flow Messaging by its outbound event stream, so there is no tunnel or public URL, and messages sent while it was stopped arrive when it starts again ([flow-messaging/README.md](flow-messaging/README.md)). Coding agents: [docs/agents.md](docs/agents.md) (https://flow.engineer/flow-framework/agents.md) has the exit codes and `next` steps.
+
+**Shared test numbers and privacy.** The free trial runs on Flow's shared Telegram bot, WhatsApp number and iMessage line. A join code binds that phone to one app, so its messages go only to that app's agent; sending another app's code moves it. Trial chats are test data, kept for the account's retention (30 days by default). Do not use the trial for real customers' data: connect your own number for that.
+
+**Stability.** 0.x: the CLI's commands, `--json` fields and exit codes in [docs/agents.md](docs/agents.md) stay compatible within 0.2.x; a breaking change comes with a minor version bump and a release note. Pin the version in `package.json` for production.
+
+**Host it.** Coming soon: `npx @flow-engineer/flow deploy`, to keep the agent answering while the laptop sleeps.
 
 ### In a folder of your own
 
@@ -74,7 +82,7 @@ console.log(`Playground: ${url}/`);
 ```
 
 ```bash
-echo "OPENROUTER_API_KEY=sk-or-..." > .env
+npx @flow-engineer/flow setup      # writes FLOW_KEY (the agent's Flow key, on Flow's trial credit), or: echo "OPENROUTER_API_KEY=sk-or-..." > .env
 node --env-file=.env src/main.ts
 ```
 
@@ -555,7 +563,9 @@ sign-in for your stack (an OAuth provider, Firebase, Supabase, your own login pa
 
 ## Models
 
-Any OpenAI-compatible API. With no `apiKey` or `baseURL`, `openAICompatible` uses the first key that has a value: `OPENROUTER_API_KEY` (OpenRouter), `OPENAI_API_KEY` (OpenAI), `ANTHROPIC_API_KEY` (Anthropic), then `GEMINI_API_KEY` (Gemini); with none it stops at once and names them. `MODEL` sets the model id; each key has its own default. Pass `baseURL` and `apiKey` for any other address; a local server that needs no key needs only `baseURL`. Give `contextTokens` (the model's window) and a long chat's history is kept within it: the latest messages go to every call, older ones are left out (the agent is told).
+Any OpenAI-compatible API. With no `apiKey` or `baseURL`, `openAICompatible` uses the first key that has a value: `OPENROUTER_API_KEY` (OpenRouter), `OPENAI_API_KEY` (OpenAI), `ANTHROPIC_API_KEY` (Anthropic), `GEMINI_API_KEY` (Gemini), then `FLOW_KEY` (Flow); with none it stops at once and names them.
+
+A provider key is optional: `npx @flow-engineer/flow setup` writes `FLOW_KEY`, the agent's one Flow key (shown only as its prefix and last 4 characters), which calls models through Flow on $2 of Flow trial credit per account (`npx @flow-engineer/flow status` shows what is left). A provider key in `.env` wins over it for the model; `setup --rotate key` replaces a leaked `FLOW_KEY` (the old one works 24 h more, `--now` ends it at once). `flowModel({ model })` uses Flow explicitly (default `anthropic/claude-haiku-5.5`; Flow offers a short list of models, `GET /models`); `FLOW_MODEL_URL` points it at another Flow server. When the credit is used up, a call fails with code `trial_credit_used` and the next step. `MODEL` sets the model id; each key has its own default. Pass `baseURL` and `apiKey` for any other address; a local server that needs no key needs only `baseURL`. Give `contextTokens` (the model's window) and a long chat's history is kept within it: the latest messages go to every call, older ones are left out (the agent is told).
 
 For agents with tools we recommend **Claude Haiku 5.5** (`anthropic/claude-haiku-5.5`) or **GPT-6.1 Sol** (`openai/gpt-6.1-sol`, about 3x the cost). In our tests, GPT Luna repeated tool calls and answered twice.
 

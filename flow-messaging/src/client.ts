@@ -74,9 +74,9 @@ export class Client {
     return new Uint8Array(await response.arrayBuffer());
   }
 
-  /** A POST with its own Idempotency-Key, kept across the retries of this one call; `tries: 1` for courtesies. */
-  post<T>(path: string, body: unknown, tries = TRIES): Promise<T> {
-    return this.request<T>("POST", path, body, randomUUID(), tries);
+  /** A POST with its own Idempotency-Key (the caller's, else a new one), kept across the retries of this one call; `tries: 1` for courtesies. */
+  post<T>(path: string, body: unknown, tries = TRIES, idempotencyKey: string = randomUUID()): Promise<T> {
+    return this.request<T>("POST", path, body, idempotencyKey, tries);
   }
 
   private async request<T>(method: string, path: string, body?: unknown, idempotencyKey?: string, tries = TRIES): Promise<T> {

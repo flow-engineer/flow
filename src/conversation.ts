@@ -217,6 +217,8 @@ interface Direct {
   link?: { label: string; url: string };
   template?: Template;
   run?: string;
+  /** The run's schedule, to read whether the run was settled. */
+  schedule?: string;
   nudge?: string;
 }
 
@@ -587,7 +589,7 @@ export class Conversation {
     } else if (row.kind === "note") {
       this.notes.push({ text: p.text, inbox: row.id, wait: p.wait === true });
     } else if (row.kind === "schedule") {
-      if (p.fixed) this.direct.push({ inbox: row.id, channel: p.channel, text: p.text, run: p.run });
+      if (p.fixed) this.direct.push({ inbox: row.id, channel: p.channel, text: p.text, run: p.run, schedule: p.schedule });
       else this.notes.push({ text: p.text, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel } });
     } else if (row.kind === "nudge") {
       if (p.prompt !== undefined) {
@@ -716,7 +718,12 @@ export class Conversation {
       this.note(`[Chinwag] ${task.tool} (${task.taskId}) was still running in the background when the agent restarted. It may or may not have finished; check before telling them it is done.`);
       this.persist(() => store.removeTask(this.id, task.taskId));
     }
-    for (const row of await store.openInbox(this.id)) this.enqueue(row);
+    for (const row of await store.openInbox(this.id)) {
+      // Already in the history (its row was not marked done): answered, so not answered again.
+      const p = row.payload as Record<string, any>;
+      if (row.kind === "message" && this.messageIds.get(p.id) === p.channel) this.persist(() => store.doneInbox([row.id]));
+      else this.enqueue(row);
+    }
     const row = await store.conversation(this.id);
     this.resumeTurn = row?.turnOpen === true;
     if ((this.resumeTurn || this.hasWork()) && !this.running) this.schedule(0);
@@ -1236,6 +1243,11 @@ export class Conversation {
 
   /** A fixed-text scheduled message or a text or template nudge, sent with no model turn. */
   private async sendDirect(d: Direct): Promise<void> {
+    // Settled already (by an earlier process, or another one running beside this): never sent twice.
+    if (await this.directSettled(d)) {
+      if (d.inbox !== undefined) this.persist(() => this.settings.store.doneInbox([d.inbox!]));
+      return;
+    }
     const settle = (status: string, reason?: string) => {
       this.settle(d, status, reason);
       this.flush([d]);
@@ -1260,7 +1272,9 @@ export class Conversation {
     }
     if (covered) return settle("dropped", `no-contact rule ${covered.id}: ${covered.rule}`);
     // The business started it: its link goes as a button, and no preview leads the notification.
-    const outbound: Outbound = d.template ? { type: "template", ...d.template } : fitMessage(link.info, { type: "message" as const, text: d.text ?? "", ...(d.link ? { link: d.link } : {}), preview: false as const });
+    // The same key in every process, so the channel's provider sends it once.
+    const idempotencyKey = d.nudge ? `nudge:${d.nudge}` : d.run ? `run:${d.run}` : `inbox:${this.id}:${d.inbox}`;
+    const outbound: Outbound = d.template ? { type: "template", ...d.template, idempotencyKey } : fitMessage(link.info, { type: "message" as const, text: d.text ?? "", ...(d.link ? { link: d.link } : {}), preview: false as const, idempotencyKey });
     let failure: string | null = null;
     if (this.closed) return settle("failed", "this person was forgotten");
     try { await link.deliver(outbound); } catch (error) { failure = errorText(error); }
@@ -1281,6 +1295,19 @@ export class Conversation {
     }
     this.settings.emit(this.id, "message.out", { text: d.text ?? d.template?.name, channel: d.channel, direct: true });
     settle("sent");
+  }
+
+  private async directSettled(d: Direct): Promise<boolean> {
+    const { store } = this.settings;
+    if (d.nudge) {
+      const status = (await store.nudge(d.nudge))?.status;
+      return status !== undefined && !["queued", "held", "scheduled"].includes(status);
+    }
+    if (d.run && d.schedule) {
+      const outcome = (await store.runs(d.schedule)).find((r) => r.id === d.run)?.outcome;
+      return outcome !== undefined && outcome !== "queued" && outcome !== "held";
+    }
+    return false;
   }
 
   /**

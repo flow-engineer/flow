@@ -20,9 +20,10 @@ and `flow-framework-auth` (`auth-skill.md`) when tools need to know who the pers
 `npx @flow-engineer/flow new <name>` (lowercase letters, digits and dashes) makes `./<name>/` from the café
 example: a complete agent with tools and tests that depends on the `@flow-engineer/flow` package and imports
 `@flow-engineer/flow` and `@flow-engineer/flow/simulators`, with these skills in `.claude/skills/`. Run `npm install` there.
-Build in it, changing Pip's prompt, skills, tools and tests into yours. The owner copies
-`.env.example` to `.env` and puts one model key in it (never read or print it). Flow Framework does not
-issue that key; it is made at the provider: `OPENROUTER_API_KEY` at https://openrouter.ai/keys,
+Build in it, changing Pip's prompt, skills, tools and tests into yours. A provider key is optional:
+`npx @flow-engineer/flow link` (or `setup`) writes `FLOW_KEY`, the agent's one Flow key, into `.env` (never
+read or print it), and the agent calls models through Flow with it on $2 of Flow trial credit. A key of the owner's own wins over it, made
+at the provider: `OPENROUTER_API_KEY` at https://openrouter.ai/keys,
 `OPENAI_API_KEY` at https://platform.openai.com/api-keys, `ANTHROPIC_API_KEY` at
 https://console.anthropic.com/settings/keys, or `GEMINI_API_KEY` at https://aistudio.google.com/apikey.
 The first one with a value is used, and `CAFE_MODEL` sets the café's model id. Then `npm start`
@@ -104,8 +105,10 @@ agent serves beside its chat, such as a business's event push, answered by `agen
 before they have written; until they write, only a template reaches them on WhatsApp.
 
 Models are reached through any OpenAI-compatible API. `openAICompatible()` with no key reads the
-first of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `GEMINI_API_KEY` that has a
-value, and uses that provider's default model (`MODEL` overrides it). With none it stops at once and
+first of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` and
+`FLOW_KEY` (the agent's Flow key, on its trial credit, from `setup`) that has a value, and uses that provider's
+default model (`MODEL` overrides it). `flowModel()` uses Flow alone; when its credit is used up a
+call fails with code `trial_credit_used` and a next step (tell the owner to add their own key). With none it stops at once and
 names them. Pass `apiKey` and `baseURL` for anywhere else (`baseURL` alone for a local server that needs no key).
 
 Which model: recommend Claude Haiku 5.5 (`anthropic/claude-haiku-5.5`, the default above) or OpenAI
@@ -320,15 +323,23 @@ and every simulated message is logged with the person, channel, time and address
 ## Put it on a phone
 
 To chat with the agent from the owner's phone, with no tunnel and no key made by hand, run these
-from the agent's folder (`npx @flow-engineer/flow init` makes a starter in an empty one). Only
-`chat` reads stdin; nothing else asks for input or needs a terminal.
+from the agent's folder (`npx @flow-engineer/flow init --display-name "<name>"` makes a starter in
+an empty one: first ask the owner what people should call their agent, such as "FlatX agent"; the
+phone's first message is `Hi FlatX agent (ref <code>)`, and `package.json`'s `displayName` keeps it).
+Only `chat` reads stdin; `init` asks for the name only in a terminal, and nothing else asks for input.
 
 ```sh
-printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # locally, no account: one message per line, replies printed
-npx @flow-engineer/flow link --json          # signs in and runs setup when needed, then the link; give its say_to_person to the owner
-npx @flow-engineer/flow test --synthetic     # the tests, on the key setup wrote
-npm start                                    # the agent; the owner texts it while it runs
+npx @flow-engineer/flow link --json          # signs in and runs setup when needed (Flow's trial model key too), then the channel's own link (t.me, wa.me, sms:); give its say_to_person to the owner
+npm start                                    # the agent: its playground link, and the owner texts it while it runs
+npx @flow-engineer/flow status --json        # what the folder has and lacks, at any time
+printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check: one message per line, replies printed
+npx @flow-engineer/flow test --synthetic     # your own check: the tests, on the key setup wrote
 ```
+
+When the owner asks how to test it, recommend first the playground (`npm start`, then open the
+link it prints: the test people and the channels side by side, with Debug), then their phone (the
+`link`, while `npm start` runs). `chat` and `test --synthetic` are for you to check your own work;
+do not offer them to the owner as ways to test.
 
 `link` runs `login` first when not signed in: it opens the owner's browser itself and prints the
 link and code at once (with `--json` the first line is `{"status":"pending","verification_uri":...,

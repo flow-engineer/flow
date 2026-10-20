@@ -293,3 +293,43 @@ test("provider message ids are deleted once older than 7 days, in batches, by on
   assert.deepEqual(await pass(7 * 86_400_000 + minutes(30)), [0, 3], "one runner deletes them, 1,000 at a time");
   assert.deepEqual(await ids(), ["recent"]);
 });
+
+/** A store that drops appendHistory's doneInbox, as a broken remote store did: rows a turn or a send handled stay open. */
+class Forgetful extends Store {
+  override appendHistory(conversationId: string, seq: number, entries: Parameters<Store["appendHistory"]>[2]): Promise<void> {
+    return super.appendHistory(conversationId, seq, entries);
+  }
+}
+
+test("after a restart, a message already answered and a nudge already sent are neither answered nor sent again, even when the store left their inbox rows open", async () => {
+  const path = file();
+  const sam = { channel: "sms", address: "+15550100100" };
+  const before = multi({ channels: CHANNELS, store: new Forgetful(sqlite(path), "default") });
+  await before.agent.resume();
+  const a = await before.message("sms", sam.address, "hi");
+  (await before.nextCall(0)).answer(respond(call("send_sms", { text: "Hi!" })));
+  await before.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.equal((await before.agent.nudge({ to: sam, text: "Your order is ready." })).status, "sent");
+  await before.agent.conversation(a!.conversationId)!.whenIdle();
+  const store = new Store(sqlite(path), "default");
+  assert.deepEqual(await store.unfinished(), [a!.conversationId], "their inbox rows were left open");
+
+  const after = multi({ channels: CHANNELS, store: new Forgetful(sqlite(path), "default"), dir: before.dir });
+  await after.agent.resume();
+  const c = after.agent.conversation(a!.conversationId);
+  await c?.stored();
+  await c?.whenIdle();
+  assert.deepEqual(after.out, [], "nothing sent again");
+  assert.equal(after.calls.length, 0, "no model call");
+  assert.deepEqual(await store.unfinished(), [], "both rows are marked done");
+});
+
+test("a reply and a text nudge leave nothing unfinished in the store", async () => {
+  const h = multi({ channels: CHANNELS });
+  const a = await h.message("sms", "+15550100100", "hi");
+  (await h.nextCall(0)).answer(respond(call("send_sms", { text: "Hi!" })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.equal((await h.agent.nudge({ to: { channel: "sms", address: "+15550100100" }, text: "Your order is ready." })).status, "sent");
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.deepEqual(await new Store(h.database, "default").unfinished(), []);
+});

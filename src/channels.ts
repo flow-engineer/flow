@@ -102,6 +102,8 @@ export interface Message {
   image?: { url: string };
   /** false: send it with link previews off (a message the business started). */
   preview?: false;
+  /** Given for a send the business starts (a nudge, a scheduled text): the same in every process, so a provider that takes one sends it once. */
+  idempotencyKey?: string;
 }
 
 export interface WhatsAppProvider {
@@ -111,11 +113,11 @@ export interface WhatsAppProvider {
   react?(to: string, messageId: string, emoji: string): Promise<void>;
   typing?(to: string, on: boolean): Promise<void>;
   markRead?(to: string, messageIds: string[]): Promise<void>;
-  sendTemplate?(to: string, template: Template): Promise<void>;
+  sendTemplate?(to: string, template: Template, idempotencyKey?: string): Promise<void>;
 }
 
 export interface SmsProvider {
-  sendMessage(to: string, message: { text: string }): Promise<void>;
+  sendMessage(to: string, message: Pick<Message, "text" | "idempotencyKey">): Promise<void>;
 }
 
 /** Your own UI. `message` carries the text, any buttons, and your params by name. */
@@ -188,8 +190,8 @@ export function whatsapp(provider: WhatsAppProvider, options: { name?: string; d
           return info.readReceipts ? provider.markRead?.(to, outbound.messageIds) : undefined;
         case "template": {
           if (!provider.sendTemplate || off.has("templates")) throw new Error("this WhatsApp provider sends no templates");
-          const { type: _type, ...template } = outbound;
-          return provider.sendTemplate(to, template);
+          const { type: _type, idempotencyKey, ...template } = outbound;
+          return provider.sendTemplate(to, template, idempotencyKey);
         }
         case "status":
           return;
@@ -207,7 +209,7 @@ export function sms(provider: SmsProvider, options: { name?: string; instruction
     keywords: keywordsFrom(SMS_KEYWORDS, options.keywords),
     phone: true,
     send: (to, outbound) => {
-      if (outbound.type === "message") return provider.sendMessage(to, { text: outbound.text });
+      if (outbound.type === "message") return provider.sendMessage(to, { text: outbound.text, ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}) });
       if (outbound.type === "template") throw new Error("SMS has no templates");
       // Reactions, typing, read receipts and status do not exist on SMS.
     },
@@ -256,6 +258,7 @@ function message(outbound: Extract<Outbound, { type: "message" }>): Message {
     ...(outbound.link ? { link: outbound.link } : {}),
     ...(outbound.image ? { image: outbound.image } : {}),
     ...(outbound.preview === false ? { preview: false as const } : {}),
+    ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}),
   };
 }
 

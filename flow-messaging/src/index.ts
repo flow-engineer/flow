@@ -169,15 +169,15 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   /** One message: into the person's conversation, or a new one from the channel's sender. */
-  async function send(route: Route, to: string, content: Record<string, unknown>, replyTo?: string, about = replyTo, channelOptions?: Record<string, unknown>): Promise<void> {
+  async function send(route: Route, to: string, content: Record<string, unknown>, replyTo?: string, about = replyTo, idempotencyKey?: string, channelOptions?: Record<string, unknown>): Promise<void> {
     try {
       const conversation = await conversationFor(route.name, to, about);
       const options = channelOptions ? { channel_options: channelOptions } : {};
       let sent: FlowMessage;
-      if (conversation) sent = await client.post(`/v1/conversations/${idSegment("conv", conversation)}/messages`, { content, ...(replyTo ? { reply_to: replyTo } : {}), ...options });
+      if (conversation) sent = await client.post(`/v1/conversations/${idSegment("conv", conversation)}/messages`, { content, ...(replyTo ? { reply_to: replyTo } : {}), ...options }, undefined, idempotencyKey);
       else {
         if (!route.sender) throw new Error(`no conversation with them on ${route.name} yet, and no sender to start one (set FLOW_MESSAGING_${route.kind.toUpperCase()}_SENDER)`);
-        sent = await client.post("/v1/messages", { sender: route.sender, to: recipient(route.kind, to), content, ...options });
+        sent = await client.post("/v1/messages", { sender: route.sender, to: recipient(route.kind, to), content, ...options }, undefined, idempotencyKey);
       }
       flowConversation.set(key(route.name, to), sent.conversation);
     } catch (error) {
@@ -185,12 +185,17 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     }
   }
 
-  /** Typing and read receipts are a courtesy: Flow's spec says to ignore their failures. */
+  /**
+   * Typing and read receipts are a courtesy: Flow's spec says to ignore their failures. Outside the
+   * window (iMessage and WhatsApp until the person writes) they are expected to be refused, so that
+   * is not logged; any other failure is, once.
+   */
   async function courtesy(route: Route, to: string, action: "typing" | "read", body: Record<string, unknown>, messageId?: string): Promise<void> {
     try {
       const conversation = await conversationFor(route.name, to, messageId);
       if (conversation) await client.post(`/v1/conversations/${idSegment("conv", conversation)}/${action}`, body, 1);
     } catch (error) {
+      if (error instanceof FlowMessagingError && error.type === "outside_window") return;
       console.warn(`@flow-engineer/flow/flow-messaging: ${action} on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
     }
   }
@@ -240,17 +245,18 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         // A message the business started: on WhatsApp, no link preview (its card's title would be the phone's notification).
         const options = (content: Record<string, unknown>) => (message.preview === false && route.kind === "whatsapp" && content.type === "text" ? { preview_url: false } : undefined);
         const [first, ...rest] = contents(route.kind, message);
-        await send(route, to, first, message.replyTo, message.replyTo, options(first));
-        for (const next of rest) await send(route, to, next, undefined, undefined, options(next));
+        const key = message.idempotencyKey;
+        await send(route, to, first, message.replyTo, message.replyTo, key, options(first));
+        for (const [i, next] of rest.entries()) await send(route, to, next, undefined, undefined, key && `${key}:${i + 1}`, options(next));
       },
       react: (to: string, messageId: string, emoji: string) => send(route, to, { type: "reaction", message_id: messageId, emoji }, undefined, messageId),
       typing: (to: string, on: boolean) => courtesy(route, to, "typing", { state: on ? "on" : "off" }),
       markRead: (to: string, messageIds: string[]) => courtesy(route, to, "read", { up_to: messageIds.at(-1) }, messageIds.at(-1)),
-      sendTemplate: async (to: string, wanted: Template) => {
+      sendTemplate: async (to: string, wanted: Template, idempotencyKey?: string) => {
         if (!route.sender) throw new Error(`a template needs the channel's sender (set FLOW_MESSAGING_${route.kind.toUpperCase()}_SENDER)`);
         const found = await template(route.sender, wanted);
         const params = templateParams(wanted);
-        await send(route, to, { type: "template", template_id: found.id, language: wanted.language ?? found.language, ...(Object.keys(params).length ? { params } : {}) });
+        await send(route, to, { type: "template", template_id: found.id, language: wanted.language ?? found.language, ...(Object.keys(params).length ? { params } : {}) }, undefined, undefined, idempotencyKey);
       },
     };
   }
@@ -299,6 +305,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
               ...(outbound.buttons && info.buttons ? { buttons: outbound.buttons } : {}),
               ...(outbound.link && info.linkButton ? { link: outbound.link } : {}),
               ...(outbound.image && info.images ? { image: outbound.image } : {}),
+              ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}),
             });
           case "reaction":
             return p.react(to, outbound.messageId, outbound.emoji);

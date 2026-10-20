@@ -112,7 +112,7 @@ test("outside WhatsApp's window, text and prompt nudges are refused before any m
   assert.equal(h.calls.length, 1, "no model call");
   const template = await h.agent.nudge({ to: h.to, template: { name: "order_ready", variables: { name: "Sam" } } });
   assert.equal(template.status, "sent");
-  assert.deepEqual(h.out.at(-1)!.outbound, { type: "template", name: "order_ready", variables: { name: "Sam" } });
+  assert.deepEqual(h.out.at(-1)!.outbound, { type: "template", name: "order_ready", variables: { name: "Sam" }, idempotencyKey: `nudge:${template.id}` });
 });
 
 test("a declared template is checked before it goes, and the agent is told what it read", async () => {
@@ -131,8 +131,9 @@ test("a declared template is checked before it goes, and the agent is told what 
   assert.equal(h.out.filter((o) => o.outbound.type === "template").length, 0, "nothing was sent");
 
   const template = { name: "order_ready", header, body: ["Sam", "latte"], buttons: [{ index: 0, value: "log_order" }, { index: 1, value: "latte" }] };
-  assert.equal((await h.agent.nudge({ to: h.to, template })).status, "sent");
-  assert.deepEqual(h.out.at(-1)!.outbound, { type: "template", ...template });
+  const sent = await h.agent.nudge({ to: h.to, template });
+  assert.equal(sent.status, "sent");
+  assert.deepEqual(h.out.at(-1)!.outbound, { type: "template", ...template, idempotencyKey: `nudge:${sent.id}` });
   await h.message("whatsapp", SAM.address, "ok");
   const next = await h.nextCall(1);
   assert.ok(next.request.messages.some((m) => m.role === "user" && m.content === '[Chinwag] The business sent them its template "order_ready" on whatsapp. It reads:\nHi Sam, your latte is ready.'));

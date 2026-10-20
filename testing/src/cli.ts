@@ -25,6 +25,7 @@ import { request as httpsRequest } from "node:https";
 import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
+import { hasModelKey, NO_MODEL_KEY } from "../../src/model.ts";
 import { PLUGIN_LINE, pluginCli } from "./plugin.ts";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions } from "./client.ts";
@@ -34,14 +35,20 @@ import { CHECK_LINE as TOOLS_CHECK_LINE, checkCli, mcpUpdateCli } from "./check.
 import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
 import { httpAgent } from "./http-agent.ts";
-import { initHere, newStandalone, packageRoot } from "./new.ts";
+import { createInterface } from "node:readline/promises";
+import { displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
 import { EXIT, finishedOutcome, loadEnv, networkCode, reportError, runVerdict, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
 import type { RunSummary } from "./protocol.ts";
 
-const NEW_LINE = `  flow new <name>           Make ./<name>/, a new agent started from the café example
-  flow init                 Make that agent in the current folder, named after it`;
+const NEW_LINE = `  flow new <name> [--display-name <name>]
+                            Make ./<name>/, a new agent started from the café example
+  flow init [--display-name <name>]
+                            Make that agent in the current folder, named after it.
+                            --display-name is what people call it, such as "FlatX agent": a
+                            phone reaches it with "Hi FlatX agent (ref <code>)" (asked for when
+                            run in a terminal; else the folder's name in words)`;
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
                             the tests are in tests/scenarios and tests/tools)`;
@@ -103,15 +110,22 @@ the CHINWAG_ names from before the rename still work):
   FLOW_FRAMEWORK_AGENT_TOKEN
                            With --agent-url: sent to it as authorization: Bearer <token>
   OPENROUTER_API_KEY       The agent's model key, or OPENAI_API_KEY, ANTHROPIC_API_KEY or
-                           GEMINI_API_KEY: the first with a value is used`;
+                           GEMINI_API_KEY: the first with a value is used, else FLOW_KEY
+                           (the agent's Flow key, on its trial credit; flow setup writes it)`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
 const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}
 ${PLUGIN_LINE}\n${ACCOUNT_LINES}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
-const NEXT_STEPS = `  2. Add one model key: cp .env.example .env; the file says where to make one
-  3. npx @flow-engineer/flow chat, and type to it (or npm start for the playground)
-  4. npx @flow-engineer/flow link: signs in, writes the other keys, prints the link for your phone;
-     keep npm start running and text it
-  5. Tell your coding agent what to build: its skills are in .claude/skills/`;
+
+/** What to do after new or init, from step 2; a model key comes first when none is set here. */
+function nextSteps(): string {
+  const steps = [
+    ...(hasModelKey(process.env) ? [] : [`Model key: none yet. ${NO_MODEL_KEY.nextLine.replace(/^Next: r/, "R")} (in .env: cp .env.example .env; the file says where to make one)`]),
+    `npm start, and open the link it prints: try it in the playground as its test people, channels side by side`,
+    `npx @flow-engineer/flow link: signs in, writes the other keys, prints the link for your phone;\n     keep npm start running and text it`,
+    `Tell your coding agent what to build: its skills are in .claude/skills/`,
+  ];
+  return steps.map((step, i) => `  ${i + 2}. ${step}`).join("\n");
+}
 
 checkNode(process.versions.node);
 
@@ -172,32 +186,54 @@ if (values.help || process.argv.length <= 2) {
   process.exit(0);
 }
 
+/** --display-name, else asked for in a terminal (Enter takes the folder's name in words), else that default. */
+async function askDisplayName(given: string | undefined, packageName: string): Promise<string | undefined> {
+  if (given !== undefined || !process.stdin.isTTY || !process.stdout.isTTY) return given;
+  const fallback = displayNameOf(undefined, packageName);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await rl.question(`What should people call your agent? Their phone says "Hi <it>" (Enter for "${fallback}"): `)).trim() || undefined;
+  } finally {
+    rl.close();
+  }
+}
+
+const namedLine = (dir: string) => {
+  const displayName = (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { displayName?: string }).displayName;
+  return `People call it "${displayName}" (package.json displayName): a phone reaches it with "Hi ${displayName} (ref <code>)".`;
+};
+
+const displayNameFlag = (values as { "display-name"?: string })["display-name"];
+
 if (command === "new") {
   const name = rest.length === 1 ? rest[0]! : "";
+  let dir: string;
   try {
-    newStandalone(name);
+    if (!name) throw new Error("Usage: flow new <name> [--display-name <name>]");
+    dir = newStandalone(name, { displayName: await askDisplayName(displayNameFlag, name) });
   } catch (error) {
-    console.error(name ? (error as Error).message : "Usage: flow new <name>");
+    console.error((error as Error).message);
     process.exit(1);
   }
-  console.log(`Made ./${name}/ from the café example (Pip). Next:
+  console.log(`Made ./${name}/ from the café example (Pip). ${namedLine(dir)} Next:
   1. cd ${name} && npm install
-${NEXT_STEPS}`);
+${nextSteps()}`);
   process.exit(0);
 }
 
 if (command === "init") {
   let name: string;
   try {
-    if (rest.length) throw new Error("Usage: flow init (it makes the agent in the current folder; flow new <name> makes a folder for it)");
-    name = initHere();
+    if (rest.length) throw new Error("Usage: flow init [--display-name <name>] (it makes the agent in the current folder; flow new <name> makes a folder for it)");
+    name = initHere(process.cwd(), { displayName: await askDisplayName(displayNameFlag, folderName(process.cwd())) });
   } catch (error) {
     console.error((error as Error).message);
     process.exit(1);
   }
-  console.log(`Made ${name}, started from the café example (Pip), in this folder. Next:
+  loadEnv(undefined); // a .env already here may hold a model key
+  console.log(`Made ${name}, started from the café example (Pip), in this folder. ${namedLine(process.cwd())} Next:
   1. npm install
-${NEXT_STEPS}`);
+${nextSteps()}`);
   process.exit(0);
 }
 
@@ -551,7 +587,7 @@ function stoppedReason(error: unknown, cloud: string): string {
 /** The command's flags, or exits 1 with what is wrong and that command's usage. */
 function parseCommandLine() {
   const isNew = process.argv[2] === "new" || process.argv[2] === "init";
-  const options = isNew ? { help: TEST_FLAGS.help, version: TEST_FLAGS.version } : TEST_FLAGS;
+  const options = isNew ? { help: TEST_FLAGS.help, version: TEST_FLAGS.version, "display-name": { type: "string" } } : TEST_FLAGS;
   try {
     return parseArgs({ allowPositionals: true, strict: true, options: options as typeof TEST_FLAGS });
   } catch (error) {
