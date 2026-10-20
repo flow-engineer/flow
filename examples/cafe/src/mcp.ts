@@ -19,22 +19,25 @@ export const mcp = mcpServer({
 
 // What people call it: package.json's displayName.
 const { displayName: name = "your agent" } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { displayName?: string };
-// MCP_PORT, else 8790 or the next free port above it.
-let port: number;
-try {
-  const chosen = await choosePort("MCP_PORT", 8790, { command: "npm run mcp" });
-  port = chosen.port;
-  if (chosen.note) console.log(`${chosen.note} The CLI then needs CAFE_SERVER=http://127.0.0.1:${port}/mcp.`);
-} catch (error) {
-  console.error((error as Error).message);
-  process.exit(1);
-}
-createServer((req, res) => void mcp.node(req, res))
-  .once("error", (error) => {
-    console.error(`${error.message}. Run: MCP_PORT=<port> npm run mcp`);
+// Run as `npm run mcp`; Flow's hosting imports `mcp` and serves it beside the agent.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  // MCP_PORT, else 8790 or the next free port above it.
+  let port: number;
+  try {
+    const chosen = await choosePort("MCP_PORT", 8790, { command: "npm run mcp" });
+    port = chosen.port;
+    if (chosen.note) console.log(`${chosen.note} The CLI then needs CAFE_SERVER=http://127.0.0.1:${port}/mcp.`);
+  } catch (error) {
+    console.error((error as Error).message);
     process.exit(1);
-  })
-  .listen(port, "127.0.0.1", () => {
-    console.log(`${name}'s MCP server: http://127.0.0.1:${port}/mcp`);
-    console.log(`Try it in Claude Code: claude mcp add --transport http bean-and-leaf http://127.0.0.1:${port}/mcp`);
-  });
+  }
+  createServer((req, res) => void mcp.node(req, res))
+    .once("error", (error) => {
+      console.error(`${error.message}. Run: MCP_PORT=<port> npm run mcp`);
+      process.exit(1);
+    })
+    .listen(port, "127.0.0.1", () => {
+      console.log(`${name}'s MCP server: http://127.0.0.1:${port}/mcp`);
+      console.log(`Try it in Claude Code: claude mcp add --transport http bean-and-leaf http://127.0.0.1:${port}/mcp`);
+    });
+}

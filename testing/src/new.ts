@@ -73,8 +73,11 @@ FLOW_FRAMEWORK_TRACES_KEY=
 
 const agentsMd = (name: string) => `# ${name}
 
-A chat agent on Flow Framework (https://github.com/flow-engineer/flow), started from its café example.
+An agent on Flow Framework (https://github.com/flow-engineer/flow): a chat agent, and the same tools as an
+MCP server and a CLI. It starts as the café example; replace the café with the owner's product.
 
+- The skills are plain Markdown files, \`.claude/skills/<skill>/SKILL.md\`. A coding agent that does not
+  load them by name (or started before this folder existed) reads them as files.
 - Load the skills in \`.claude/skills/\` before changing it: \`flow-framework\` to build the agent (and its MCP
   server and CLI), \`flow-framework-tools\` for its tools and their test files, \`flow-framework-tests\` for its test
   scenarios, \`flow-framework-context\` to gather what the tools are written from out of an existing

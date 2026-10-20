@@ -17,6 +17,16 @@ Telegram or a web or app chat, that feel like a person texting back.
 - A new dependency or a new file needs a maintainer's yes.
 - Remove what stops being used (scripts, options, tests) in the same change.
 
+## Every change is backward compatible
+- An agent that works on this version keeps working on the next, unchanged: its `src/agent.ts`, the
+  starter files `flow new` copied into it, its test files, its `.env` names, its CLI commands, `--json`
+  fields and exit codes, and what Flow's hosting passes to `buildAgent`. Add an option or field; never
+  rename, remove or change the meaning of one an agent may use.
+- When something has to go, keep the old name working beside the new one (deprecated, saying what
+  replaces it) for at least one minor release, and say so in the release notes and the README.
+- A change that cannot be made compatible needs a maintainer's yes, a minor version bump and a
+  migration note, as the move from chinwag had.
+
 ## Tests
 - Each test protects one behaviour. Before adding one, say which behaviour, and why no existing
   test already covers it. Prefer fewer tests that matter; merge or delete tests that overlap or no

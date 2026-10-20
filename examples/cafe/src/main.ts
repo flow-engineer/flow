@@ -9,13 +9,14 @@ import { choosePort, markRunning } from "../../../src/index.ts";
 import { flowMessaging } from "../../../flow-messaging/src/index.ts";
 import { simulators } from "../../../simulators/src/index.ts";
 import { buildAgent } from "./agent.ts";
-import { channelNames, flowChannels } from "./channels.ts";
+import { channelNames } from "./channels.ts";
 
 // What people call it: package.json's displayName (`npx @flow-engineer/flow link --display-name <name>` changes it).
 const { displayName: name = "your agent" } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { displayName?: string };
 const play = simulators({ title: `${name} · Bean & Leaf` });
 const fm = process.env.FLOW_MESSAGING_KEY ? flowMessaging() : undefined;
-const channels = fm ? flowChannels(fm) : [];
+// Telegram, plus WhatsApp and iMessage when .env names their senders.
+const channels = fm ? fm.channels() : [];
 let agent: ReturnType<typeof buildAgent>;
 try {
   agent = buildAgent({ events: [play.events], channels });

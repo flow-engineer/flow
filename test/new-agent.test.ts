@@ -149,7 +149,8 @@ test("choosePort: an unset port moves to the next free one and says so; a port s
 test("npm start on a taken PORT prints one line and exits 1, no stack; on a free one it prints the name from package.json and marks itself running for flow link", async (t) => {
   const main = fileURLToPath(new URL("../examples/cafe/src/main.ts", import.meta.url));
   const cwd = mkdtempSync(join(tmpdir(), "flow-start-"));
-  const env = { PATH: process.env.PATH, OPENROUTER_API_KEY: "sk-test-not-used" };
+  // NODE_NO_WARNINGS: Node 22 prints an ExperimentalWarning for SQLite on stderr.
+  const env = { PATH: process.env.PATH, OPENROUTER_API_KEY: "sk-test-not-used", NODE_NO_WARNINGS: "1" };
   const taken = await takePort();
   t.after(taken.close);
   const refused = spawnSync(process.execPath, [main], { cwd, env: { ...env, PORT: String(taken.port) }, encoding: "utf8" });
