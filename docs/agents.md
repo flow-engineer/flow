@@ -63,9 +63,12 @@ before you hand it back; run them yourself, and do not offer them to the owner a
   and `init`, `setup`, `link` and `status` say so too, with the way to get one first in `next`.
   Each folder's `setup` makes its own `FLOW_KEY` (the credit is the account's);
   `setup --rotate key` replaces a leaked one (the old one works 24 h more; `--now` ends it at once).
+- `setup --workspace <name|acc_id>` (and `link --workspace`) puts the agent, its cloud and traces keys in
+  that observe workspace of yours and keeps its `acc_` id in `.env` as `FLOW_FRAMEWORK_WORKSPACE`, which later
+  runs send; another workspace makes those two keys again (403 `not_a_member`, 409 `workspace_ambiguous`: pass the id).
 - `status` reports `FLOW_KEY` and the model key (never their values; `flow_key.set` in `--json`; with
   `FLOW_KEY` the model's key, the credit left from Flow, `model_key.flow_credit`; a key Flow does not
-  know gets `setup --rotate key`), the sign-in, each channel's sender in `.env`
+  know gets `setup --rotate key`), the workspace (`FLOW_FRAMEWORK_WORKSPACE`, else `personal`), the sign-in, each channel's sender in `.env`
   and, signed in, which channels are open now with their trial counts. It writes nothing.
 - `chat` builds the agent from `src/agent.ts` and writes as its first test person. Each reply is
   printed (`agent: ...`) once the turn is over; `--json` gives one JSON line per thing it sends.

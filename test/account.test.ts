@@ -979,3 +979,100 @@ test("link and setup --display-name rename the agent: package.json's displayName
   assert.match(setup.out, /^People call it "Ash" now \(package\.json displayName and agent\/AGENTS\.md\)\.$/m);
   assert.match(readFileSync(join(cwd, "agent", "AGENTS.md"), "utf8"), /^# Ash$/m);
 });
+
+const TEAM = { workspace_id: "acc_team1", workspace_name: "Team" };
+
+test("setup --workspace sends it, keeps the answered acc_ id in .env and names the workspace; later runs send the kept id; status shows it", async (t) => {
+  const flow = await flowServer([], 200, { setup: TEAM });
+  t.after(flow.close);
+  const cwd = agentDir();
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  const first = await run(["setup", "--workspace", "team", "--json"], { url: flow.url, config: temp(), cwd, env });
+  assert.equal(first.code, 0, first.err);
+  assert.equal(setupCall(flow).body.workspace, "team");
+  assert.ok(!("rotate" in setupCall(flow).body), "a folder with no keys yet makes them there, with nothing to rotate");
+  assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_FRAMEWORK_WORKSPACE=acc_team1$/m, "the answered id, not the typed name");
+  assert.deepEqual(first.lines[0]!.workspace, { id: "acc_team1", name: "Team" });
+
+  const again = await run(["setup"], { url: flow.url, config: temp(), cwd, env });
+  assert.equal(again.code, 0, again.err);
+  assert.equal(setupCall(flow).body.workspace, "acc_team1", "the kept workspace is sent without the flag");
+  assert.ok(!("rotate" in setupCall(flow).body));
+  assert.match(again.out, /^Workspace: Team \(acc_team1\)$/m);
+
+  const same = await run(["setup", "--workspace", "acc_team1"], { url: flow.url, config: temp(), cwd, env });
+  assert.equal(same.code, 0, same.err);
+  assert.ok(!("rotate" in setupCall(flow).body), "the same workspace rotates nothing");
+
+  const shown = await run(["status", "--json"], { url: flow.url, config: temp(), cwd, env });
+  assert.equal(shown.lines[0]!.workspace, "acc_team1");
+  assert.equal(setupCall(flow).body.workspace, "acc_team1", "status asks about the agent in its own workspace");
+  const personal = await run(["status"], { url: flow.url, config: temp(), cwd: agentDir() });
+  assert.match(personal.out, /^Workspace: personal$/m);
+});
+
+test("setup --workspace naming another workspace makes the cloud and traces keys again there and replaces them in .env; Messaging's key and FLOW_KEY stay", async (t) => {
+  const flow = await flowServer([], 200, { setup: TEAM });
+  t.after(flow.close);
+  const cwd = agentDir();
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  writeFileSync(join(cwd, ".env"), `FLOW_KEY=${OLD}\nFLOW_FRAMEWORK_CLOUD_KEY=oci_old\nFLOW_FRAMEWORK_TRACES_KEY=otk_old\nFLOW_MESSAGING_KEY=fk_old\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\n`);
+  const moved = await run(["setup", "--workspace", "Team"], { url: flow.url, config: temp(), cwd, env });
+  assert.equal(moved.code, 0, moved.err);
+  assert.deepEqual(setupCall(flow).body.rotate, ["cloud_key", "traces_key"]);
+  const have = setupCall(flow).body.have as string[];
+  assert.ok(!have.includes("FLOW_FRAMEWORK_CLOUD_KEY") && !have.includes("FLOW_FRAMEWORK_TRACES_KEY") && have.includes("FLOW_MESSAGING_KEY") && have.includes("FLOW_KEY"));
+  const dotenv = readFileSync(join(cwd, ".env"), "utf8");
+  assert.match(dotenv, new RegExp(`^FLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}$`, "m"));
+  assert.match(dotenv, new RegExp(`^FLOW_FRAMEWORK_TRACES_KEY=${KEYS.traces_key}$`, "m"));
+  assert.match(dotenv, /^FLOW_MESSAGING_KEY=fk_old$/m);
+  assert.match(dotenv, new RegExp(`^FLOW_KEY=${OLD}$`, "m"));
+
+  const other = await flowServer([], 200, { setup: { workspace_id: "acc_other", workspace_name: "Other" } });
+  t.after(other.close);
+  assert.equal((await run(["setup", "--workspace", "Other", "--rotate", "key"], { url: other.url, config: temp(), cwd, env })).code, 0);
+  assert.deepEqual(setupCall(other).body.rotate, ["flow_key", "cloud_key", "traces_key"], "a move from a kept workspace too, beside --rotate");
+  assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_FRAMEWORK_WORKSPACE=acc_other$/m);
+});
+
+test("link --workspace in a folder set up already runs setup again in that workspace", async (t) => {
+  const flow = await flowServer([], 200, { setup: TEAM });
+  t.after(flow.close);
+  const cwd = agentDir();
+  writeFileSync(join(cwd, ".env"), `FLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\n`);
+  const linked = await run(["link", "--workspace", "Team", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(linked.code, 0, linked.err);
+  assert.equal(setupCall(flow).body.workspace, "Team");
+  assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_FRAMEWORK_WORKSPACE=acc_team1$/m);
+});
+
+test("setup --workspace against a flow.engineer that answers no workspace_id keeps the keys, stores no workspace and says so (exit 3)", async (t) => {
+  const flow = await flowServer();
+  t.after(flow.close);
+  const cwd = agentDir();
+  const result = await run(["setup", "--workspace", "Team", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(result.code, 3);
+  assert.equal(result.lines.at(-1)!.error.code, "workspace_unsupported");
+  assert.match(result.err, /flow\.engineer does not support --workspace yet; the agent was set up in your personal workspace\./);
+  const dotenv = readFileSync(join(cwd, ".env"), "utf8");
+  assert.match(dotenv, /^FLOW_FRAMEWORK_CLOUD_KEY=/m);
+  assert.ok(!dotenv.includes("FLOW_FRAMEWORK_WORKSPACE"));
+});
+
+test("setup --workspace refused (403 not_a_member, 409 workspace_ambiguous) shows the server's description and next and exits 3; a bad value is a usage error", async (t) => {
+  for (const [status, code, next] of [[403, "not_a_member", "https://flow.engineer/dashboard"], [409, "workspace_ambiguous", "npx @flow-engineer/flow setup --workspace acc_team1"]] as const) {
+    const flow = await flowServer([], 200, { setupError: { status, body: { error: code, error_description: `Refused for ${code}.`, next } } });
+    t.after(flow.close);
+    const cwd = agentDir();
+    const result = await run(["setup", "--workspace", "Team", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+    assert.equal(result.code, 3);
+    assert.equal(result.lines.at(-1)!.error.code, code);
+    assert.equal(result.lines.at(-1)!.error.next, next);
+    assert.match(result.err, new RegExp(`Refused for ${code}\\. Next: ${next.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}`));
+    assert.ok(!existsSync(join(cwd, ".env")));
+  }
+  const flow = await flowServer();
+  t.after(flow.close);
+  assert.equal((await run(["setup", "--workspace", ""], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } })).code, 1);
+  assert.equal((await run(["link", "--workspace", "x".repeat(101)], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } })).code, 1);
+});
