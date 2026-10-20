@@ -4,7 +4,7 @@
 // live or refused, and secrets sent with their names printed and their values never.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -21,7 +21,7 @@ interface Call {
 }
 
 /** A fake cloud: the routes `flow deploy` calls, a deploy that builds once then ends as `ending`. */
-async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean } = {}) {
+async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean; neverDeployed?: boolean } = {}) {
   const calls: Call[] = [];
   let looks = 0;
   const server = createServer(async (req, res) => {
@@ -51,6 +51,8 @@ async function cloud(options: { ending?: "live" | "refused"; address?: boolean; 
     }
     if (req.method === "PUT" && path.startsWith("/v1/hosting/secrets/")) {
       const name = path.split("/").at(-1)!;
+      // As the host: an agent exists once its first deploy is made.
+      if (options.neverDeployed && !calls.some((c) => c.method === "POST" && c.path === "/v1/hosting/deploys")) return send(404, { error: { code: "not_found", message: "this agent has never been deployed" } });
       if (name === options.refuseSecret) return send(400, { error: { code: "invalid_request", message: `${name} is set by Flow` } });
       return send(200, { name, last4: "abcd" });
     }
@@ -143,7 +145,7 @@ test("a refused deploy prints the lint's errors and exits 1", async () => {
 
 test("promote moves staging's live version to production", async () => {
   const fake = await cloud();
-  const { code, printed } = await run(["promote"], { CHINWAG_CLOUD_KEY: "oci_old", CHINWAG_CLOUD: fake.url });
+  const { code, printed } = await run(["promote", "--dir", agentFolder()], { CHINWAG_CLOUD_KEY: "oci_old", CHINWAG_CLOUD: fake.url });
   assert.equal(code, 0, printed);
   assert.equal(fake.calls[0]!.path, "/v1/hosting/promote");
   assert.equal(fake.calls[0]!.auth, "Bearer oci_old", "the older names still work");
@@ -263,4 +265,89 @@ test("logs on a Flow without the logs route says it is not available yet", async
   assert.equal(code, 1);
   assert.equal(JSON.parse(stdout).error.code, "not_available");
   assert.match(printed, /Logs are not available on this Flow yet/);
+});
+
+const route = (calls: Call[]) => calls.map((c) => `${c.method} ${c.path.split("?")[0]}`);
+
+test("a first deploy sends the .env's values as secrets before the build starts, printing names only", async () => {
+  const fake = await cloud({ neverDeployed: true });
+  const dir = agentFolder("FLOW_FRAMEWORK_CLOUD_KEY=oci_key\nANTHROPIC_API_KEY=sk-ant-secret-value\nFLOW_FRAMEWORK_TRACES_KEY=tk_1\nEMPTY=\n");
+  const { code, printed } = await run(["--dir", dir, "--version", "v1"], { FLOW_FRAMEWORK_CLOUD: fake.url });
+  assert.equal(code, 0, printed);
+  assert.deepEqual(route(fake.calls).slice(0, 4), ["POST /v1/hosting/deploys", "PUT /v1/hosting/secrets/ANTHROPIC_API_KEY", "PUT /upload/hdp_1", "POST /v1/hosting/deploys/hdp_1/start"]);
+  assert.deepEqual(fake.calls[1]!.body, { environment: "staging", value: "sk-ant-secret-value" });
+  assert.match(printed, /Sent 1 secret from \.env to staging: ANTHROPIC_API_KEY\./);
+  assert.ok(!printed.includes("sk-ant-secret-value") && !printed.includes("oci_key"), "no value is printed");
+  const kept = readFileSync(join(dir, ".flow", "secrets.json"), "utf8");
+  assert.ok(!kept.includes("sk-ant-secret-value") && kept.includes("ANTHROPIC_API_KEY"), "a hash per name, never the value");
+  assert.doesNotMatch(printed, /secrets --from-env/);
+
+  // The next deploy sends only what is new or changed.
+  const again = await cloud();
+  writeFileSync(join(dir, ".env"), "FLOW_FRAMEWORK_CLOUD_KEY=oci_key\nANTHROPIC_API_KEY=sk-ant-secret-value\nNEW_ONE=x\n");
+  assert.equal((await run(["--dir", dir, "--version", "v2"], { FLOW_FRAMEWORK_CLOUD: again.url })).code, 0);
+  assert.deepEqual(again.calls.filter((c) => c.path.startsWith("/v1/hosting/secrets/")).map((c) => c.path.split("/").at(-1)), ["NEW_ONE"]);
+  const third = await cloud();
+  writeFileSync(join(dir, ".env"), "FLOW_FRAMEWORK_CLOUD_KEY=oci_key\nANTHROPIC_API_KEY=changed\nNEW_ONE=x\n");
+  assert.equal((await run(["--dir", dir, "--version", "v3"], { FLOW_FRAMEWORK_CLOUD: third.url })).code, 0);
+  assert.deepEqual(third.calls.filter((c) => c.path.startsWith("/v1/hosting/secrets/")).map((c) => c.path.split("/").at(-1)), ["ANTHROPIC_API_KEY"]);
+});
+
+test("deploy --no-secrets sends none; a refused secret stops the deploy before it starts", async () => {
+  const fake = await cloud();
+  const dir = agentFolder("ANTHROPIC_API_KEY=sk-1\n");
+  assert.equal((await run(["--dir", dir, "--no-secrets"], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url })).code, 0);
+  assert.ok(!fake.calls.some((c) => c.path.startsWith("/v1/hosting/secrets/")));
+
+  const bad = await cloud({ refuseSecret: "OPENAI_API_KEY" });
+  const other = agentFolder("OPENAI_API_KEY=sk-2\n");
+  const { code, printed } = await run(["--dir", other], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: bad.url });
+  assert.equal(code, 1);
+  assert.match(printed, /OPENAI_API_KEY could not be saved as a secret .*did not start/);
+  assert.ok(!bad.calls.some((c) => c.path.endsWith("/start")));
+  assert.ok(!printed.includes("sk-2"));
+});
+
+test("secrets --from-env before any deploy says why on stderr, points at flow deploy and exits 1", async () => {
+  const fake = await cloud({ neverDeployed: true });
+  const dir = agentFolder("ANTHROPIC_API_KEY=sk-1\n");
+  const plain = await run(["secrets", "--from-env", "--dir", dir], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url });
+  assert.equal(plain.code, 1);
+  assert.match(plain.printed, /Refused: this agent has not been deployed yet/);
+  assert.match(plain.printed, /Next: npx @flow-engineer\/flow deploy \(it sends/);
+  const json = await run(["secrets", "--from-env", "--dir", dir, "--json"], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url });
+  assert.equal(json.code, 1);
+  const answer = JSON.parse(json.stdout);
+  assert.equal(answer.ok, false);
+  assert.equal(answer.refused[0].name, "ANTHROPIC_API_KEY");
+  assert.ok(!json.printed.includes("sk-1"));
+});
+
+test("the version is the commit, with +dirty and a warning when the folder has uncommitted changes", async () => {
+  const dir = agentFolder();
+  writeFileSync(join(dir, ".gitignore"), "node_modules\n.flow\n.env*\n");
+  const git = (...a: string[]) => execFileSync("git", ["-C", dir, ...a], { stdio: "pipe" }).toString().trim();
+  git("init", "-q");
+  git("add", ".");
+  git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init");
+  const sha = git("rev-parse", "--short", "HEAD");
+  const clean = await cloud();
+  assert.equal((await run(["--dir", dir], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: clean.url })).code, 0);
+  assert.equal(clean.calls[0]!.body!.version, sha);
+  writeFileSync(join(dir, "src", "agent.ts"), "export function buildAgent() { return 1; }");
+  const dirty = await cloud();
+  const { printed } = await run(["--dir", dir], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: dirty.url });
+  assert.equal(dirty.calls[0]!.body!.version, `${sha}+dirty`);
+  assert.match(printed, /deploying uncommitted changes; commit first so the version names what runs/);
+  const named = await cloud();
+  await run(["--dir", dir, "--version", "mine"], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: named.url });
+  assert.equal(named.calls[0]!.body!.version, "mine");
+});
+
+test("promote sends the .env's new or changed values to production first", async () => {
+  const fake = await cloud();
+  const dir = agentFolder("ANTHROPIC_API_KEY=sk-1\n");
+  assert.equal((await run(["promote", "--dir", dir], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url })).code, 0);
+  assert.deepEqual(route(fake.calls).slice(0, 2), ["PUT /v1/hosting/secrets/ANTHROPIC_API_KEY", "POST /v1/hosting/promote"]);
+  assert.equal(fake.calls[0]!.body!.environment, "production");
 });

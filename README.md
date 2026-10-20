@@ -50,7 +50,7 @@ Test it first in the playground (the link `npm start` prints: the test people an
 
 **Stability.** 0.x: the CLI's commands, `--json` fields and exit codes in [docs/agents.md](docs/agents.md) stay compatible within 0.2.x; a breaking change comes with a minor version bump and a release note. Pin the version in `package.json` for production.
 
-**Host it.** `npx @flow-engineer/flow deploy` puts the agent on Flow's hosting, so it keeps answering while the laptop sleeps: staging first, then `deploy promote` to production; `deploy secrets --from-env .env` sends its keys as secrets. `deploy status` shows what is live and its URL, `flow logs` its log lines. It needs the agent's CI key (`FLOW_FRAMEWORK_CLOUD_KEY`, which `flow setup` writes) and a `buildAgent` that passes `options.host` on to `createAgent` ([docs/agents.md](docs/agents.md), "Host it").
+**Host it.** `npx @flow-engineer/flow deploy` puts the agent on Flow's hosting, so it keeps answering while the laptop sleeps: staging first, then `deploy promote` to production; it sends the `.env`'s keys as the agent's secrets itself. `deploy status` shows what is live and its URL, `flow logs` its log lines. It needs the agent's CI key (`FLOW_FRAMEWORK_CLOUD_KEY`, which `flow setup` writes) and a `buildAgent` that passes `options.host` on to `createAgent` ([docs/agents.md](docs/agents.md), "Host it").
 
 ### In a folder of your own
 
