@@ -31,6 +31,23 @@ export interface ReportRun {
   turns: number | null;
   watch: string | null;
   failedChecks: Array<{ kind: string; text: string; reason: string }>;
+  /** The scenario file the cloud could not play and what is wrong in it (error scenario_invalid); else null. */
+  invalid: { path: string; reason: string } | null;
+}
+
+/** A scenario the cloud could not play, once per scenario. */
+export interface InvalidScenario {
+  scenario: string;
+  path: string;
+  reason: string;
+}
+
+/** The cloud ended the whole session scenario_invalid: what it said after the code (null when nothing),
+ * whether that looks like a cloud older than this client, and the scenario files this session sent. */
+export interface SessionInvalid {
+  reason: string | null;
+  olderCloud: boolean;
+  sent: Array<{ scenario: string; path: string }>;
 }
 
 /** `flow test --json`: one document on stdout, whatever the exit. */
@@ -47,6 +64,10 @@ export interface JsonReport {
   counts: { runs: number; passed: number; failed: number; errored: number; notPlayed: number };
   costUsd: { agent: number; test: number };
   runs: ReportRun[];
+  /** Each scenario the cloud could not play; the other scenarios played. */
+  invalid: InvalidScenario[];
+  /** Set when the cloud ended the whole session scenario_invalid; else null. */
+  sessionInvalid: SessionInvalid | null;
 }
 
 /** A run's verdict: errored when the cloud names an error for it or ended it run_failed, since the cloud
@@ -79,6 +100,46 @@ export function stoppedOutcome(error: unknown, opened: boolean): Outcome {
   if (isTransportFailure(error) || networkCode(error)) return "transport";
   // Something on this machine: the agent would not build before the open, or broke the session after it.
   return opened ? "failed" : "invalid";
+}
+
+/** The scenarios the cloud could not play, once each, from the runs it reported (a run per channel and --runs). */
+export function invalidScenarios(runs: Array<{ scenario: string; invalid?: { path: string; reason: string } | null }>): InvalidScenario[] {
+  const out = new Map<string, InvalidScenario>();
+  for (const r of runs) if (r.invalid) out.set(`${r.scenario}\n${r.invalid.path}`, { scenario: r.scenario, path: r.invalid.path, reason: r.invalid.reason });
+  return [...out.values()];
+}
+
+/** The lines that name each scenario the cloud could not play. */
+export function invalidLines(invalid: InvalidScenario[]): string[] {
+  if (!invalid.length) return [];
+  const lines = [`${invalid.length} ${invalid.length === 1 ? "scenario" : "scenarios"} could not be played (fix ${invalid.length === 1 ? "it" : "them"} and run again):`];
+  for (const i of invalid) lines.push(`  ${i.scenario}: ${i.path}: ${i.reason}${unsupported(i.reason)}`);
+  return lines;
+}
+
+/** A reason naming a key the cloud does not know: the client may be newer than the cloud. */
+export function unsupported(reason: string): string {
+  return reason.startsWith("unsupported: ") ? " (the test cloud does not know this key; it may be older than this client)" : "";
+}
+
+/** A session the cloud ended scenario_invalid; null for any other stop. A tools/ or checks/ file with
+ * its reason is the suite's own problem; anything else (no reason, or a scenario, which a current
+ * cloud reports as that scenario's run) suggests a cloud older than this client. */
+export function sessionInvalid(error: unknown, sent: Array<{ scenario: string; path: string }>): SessionInvalid | null {
+  if (!(error instanceof CloudEnded)) return null;
+  const match = /^scenario_invalid(?::\s*(.*))?$/s.exec(error.error.trim());
+  if (!match) return null;
+  const reason = match[1]?.trim() || null;
+  const suiteFile = reason !== null && /^(?:\S*\/)?(?:tools|checks)\/[^:]+:\s*\S/.test(reason);
+  return { reason, olderCloud: !suiteFile, sent };
+}
+
+/** The lines that say why the session ended scenario_invalid. */
+export function sessionInvalidLines(info: SessionInvalid): string[] {
+  const lines = [`The test cloud could not play this suite${info.reason ? `: ${info.reason}` : " and gave no reason."}`];
+  if (info.olderCloud) lines.push("the test cloud may be older than this client");
+  lines.push(`Scenarios sent: ${info.sent.map((s) => `${s.scenario} (${s.path})`).join(", ") || "none"}`);
+  return lines;
 }
 
 /** The error as the JSON report says it: the cloud's status, code and Retry-After when it answered. */

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import { RESULTS_DIR, resultsFile } from "../../src/names.ts";
-import { loadEnv } from "./report.ts";
+import { loadEnv, type SessionInvalid } from "./report.ts";
 
 /** Where every session's results go, in the agent's folder; `flow new` git-ignores .flow/. */
 export const LAST_SESSION = join(RESULTS_DIR, "last-session.json");
@@ -41,7 +41,12 @@ export interface LastSession {
     /** The checks as the test file says them, with the judge's reason. The file is local and
      * git-ignored, and the suite is synthetic by attestation; the messages themselves are never kept. */
     failedChecks: Array<{ kind: string; text: string; reason?: string }>;
+    /** The scenario file the cloud could not play and what is wrong in it (error scenario_invalid). */
+    invalid?: { path: string; reason: string };
   }>;
+  /** The cloud ended the whole session scenario_invalid: its reason, whether the cloud looks older
+   * than the client, and the scenario files sent. */
+  sessionInvalid?: SessionInvalid;
 }
 
 export const SHOW_LINE = `  flow show <run-id|last> [--json]

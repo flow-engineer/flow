@@ -37,7 +37,7 @@ import { CHAT_LINE, chatCli } from "./chat.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
-import { EXIT, finishedOutcome, loadEnv, networkCode, reportError, runVerdict, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type Verdict } from "./report.ts";
+import { EXIT, finishedOutcome, invalidLines, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
 import type { RunSummary } from "./protocol.ts";
@@ -100,7 +100,7 @@ Exit status:
 Results: once the session has opened, every exit writes .flow/last-session.json in the agent's
 folder: the session id, the cloud's agent id, dashboard link, suite hash and time, and per run its
 scenario, channel, number, run id, verdict (passed, failed, errored or not_played) and failed checks
-with the judge's reasons. Never the messages. The folder is git-ignored and the suite synthetic.
+with the judge's reasons (and, for a scenario the cloud could not play, its file and what is wrong). Never the messages. The folder is git-ignored and the suite synthetic.
 
 Environment (also read from the agent folder's .env, or --dotenv; variables already set win;
 the CHINWAG_ names from before the rename still work):
@@ -249,6 +249,8 @@ let sessionId = "";
 let dashboard = "";
 let agentId = "";
 const seen: RunSummary[] = [];
+/** Set when the cloud ended the whole session scenario_invalid. */
+let endedInvalid: SessionInvalid | null = null;
 
 if (command !== undefined && (command !== "test" || rest.length)) invalid(`flow: unknown command "${positionals.join(" ")}".\n\n${USAGE}`);
 
@@ -375,6 +377,8 @@ try {
     end("transport", { received: error.runs, error: reportError(error, reason) });
   }
   console.error(reason);
+  endedInvalid = sessionInvalid(error, files.filter((f) => f.path.startsWith("scenarios/")).map((f) => ({ scenario: f.path.slice("scenarios/".length, -".yaml".length), path: f.path })));
+  if (endedInvalid) for (const line of sessionInvalidLines(endedInvalid)) console.error(line);
   // The cloud stopped a session that had opened: what finished is kept, the rest is not_played.
   saveSession("stopped", seen, dashboard, console.error);
   end(stoppedOutcome(error, sessionId !== ""), { received: seen, error: reportError(error, reason) });
@@ -396,6 +400,7 @@ for (const channel of [...new Set(summary.runs.map((r) => r.channel))]) {
   const runs = summary.runs.filter((r) => r.channel === channel);
   say(`  ${channel}: ${runs.filter((r) => runVerdict(r) === "passed").length} of ${runs.length} passed`);
 }
+for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m) => ({ scenario: m.scenario, invalid: m.summary?.invalid }))))) say(line);
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
 say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
 sessionId = summary.sessionId || sessionId;
@@ -437,8 +442,10 @@ function mergedRuns(received: RunSummary[]): Merged[] {
     fileOf.set(scenario.id, id);
     for (let run = 1; run <= perScenario; run++) {
       for (const channel of scenario.channels) {
-        const r = byRun.get(key(scenario.id, channel, run));
+        // A scenario the cloud could not read is named by its file, not its id.
+        const r = byRun.get(key(scenario.id, channel, run)) ?? byRun.get(key(id, channel, run));
         byRun.delete(key(scenario.id, channel, run));
+        if (r) byRun.delete(key(r.scenario, channel, run));
         out.push(r ? merged(id, r) : { scenario: id, channel, run, verdict: "not_played" });
       }
     }
@@ -471,7 +478,9 @@ function saveSession(ended: Ended, received: RunSummary[], link: string, print: 
       runId: m.summary?.runId ?? null,
       verdict: m.verdict,
       failedChecks: failedChecks(m.summary),
+      ...(m.summary?.invalid ? { invalid: m.summary.invalid } : {}),
     })),
+    ...(endedInvalid ? { sessionInvalid: endedInvalid } : {}),
   };
   const path = join(dir, LAST_SESSION);
   try {
@@ -501,6 +510,7 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       turns: m.summary?.turns ?? null,
       watch: m.summary?.watch || null,
       failedChecks: failedChecks(m.summary),
+      invalid: m.summary?.invalid ?? null,
     })) : [];
     const count = (verdict: Verdict) => runs.filter((r) => r.verdict === verdict).length;
     const cost = (pick: (r: RunSummary) => number) => received.reduce((n, r) => n + pick(r), 0);
@@ -516,6 +526,8 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       counts: { runs: runs.length, passed: count("passed"), failed: count("failed"), errored: count("errored"), notPlayed: count("not_played") },
       costUsd: { agent: cost((r) => r.agentUsage.costUsd), test: cost((r) => r.testUsage.costUsd) },
       runs,
+      invalid: invalidScenarios(runs),
+      sessionInvalid: endedInvalid,
     };
     writeAll(`${JSON.stringify(report)}\n`);
   }

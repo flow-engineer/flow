@@ -1,4 +1,4 @@
-// covers: testing/src/cli.ts testing/src/suite.ts testing/src/client.ts testing/src/report.ts testing/src/show.ts
+// covers: testing/src/cli.ts testing/src/suite.ts testing/src/client.ts testing/src/report.ts testing/src/show.ts testing/src/print-run.ts testing/src/protocol.ts
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -257,9 +257,11 @@ test("with --json, every exit prints one report on stdout and every other line o
     counts: { runs: 2, passed: 1, failed: 1, errored: 0, notPlayed: 0 },
     costUsd: { agent: 0.5, test: 0.5 },
     runs: [
-      { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }] },
-      { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [] },
+      { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }], invalid: null },
+      { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [], invalid: null },
     ],
+    invalid: [],
+    sessionInvalid: null,
   });
   // The results file agrees with the report, and keeps the cloud's agent id for flow show.
   const last = lastSession(dir);
@@ -310,6 +312,51 @@ test("a run the cloud names an error for is errored, whatever it ended as: ERROR
   try {
     assert.equal((await cliStreams(["test", "--cloud", mixed.url], dir)).code, 1);
   } finally { mixed.close(); }
+});
+
+test("a scenario the cloud could not play is named with its file and reason, and a session it ended scenario_invalid says why, what was sent and that the cloud may be older; both exit 2", { timeout: 20_000 }, async () => {
+  const dir = agentDir({ b: scenarioYaml("bee", "sms") });
+  // The cloud names the run by the file it could not read; the other scenario plays.
+  const bad = runOf({
+    runId: "trn_2", scenario: "b", ended: "run_failed", error: "scenario_invalid", turns: 0,
+    checks: [{ kind: "measured", text: "The scenario can be played", pass: false, reason: "scenarios/b.yaml: unsupported: person.mood" }],
+    invalid: { path: "scenarios/b.yaml", reason: "unsupported: person.mood" },
+  });
+  const runs = [runOf({ runId: "trn_1", scenario: "hello", passed: true, ended: "goal_met" }), bad];
+  const local = await cloud(false, [{ type: "finished", summary: { sessionId: "s1", suiteHash: "h", testModel: "m", runs, dashboard: "http://dash/s1" } }], "s1");
+  let result;
+  try {
+    result = await cliStreams(["test", "--cloud", local.url, "--json"], dir);
+  } finally { local.close(); }
+  assert.equal(result.code, 2, result.out);
+  assert.match(result.stderr, /^INVALID {2}b #1 \(sms\) trn_2: the cloud could not play this scenario: scenarios\/b\.yaml: unsupported: person\.mood \(the test cloud does not know this key; it may be older than this client\)$/m);
+  assert.match(result.stderr, /^1 scenario could not be played \(fix it and run again\):\n {2}b: scenarios\/b\.yaml: unsupported: person\.mood/m);
+  const report = JSON.parse(result.stdout);
+  assert.deepEqual([report.outcome, report.counts.errored, report.counts.notPlayed, report.sessionInvalid], ["errored", 1, 0, null]);
+  assert.deepEqual(report.runs.map((r: { scenario: string; error: string | null; invalid: unknown }) => [r.scenario, r.error, r.invalid]), [["b", "scenario_invalid", { path: "scenarios/b.yaml", reason: "unsupported: person.mood" }], ["hello", null, null]]);
+  assert.deepEqual(report.invalid, [{ scenario: "b", path: "scenarios/b.yaml", reason: "unsupported: person.mood" }]);
+  assert.deepEqual(lastSession(dir).runs[0].invalid, { path: "scenarios/b.yaml", reason: "unsupported: person.mood" });
+
+  // An older cloud ends the whole session, with or without a reason; a tools file is the suite's own problem.
+  const sent = [{ scenario: "b", path: "scenarios/b.yaml" }, { scenario: "hello", path: "scenarios/hello.yaml" }];
+  for (const [error, reason, olderCloud] of [
+    ["scenario_invalid", null, true],
+    ["scenario_invalid: scenarios/b.yaml", "scenarios/b.yaml", true],
+    ["scenario_invalid: tools/orders.yaml: unknown field fails", "tools/orders.yaml: unknown field fails", false],
+  ] as const) {
+    const ended = await cloud(false, [{ type: "failed", error }], "s2");
+    let stopped;
+    try {
+      stopped = await cliStreams(["test", "--cloud", ended.url, "--json"], dir);
+    } finally { ended.close(); }
+    assert.equal(stopped.code, 2, stopped.out);
+    assert.match(stopped.stderr, new RegExp(`^The test cloud could not play this suite${reason ? `: ${reason.replace(/[.]/g, "\\.")}$` : " and gave no reason\\.$"}`, "m"));
+    assert.equal(/^the test cloud may be older than this client$/m.test(stopped.stderr), olderCloud, stopped.stderr);
+    assert.match(stopped.stderr, /^Scenarios sent: b \(scenarios\/b\.yaml\), hello \(scenarios\/hello\.yaml\)$/m);
+    const json = JSON.parse(stopped.stdout);
+    assert.deepEqual([json.outcome, json.error.type, json.sessionInvalid], ["errored", reason ? "scenario_invalid" : null, { reason, olderCloud, sent }]);
+    assert.deepEqual(lastSession(dir).sessionInvalid, { reason, olderCloud, sent });
+  }
 });
 
 test("an agent that fails to build exits 1 and prints only the message", { timeout: 15_000 }, async () => {

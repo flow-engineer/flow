@@ -62,9 +62,12 @@ type OpenAnswer = Opened & { agent?: string };
  * code (`capacity: ...` gives capacity), when it starts with one. */
 export class CloudEnded extends Error {
   readonly code?: string;
+  /** The cloud's error as it sent it. */
+  readonly error: string;
   constructor(error: string) {
     super(`the cloud stopped the session: ${error}`);
     this.name = "CloudEnded";
+    this.error = error;
     this.code = /^([a-z_]+):/.exec(error)?.[1];
   }
 }

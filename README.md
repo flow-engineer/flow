@@ -408,12 +408,17 @@ Each run's line carries its id (`FAIL  latte-correction #1 (whatsapp) trn_…: 6
   "runs": [
     { "runId": "trn_…", "scenario": "latte-correction", "channel": "whatsapp", "run": 1, "verdict": "failed",
       "error": null, "ended": "goal_met", "turns": 6, "watch": "https://…",
-      "failedChecks": [{ "kind": "judge", "text": "The agent asks Sam to confirm before placing the order.", "reason": "…" }] }
-  ]
+      "failedChecks": [{ "kind": "judge", "text": "The agent asks Sam to confirm before placing the order.", "reason": "…" }],
+      "invalid": null }
+  ],
+  "invalid": [],
+  "sessionInvalid": null
 }
 ```
 
 `outcome` is `passed` (exit 0), `failed` or `invalid` (1), `errored` or `transport` (2), `refused` (3) or `interrupted` (130). A run's `verdict` is `errored` whenever the cloud names an `error` for it (such as `judge_failed`, `simulator_failed` or `spend_cap`), whatever it `ended` as: the cloud could not play or judge it, so it says nothing about the agent. Its line reads `ERROR` instead of `PASS` or `FAIL`, and the run's `error` is that code (else `null`). `error` is `{ "message", "status", "type", "retryAfterSeconds" }` when the session did not finish (`type` is the cloud's code, such as `spend_cap`; the others are `null` when it did not say).
+
+A scenario the cloud cannot play (a key it does not know, a value it cannot read) does not stop the others: its runs are `errored` with `error` `scenario_invalid` and `invalid` `{ "path", "reason" }` (the reason starts `unsupported:` when the cloud does not know a key), its line reads `INVALID` with the file and what is wrong, and the top-level `invalid` lists each such scenario once as `{ "scenario", "path", "reason" }`. When the cloud ends the whole session `scenario_invalid` (a tools or checks file it cannot read, or an older cloud), `sessionInvalid` is `{ "reason", "olderCloud", "sent" }`: what the cloud said after the code (else `null`), whether that suggests a cloud older than this client, and the scenarios sent as `{ "scenario", "path" }`; the same lines are printed.
 
 `--only latte-correction,order-fails` runs only those scenarios (file names without `.yaml`); every tool file still goes. Once the session has opened, every exit (0, 1, 2, 3 or 130) writes `.flow/last-session.json` in the agent's folder and prints its path; `flow new` git-ignores `.flow/`. It holds what each run ended as and the judge's reasons, never the messages (a reason can quote one, which is why the file stays on your machine; the suite is synthetic by `--synthetic`):
 
@@ -428,6 +433,8 @@ Each run's line carries its id (`FAIL  latte-correction #1 (whatsapp) trn_…: 6
   ]
 }
 ```
+
+A run of a scenario the cloud could not play also has `invalid` (`{ "path", "reason" }`), and a session the cloud ended `scenario_invalid` has `sessionInvalid`, as in `--json`.
 
 `ended` is `finished`, `stopped` (the session broke off or the cloud stopped it) or `interrupted`. `agent` is the cloud's id for the agent (a hosted cloud names it), which `flow show` reads. `only` is the scenarios the session was limited to, `null` for the whole suite. `verdict` is `passed`, `failed`, `errored` (the cloud could not play or judge the run) or `not_played` (the session ended first; its `runId` is `null`).
 
