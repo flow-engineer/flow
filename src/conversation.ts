@@ -99,6 +99,10 @@ export interface ConversationSettings {
   settle(target: { run?: string; nudge?: string }, status: string, reason?: string): Promise<void>;
   /** A window-closed prompt nudge the agent sent no template for: held until they reply, and the fallback goes. */
   windowClosed(nudge: string, to: { channel: string; address: string }): Promise<void>;
+  /** This process among the agent's runners: it holds a conversation's lease while working on it. */
+  runner: string;
+  /** Another runner holds the conversation, or held it since this copy was read: the agent drops this copy, and reads it again (`again`) when this runner holds it now. */
+  away(conversation: Conversation, again: boolean): void;
 }
 
 /** One channel this person writes on, and how to reach them there. */
@@ -119,6 +123,10 @@ const ACKNOWLEDGE_FIRST =
   "(react to their message or send a short line) and make your tool calls again.";
 const INTERRUPTED = "[Chinwag] Cut off by a restart: this may or may not have happened. Check before you rely on it.";
 const APOLOGY = "Sorry, something went wrong on my side. Could you send that again?";
+/** How long a runner holds a conversation without renewing (ms), and how often it renews while busy. */
+export const LEASE_MS = 15_000;
+const RENEW_MS = 5_000;
+let leaseWarned = false;
 const EARLIER = "[Chinwag] Older messages of this conversation are no longer shown to you.";
 const NOT_SHOWN = "[Chinwag] You are no longer shown the photos or documents in these messages; ask them to send one again if you need it.";
 
@@ -291,6 +299,15 @@ export class Conversation {
   private leftOut = 0;
   /** They texted STOP (as of the latest look): what the business starts is dropped, with no model call. */
   private stop: NoContactRow | null = null;
+  /**
+   * The lease's epoch this copy was read under: 0 for a conversation new here (no runner held it
+   * yet). Another epoch at a claim means another runner worked on it since: this copy is stale.
+   */
+  private epoch = 0;
+  /** This runner holds the lease and renews it while busy. */
+  private renewal: ReturnType<typeof setInterval> | null = null;
+  /** Another runner has it: this copy runs nothing more (its writes still finish), and the agent drops it. */
+  private gone = false;
 
   constructor(id: string, personKey: string, settings: ConversationSettings, existing: ConversationRow | null = null) {
     this.id = id;
@@ -320,7 +337,7 @@ export class Conversation {
     if (offered.length) builtins.push(this.templateTool(offered));
     this.builtins = new Map(builtins.map((t) => [t.name, t]));
     this.builtinSpecs = builtins.map(toSpec);
-    this.loaded = settings.ready.then(() => (existing ? this.load() : settings.store.createConversation(id, personKey)));
+    this.loaded = settings.ready.then(() => (existing ? this.claimAndLoad() : settings.store.createConversation(id, personKey)));
     this.writes = this.loaded.catch((error) => console.warn("flow: conversation %s did not load:", id, error));
   }
 
@@ -688,6 +705,8 @@ export class Conversation {
    */
   close(): void {
     this.closed = true;
+    if (this.renewal) clearInterval(this.renewal);
+    this.renewal = null;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.pending = [];
@@ -707,6 +726,106 @@ export class Conversation {
     );
     this.writes = next;
     return next;
+  }
+
+  /** Reads the conversation only while this runner holds it, so no other runner adds to it meanwhile. */
+  private async claimAndLoad(): Promise<void> {
+    const lease = await this.hold(true);
+    if (lease === "elsewhere") return this.leave(false);
+    await this.load();
+    if (!this.busy) this.letGo();
+  }
+
+  /**
+   * Takes or renews the lease for this runner: "mine" to go on, "stale" when another runner had
+   * the conversation since this copy was read, "elsewhere" when another holds it now. A store with
+   * no leases (an older one) answers "mine", as before them.
+   */
+  private async claim(reading = false): Promise<"mine" | "stale" | "elsewhere"> {
+    const now = this.settings.now();
+    let epoch: number | null;
+    try {
+      epoch = await this.settings.store.claimConversation(this.id, this.settings.runner, now, now + LEASE_MS);
+    } catch (error) {
+      if (!leaseWarned) console.warn(`flow: runner ${this.settings.runner} could not take conversation ${this.id}'s lease; going on without it (later failures are not logged):`, error);
+      leaseWarned = true;
+      return "mine";
+    }
+    if (epoch === null) return "elsewhere";
+    // Reading it now, any epoch will do; a copy already read (or new here: epoch 0, fresh only if
+    // this runner is the first to hold it) is stale once another runner held it.
+    if (!reading && epoch !== (this.epoch || 1)) return "stale";
+    this.epoch = epoch;
+    return "mine";
+  }
+
+  /** Claims the lease and keeps renewing it while the conversation is busy. */
+  private async hold(reading = false): Promise<"mine" | "stale" | "elsewhere"> {
+    const lease = await this.claim(reading);
+    if (lease === "mine" && !this.renewal) {
+      this.renewal = setInterval(() => void this.renew(), RENEW_MS);
+      this.renewal.unref?.();
+    }
+    return lease;
+  }
+
+  private async renew(): Promise<void> {
+    if (!this.renewal) return;
+    if ((await this.claim()) === "mine") return;
+    // This runner stalled past its lease and another took the conversation: it stops here.
+    console.warn(`flow: runner ${this.settings.runner} lost conversation ${this.id} to another runner; it stops working on it`);
+    this.close();
+    this.leave(false);
+  }
+
+  /** Lets go of the lease once nothing runs or waits, so another runner may take the conversation at once. */
+  private letGo(): void {
+    if (!this.renewal) return;
+    clearInterval(this.renewal);
+    this.renewal = null;
+    if (this.closed) return;
+    const { store, runner } = this.settings;
+    void this.persist(() => store.releaseConversation(this.id, runner));
+  }
+
+  /** Another runner has the conversation: run nothing more here, and let the agent drop this copy. */
+  private leave(again: boolean): void {
+    this.gone = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    if (this.renewal) clearInterval(this.renewal);
+    this.renewal = null;
+    this.settings.away(this, again);
+  }
+
+  /** Takes the open inbox rows another runner stored for this conversation (it does not know them yet); true when there were any. */
+  private async takeOpen(): Promise<boolean> {
+    await this.writes;
+    let took = false;
+    let rows: InboxRow[];
+    try {
+      rows = await this.settings.store.openInbox(this.id);
+    } catch (error) {
+      console.warn(`flow: runner ${this.settings.runner} could not read conversation ${this.id}'s inbox:`, error);
+      return false;
+    }
+    for (const row of rows) {
+      if (this.knownInbox.has(row.id)) continue;
+      const p = row.payload as Record<string, any>;
+      if (row.kind === "message" && this.messageIds.get(p.id) === p.channel) {
+        this.knownInbox.add(row.id);
+        this.persist(() => this.settings.store.doneInbox([row.id]));
+        continue;
+      }
+      this.enqueue(row);
+      took = true;
+    }
+    return took;
+  }
+
+  /** Looks at the conversation again (the agent's periodic look at unfinished ones): runs what is waiting, if this runner can take it. */
+  poke(): void {
+    if (!this.gone && !this.closed && !this.busy) this.schedule(0);
   }
 
   /** Picks up where the conversation was: its history, events not yet handled, tools cut off. */
@@ -772,10 +891,15 @@ export class Conversation {
   }
 
   private async run(): Promise<void> {
-    if (this.running) return;
+    if (this.running || this.gone) return;
     this.running = true;
     try {
       await this.loaded;
+      if (this.gone) return;
+      const lease = await this.hold();
+      if (lease !== "mine") return void this.leave(lease === "stale");
+      // What other runners stored for it meanwhile (a message that reached them, a nudge).
+      await this.takeOpen();
       for (;;) {
         if (this.closed) break;
         if (this.unread() || this.notes.some((n) => !n.wait) || this.resumeTurn) {
@@ -792,7 +916,13 @@ export class Conversation {
           continue;
         }
         const next = this.direct.shift();
-        if (!next) break;
+        if (!next) {
+          // Rows another runner stored while this one worked; anything that came meanwhile; then it lets go.
+          if (this.closed) break;
+          const took = await this.takeOpen();
+          if (took || this.pending.length || this.direct.length || this.resumeTurn || this.notes.some((n) => !n.wait)) continue;
+          break;
+        }
         try {
           await this.sendDirect(next);
         } catch (error) {
@@ -826,6 +956,7 @@ export class Conversation {
 
   private checkIdle(): void {
     if (this.busy) return;
+    this.letGo();
     this.idleSince = Date.now();
     const waiting = this.settled;
     this.settled = [];

@@ -14,6 +14,7 @@
 // every send to it (replies, scheduled messages, nudges) goes back the same way.
 
 import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
 import { Conversation, PROFILE_TOOL, profileTool, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
@@ -185,6 +186,13 @@ export interface AgentOptions {
   /** The clock (tests move it). */
   now?: () => number;
   /**
+   * This process's name among the agent's runners (default FLOW_RUNNER, else the host's name),
+   * with a random suffix so each process differs. It is on every event, and on a conversation's
+   * lease: one runner works on a conversation at a time, even while two run on one database (a
+   * deploy's overlap); a runner that dies mid-turn leaves it to another after 15 s.
+   */
+  runner?: string;
+  /**
    * Work of your own that runs on the agent's clock: called (and awaited) each time due scheduled
    * messages are looked for (every `scheduleCheckMs`, and each `runDue()`), with the time now. A
    * test that moves the clock runs it at each step, so your own timers (held sends, reminders
@@ -341,6 +349,8 @@ export class Agent {
   private readonly options: AgentOptions;
   private readonly settings: ConversationSettings;
   private readonly store: StoreApi;
+  /** This process among the agent's runners (`runner`). */
+  readonly runner: string;
   private readonly startedAt = Date.now();
   /** Conversations in the store, known once resume() ran. */
   private readonly rows = new Map<string, ConversationRow>();
@@ -383,7 +393,8 @@ export class Agent {
     const tracing = options.traces ?? tracesFromEnv();
     this.traces = tracing ? traces(tracing, { service: options.id ?? "flow", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind }) : null;
     const sinks = [...(options.events ?? []), ...(this.traces ? [this.traces.sink] : [])];
-    const emit = emitter(sinks);
+    this.runner = `${options.runner ?? process.env.FLOW_RUNNER ?? hostname()}:${randomUUID().slice(0, 8)}`;
+    const emit = emitter(sinks, this.runner);
     if ((options.dir === undefined) === (options.files === undefined)) throw new Error("flow: give an agent exactly one of dir or files");
     const files = options.files ?? readAgentFolder(options.dir!);
     const skills = loadSkills(files);
@@ -416,6 +427,8 @@ export class Agent {
         shareUpdatesInstructions: typeof options.shareUpdates === "string" ? options.shareUpdates : undefined,
       },
       emit,
+      runner: this.runner,
+      away: (conversation, again) => this.away(conversation, again),
       store: this.store,
       ready: this.store.migrate(),
       now: this.now,
@@ -1122,6 +1135,7 @@ export class Agent {
     });
     // Awaited, so a caller that then waits for the conversation (a test moving the clock) sees the turn.
     await Promise.all(queued.map((q) => this.wake(q.conversationId, q.inbox)));
+    await this.lookAgain();
     await this.releaseHeld(now);
     if (this.options.onTick) await Promise.resolve().then(() => this.options.onTick!(now)).catch((error) => console.warn("flow: onTick:", error));
     await this.pruneMessageIds(now).catch((error) => console.warn("flow: pruning message ids:", error));
@@ -1163,6 +1177,49 @@ export class Agent {
       this.conversations.set(id, conversation);
     }
     return conversation;
+  }
+
+  /**
+   * Another runner has a conversation (or had it since this copy was read): the copy is dropped
+   * once its writes are in. `again`: this runner holds it now, so it is read again at once;
+   * otherwise the holder takes what is waiting, or lookAgain() does once its lease runs out.
+   */
+  private away(conversation: Conversation, again: boolean): void {
+    const id = conversation.id;
+    if (this.conversations.get(id) === conversation) this.conversations.delete(id);
+    if (!again) return;
+    void conversation
+      .stored()
+      .then(() => this.store.conversation(id))
+      .then((row) => {
+        if (row) this.rows.set(id, row);
+        if (!this.conversations.has(id)) this.open(id);
+      })
+      .catch((error) => console.warn(`flow: runner ${this.runner} could not read conversation ${id} again:`, error));
+  }
+
+  /**
+   * Conversations with work left (a turn cut off, inbox rows open), looked at again on the
+   * scheduled messages' timer: one another runner held until it died, or rows stored here while
+   * another runner worked on it, are taken once its lease is free.
+   */
+  private async lookAgain(): Promise<void> {
+    // Nudges waited on here that another runner's copy of the conversation settled.
+    for (const id of [...this.nudgeWaiters.keys()]) {
+      const row = await this.store.nudge(id);
+      if (row && row.status !== "queued") this.release(id, this.result(id, row.status, row.reason));
+    }
+    for (const id of await this.store.unfinished()) {
+      const resident = this.conversations.get(id);
+      if (resident) {
+        resident.poke();
+        continue;
+      }
+      const row = await this.store.conversation(id);
+      if (!row || this.conversations.has(id)) continue;
+      this.rows.set(id, row);
+      this.open(id);
+    }
   }
 
   /** An inbox row for a conversation: handed to it in memory, or found when it loads. */

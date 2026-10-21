@@ -195,8 +195,9 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   null without one: look them up in the backend by that, never by `context.person`.
 - With several channels the agent gets a send tool per channel (`send_sms`, `send_web`) and
   answers each message where it came. Don't add your own.
-- Run exactly one copy of the agent per database (one instance, kept warm, CPU always on): a
-  conversation lives in one process, so two copies would run overlapping turns for it.
+- Run exactly one copy of the agent per database (one instance, kept warm, CPU always on). A
+  conversation lives in one process at a time (its lease in the database), so the old and new
+  copy beside each other during a deploy never answer one message twice; events name their `runner`.
 - After a restart, `resume()` carries on: cut-off turns run again, background tools that were
   running are reported as interrupted (never rerun).
 - `agent.receive(conversationId, message, deliver)` still works for one channel at a time (the
