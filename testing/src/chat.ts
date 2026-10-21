@@ -15,6 +15,7 @@ import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import type { Agent, FlowEvent, Outbound, Photo } from "../../src/index.ts";
+import { replyButton } from "../../src/channels.ts";
 import { NO_MODEL_KEY } from "../../src/model.ts";
 import { loadEnv } from "./report.ts";
 
@@ -100,13 +101,13 @@ function print(outbound: Outbound, channel: string, json: boolean): void {
   if (outbound.type === "reaction") return void process.stdout.write(`agent reacted ${outbound.emoji}\n`);
   if (outbound.type === "template") return void process.stdout.write(`agent: [template ${outbound.name}]\n`);
   if (outbound.type === "carousel") {
-    const cards = outbound.cards.map((c) => `[card ${photoText(c.image)}${c.text ? ` ${c.text}` : ""}${c.link ? ` [${c.link.label}: ${c.link.url}]` : ""}${c.buttons ? ` ${c.buttons.map((b) => `[${b}]`).join(" ")}` : ""}]`);
+    const cards = outbound.cards.map((c) => `[card ${photoText(c.image)}${c.text ? ` ${c.text}` : ""}${c.link ? ` [${c.link.label}: ${c.link.url}]` : ""}${c.buttons ? ` ${c.buttons.map((b) => `[${replyButton(b).label}]`).join(" ")}` : ""}]`);
     return void process.stdout.write(`agent: ${[outbound.text, ...cards].join(" ")}\n`);
   }
   const extra = [
     outbound.image && `[photo ${photoText(outbound.image)}]`,
     outbound.link && `[${outbound.link.label}: ${outbound.link.url}]`,
-    outbound.buttons?.map((b) => `[${b}]`).join(" "),
+    outbound.buttons?.map((b) => `[${replyButton(b).label}]`).join(" "),
     outbound.list && `[${outbound.list.button}: ${outbound.list.rows.map((r) => r.title).join(" | ")}]`,
   ].filter(Boolean);
   process.stdout.write(`agent: ${[outbound.text, ...extra].filter(Boolean).join(" ")}\n`);

@@ -22,6 +22,8 @@ export interface PersonMessage {
   text: string;
   /** They tapped a button or list row. */
   choice?: boolean;
+  /** The id of what they tapped, when it is not its label. */
+  choiceId?: string;
 }
 
 /**
@@ -78,12 +80,18 @@ export interface ListRow {
 /** A photo by https URL, or by the provider's own id for a file it holds (Flow Messaging's file_..., WhatsApp's media id). */
 export type Photo = { url: string } | { fileId: string };
 
+/**
+ * A reply button: its label (the id a tap carries back is then the label), or an id and a label.
+ * Ids are 1 to 64 bytes and unique within a message and across a carousel; labels may repeat.
+ */
+export type ReplyButton = string | { id: string; label: string };
+
 /** One card of a carousel: its photo, a short text, and either reply buttons or one link button (the same kind and number on every card). */
 export interface CarouselCard {
   image: Photo;
   text?: string;
-  /** Reply buttons; a tap comes back as the person's message. */
-  buttons?: string[];
+  /** Reply buttons; a tap comes back as the person's message, with the button's id as `choice.id`. */
+  buttons?: ReplyButton[];
   /** One button that opens this https page. */
   link?: { label: string; url: string };
 }
@@ -97,8 +105,8 @@ export type Outbound =
       authentication?: boolean;
       /** The person's message this one quotes (channels with replies). */
       replyTo?: string;
-      /** Reply buttons; a tap comes back as the person's message. */
-      buttons?: string[];
+      /** Reply buttons; a tap comes back as the person's message, with the button's id as `choice.id`. */
+      buttons?: ReplyButton[];
       /** A list the person picks one row from. */
       list?: { button: string; rows: ListRow[] };
       /** A button that opens this https page; only on channels with linkButton (elsewhere Flow Framework puts the URL in the text). */
@@ -241,7 +249,7 @@ export interface Incoming {
   text: string;
   /** The message they replied to (theirs or the agent's), quoted. */
   replyTo?: { text: string; fromAgent: boolean };
-  /** They tapped a button or picked a list row rather than typing. */
+  /** They tapped a button or picked a list row rather than typing: its id (a button's, a row's) and its label. */
   choice?: { id?: string; title: string };
   /** Photos, voice notes and documents sent with it; `text` is then their caption, or "". */
   attachments?: Attachment[];

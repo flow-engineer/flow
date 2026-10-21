@@ -47,7 +47,7 @@ import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, Tim
 import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
-import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, SendContext, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
+import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 
 export interface ConversationSettings {
   model: Model;
@@ -193,6 +193,8 @@ interface Pending {
   /** As the person wrote it (the transcript's). */
   shown: string;
   choice?: boolean;
+  /** What they tapped, by id, when it is not its label. */
+  choiceId?: string;
   channel: string;
   media?: Media[];
   inbox?: number;
@@ -450,14 +452,14 @@ export class Conversation {
   /** The message is ready for the agent: it joins the reply in progress, or starts one. */
   private arrive(incoming: Incoming, id: string, channel: string, ownId: boolean, files: Files): void {
     const at = this.settings.now();
-    const item: Pending = { id, text: describe(incoming, files), shown: shownText(incoming, files), ...(incoming.choice ? { choice: true } : {}), channel, ...(files.media.length ? { media: files.media } : {}) };
+    const item: Pending = { id, text: describe(incoming, files), shown: shownText(incoming, files), ...choiceOf(incoming), channel, ...(files.media.length ? { media: files.media } : {}) };
     this.pending.push(item);
     this.recentChannels = [...this.recentChannels, channel].slice(-5);
     const link = this.channels.get(channel);
     if (link) link.lastMessageAt = at;
     const fields = { messageCount: this.messageCount, recentChannels: this.recentChannels };
     this.persist(async () => {
-      const payload = { id, text: item.text, shown: item.shown, ...(item.choice ? { choice: true } : {}), channel, ...(item.media ? { media: item.media.map(stored) } : {}) };
+      const payload = { id, text: item.text, shown: item.shown, ...(item.choice ? { choice: true } : {}), ...(item.choiceId ? { choiceId: item.choiceId } : {}), channel, ...(item.media ? { media: item.media.map(stored) } : {}) };
       const inbox = await this.settings.store.addMessage(this.id, payload, ownId ? { channel, messageId: id } : undefined);
       if (inbox === null) {
         // Another runner took this provider id first (a retry reached both): the message is theirs.
@@ -507,7 +509,7 @@ export class Conversation {
     this.messageIds.set(id, channel);
     const none: Files = { marks: [], media: [] };
     const answer: Answer = { reply, ...(options.note ? { note: options.note } : {}) };
-    const item: Pending = { id, text: describe(incoming, none), shown: shownText(incoming, none), ...(incoming.choice ? { choice: true } : {}), channel, answer };
+    const item: Pending = { id, text: describe(incoming, none), shown: shownText(incoming, none), ...choiceOf(incoming), channel, answer };
     this.pending.push(item);
     const at = this.settings.now();
     this.recentChannels = [...this.recentChannels, channel].slice(-5);
@@ -518,7 +520,7 @@ export class Conversation {
     let lost = false;
     const stored = this.persist(async () => {
       if (options.claimed && !(await options.claimed)) return void (lost = true);
-      const payload = { id, text: item.text, shown: item.shown, ...(item.choice ? { choice: true } : {}), channel, answer };
+      const payload = { id, text: item.text, shown: item.shown, ...(item.choice ? { choice: true } : {}), ...(item.choiceId ? { choiceId: item.choiceId } : {}), channel, answer };
       // Its provider id is written with it (unless the STOP already holds it), so a retry is not answered again.
       const inbox = await this.settings.store.addMessage(this.id, payload, ownId && !options.claimed ? { channel, messageId: id } : undefined);
       if (inbox === null) return void (lost = true);
@@ -610,7 +612,7 @@ export class Conversation {
     const p = row.payload as Record<string, any>;
     if (row.kind === "message") {
       // Its photos and PDFs are named, not shown: their bytes were never stored.
-      this.pending.push({ id: p.id, text: p.text, shown: p.shown ?? p.text, ...(p.choice ? { choice: true } : {}), channel: p.channel, inbox: row.id, ...(Array.isArray(p.media) ? { media: p.media } : {}), ...(p.answer ? { answer: p.answer } : {}) });
+      this.pending.push({ id: p.id, text: p.text, shown: p.shown ?? p.text, ...(p.choice ? { choice: true } : {}), ...(typeof p.choiceId === "string" ? { choiceId: p.choiceId } : {}), channel: p.channel, inbox: row.id, ...(Array.isArray(p.media) ? { media: p.media } : {}), ...(p.answer ? { answer: p.answer } : {}) });
       this.messageIds.set(p.id, p.channel);
       if (!p.answer) {
         this.unanswered.add(p.channel);
@@ -992,7 +994,7 @@ export class Conversation {
     if (messages.length) {
       const tag = this.settings.tagChannels || this.channels.size > 1;
       const line = (m: Pending) => `[${tag ? `${m.channel} · ` : ""}${m.id}${m.text}`;
-      const said = (m: Pending): PersonMessage => ({ id: m.id, channel: m.channel, text: m.shown, ...(m.choice ? { choice: true } : {}) });
+      const said = (m: Pending): PersonMessage => ({ id: m.id, channel: m.channel, text: m.shown, ...(m.choice ? { choice: true } : {}), ...(m.choiceId ? { choiceId: m.choiceId } : {}) });
       // In order: the messages the agent answers, together in one entry, and each answered with no
       // model call as one of its own, with what was sent back as the agent's (as a text nudge is).
       let group: Pending[] = [];
@@ -1724,7 +1726,7 @@ export function windowClosed(link: { info: ChannelInfo; lastMessageAt: number | 
 
 /** One line of a conversation as the person saw it, read back from the history (the playground shows these). */
 export type TranscriptEntry =
-  | { kind: "in"; channel: string; id: string; text: string; at: number; choice?: boolean }
+  | { kind: "in"; channel: string; id: string; text: string; at: number; choice?: boolean; choiceId?: string }
   | {
       kind: "out";
       channel: string;
@@ -1732,7 +1734,7 @@ export type TranscriptEntry =
       authentication?: boolean;
       at: number;
       replyTo?: string;
-      buttons?: string[];
+      buttons?: ReplyButton[];
       list?: { button: string; rows: Array<{ id: string; title: string; description?: string }> };
       /** As the agent sent them: fitMessage shows them as a channel can. */
       link?: { label: string; url: string };
@@ -1769,7 +1771,7 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
       }
       for (const m of personMessages(entry, only)) {
         channelOf.set(m.id, m.channel);
-        lines.push({ kind: "in", channel: m.channel, id: m.id, text: m.text, at, ...(m.choice ? { choice: true } : {}) });
+        lines.push({ kind: "in", channel: m.channel, id: m.id, text: m.text, at, ...(m.choice ? { choice: true } : {}), ...(m.choiceId ? { choiceId: m.choiceId } : {}) });
       }
       continue;
     }
@@ -1796,7 +1798,7 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
           ...(delivered.authentication ? { authentication: true } : {}),
           at: result!.at,
           ...(typeof args.reply_to === "string" ? { replyTo: args.reply_to } : {}),
-          ...(Array.isArray(args.buttons) && args.buttons.length ? { buttons: args.buttons as string[] } : {}),
+          ...(Array.isArray(args.buttons) && args.buttons.length ? { buttons: args.buttons as ReplyButton[] } : {}),
           ...(args.list ? { list: args.list as never } : {}),
           ...(args.link ? { link: args.link as never } : {}),
           ...(args.image ? { image: photoOf(args.image as never) } : {}),
@@ -1821,9 +1823,25 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
 function describe(incoming: Incoming, files?: Files): string {
   const parts: string[] = [];
   if (incoming.replyTo) parts.push(`, replying to ${incoming.replyTo.fromAgent ? "your" : "their own"} message "${clip(incoming.replyTo.text)}"`);
-  if (incoming.choice) return `${parts.join("")}, tapped] ${incoming.choice.title}`;
+  if (incoming.choice) {
+    const id = tappedId(incoming);
+    return `${parts.join("")}, tapped] ${incoming.choice.title}${id ? ` (${id})` : ""}`;
+  }
   const body = [files?.marks.join(" "), files?.transcript, incoming.text].filter(Boolean).join(" ");
   return `${parts.join("")}] ${body}`;
+}
+
+/** The id of what they tapped, when it is not its label. */
+function tappedId(incoming: Incoming): string | undefined {
+  const id = incoming.choice?.id;
+  return id && id !== incoming.choice!.title ? id : undefined;
+}
+
+/** A tap, as a pending message keeps it. */
+function choiceOf(incoming: Incoming): { choice?: true; choiceId?: string } {
+  if (!incoming.choice) return {};
+  const id = tappedId(incoming);
+  return { choice: true, ...(id ? { choiceId: id } : {}) };
 }
 
 /** What the person wrote, as the transcript shows it: the tap, or the files' marks and the text. */

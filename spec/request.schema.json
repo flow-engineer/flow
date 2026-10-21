@@ -70,7 +70,7 @@
           "properties": {
             "id": {
               "type": "string",
-              "description": "The list row's id, when it has one."
+              "description": "The button's or list row's id, when it has one."
             },
             "title": {
               "type": "string"
