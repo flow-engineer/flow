@@ -430,7 +430,8 @@ end(finishedOutcome(mergedRuns(summary.runs)), { received: summary.runs });
 function endedEarly(received: RunSummary[], reason: string, print: (line: string) => void): void {
   const runs = mergedRuns(received);
   const notPlayed = runs.filter((m) => m.verdict === "not_played").length;
-  print(`${runs.length - notPlayed} of ${runs.length} runs finished before the session ended early (${notPlayed} not played): ${reason}`);
+  // Every run finished (Ctrl-C after the last one): nothing was left unplayed, so the line says only why it ended.
+  print(notPlayed ? `${runs.length - notPlayed} of ${runs.length} runs finished before the session ended early (${notPlayed} not played): ${reason}` : `All ${runs.length} runs finished before the session ended: ${reason}`);
 }
 
 /** How a session ended: its summary came, it broke off or the cloud stopped it, or Ctrl-C. */

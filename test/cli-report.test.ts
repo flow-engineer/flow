@@ -208,7 +208,7 @@ test("Ctrl-C prints the same partial report, keeps what finished, and exits 130"
     child.kill("SIGINT");
     const code = await new Promise<number | null>((resolve) => child.on("exit", resolve));
     assert.equal(code, 130);
-    assert.match(out, /1 of 1 runs finished before the session ended early \(0 not played\): interrupted/);
+    assert.match(out, /All 1 runs finished before the session ended: interrupted/);
     assert.match(out, /http:\/\/dash\/s/);
     assert.match(out, /the cloud keeps playing; stop it from the dashboard: http:\/\/dash\/s/);
     assert.match(out, /^Results: \.flow\/last-session\.json/m);
