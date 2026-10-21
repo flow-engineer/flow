@@ -348,7 +348,7 @@ The contract is [`spec/nudges.openapi.yaml`](spec/nudges.openapi.yaml). In code,
 - Pass the provider's own id as `messageId` to `agent.message()`: a webhook the provider sends again is taken once. Ids are kept 7 days (`keepMessageIdsDays`); once an hour one runner deletes older ones, a batch at a time, on the scheduled messages' timer.
 - Run one copy of an agent per database. Scheduled messages, upkeep and a provider's retried webhooks are claimed in the database, so they happen once whichever copy takes them; a conversation lives in one process at a time (its turn, folded double texts, background tools): the copy working on it holds its lease in the database, renewed while it is busy, and another copy leaves it alone, so the old and new copy side by side during a deploy never answer one message twice. A copy that dies mid-turn leaves the turn to another once its lease runs out (15 s). Each copy is a `runner` (createAgent's option, else `FLOW_RUNNER`, else the host's name, with a random suffix), named on every event. On a platform that adds instances under load, still set it to exactly one instance, kept warm, with CPU always on, and use a durable `database`.
 - `agent.status()` says whether anything is running and for how long it has been idle, so your platform can stop idle agents and start them on the next message.
-- Every message, turn, model call (tokens and cost), tool and schedule is an event. Send events wherever you like; `jsonlSink(path)` writes them to a file. An `EventSink` is a function that gets each event (`{ type, conversationId, at, runner, ... }`) and must not throw:
+- Every message, turn, model call (tokens and cost), tool and schedule is an event. Send events wherever you like; `jsonlSink(path)` writes them to a file. An `EventSink` is a function that gets each event (`{ type, conversationId, at, runner, ... }`) and must not throw; `turn.start` and `turn.end` carry the turn's number (`turn`), the same when a turn cut off by a restart runs again:
 
   ```ts
   const log: EventSink = (event) => console.log(event.type, event.conversationId);
@@ -378,7 +378,7 @@ expect:
     - The agent asks Sam to confirm before placing the order.
 ```
 
-`expect.calls` and `expect.never` name tools that must or must not be called, checked by code from the recorded calls. `now` and `timezone` set the test's clock, and dates in test files are written against it (`{{now + 1d | date}}`), so they never go stale ([coding-agents/test-skill.md](coding-agents/test-skill.md)). `tests/tools/*.yaml` describe how each tool behaves (normal, slow, each error). Run the suite from the agent's folder:
+`expect.calls` and `expect.never` name tools that must or must not be called, checked by code from the recorded calls. An opening step `restart: crash` or `restart: deploy` restarts the agent mid-conversation on the same store, and the cloud checks that every message was answered once and no turn was lost. `now` and `timezone` set the test's clock, and dates in test files are written against it (`{{now + 1d | date}}`), so they never go stale ([coding-agents/test-skill.md](coding-agents/test-skill.md)). `tests/tools/*.yaml` describe how each tool behaves (normal, slow, each error). Run the suite from the agent's folder:
 
 ```bash
 npx @flow-engineer/flow test --cloud https://flow.engineer/observe --synthetic --runs 3 --only latte-correction

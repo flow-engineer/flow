@@ -185,16 +185,20 @@ const openingStep = z
     nudge: businessNudge.optional(),
     /** Time passes on the test's clock. */
     wait: z.string().refine((t) => waitMs(t) !== null, 'a length of time such as 8h30m, 45m or 2d').optional(),
+    /** The agent restarts mid-conversation, on the same store: crash (it dies where it is; a new one takes over
+     * once its lease runs out) or deploy (a new one starts beside it; the old one finishes what it holds and stops).
+     * Right after a say, it lands while that message's turn runs. */
+    restart: z.enum(["crash", "deploy"], { error: "crash or deploy" }).optional(),
     /** Move the test's clock to this time before the step. */
     at: moment.optional(),
   })
   .superRefine((step, ctx) => {
-    const kinds = [step.say !== undefined || step.attach ? "say" : null, step.event ? "event" : null, step.nudge ? "nudge" : null, step.wait !== undefined ? "wait" : null].filter(Boolean);
-    if (kinds.length !== 1) ctx.addIssue({ code: "custom", message: kinds.length ? `one of say, event, nudge or wait per step, not ${kinds.join(" and ")}` : "say something, attach a file, send an event, nudge, or wait" });
+    const kinds = [step.say !== undefined || step.attach ? "say" : null, step.event ? "event" : null, step.nudge ? "nudge" : null, step.wait !== undefined ? "wait" : null, step.restart ? "restart" : null].filter(Boolean);
+    if (kinds.length !== 1) ctx.addIssue({ code: "custom", message: kinds.length ? `one of say, event, nudge, wait or restart per step, not ${kinds.join(" and ")}` : "say something, attach a file, send an event, nudge, wait, or restart" });
     if (!step.event && (step.path || step.signature || step.answer !== undefined)) ctx.addIssue({ code: "custom", message: "path, signature and answer belong to an event step" });
     if (kinds[0] === "say" && !step.say && !step.attach) ctx.addIssue({ code: "custom", message: "say something, attach a file, or both" });
   })
-  .transform((step) => (step.event || step.nudge || step.wait !== undefined ? step : { ...step, say: step.say ?? "" }));
+  .transform((step) => (step.event || step.nudge || step.wait !== undefined || step.restart ? step : { ...step, say: step.say ?? "" }));
 
 const scenarioSchema = z.object({
   id: z.string().min(1),
@@ -267,9 +271,9 @@ export type Scenario = z.infer<typeof scenarioSchema>;
 export type OpeningStep = Scenario["opening"][number];
 export type SentItem = z.infer<typeof sentItem>;
 
-/** The business starts something in it (an event, a nudge, time passing), or it checks what was sent: a business run. */
+/** The business starts something in it (an event, a nudge, time passing, a restart), or it checks what was sent: a business run. */
 export function isBusiness(scenario: Scenario): boolean {
-  return scenario.opening.some((s) => s.event || s.nudge || s.wait !== undefined || s.at !== undefined) || !!scenario.expect.sent || !!scenario.expect.not_sent || !!scenario.tools;
+  return scenario.opening.some((s) => s.event || s.nudge || s.wait !== undefined || s.at !== undefined || s.restart) || !!scenario.expect.sent || !!scenario.expect.not_sent || !!scenario.tools;
 }
 export type ToolFile = z.infer<typeof toolFileSchema>;
 export type ExpectedCall = z.infer<typeof expectedCall>;
