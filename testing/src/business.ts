@@ -64,6 +64,8 @@ interface Run {
   channelName: string;
   /** The agent's conversation for the run's person. */
   conversationId: string;
+  /** The cloud's conversation: the run's key. */
+  cloudId: string;
   deliveries: Set<Promise<void>>;
   sent: number;
 }
@@ -92,7 +94,7 @@ export function businessRuns(ctx: BusinessContext) {
     const real = new Set(command.realTools ?? []);
     const unknown = [...real].filter((name) => !ctx.realTools.some((t) => t.name === name));
     if (unknown.length) return { conversationId: cloudId, step: 0, at: command.now, error: `the agent has no tool ${unknown.join(", ")} to run for real` };
-    const run = { clock: command.now, secret: `whsec_test_${randomBytes(18).toString("hex")}`, address: command.address, channelName: command.channelName, conversationId: "", deliveries: new Set(), sent: 0, lives: new Set(), database: sqlite(), started: 0, real } as unknown as Run;
+    const run = { clock: command.now, secret: `whsec_test_${randomBytes(18).toString("hex")}`, address: command.address, channelName: command.channelName, conversationId: "", cloudId, deliveries: new Set(), sent: 0, lives: new Set(), database: sqlite(), started: 0, real } as unknown as Run;
     start(run, cloudId);
     run.conversationId = (await run.agent.reach({ channel: command.channelName, address: command.address })).conversationId;
     runs.set(cloudId, run);
@@ -117,7 +119,7 @@ export function businessRuns(ctx: BusinessContext) {
     life.agent = ctx.build({ tools, events: [events], channels, testing: { now: () => run.clock, scheduleCheckMs: 0, eventsSecret: run.secret, database: life.database, runner } });
     if (run.started > 1 && !String(life.agent.runner ?? "").startsWith(`${runner}:`)) {
       kill(run, life);
-      throw new Error("a restart needs buildAgent to pass options.testing on to createAgent as it is (its database and runner), so the new agent starts on the run's store");
+      throw new Error("a restart needs buildAgent to pass options.testing on to createAgent as it is (its database and runner, neither replaced), so the new agent starts on the run's store");
     }
     run.lives.add(life);
     run.life = life;
@@ -140,10 +142,11 @@ export function businessRuns(ctx: BusinessContext) {
    * from now on; the old one finishes what it holds (with what the new one stores for it meanwhile)
    * and stops, within DRAIN_MS. The step is answered once the new agent is up.
    */
-  const restart = async (run: Run, command: Extract<BusinessCommand, { type: "restart" }>) => {
+  const restart = async (run: Run, command: Extract<BusinessCommand, { type: "restart" }>): Promise<NonNullable<StepAnswer["restart"]>> => {
     const old = run.life;
-    if (command.mode === "crash") kill(run, old);
     const life = start(run, command.conversationId);
+    const names = { stopped: String(old.agent.runner), started: String(life.agent.runner) };
+    if (command.mode === "crash") kill(run, old);
     await life.agent.resume();
     if (command.mode === "crash") {
       await settle(run);
@@ -151,6 +154,7 @@ export function businessRuns(ctx: BusinessContext) {
     } else {
       ctx.watch(retire(run, old), "the old agent of a deploy");
     }
+    return names;
   };
 
   /** A deploy's old agent: once nothing runs or waits in the run's conversation there, it stops. */
@@ -169,6 +173,9 @@ export function businessRuns(ctx: BusinessContext) {
     await Promise.race([drained, new Promise<void>((done) => (timer = setTimeout(done, DRAIN_MS)))]);
     clearTimeout(timer);
     kill(run, old);
+    // A message the new agent stored after the old one last looked: the scheduled messages' timer would
+    // take it in production; a run has none, so the new agent looks now (unless the run is over).
+    if (runs.get(run.cloudId) === run) await settle(run).catch(() => {});
   };
 
   const deliver = (run: Run, cloudId: string, address: string, outbound: Outbound): Promise<void> => {
@@ -212,7 +219,7 @@ export function businessRuns(ctx: BusinessContext) {
     let result: Omit<StepAnswer, "conversationId" | "step" | "at"> = {};
     try {
       if (command.type === "event") result = await event(run, command);
-      else if (command.type === "restart") await restart(run, command);
+      else if (command.type === "restart") result = { restart: await restart(run, command) };
       else if (command.type === "nudge") {
         const { expiresAt, ...rest } = command.nudge;
         const nudged = await run.agent.nudge({ to: { channel: run.channelName, address: run.address }, ...rest, ...(expiresAt !== undefined ? { expiresAt } : {}) });

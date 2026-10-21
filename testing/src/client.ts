@@ -402,6 +402,8 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
   const agent = options.build({ tools, events: [events] });
   // Business runs need an agent of this framework: its own channels, routes, clock and nudges.
   const canBusiness = typeof (agent as Partial<BusinessAgent>).reach === "function" && typeof (agent as Partial<BusinessAgent>).fetch === "function";
+  // A restart starts the run's next agent and resumes it on the run's store.
+  const canRestart = canBusiness && typeof (agent as Partial<BusinessAgent>).resume === "function";
 
   const open: OpenSession = {
     agent: { name: options.name, title: options.title, tools: [...options.tools, ...(agent.hasProfile?.() ? standIn : [])].map(toSpec), channels: agent.channels() },
@@ -411,7 +413,8 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     retries: true,
     resume: true,
     reopen: true,
-    ...(canBusiness ? { business: true, restart: true } : {}),
+    ...(canBusiness ? { business: true } : {}),
+    ...(canRestart ? { restart: true } : {}),
     ...(only ? { only } : {}),
   };
   const opened = await openOnce(`${base}/api/sessions`, open, options.openHeaders, controller.signal, postTimeoutMs, openRetryCapMs, log);

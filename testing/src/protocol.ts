@@ -162,7 +162,9 @@ export type BusinessCommand =
   /** The agent restarts, on the same store: `crash`, the run's agent dies where it is (nothing more it does is
    * sent or kept, its lease stays until it runs out) and a new one starts once the clock has moved past it;
    * `deploy`, a new one starts beside it and takes every command from now on, while the old one finishes what it
-   * holds and stops. Each has a runner name of its own. Sent only when both sides said `restart`. */
+   * holds and stops. Each has a runner name of its own. Sent only when both sides said `restart`. A cloud
+   * that plays it right after a message sends it once that message's receipt is in, not its reply, so it
+   * lands while the message's turn runs. */
   | { type: "restart"; conversationId: string; step: number; mode: "crash" | "deploy" }
   /** The run is over: its agent is dropped. */
   | { type: "close"; conversationId: string };
@@ -202,6 +204,9 @@ export interface StepAnswer {
   nudge?: { status: string; reason?: string };
   /** The run's clock when the step settled, epoch ms. */
   at: number;
+  /** A restart's runners (createAgent's runner names): the one that stopped (at once on a crash; once it
+   * finished what it held on a deploy) and the one that started. */
+  restart?: { stopped: string; started: string };
   /** The step could not be played on the agent's side (the agent threw, no such route ...). */
   error?: string;
 }

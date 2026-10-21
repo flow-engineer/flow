@@ -222,6 +222,7 @@ test("a crash mid-turn: the dead agent sends nothing more, and its turn runs onc
   const { opened, answers, outbound, events } = await played;
   assert.equal((opened as { restart?: boolean }).restart, true);
   assert.deepEqual(answers.map((a) => [a.step, a.at, a.error ?? null]), [[0, START, null], [2, START + LEASE_MS, null]]);
+  assert.deepEqual([answers[1].restart?.stopped.split(":")[0], answers[1].restart?.started.split(":")[0]], ["runner-1", "runner-2"]);
   assert.deepEqual(outbound.flatMap((o) => (o.outbound.type === "message" ? [o.outbound.text] : [])), ["Thursday at 10."]);
   assert.deepEqual(sentBy(events), [["Thursday at 10.", "runner-2"]]);
   assert.deepEqual(turns(events), [["turn.start", 1, "runner-1"], ["turn.start", 1, "runner-2"], ["turn.end", 1, "runner-2"]]);

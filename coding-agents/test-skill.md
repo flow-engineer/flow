@@ -153,7 +153,7 @@ expect:
   new one starts; it waits out the dead one's lease (15 s on the test's clock), then runs the cut-off
   turn once. `deploy`: a new one starts beside the old one and takes every message from then on; the
   old one finishes what it holds, a message the new one took meanwhile included, and stops. Each has
-  its own runner name (`runner-1`, `runner-2`, on every event). The cloud checks that every message
+  its own runner name (`runner-1`, `runner-2`, with createAgent's random suffix, on every event). The cloud checks that every message
   the person sent was answered, none twice, and that no turn was lost. `buildAgent` must pass
   `options.testing` on to `createAgent` as it is (it carries the run's `database` and `runner`), or
   the step fails saying so.
