@@ -171,7 +171,9 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   carousel; labels may repeat, so every card can say "Details" with ids `details:<listing>`. A tap
   comes back as `Incoming.choice: { id, title }` (`message.in`'s `choice`, the transcript's
   `choiceId`), and the model reads `tapped] Details (details:b)`. A provider reads `m.buttons` with
-  `replyButton(b)`, which gives `{ id, label }` either way. A channel that gets a carousel without a way to show
+  `replyButton(b)`, which gives `{ id, label }` either way. `ChannelInfo.buttonIds` is true where the
+  tap gives the id back (Flow Messaging's WhatsApp and Telegram, the simulators); a channel of your own
+  (a customUI) sets it in its `info` once it does, else number labels where taps must be told apart. A channel that gets a carousel without a way to show
   one sends its text, then each card as a message, in order (`carouselMessages`).
 - The simulators and the test cloud play an agent's own channels with these definitions (the web
   simulator plays a customUI), so the model sees the production tools; they show params such as

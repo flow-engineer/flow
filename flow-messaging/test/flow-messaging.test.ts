@@ -120,7 +120,11 @@ test("a photo arrives as an attachment whose bytes come from Flow's files API wi
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
-test("taps come as choices, with the button's id, and reactions to the agent's messages as reactions", async (t) => {
+test("taps come as choices, with the button's id (info.buttonIds says so), and reactions to the agent's messages as reactions", async (t) => {
+  const fm = flowMessaging({ apiKey: "fk_test_key" });
+  assert.equal(fm.whatsapp({ sender: "snd_wa" }).info.buttonIds, true);
+  assert.equal(fm.telegram({ sender: "snd_tg" }).info.buttonIds, true);
+  assert.equal(fm.whatsapp({ sender: "snd_wa2", disable: ["buttons"] }).info.buttonIds, undefined, "no buttons, no claim about their ids");
   const flow = await fakeFlow();
   const live = await liveAgent(flow);
   t.after(() => (flow.close(), live.close()));

@@ -82,6 +82,7 @@ export const TELEGRAM: ChannelInfo = {
   maxLength: 4096,
   replies: true,
   buttons: { max: 10, labelMax: 20 },
+  buttonIds: true,
   linkButton: { labelMax: 20 },
   images: { captionMax: 1024 },
   carousels: WHATSAPP_CAROUSELS,
@@ -278,7 +279,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   function whatsapp(o: FlowChannelOptions & { disable?: WhatsAppFeature[] } = {}): Channel {
     const route = register("whatsapp", o);
     const channel = whatsappChannel(provider(route), { name: route.name, disable: o.disable, instructions: o.instructions });
-    return { ...channel, info: { ...channel.info, ...(channel.info.lists ? { lists: { ...channel.info.lists, titleMax: LIST_TITLE_MAX } } : {}) } };
+    // Flow Messaging sends every reply button's own id and gives it back on the tap.
+    return { ...channel, info: { ...channel.info, ...(channel.info.buttons ? { buttonIds: true } : {}), ...(channel.info.lists ? { lists: { ...channel.info.lists, titleMax: LIST_TITLE_MAX } } : {}) } };
   }
 
   /** US SMS from a Flow number: plain text; STOP, START and HELP are Flow's. */

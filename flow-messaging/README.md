@@ -126,6 +126,7 @@ Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret
 - Reply buttons and lists, sent as Flow `buttons`, each with its own id (a button given as a label
   has the label as its id). WhatsApp shows up to 3 reply buttons, or a list
   for 4 to 10. Telegram shows an inline keyboard. iMessage has none, so the agent is not offered them.
+  The WhatsApp and Telegram channels' `info.buttonIds` is true: a tap comes back with the button's id.
 - A link: one URL button (WhatsApp's call-to-action button); on iMessage, the URL on its own line.
 - A photo (by URL, or a Flow file ID from `POST /v1/files`): a media message with the text as its
   caption; with buttons or a link, the image header of that same message (on Telegram, one photo
