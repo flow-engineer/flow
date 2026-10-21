@@ -7,7 +7,8 @@ const usd = (n: number) => `$${n.toFixed(4)}`;
 export function runPrinter(log: (line: string) => void = console.log): (run: RunSummary) => void {
   const printed = new Set<string>();
   return (r) => {
-    if (printed.has(r.runId)) return;
+    // The cloud's second play of a failed run is shown under its original, from the original's `rerun`.
+    if (r.rerunOf || printed.has(r.runId)) return;
     printed.add(r.runId);
     const verdict = runVerdict(r);
     // A scenario the cloud could not play: its file and what is wrong in it, not a run of the agent.
@@ -17,11 +18,14 @@ export function runPrinter(log: (line: string) => void = console.log): (run: Run
     }
     const gaveUp = verdict === "passed" && r.ended === "gave_up" ? " (passed, the person gave up)" : "";
     const retried = r.retried ? "; tried once more" : "";
+    const stored = r.replayed ? r.replayed.person + r.replayed.tools + r.replayed.judge : 0;
+    const replayed = stored ? `; replayed ${stored} stored simulator answer${stored === 1 ? "" : "s"}` : "";
     // An errored run: the cloud could not play or judge it, so its checks say nothing about the agent.
     const error = verdict === "errored" ? `; error: ${r.error ?? r.ended} (the cloud could not play or judge this run, not the agent's fault)` : "";
-    const label = verdict === "errored" ? "ERROR" : verdict === "passed" ? "PASS" : "FAIL";
-    log(`${label}  ${r.scenario} #${r.run} (${r.channel}) ${r.runId}: ${r.turns} turn${r.turns === 1 ? "" : "s"}, ended: ${r.ended}${gaveUp}${retried}${error}; slowest acknowledgement ${r.slowestAckMs === null ? "never" : `${r.slowestAckMs} ms`}; cost ${usd(r.agentUsage.costUsd)} agent + ${usd(r.testUsage.costUsd)} test`);
+    const label = verdict === "errored" ? "ERROR" : verdict === "passed" ? "PASS" : verdict === "flaky" ? "FLAKY" : "FAIL";
+    log(`${label}  ${r.scenario} #${r.run} (${r.channel}) ${r.runId}: ${r.turns} turn${r.turns === 1 ? "" : "s"}, ended: ${r.ended}${gaveUp}${retried}${replayed}${error}; slowest acknowledgement ${r.slowestAckMs === null ? "never" : `${r.slowestAckMs} ms`}; cost ${usd(r.agentUsage.costUsd)} agent + ${usd(r.testUsage.costUsd)} test`);
     if (verdict !== "errored") for (const c of r.checks.filter((c) => !c.pass)) log(`      ✗ ${c.kind}: ${c.text}\n        ${c.reason}`);
     log(`      watch: ${r.watch}`);
+    if (r.rerun) log(`      played again: ${r.rerun.passed ? "passed" : "failed"} ${r.rerun.watch}`);
   };
 }

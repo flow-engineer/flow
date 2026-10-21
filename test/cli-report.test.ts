@@ -42,7 +42,7 @@ function agentDir(more: Record<string, string> = {}): string {
 function cloud(hold: boolean, frames: unknown[] = [run], sessionId = "s", answer: Record<string, unknown> = {}) {
   let release: (() => void) | undefined;
   const opened = new Promise<void>((done) => { release = done; });
-  const opens: Array<{ files: Array<{ path: string }>; runs: number }> = [];
+  const opens: Array<{ files: Array<{ path: string }>; runs: number; flaky?: boolean; fresh?: boolean }> = [];
   const server = createServer((req, res) => {
     if (req.url === "/api/sessions") {
       let body = "";
@@ -274,11 +274,12 @@ test("with --json, every exit prints one report on stdout and every other line o
   assert.match(report.suiteHash, /^[0-9a-f]{64}$/);
   assert.deepEqual({ ...report, suiteHash: undefined }, {
     version: 1, outcome: "failed", exitCode: 1, sessionId: "s1", agent: "agt_1", dashboard: "http://dash/s1", suiteHash: undefined, error: null,
-    counts: { runs: 2, passed: 1, failed: 1, errored: 0, notPlayed: 0 },
+    counts: { runs: 2, passed: 1, failed: 1, flaky: 0, errored: 0, notPlayed: 0 },
+    strict: false,
     costUsd: { agent: 0.5, test: 0.5 },
     runs: [
-      { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }], invalid: null },
-      { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [], invalid: null },
+      { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }], invalid: null, rerun: null, label: null, replayed: null },
+      { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [], invalid: null, rerun: null, label: null, replayed: null },
     ],
     invalid: [],
     sessionInvalid: null,
@@ -338,7 +339,7 @@ test("a run the cloud names an error for is errored, whatever it ended as: ERROR
   assert.doesNotMatch(result.stderr, /FAIL {2}bee|not judged/);
   assert.match(result.stderr, /^1 of 2 runs passed\. 1 errored \(the cloud could not play or judge it\)\. .* 0 failed a check\./m);
   const report = JSON.parse(result.stdout);
-  assert.deepEqual([report.outcome, report.exitCode, report.counts], ["errored", 2, { runs: 2, passed: 1, failed: 0, errored: 1, notPlayed: 0 }]);
+  assert.deepEqual([report.outcome, report.exitCode, report.counts], ["errored", 2, { runs: 2, passed: 1, failed: 0, flaky: 0, errored: 1, notPlayed: 0 }]);
   assert.deepEqual(report.runs.map((r: { runId: string; verdict: string; error: string | null; ended: string }) => `${r.runId} ${r.verdict} ${r.error} ${r.ended}`), ["trn_2 errored judge_failed goal_met", "trn_1 passed null goal_met"]);
   assert.deepEqual(lastSession(dir).runs.map((r: { runId: string; verdict: string }) => `${r.runId} ${r.verdict}`), ["trn_2 errored", "trn_1 passed"]);
 
@@ -356,6 +357,38 @@ test("a run the cloud names an error for is errored, whatever it ended as: ERROR
   try {
     assert.equal((await cliStreams(["test", "--cloud", mixed.url], dir)).code, 1);
   } finally { mixed.close(); }
+});
+
+test("a run that failed and passed when the cloud played it again is flaky: its own section, its second play never counted, exit 0 unless --strict; the open asks for flaky runs, and --fresh for no replays", { timeout: 20_000 }, async () => {
+  const dir = agentDir({ b: scenarioYaml("bee", "sms") });
+  // The second play has its original's scenario, channel and number; the cloud may send it first.
+  const second = runOf({ runId: "trn_3", passed: true, rerunOf: "trn_1", watch: "http://watch/trn_3" });
+  const first = runOf({ runId: "trn_1", watch: "http://watch/trn_1", rerun: { runId: "trn_3", passed: true, watch: "http://watch/trn_3" }, label: "flaky", replayed: { person: 2, tools: 1, judge: 0 } });
+  const bee = runOf({ runId: "trn_2", scenario: "bee", passed: true });
+  const runs = [second, first, bee];
+  const frames = [...runs.map((run) => ({ type: "run", run })), { type: "finished", summary: { sessionId: "s1", suiteHash: "h", testModel: "m", runs, dashboard: "http://dash/s1" } }];
+  const local = await cloud(false, frames, "s1", { flaky: true, replay: true });
+  try {
+    const result = await cliStreams(["test", "--cloud", local.url, "--json"], dir);
+    assert.equal(result.code, 0, result.out);
+    assert.match(result.stderr, /^FLAKY {2}hello #1 \(sms\) trn_1: .*replayed 3 stored simulator answers/m);
+    assert.match(result.stderr, /^ {6}played again: passed http:\/\/watch\/trn_3$/m);
+    assert.doesNotMatch(result.stderr, /trn_3:/);
+    assert.match(result.stderr, /^1 of 2 runs passed\./m);
+    assert.match(result.stderr, /^1 flaky \(failed once, passed when played again\):\n {2}hello #1 \(sms\): http:\/\/watch\/trn_1 then http:\/\/watch\/trn_3$/m);
+    const report = JSON.parse(result.stdout);
+    assert.deepEqual([report.outcome, report.strict, report.counts], ["passed", false, { runs: 2, passed: 1, failed: 0, flaky: 1, errored: 0, notPlayed: 0 }]);
+    assert.deepEqual(report.runs.map((r: { runId: string; verdict: string; label: string | null; rerun: { runId: string } | null }) => `${r.runId} ${r.verdict} ${r.label} ${r.rerun?.runId ?? null}`), ["trn_2 passed null null", "trn_1 flaky flaky trn_3"]);
+    assert.deepEqual(report.runs[1].replayed, { person: 2, tools: 1, judge: 0 });
+    assert.deepEqual(lastSession(dir).runs.map((r: { runId: string; verdict: string }) => `${r.runId} ${r.verdict}`), ["trn_2 passed", "trn_1 flaky"]);
+
+    const strict = await cliStreams(["test", "--cloud", local.url, "--json", "--strict", "--fresh"], dir);
+    assert.equal(strict.code, 1, strict.out);
+    const strictReport = JSON.parse(strict.stdout);
+    assert.deepEqual([strictReport.outcome, strictReport.strict, strictReport.counts.failed, strictReport.counts.flaky], ["failed", true, 1, 1]);
+    // Every open asks for flaky runs; only --fresh asks the cloud to replay nothing.
+    assert.deepEqual(local.opens.map((o) => [o.flaky, o.fresh]), [[true, undefined], [true, true]]);
+  } finally { local.close(); }
 });
 
 test("a scenario the cloud could not play is named with its file and reason, and a session it ended scenario_invalid says why, what was sent and that the cloud may be older; both exit 2", { timeout: 20_000 }, async () => {

@@ -30,6 +30,8 @@ export interface ConnectOptions {
   /** The tests folder: files a scenario attaches are read from here, and never leave this machine. */
   testsDir?: string;
   runs?: number;
+  /** Ask the cloud to replay no stored person, tool or judge answers (`flow test --fresh`). */
+  fresh?: boolean;
   log?: (line: string) => void;
   /** Headers for the open only (cloudHeaders: the CI key and the attestation); never sent to the tunnel. */
   openHeaders?: Record<string, string>;
@@ -244,7 +246,8 @@ export async function runInCloud(options: ConnectOptions): Promise<CloudSummary>
 
 /** The runs the suite plays (each scenario on each of its channels, `runs` times) that have no summary in `done`. */
 function unfinishedRuns(files: SuiteFile[], runs: number, done: RunSummary[]): RunKey[] {
-  const have = new Set(done.map((r) => `${r.scenario}\n${r.channel}\n${r.run}`));
+  // A second play of a failed run (rerunOf) is not a run of the suite; its original is what counts.
+  const have = new Set(done.filter((r) => !r.rerunOf).map((r) => `${r.scenario}\n${r.channel}\n${r.run}`));
   const out: RunKey[] = [];
   for (const file of files) {
     if (!file.path.startsWith("scenarios/")) continue;
@@ -415,6 +418,8 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     reopen: true,
     ...(canBusiness ? { business: true } : {}),
     ...(canRestart ? { restart: true } : {}),
+    flaky: true,
+    ...(options.fresh ? { fresh: true } : {}),
     ...(only ? { only } : {}),
   };
   const opened = await openOnce(`${base}/api/sessions`, open, options.openHeaders, controller.signal, postTimeoutMs, openRetryCapMs, log);
@@ -442,6 +447,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
   }
   dashboard = opened.dashboard;
   options.onDashboard?.(dashboard, opened.sessionId, typeof opened.agent === "string" && opened.agent ? opened.agent : undefined);
+  if (opened.replay === true) log("The cloud replays stored person, tool and judge answers where a scenario has not changed (--fresh plays them all anew).");
   log(`Watch it: ${opened.dashboard}`);
   session = `${tunnel}/api/sessions/${opened.sessionId}`;
 

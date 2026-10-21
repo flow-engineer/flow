@@ -202,7 +202,7 @@ connects out to the cloud, which plays the person and the tools and judges.
    stderr): `outcome`, `exitCode`, `sessionId`, `agent`, `error`, `counts`, `costUsd` and per run
    `runId`, `scenario`, `channel`, `run`, `verdict`, `error` (the cloud's code when it could not play
    or judge the run, such as `judge_failed`; the run is then `errored` and its line reads `ERROR`,
-   whatever it ended as), `ended`, `turns`, `watch` and `failedChecks` (`kind`, `text` and the judge's
+   whatever it ended as), `ended`, `turns`, `watch`, `rerun`, `label`, `replayed` and `failedChecks` (`kind`, `text` and the judge's
    `reason`), and `invalid` (`{ path, reason }` for a scenario the cloud could not play, its error
    `scenario_invalid` and its line `INVALID`; else `null`); top-level `invalid` lists those scenarios
    once each (`scenario`, `path`, `reason`: fix the file; `unsupported: ...` means the cloud does not
@@ -211,18 +211,28 @@ connects out to the cloud, which plays the person and the tools and judges.
    `.flow/last-session.json` in the agent's folder (its path is printed on every exit): `sessionId`,
    `agent`, `dashboard`, `suiteHash`, `endedAt`, `ended` (`finished`, `stopped` or `interrupted`),
    `only` (the scenarios it was limited to, else `null`) and per run `scenario` (file name without
-   `.yaml`), `channel`, `run`, `runId`, `verdict` (`passed`, `failed`, `errored`: the cloud could not
+   `.yaml`), `channel`, `run`, `runId`, `verdict` (`passed`, `failed`, `flaky`: it failed, then passed
+   when the cloud played it again, `errored`: the cloud could not
    play or judge it, such as a failed tool simulator or person model, which is not a failure of your
    agent, or `not_played`: the session ended first), `failedChecks` (with reasons) and `invalid`
    when the cloud could not play the scenario, plus `sessionInvalid` as in `--json`.
    Read these instead of parsing the printed lines.
-   Exit status: 0 all passed; 1 a run failed, or nothing was sent (a wrong flag, a test file that does
+   Flaky runs: the cloud plays a failed run once more. When that passes the run is `flaky` (its line
+   reads `FLAKY` with `played again: passed <watch>`, and the summary lists it in its own section with
+   both watch links); `label` is `flaky` or `failing` (failed twice) and `rerun` is the second play
+   (`runId`, `passed`, `watch`), never a run of its own. A flaky run does not fail the session unless
+   `--strict`; `counts.flaky` counts them, and `counts.failed` leaves them out unless `--strict`. Read
+   a flaky run like a failure that is not certain: look at it with `flow show`, and fix the agent or
+   the test when the failed play shows a real problem. The cloud also replays the person's, the tools'
+   and the judge's stored answers for a scenario it has played unchanged (`replayed` counts them), so
+   runs vary less; `--fresh` plays every simulator anew.
+   Exit status: 0 all passed (or flaky, without `--strict`); 1 a run failed, or nothing was sent (a wrong flag, a test file that does
    not parse, no key); 2 the connection or the cloud failed, or runs errored or were not played (the
    session ended early: one line says how many and why) and none failed; 3 the cloud refused (key,
    busy, spend cap, capacity); 130 Ctrl-C. On 2 or 3 the agent is not at fault:
    say what the cloud said (`error` in the report), do not change the agent for it.
 5. `--only a,b` runs only those scenarios (file names without `.yaml`). `--failed` runs only the ones
-   that did not pass in the last session, on every channel each plays; it goes with `--runs`, never
+   that did not pass in the last session (flaky ones too), on every channel each plays; it goes with `--runs`, never
    with `--only`. It prints `Nothing failed in the last session (<id>).` and exits 0 when there is
    nothing to run again, and exits 1 when there is no last session.
 
@@ -246,8 +256,9 @@ Work in this loop, and never finish on a partial run:
    - the test: a check asks for the wrong thing, or the scenario cannot reach its goal; fix the YAML;
    - the simulator: a tool output that could not happen, or a person who left the scenario; fix
      `tests/tools/*.yaml` or the scenario's `world` and `person`.
-4. `npx @flow-engineer/flow test --synthetic --failed`, then `--runs 3 --only <scenario>` on what you fixed, so
-   a pass is not luck.
+4. `npx @flow-engineer/flow test --synthetic --failed` until it passes with nothing flaky. With the
+   cloud's replays and second plays, `--runs 3 --only <scenario>` is rarely needed; `--fresh` plays every
+   simulator anew when you want a run with no stored answers.
 5. The whole suite once more.
 
 ### Get a test cloud
