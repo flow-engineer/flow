@@ -19,7 +19,7 @@ A messaging agent can itself be a server-side client: its channel connection cre
 
 1. **Phone is the brand’s primary identity.** A sender on a provider-verified phone channel (WhatsApp, phone-based iMessage, SMS) is signed in. Resolve that phone to the brand’s account, creating it only when the brand supports that. Give their normal full account access. Do not add an OTP, browser login, consent screen or permission picker on top of the verified channel.
 2. **The brand already exposes an OAuth authorization server.** Use it for MCP and CLI connections. On chat channels that need account sign-in, send a connection link to its existing login. A Google sign-in button in an app is not by itself an OAuth authorization server for MCP clients.
-3. **The brand has an ordinary login.** Use that login as the authentication step behind Flow’s OAuth layer (or a self-hosted OAuth server). Phone OTP, email, social login, company SSO and custom login can all finish the same connection. The brand confirms the signed-in account server-side and owns credential issuance and refresh; the OAuth layer coordinates client registration, one-time codes, PKCE and the brand-authorized token exchange. Do not add a Flow grant-selection screen by default. An existing provider can have its own required screens.
+3. **The brand has an ordinary login.** Use that login as the authentication step behind Flow’s OAuth bridge (or a self-hosted OAuth server); the `flow-framework-oauth-bridge` skill (`oauth-bridge-skill.md`) is the setup and the local test. Phone OTP, email, social login, company SSO and custom login can all finish the same connection. The brand confirms the signed-in account server-side and owns credential issuance and refresh; the OAuth layer coordinates client registration, one-time codes, PKCE and the brand-authorized token exchange. Do not add a Flow grant-selection screen by default. An existing provider can have its own required screens.
 
 A phone-first brand uses case 1 on WhatsApp and case 3 for its CLI: `auth login` opens the brand’s phone login in a browser, phone verification signs in, and OAuth returns to the CLI. The user never has to create an email account just to use another interface.
 
@@ -97,12 +97,14 @@ Verify signature (or introspect opaque tokens), issuer, expiry, intended resourc
 | Deployment | Authorization server | Brand work |
 | --- | --- | --- |
 | Flow-hosted, existing OAuth/OIDC server | Existing provider (for example Cognito) | Register clients/redirects, authorize the agent resource, and configure token verification/backend access. Flow does not add a broker. |
-| Flow-hosted, ordinary/custom login | Flow's protocol bridge | Keep normal login. Add brand-owned one-time login completion, credential issuance, refresh, verification and revocation functions. The bridge relays brand-issued client credentials. |
+| Flow-hosted, ordinary/custom login | The OAuth bridge (`@flow-engineer/flow/oauth`, served by the agent beside `/mcp`: `oauth-bridge-skill.md`) | Keep normal login. Add brand-owned one-time login completion, credential issuance, refresh, verification and revocation functions. The bridge relays brand-issued client credentials. |
 | Self-hosted | Existing provider or the team's own OAuth server | Publish OAuth discovery and resource metadata, configure PKCE and client/redirect validation, implement the same brand authority boundary. No Flow service is required. |
 
 An existing OAuth server must authorize the actual agent resource and supported clients; a website's social sign-in token alone is insufficient. Discover its authorization and token endpoints rather than assuming `/auth` and `/token`. Providers without dynamic registration need registered client configuration. The CLI accepts a configured OAuth client ID, and custom surfaces remain replaceable.
 
 ## Connecting an ordinary brand login
+
+The `flow-framework-oauth-bridge` skill (`oauth-bridge-skill.md`) has the exact login hand-off, the six brand endpoints, the agent configuration and the step-by-step local test. This section states the boundary they keep.
 
 Keep the OAuth protocol layer reusable and the account authority in the brand. The brand integration must:
 

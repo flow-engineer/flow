@@ -555,6 +555,10 @@ createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamabl
 - Sign-in is the host's OAuth against your own authorization server: `auth: { issuer, scopes,
   verify }`, with `signIn: "required" | "optional" | "none"` per tool. A call that needs sign-in gets
   HTTP 401 and the host's sign-in prompt; the person is `context.key` in the tool.
+- No OAuth server of your own: `oauthBridge` from `@flow-engineer/flow/oauth` (optional peer
+  `oidc-provider`) is one, served beside `/mcp` by `mcpServer({ auth: bridge.auth })`. It sends
+  people to your existing login page and your functions issue and check every token; it keeps none.
+  See `coding-agents/oauth-bridge-skill.md`.
 - Backend access stays in tool code: supply the same `credentials` provider to `createAgent` and
   `mcpServer`, then use `context.credentials.get("backend")` for that verified account. `resolve`
   receives a normalized `phone` only on verified phone channels; phone-first brands need no extra
