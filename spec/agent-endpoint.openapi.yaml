@@ -130,6 +130,7 @@ x-chinwag-platforms:
     maxLength: 4096
     replies: true
     buttons: { max: 3, labelMax: 20 }
+    buttonIds: true
     lists: { maxRows: 10, titleMax: 24, buttonMax: 20 }
     linkButton: { labelMax: 20 }
     images: { captionMax: 1024 }

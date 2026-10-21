@@ -221,6 +221,11 @@ export interface ChannelInfo {
   replies?: boolean;
   /** Reply buttons under a message. */
   buttons?: { max: number; labelMax: number };
+  /**
+   * A tap on a `{ id, label }` button comes back with that id (`choice.id`). Without it a provider may
+   * know only the label: number the labels yourself if taps must be told apart.
+   */
+  buttonIds?: boolean;
   /** A list the person picks one row from. */
   lists?: { maxRows: number; titleMax: number; buttonMax: number };
   /** One button under a message that opens a web page (WhatsApp's call-to-action URL button). */
