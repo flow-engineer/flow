@@ -45,8 +45,8 @@ Telegram or a web or app chat, that feel like a person texting back.
 ## Coding-agent skills
 - `coding-agents/` teaches coding agents to build on Flow Framework (`skill.md`, with MCP and the CLI),
   write tools and their test files (`tools-skill.md`), write tests (`test-skill.md`), build the
-  context pack from an organization's codebase (`context-skill.md`) and set up sign-in
-  (`auth-skill.md`). A change to an API, a file format or a convention they describe updates them
+  context pack from an organization's codebase (`context-skill.md`), set up sign-in
+  (`auth-skill.md`) and connect a brand's existing login to Flow's OAuth bridge (`oauth-bridge-skill.md`). A change to an API, a file format or a convention they describe updates them
   in the same change.
 
 ## Model-facing text

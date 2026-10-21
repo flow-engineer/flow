@@ -13,6 +13,7 @@
     "simulators/src",
     "mcp/src",
     "cli/src",
+    "oauth/src",
     "flow-messaging/src",
     "testing/src/index.ts",
     "testing/src/client.ts",

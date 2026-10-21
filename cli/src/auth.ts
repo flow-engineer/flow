@@ -91,6 +91,14 @@ export function storedProvider(config: CliConfig, server: string, redirectUrl?: 
       if (!verifier) throw new Error("No sign-in in progress.");
       return verifier;
     },
+    // Commands connect with no redirect, which the SDK treats as a non-interactive grant: an
+    // expired token is then renewed with the stored refresh token, never by a new sign-in.
+    ...(redirectUrl ? {} : {
+      prepareTokenRequest: () => {
+        const refreshToken = read().tokens?.refresh_token;
+        return refreshToken ? new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken }) : undefined;
+      },
+    }),
   };
 }
 

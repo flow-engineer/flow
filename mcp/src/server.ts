@@ -40,6 +40,8 @@ export interface McpAuth {
    * the person, as ToolContext.key) and the scopes it grants, or null when it is not valid.
    */
   verify(token: string, request: Request): Promise<McpIdentity | null> | McpIdentity | null;
+  /** The authorization server's own routes when it is served here, on the same origin (the OAuth bridge's). */
+  routes?: { paths: string[]; fetch(request: Request): Promise<Response> };
 }
 
 export interface McpIdentity {
@@ -83,6 +85,8 @@ export interface McpServerHandle {
   node(req: IncomingMessage, res: ServerResponse): Promise<void>;
   /** The descriptors `tools/list` sends. */
   descriptors: McpToolDescriptor[];
+  /** Every path this handler serves, for a host that mounts paths (Flow's hosting); set when auth has routes. */
+  paths?: string[];
   /** The tools-only plugin endpoint, unless disabled. */
   plugin?: { path: string; descriptors: McpToolDescriptor[] };
   /** Wait for calls queued for tracing, for shutdown or short-lived servers. */
@@ -168,6 +172,8 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     const metadataPrefix = "/.well-known/oauth-protected-resource";
     const plugin = pluginPath !== undefined && (url.pathname === pluginPath || url.pathname === `${metadataPrefix}${pluginPath}`);
     const servedPath = plugin ? pluginPath! : path;
+    const routes = options.auth?.routes;
+    if (routes?.paths.some((p) => url.pathname === p || url.pathname.startsWith(`${p}/`))) return routes.fetch(request);
     if (request.method === "GET" && (url.pathname === metadataPrefix || url.pathname === `${metadataPrefix}${servedPath}`)) {
       if (!options.auth) return new Response("Not found", { status: 404 });
       return Response.json({
@@ -259,6 +265,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     descriptors,
     flushTraces: () => trace?.flush() ?? Promise.resolve(),
     ...(pluginPath ? { plugin: { path: pluginPath, descriptors: pluginDescriptors } } : {}),
+    ...(options.auth?.routes ? { paths: [...new Set([path, ...(pluginPath ? [pluginPath] : []), "/.well-known/oauth-protected-resource", ...options.auth.routes.paths])] } : {}),
   };
 }
 
@@ -298,7 +305,9 @@ async function serveNode(serve: (request: Request) => Promise<Response>, req: In
     body = all.buffer.slice(all.byteOffset, all.byteOffset + all.byteLength) as ArrayBuffer;
   }
   const response = await serve(new Request(url, { method: req.method, headers, body, signal: abort.signal }));
-  res.writeHead(response.status, Object.fromEntries(response.headers));
+  // Headers joins Set-Cookie values into one; node:http must get each as its own header.
+  const cookies = response.headers.getSetCookie();
+  res.writeHead(response.status, { ...Object.fromEntries(response.headers), ...(cookies.length ? { "set-cookie": cookies } : {}) });
   if (!response.body) return void res.end();
   try {
     for await (const chunk of response.body) res.write(chunk);
