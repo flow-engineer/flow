@@ -6,10 +6,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { z } from "zod";
 import { createAgent, sqlite, SMS_KEYWORDS, Store, tool, type Database, type Outbound } from "../src/index.ts";
+import { LEASE_MS } from "../src/conversation.ts";
 import { SMS, WHATSAPP, call, gate, last, multi, respond, scriptedModel, users } from "./helpers.ts";
 
 const CHANNELS = { sms: { info: SMS, phone: true } };
 const file = () => join(mkdtempSync(join(tmpdir(), "flow-db-")), "chinwag.db");
+/** The clock of a process started after one that died mid-turn, once the dead one's lease ran out. */
+const leaseOver = () => Date.now() + LEASE_MS;
 
 /** A database that dies at the first write to `table`: that write and every statement after it fail, as when the process is killed there. */
 function diesAt(table: string, db: Database): Database {
@@ -28,6 +31,80 @@ function diesAt(table: string, db: Database): Database {
   });
   return { ...on(db), transaction: (work) => db.transaction((tx) => work(on(tx))) };
 }
+
+/** A database that stops answering when `kill()` is called, as a process that died: it neither renews nor lets go of what it held. */
+function killable(db: Database): Database & { kill(): void } {
+  let dead = false;
+  const guard = () => {
+    if (dead) throw new Error("the process died");
+  };
+  const on = (inner: Omit<Database, "transaction">): Omit<Database, "transaction"> => ({
+    durable: inner.durable,
+    dialect: inner.dialect,
+    query: async (sql, params) => (guard(), inner.query(sql, params)),
+    run: async (sql, params) => (guard(), inner.run(sql, params)),
+  });
+  return { ...on(db), transaction: (work) => (guard(), db.transaction((tx) => work(on(tx)))), kill: () => (dead = true) };
+}
+
+test("while a deploy runs the old and new runner side by side, each message is answered once, and the new runner carries on the conversation", async () => {
+  const path = file();
+  const old = multi({ channels: CHANNELS, database: sqlite(path) });
+  await old.agent.resume();
+  const sms = (text: string, messageId: string) => ({ channel: "sms", from: "+15550100100", message: text, messageId });
+  const a = await old.agent.message(sms("when is my session?", "SM1"));
+  const id = a!.conversationId;
+  const first = await old.nextCall(0); // the old runner's turn is running when the new one starts
+
+  const next = multi({ channels: CHANNELS, database: sqlite(path), dir: old.dir });
+  await next.agent.resume();
+  await next.agent.conversation(id)?.stored(); // it looked at the open turn, and left it to the old runner
+  // A message both runners are sent (each reads the event stream): it reaches the new one first.
+  await next.agent.message(sms("and where?", "SM2"));
+  first.answer(respond(call("send_sms", { text: "Thursday at 10." })));
+  const second = await old.nextCall(1); // the old runner takes the message the new one stored
+  assert.deepEqual(users(second.request.messages), ["[SM1] when is my session?", "[SM2] and where?"]);
+  await old.agent.message(sms("and where?", "SM2")); // its own copy of the event, later
+  second.answer(respond(call("send_sms", { text: "At the studio." })));
+  await old.agent.conversation(id)!.whenIdle();
+
+  // The old runner stops; the new one has the conversation as the old one left it.
+  await next.agent.message(sms("thanks!", "SM3"));
+  const third = await next.nextCall(0);
+  assert.deepEqual(users(third.request.messages), ["[SM1] when is my session?", "[SM2] and where?", "[SM3] thanks!"]);
+  third.answer(respond(call("send_sms", { text: "Any time." })));
+  await next.agent.conversation(id)!.whenIdle();
+  assert.deepEqual([old.calls.length, next.calls.length], [2, 1], "no turn ran twice");
+  assert.deepEqual([...old.texts("sms"), ...next.texts("sms")], ["Thursday at 10.", "At the studio.", "Any time."]);
+});
+
+test("a runner that dies mid-turn leaves the turn to another once its lease runs out, and it runs there once", async () => {
+  const path = file();
+  const database = killable(sqlite(path));
+  const dying = multi({ channels: CHANNELS, database });
+  await dying.agent.resume();
+  const a = await dying.agent.message({ channel: "sms", from: "+15550100100", message: "when is my session?", messageId: "SM1" });
+  await dying.nextCall(0);
+  await dying.agent.conversation(a!.conversationId)!.stored();
+  database.kill();
+
+  const clock = { now: Date.now() };
+  const other = multi({ channels: CHANNELS, database: sqlite(path), dir: dying.dir, now: () => clock.now });
+  await other.agent.resume();
+  await other.agent.conversation(a!.conversationId)?.stored();
+  await other.agent.runDue();
+  assert.equal(other.calls.length, 0, "not while the lease may still be the dying runner's");
+
+  clock.now += LEASE_MS;
+  await other.agent.runDue();
+  const turn = await other.nextCall(0);
+  assert.deepEqual(users(turn.request.messages), ["[SM1] when is my session?"]);
+  turn.answer(respond(call("send_sms", { text: "Thursday at 10." })));
+  await other.agent.conversation(a!.conversationId)!.whenIdle();
+  await other.agent.runDue();
+  assert.equal(other.calls.length, 1, "it ran once");
+  assert.deepEqual(other.texts("sms"), ["Thursday at 10."]);
+});
 
 test("an agent started again on the same database carries on the conversation", async () => {
   const path = file();
@@ -56,7 +133,7 @@ test("a turn cut off by a restart runs again, and its answer goes out", async ()
   await before.nextCall(0); // the model is thinking when the process dies
   await before.agent.conversation(a!.conversationId)!.stored();
 
-  const after = multi({ channels: CHANNELS, database: sqlite(path), dir: before.dir });
+  const after = multi({ channels: CHANNELS, database: sqlite(path), dir: before.dir, now: leaseOver });
   await after.agent.resume();
   const first = await after.nextCall(0);
   assert.deepEqual(users(first.request.messages), ["[m1] when is my session?"]);
@@ -78,7 +155,7 @@ test("a background tool cut off by a restart is reported to the agent, never run
   await before.agent.conversation(a!.conversationId)!.stored();
   assert.equal(runs, 1);
 
-  const after = multi({ channels: CHANNELS, database: sqlite(path), dir: before.dir, tools: [book] });
+  const after = multi({ channels: CHANNELS, database: sqlite(path), dir: before.dir, tools: [book], now: leaseOver });
   await after.agent.resume();
   const first = await after.nextCall(0);
   assert.match(users(first.request.messages).at(-1)!, /book \(task_1\) was still running in the background when the agent restarted/);
@@ -149,7 +226,7 @@ test("a tool gets its call id and a signal, and an idempotency key that is the s
   await before.agent.conversation(a!.conversationId)!.stored(); // the process dies while the booking runs
 
   answer = Promise.resolve("booked");
-  const after = multi({ channels: CHANNELS, database: sqlite(path), dir: before.dir, tools: [book] });
+  const after = multi({ channels: CHANNELS, database: sqlite(path), dir: before.dir, tools: [book], now: leaseOver });
   await after.agent.resume();
   const again = await after.nextCall(0);
   assert.match(last(again.request.messages).content, /Cut off by a restart/);
@@ -216,7 +293,7 @@ test("a provider's message id is kept with what its message stored, so a crash b
     const a = await before.agent.message(sent);
     if (a) await before.agent.conversation(a.conversationId)!.stored();
 
-    const after = multi({ channels, database: sqlite(path), dir: before.dir });
+    const after = multi({ channels, database: sqlite(path), dir: before.dir, now: leaseOver });
     await after.agent.resume();
     await after.agent.message(sent);
     assert.ok(!after.events.some((e) => e.type === "message.duplicate"), `the retry is taken (crash at ${table})`);

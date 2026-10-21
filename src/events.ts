@@ -35,6 +35,8 @@ export interface FlowEvent {
     | "template.missing";
   conversationId: string;
   at: number;
+  /** The runner (process) the event happened in, as createAgent's `runner`. */
+  runner?: string;
   [detail: string]: unknown;
 }
 
@@ -52,9 +54,10 @@ export function jsonlSink(path: string): EventSink {
   return (event) => appendFileSync(path, JSON.stringify(event) + "\n");
 }
 
-export function emitter(sinks: EventSink[]) {
+/** Events of one runner (createAgent's `runner`): each names it, so two runners' lines tell apart. */
+export function emitter(sinks: EventSink[], runner?: string) {
   return (conversationId: string, type: FlowEvent["type"], detail: Record<string, unknown> = {}) => {
-    const event: FlowEvent = { type, conversationId, at: Date.now(), ...detail };
+    const event: FlowEvent = { type, conversationId, at: Date.now(), ...(runner ? { runner } : {}), ...detail };
     for (const sink of sinks) {
       try {
         sink(event);

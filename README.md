@@ -345,9 +345,9 @@ The contract is [`spec/nudges.openapi.yaml`](spec/nudges.openapi.yaml). In code,
 - Everything is stored as it happens: history, messages not yet handled, background tools, schedules. SQLite is built in (`sqlite("file.db")`; in memory by default). Postgres: `postgres(pool)` over your own node-postgres pool. Any other engine: implement the three-method `Database` interface, or pass a whole `store` of your own.
 - After a restart, `await agent.resume()` carries on: cut-off turns run again, and background tools that were running are reported as interrupted, never silently rerun. A tool's `context.idempotencyKey` is the same when the agent calls it again with the same input in that turn, so your backend can do it once; `context.callId` and `context.signal` (aborted when the person is forgotten) are there too.
 - Pass the provider's own id as `messageId` to `agent.message()`: a webhook the provider sends again is taken once. Ids are kept 7 days (`keepMessageIdsDays`); once an hour one runner deletes older ones, a batch at a time, on the scheduled messages' timer.
-- Run one copy of an agent per database. Scheduled messages, upkeep and a provider's retried webhooks are claimed in the database, so they happen once whichever copy takes them; a conversation, though, lives in one process (its turn, folded double texts, background tools), and two copies taking messages for the same conversation would run overlapping turns. On a platform that adds instances under load, set it to exactly one instance, kept warm, with CPU always on, and use a durable `database`.
+- Run one copy of an agent per database. Scheduled messages, upkeep and a provider's retried webhooks are claimed in the database, so they happen once whichever copy takes them; a conversation lives in one process at a time (its turn, folded double texts, background tools): the copy working on it holds its lease in the database, renewed while it is busy, and another copy leaves it alone, so the old and new copy side by side during a deploy never answer one message twice. A copy that dies mid-turn leaves the turn to another once its lease runs out (15 s). Each copy is a `runner` (createAgent's option, else `FLOW_RUNNER`, else the host's name, with a random suffix), named on every event. On a platform that adds instances under load, still set it to exactly one instance, kept warm, with CPU always on, and use a durable `database`.
 - `agent.status()` says whether anything is running and for how long it has been idle, so your platform can stop idle agents and start them on the next message.
-- Every message, turn, model call (tokens and cost), tool and schedule is an event. Send events wherever you like; `jsonlSink(path)` writes them to a file. An `EventSink` is a function that gets each event (`{ type, conversationId, at, ... }`) and must not throw:
+- Every message, turn, model call (tokens and cost), tool and schedule is an event. Send events wherever you like; `jsonlSink(path)` writes them to a file. An `EventSink` is a function that gets each event (`{ type, conversationId, at, runner, ... }`) and must not throw:
 
   ```ts
   const log: EventSink = (event) => console.log(event.type, event.conversationId);
@@ -617,7 +617,7 @@ For agents with tools we recommend **Claude Haiku 5.5** (`anthropic/claude-haiku
 
 ## Roadmap
 
-- **Several copies of one agent.** Each conversation owned by one copy at a time (a claim in the database, taken over when a copy stops), so an agent can run on more than one instance. Until then, run one copy (see [State, restarts and hosting](#state-restarts-and-hosting)).
+- **Several copies of one agent.** Each conversation is already worked on by one copy at a time (its lease, taken over when a copy stops), which keeps a deploy's overlap safe; what is left is to prove the rest under steady load on several instances. Until then, run one copy (see [State, restarts and hosting](#state-restarts-and-hosting)).
 
 ## Contributing
 

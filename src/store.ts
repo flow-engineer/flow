@@ -91,6 +91,11 @@ const MIGRATIONS: Array<(t: Types) => string> = [
    ALTER TABLE no_contact ADD COLUMN kind TEXT NOT NULL DEFAULT 'topic';
    UPDATE no_contact SET kind = 'stop' WHERE hard = 1;
    CREATE INDEX nudges_status ON nudges (agent_id, status)`,
+  // Which runner works on a conversation, until when (renewed while it does), and how many times it
+  // changed hands: a runner whose copy is from an earlier epoch reads the conversation again.
+  (t) => `CREATE TABLE conversation_leases (
+     agent_id TEXT NOT NULL, conversation_id TEXT NOT NULL, runner TEXT NOT NULL, until ${t.int} NOT NULL, epoch ${t.int} NOT NULL,
+     PRIMARY KEY (agent_id, conversation_id))`,
 ];
 
 /** Quiet hours, "HH:MM" to "HH:MM" in the person's own time; they may wrap midnight. */
@@ -398,6 +403,31 @@ export class Store {
 
   async doneInbox(ids: number[]): Promise<void> {
     for (const id of ids) await this.db.run("UPDATE inbox SET done = 1 WHERE agent_id = ? AND id = ?", [this.agentId, id]);
+  }
+
+  // Which runner works on a conversation.
+
+  /**
+   * Takes or renews the conversation for `runner` until `until`, unless another runner holds it
+   * past `now`. Returns the lease's epoch, which goes up each time the conversation changes hands,
+   * or null when another runner holds it.
+   */
+  async claimConversation(conversationId: string, runner: string, now: number, until: number): Promise<number | null> {
+    const [row] = await this.db.query(
+      `INSERT INTO conversation_leases (agent_id, conversation_id, runner, until, epoch) VALUES (?, ?, ?, ?, 1)
+       ON CONFLICT (agent_id, conversation_id) DO UPDATE SET
+         epoch = CASE WHEN conversation_leases.runner = excluded.runner THEN conversation_leases.epoch ELSE conversation_leases.epoch + 1 END,
+         runner = excluded.runner, until = excluded.until
+       WHERE conversation_leases.runner = excluded.runner OR conversation_leases.until <= ?
+       RETURNING epoch`,
+      [this.agentId, conversationId, runner, until, now],
+    );
+    return row ? Number(row.epoch) : null;
+  }
+
+  /** Lets go of the conversation, if `runner` still holds it; another runner may take it at once. */
+  async releaseConversation(conversationId: string, runner: string): Promise<void> {
+    await this.db.run("UPDATE conversation_leases SET until = 0 WHERE agent_id = ? AND conversation_id = ? AND runner = ?", [this.agentId, conversationId, runner]);
   }
 
   // Background tools.
