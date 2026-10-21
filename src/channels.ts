@@ -150,6 +150,7 @@ export interface CustomUIProvider {
 
 /** WhatsApp's own limits, the same for every provider. */
 export const WHATSAPP: ChannelInfo = {
+  platform: "whatsapp",
   reactions: true,
   status: false,
   formatting: "whatsapp",
@@ -169,7 +170,7 @@ export const WHATSAPP: ChannelInfo = {
 export const WHATSAPP_CAROUSELS: NonNullable<ChannelInfo["carousels"]> = { maxCards: 10, textMax: 1024, cardTextMax: 160, buttons: 2, labelMax: 20 };
 
 /** SMS: plain text; providers join up to 10 segments into one text (1,530 GSM-7 characters). */
-export const SMS: ChannelInfo = { reactions: false, status: false, formatting: "plain", maxLength: 1530 };
+export const SMS: ChannelInfo = { platform: "sms", reactions: false, status: false, formatting: "plain", maxLength: 1530 };
 
 export type WhatsAppFeature = "buttons" | "lists" | "links" | "images" | "carousels" | "replies" | "reactions" | "typing" | "readReceipts" | "templates";
 
@@ -329,6 +330,197 @@ export function fitMessage<M extends { text: string; link?: { label: string; url
     ...(link && info.linkButton ? { link } : {}),
     ...(image && info.images ? { image } : {}),
   } as M;
+}
+
+/**
+ * Each platform's content limits as Flow Messaging enforces them (its API spec, flow-engineer/sdk,
+ * and the checks its server runs on every send: the channel's text, caption and buttons-text limits,
+ * SMS segments). They are the platforms' own (WhatsApp's, Telegram's), with Flow Messaging's
+ * counting: characters as code points, Telegram's as UTF-16 code units. Keep them in step with it.
+ */
+export const CONTENT_LIMITS: Record<NonNullable<ChannelInfo["platform"]>, ContentLimits> = {
+  whatsapp: { name: "WhatsApp", text: 4096, caption: 1024, buttonsText: 1024, mediaHeaderReplies: 3 },
+  // Flow sends Telegram text as Markdown and counts it as rendered; this counts it as written, so it
+  // can only be stricter, and only for formatted text near the limit.
+  telegram: { name: "Telegram", text: 4096, utf16: true, caption: 1024, buttonsText: 4096 },
+  imessage: { name: "iMessage", text: 9999, caption: 1024 },
+  sms: { name: "SMS", text: 1530, caption: 1024, smsSegments: 10 },
+};
+
+export interface ContentLimits {
+  /** The platform's name in errors. */
+  name: string;
+  /** The most characters a text takes. */
+  text: number;
+  /** Characters are counted as UTF-16 code units (an emoji such as 😀 is 2), not code points. */
+  utf16?: boolean;
+  /** The most characters a photo's caption takes. */
+  caption: number;
+  /** With buttons (or a link button): the most characters their text takes. Absent: the platform shows no buttons. */
+  buttonsText?: number;
+  /** With a photo heading them: the most reply buttons (WhatsApp shows more as a list, whose header can only be text). */
+  mediaHeaderReplies?: number;
+  /** The most SMS segments one text takes. */
+  smsSegments?: number;
+}
+
+/** Limits of every platform (the spec's). */
+const SPEC = { buttonsText: 4096, caption: 1024, buttons: 10, label: 20, buttonId: 64, carouselText: 1024, minCards: 2, maxCards: 10, cardText: 160, cardLineBreaks: 2, cardButtons: 2 };
+
+/** A send Flow Messaging refuses, as it refuses it: its error type, the field (`param`) and its message. */
+export interface ContentRefusal {
+  type: "invalid_request";
+  param: string;
+  message: string;
+}
+
+/**
+ * Why the channel's platform would refuse this outbound (Flow Messaging's checks, in its order, on
+ * the content Flow Framework's Flow Messaging channels make of it), or null. Only messages and
+ * carousels are checked, on channels whose info names a platform. A link is a link button, a photo
+ * with buttons or a link their header (else a photo with the text as its caption), a button's id is
+ * its label (a list row's, its id), and a carousel on a channel without carousels is checked as the
+ * messages it is sent as. Photos by file id are the provider's own and not checked here; nor are
+ * media types (Flow converts WebP, GIF, BMP and TIFF; the rest is known only from the file's bytes).
+ */
+export function contentRefusal(info: ChannelInfo, outbound: Outbound): ContentRefusal | null {
+  const limits = info.platform ? CONTENT_LIMITS[info.platform] : undefined;
+  if (!limits) return null;
+  if (outbound.type === "message") return messageRefusal(limits, outbound);
+  if (outbound.type !== "carousel") return null;
+  if (info.carousels) return carouselRefusal(outbound);
+  for (const m of carouselMessages(info, carouselOf(outbound))) {
+    const refusal = messageRefusal(limits, m);
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
+const refuse = (param: string, message: string): ContentRefusal => ({ type: "invalid_request", param, message });
+const codePoints = (s: string) => [...s].length;
+const isHttps = (s: string) => {
+  try {
+    const u = new URL(s);
+    return u.protocol === "https:" && u.host !== "";
+  } catch {
+    return false;
+  }
+};
+
+type FlowButton = { id: string; label: string } | { url: string; label: string };
+
+/** Buttons at `param` (reply ids unique across `seen`): Flow Messaging's checkButtonList. */
+function buttonsRefusal(buttons: FlowButton[], param: string, seen: Set<string>, duplicate = "Button ids must be unique within a message."): ContentRefusal | null {
+  for (const [i, b] of buttons.entries()) {
+    const bp = `${param}.buttons[${i}]`;
+    const label = codePoints(b.label);
+    if ("url" in b) {
+      if (!isHttps(b.url) || label === 0 || label > SPEC.label) return refuse(bp, "A link button needs an https url and a label of 1 to 20 characters.");
+      continue;
+    }
+    if (b.id === "" || new TextEncoder().encode(b.id).length > SPEC.buttonId || label === 0 || label > SPEC.label) return refuse(bp, "A reply button needs an id of 1 to 64 characters and a label of 1 to 20.");
+    if (seen.has(b.id)) return refuse(`${bp}.id`, duplicate);
+    seen.add(b.id);
+  }
+  return null;
+}
+
+function messageRefusal(limits: ContentLimits, m: Pick<Message, "text" | "buttons" | "list" | "link" | "image">): ContentRefusal | null {
+  const length = (s: string) => (limits.utf16 ? s.length : codePoints(s));
+  const on = limits.name;
+  const buttons: FlowButton[] | undefined = m.link
+    ? [{ url: m.link.url, label: m.link.label }]
+    : m.buttons?.length
+      ? m.buttons.map((label) => ({ id: label, label }))
+      : m.list?.rows.map((row) => ({ id: row.id, label: row.title }));
+  const header = m.image && "url" in m.image ? m.image.url : undefined;
+  if (buttons && limits.buttonsText) {
+    if (m.text === "" || codePoints(m.text) > SPEC.buttonsText) return refuse("content.text", `text must be 1 to ${SPEC.buttonsText} characters.`);
+    if (buttons.length < 1 || buttons.length > SPEC.buttons) return refuse("content.buttons", "Give 1 to 10 buttons.");
+    const problem = buttonsRefusal(buttons, "content", new Set());
+    if (problem) return problem;
+    if (header !== undefined && !isHttps(header)) return refuse("content.header.url", "content.header.url must be an https URL Flow can fetch.");
+    if (m.image && codePoints(m.text) > SPEC.caption) return refuse("content.text", `text must be 1 to ${SPEC.caption} characters with a media header.`);
+    if (length(m.text) > limits.buttonsText) return refuse("content.text", `text must be 1 to ${limits.buttonsText} characters with buttons on ${on}.`);
+    if (m.image && length(m.text) > limits.caption) return refuse("content.text", `caption must be at most ${limits.caption} characters on ${on}.`);
+    const replies = buttons.filter((b) => !("url" in b)).length;
+    if (m.image && limits.mediaHeaderReplies && replies > limits.mediaHeaderReplies) return refuse("content.header", `A media header goes with at most ${limits.mediaHeaderReplies} reply buttons on ${on}.`);
+    return null;
+  }
+  if (m.image) {
+    if (header !== undefined && !isHttps(header)) return refuse("content.url", "url must be an https URL Flow can fetch.");
+    if (m.text && codePoints(m.text) > SPEC.caption) return refuse("content.caption", `caption must be at most ${SPEC.caption} characters.`);
+    if (m.text && length(m.text) > limits.caption) return refuse("content.caption", `caption must be at most ${limits.caption} characters on ${on}.`);
+    return null;
+  }
+  const n = length(m.text);
+  if (n === 0) return refuse("content.text", `text is empty; give 1 to ${limits.text} characters on ${on}.`);
+  if (n > limits.text) return refuse("content.text", `text must be 1 to ${limits.text} characters on ${on}.`);
+  if (limits.smsSegments) {
+    const { segments, encoding } = smsSegmentsOf(m.text);
+    if (segments > limits.smsSegments) {
+      return refuse(
+        "content.text",
+        encoding === "ucs2"
+          ? `This text is ${segments} SMS segments as UCS-2 because it contains an emoji or a character outside GSM-7; SMS takes at most ${limits.smsSegments}.`
+          : `This text is ${segments} SMS segments (GSM-7); SMS takes at most ${limits.smsSegments}.`,
+      );
+    }
+  }
+  return null;
+}
+
+function carouselRefusal(c: Carousel): ContentRefusal | null {
+  if (c.text === "" || codePoints(c.text) > SPEC.carouselText) return refuse("content.text", `text must be 1 to ${SPEC.carouselText} characters.`);
+  if (c.cards.length < SPEC.minCards || c.cards.length > SPEC.maxCards) return refuse("content.cards", `Give ${SPEC.minCards} to ${SPEC.maxCards} cards.`);
+  const seen = new Set<string>();
+  let first: { links: boolean; count: number } | undefined;
+  for (const [i, card] of c.cards.entries()) {
+    const cp = `content.cards[${i}]`;
+    if ("url" in card.image && !isHttps(card.image.url)) return refuse(`${cp}.header.url`, `${cp}.header.url must be an https URL Flow can fetch.`);
+    if (card.text !== undefined) {
+      const n = codePoints(card.text);
+      if (n === 0 || n > SPEC.cardText) return refuse(`${cp}.text`, `${cp}.text must be 1 to ${SPEC.cardText} characters.`);
+      if (card.text.split("\n").length - 1 > SPEC.cardLineBreaks) return refuse(`${cp}.text`, `${cp}.text has more than ${SPEC.cardLineBreaks} line breaks.`);
+    }
+    const buttons: FlowButton[] = card.link ? [{ url: card.link.url, label: card.link.label }] : (card.buttons ?? []).map((label) => ({ id: label, label }));
+    if (buttons.length < 1 || buttons.length > SPEC.cardButtons) return refuse(`${cp}.buttons`, `${cp}.buttons must hold 1 to ${SPEC.cardButtons} buttons.`);
+    const problem = buttonsRefusal(buttons, cp, seen, "Reply button ids must be unique across the carousel.");
+    if (problem) return problem;
+    const links = Boolean(card.link);
+    if (!first) first = { links, count: buttons.length };
+    else if (links !== first.links || buttons.length !== first.count) return refuse(`${cp}.buttons`, `${cp}.buttons differ from cards[0].buttons in number or kind.`);
+  }
+  return null;
+}
+
+/** GSM 03.38's alphabet: one septet each, its extension table's characters two. */
+const GSM_BASIC = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà";
+const GSM_EXTENDED = "^{}\\[~]|€\f";
+
+/**
+ * How many SMS segments a text takes, as Flow Messaging counts them: GSM-7 when every character is
+ * in the GSM alphabet (160 in one segment, 153 per segment when split, an extension character two
+ * and never split across segments), else UCS-2 (70 UTF-16 units, 67 when split, a character outside
+ * the BMP two and never split).
+ */
+function smsSegmentsOf(text: string): { segments: number; encoding: "gsm7" | "ucs2" } {
+  const chars = [...text];
+  const gsm = chars.every((c) => GSM_BASIC.includes(c) || GSM_EXTENDED.includes(c));
+  const unit = gsm ? (c: string) => (GSM_EXTENDED.includes(c) ? 2 : 1) : (c: string) => c.length;
+  const [single, split] = gsm ? [160, 153] : [70, 67];
+  const encoding = gsm ? ("gsm7" as const) : ("ucs2" as const);
+  if (chars.reduce((n, c) => n + unit(c), 0) <= single) return { segments: 1, encoding };
+  let segments = 1;
+  let used = 0;
+  for (const c of chars) {
+    if (used + unit(c) > split) {
+      segments++;
+      used = 0;
+    }
+    used += unit(c);
+  }
+  return { segments, encoding };
 }
 
 /** A declared template filled with the values of one send: what the person sees. */

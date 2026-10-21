@@ -10,7 +10,8 @@
 
 import { z } from "zod";
 import { toSpec, tool } from "./tools.ts";
-import type { CarouselCard, ChannelInfo, Photo, ToolSpec } from "./types.ts";
+import { CONTENT_LIMITS, type ContentRefusal } from "./channels.ts";
+import type { CarouselCard, ChannelInfo, Outbound, Photo, ToolSpec } from "./types.ts";
 
 export const REACT = "react";
 export const UPDATE = "share_updates";
@@ -154,6 +155,34 @@ export function sendRefusal(channel: ChannelInfo, input: SendInput): string | nu
     return `Not sent: the link's URL goes after your text here, and together they are over ${max} characters. Shorten the text.`;
   }
   return null;
+}
+
+/** A send the platform's content rules refuse, as the agent is told it: the platform's own error. */
+export function contentRefusalText(channel: ChannelInfo, refusal: ContentRefusal): string {
+  const platform = channel.platform ? CONTENT_LIMITS[channel.platform].name : "The channel";
+  const card = /cards\[(\d+)\]/.exec(refusal.param);
+  return `Not sent, ${platform} refuses it: ${refusal.message}${card ? ` (cards[${card[1]}] is card ${Number(card[1]) + 1}.)` : ""} Fix it and send again.`;
+}
+
+/** A message or carousel as it was sent, in the send tool's words: what the history and the transcript keep. */
+export function sentArgs(outbound: Extract<Outbound, { type: "message" | "carousel" }>): SendInput & Record<string, unknown> {
+  const tool = (p: Photo) => ("url" in p ? { url: p.url } : { file_id: p.fileId });
+  if (outbound.type === "carousel") {
+    return {
+      text: outbound.text,
+      ...(outbound.replyTo ? { reply_to: outbound.replyTo } : {}),
+      carousel: outbound.cards.map((c) => ({ image: tool(c.image), ...(c.text ? { text: c.text } : {}), ...(c.buttons?.length ? { buttons: c.buttons } : {}), ...(c.link ? { link: c.link } : {}) })),
+    };
+  }
+  return {
+    text: outbound.text,
+    ...(outbound.replyTo ? { reply_to: outbound.replyTo } : {}),
+    ...(outbound.buttons?.length ? { buttons: outbound.buttons } : {}),
+    ...(outbound.list ? { list: outbound.list } : {}),
+    ...(outbound.link ? { link: outbound.link } : {}),
+    ...(outbound.image ? { image: tool(outbound.image) } : {}),
+    ...outbound.fields,
+  };
 }
 
 const reactTool = tool({

@@ -26,6 +26,7 @@ export interface FlowEvent {
     | "reaction"
     | "status"
     | "message.undelivered"
+    | "message.refused"
     | "reaction.in"
     | "attachment.failed"
     | "keyword"

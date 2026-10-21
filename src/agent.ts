@@ -24,7 +24,7 @@ import { Store, type ConversationRow, type IdentityRow, type NudgeRow, type Quie
 import { clock, quietUntil, validZone } from "./time.ts";
 import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } from "./tools.ts";
 import { traces, tracesFromEnv, type Traces, type TracesOptions } from "./traces.ts";
-import type { ChannelInfo, Deliver, Incoming, Model, Outbound, Template, TemplateDefinition, Transcribe } from "./types.ts";
+import type { BeforeSend, ChannelInfo, Deliver, Incoming, Model, Outbound, Template, TemplateDefinition, Transcribe } from "./types.ts";
 
 /** What a host supplies to an agent: `createAgent({ ..., host })`. */
 export interface HostOptions {
@@ -151,6 +151,17 @@ export interface AgentOptions {
    * nudge outside the window is refused (outside_window), as before.
    */
   fallbackTemplate?: Template;
+  /**
+   * Checks, changes or refuses every message, carousel and template before it goes, on every
+   * channel (the agent's sends, scheduled messages and nudges, Flow Framework's own replies): return
+   * nothing to send it as it is, another message to send that instead, or `{ refuse: why }` to send
+   * nothing. It runs before the platform's content rules (`contentRefusal`) and before anything is
+   * recorded, so the events, the history, the transcript and the test cloud's judge see what went. A
+   * refused send of the agent's goes back to it, with your reason, to fix; a scheduled message or
+   * nudge it refuses is settled refused. Use it rather than wrapping a channel's send, which the
+   * playground and the test cloud never call.
+   */
+  beforeSend?: BeforeSend;
   /**
    * Quiet hours in each person's own time ("22:00" to "07:00", the default), when what the business
    * starts waits: a nudge is held until they end (or the person writes), then the agent writes one
@@ -411,6 +422,7 @@ export class Agent {
       timeZone: options.timeZone,
       quietHours: options.quietHours,
       templates: options.templates ?? [],
+      beforeSend: options.beforeSend,
       fallbackTemplate: options.fallbackTemplate?.name,
       windowClosed: (nudge, to) => this.windowClosed(nudge, to),
       tagChannels: (options.channels ?? []).length > 1,

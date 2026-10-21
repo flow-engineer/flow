@@ -13,8 +13,8 @@
 
 import { Buffer } from "node:buffer";
 import { emitter } from "../../src/events.ts";
-import { fitMessage, z, type ChannelInfo, type ChannelSummary, type Deliver, type EventSink, type Incoming, type Outbound, type ReceiveOptions } from "../../src/index.ts";
-import { sendInput, sendRefusal } from "../../src/talk.ts";
+import { contentRefusal, fitMessage, z, type ChannelInfo, type ChannelSummary, type Deliver, type EventSink, type Incoming, type Outbound, type ReceiveOptions } from "../../src/index.ts";
+import { contentRefusalText, sendInput, sendRefusal } from "../../src/talk.ts";
 
 export interface HttpAgentOptions {
   url: string;
@@ -99,7 +99,10 @@ export function checkReply(reply: unknown, info: ChannelInfo): { outbound: Outbo
   if (fields !== undefined && (typeof fields !== "object" || fields === null || Array.isArray(fields))) return { refused: "fields: must be an object" };
   const refusal = sendRefusal(info, input as Parameters<typeof sendRefusal>[1]);
   if (refusal) return { refused: refusal };
-  return { outbound: fitMessage(info, { type: "message" as const, ...rest, ...(replyTo !== undefined ? { replyTo } : {}), ...(fields ? { fields } : {}) }) };
+  const outbound = fitMessage(info, { type: "message" as const, ...rest, ...(replyTo !== undefined ? { replyTo } : {}), ...(fields ? { fields } : {}) });
+  // What the platform itself refuses (Flow Messaging's content rules), as it refuses it.
+  const refused = contentRefusal(info, outbound);
+  return refused ? { refused: contentRefusalText(info, refused) } : { outbound };
 }
 
 /** A reply's photo ({ url } or { fileId }) as the send tool takes it ({ url } or { file_id }). */

@@ -57,7 +57,7 @@ export const PLATFORMS: Platform[] = [
     complete: true,
     icon: "whatsapp",
   },
-  { id: "imessage", name: "iMessage", reactions: true, status: false, typing: true, formatting: "plain", images: { captionMax: 4000 }, complete: false, icon: "imessage" },
+  { id: "imessage", name: "iMessage", reactions: true, status: false, typing: true, formatting: "plain", images: { captionMax: 1024 }, complete: false, icon: "imessage" },
   { id: "telegram", name: "Telegram", reactions: true, status: false, typing: true, formatting: "markdown", images: { captionMax: 1024 }, complete: false, icon: "telegram" },
   { id: "web", name: "Web", reactions: true, status: true, typing: true, formatting: "markdown", linkButton: { labelMax: 20 }, images: { captionMax: 4000 }, complete: false, icon: "googlechrome" },
 ];
@@ -69,6 +69,8 @@ export function platform(id: string | null): Platform {
 /** The parts of a platform the agent's runtime needs. */
 export function channelOf(p: Platform): ChannelInfo {
   return {
+    // Flow Messaging's content rules for the platform (CONTENT_LIMITS); the web has none.
+    ...(p.id === "web" ? {} : { platform: p.id }),
     reactions: p.reactions,
     status: p.status,
     formatting: p.formatting,

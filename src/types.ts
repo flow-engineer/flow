@@ -131,6 +131,36 @@ export type Outbound =
   | { type: "status"; text: string | null }
   | { type: "typing"; on: boolean };
 
+/** What the person reads: a message, a carousel or a template. */
+export type OutboundMessage = Extract<Outbound, { type: "message" | "carousel" | "template" }>;
+
+/** Where a message is going, and what started it: what `beforeSend` gets with it. */
+export interface SendContext {
+  conversationId: string;
+  /** The channel's name (whatsapp, sms, your UI's), and what it can show. */
+  channel: string;
+  info: ChannelInfo;
+  /** The person's address on it. */
+  address: string;
+  /**
+   * agent: its send tools, or a template it sent. direct: a fixed-text scheduled message or a nudge,
+   * with no model. framework: Flow Framework's own (a keyword's or intercept's reply, a sign-in
+   * prompt, the apology after a failed turn).
+   */
+  origin: "agent" | "direct" | "framework";
+}
+
+/**
+ * createAgent's `beforeSend`: every message, carousel and template passes through it before it is
+ * checked against the platform's content rules, sent and recorded. Return nothing (or the message)
+ * to send it as it is, another message to send that instead, or `{ refuse: why }` to send nothing.
+ * A refused send of the agent's goes back to it with the reason, to fix and send again.
+ */
+export type BeforeSend = (
+  message: OutboundMessage,
+  context: SendContext,
+) => OutboundMessage | { refuse: string } | void | Promise<OutboundMessage | { refuse: string } | void>;
+
 /** A WhatsApp template as it is sent: its name and the values for its placeholders (Meta's template parameters). */
 export interface Template {
   /** Its name as approved (or the provider's own id for it). */
@@ -189,6 +219,12 @@ export interface ChannelInfo {
   linkButton?: { labelMax: number };
   /** Photos sent by URL, with the message's text as their caption. */
   images?: { captionMax: number };
+  /**
+   * The platform whose content rules (Flow Messaging's, CONTENT_LIMITS) every send on this channel is
+   * checked against, after beforeSend and before it goes: what the platform would refuse is refused
+   * here, with its error, in the playground, the test cloud and production alike.
+   */
+  platform?: "whatsapp" | "telegram" | "imessage" | "sms";
   /** Carousels: 2 to maxCards cards, each a photo, up to cardTextMax characters and 1 to `buttons` reply buttons (or one link). */
   carousels?: { maxCards: number; textMax: number; cardTextMax: number; buttons: number; labelMax: number };
   /** The channel shows the person when their message has been read. */

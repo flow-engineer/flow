@@ -75,6 +75,7 @@ export interface StreamHandle {
 
 /** Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos (one with buttons is one message), carousels (Flow sends their cards one by one), Markdown, no read receipts for bots. */
 export const TELEGRAM: ChannelInfo = {
+  platform: "telegram",
   reactions: true,
   status: false,
   formatting: "markdown",
@@ -94,6 +95,7 @@ export const TELEGRAM: ChannelInfo = {
  * send it will not deliver comes back as Not delivered (outside_window).
  */
 export const IMESSAGE: ChannelInfo = {
+  platform: "imessage",
   reactions: true,
   status: false,
   formatting: "plain",

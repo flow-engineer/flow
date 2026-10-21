@@ -164,12 +164,13 @@ test("a business run against flowEvents' own route: a signed event is 202, a wro
   await events!.idle();
 });
 
-test("the format: a business run's steps parse, and a step that is two things is refused at its line", () => {
+test("the format: a business run's steps parse (expect.sent may ask for a carousel), and a step that is two things is refused at its line", () => {
   const scenario = (opening: string, expect = "") => ({ path: "scenarios/b.yaml", content: `id: b\nchannels: [whatsapp]\nperson: { address: "+15550100001", persona: p, goal: g }\nopening:\n${opening}\n${expect}` });
   const ok = parseScenario(scenario(
     `  - event: { type: test.outbid, delivery: critical, subject: "user:1", data: { phone: "+15550100001" } }\n    at: "23:30"\n  - wait: 8h30m\n  - event: { id: e1, type: t, subject: s, data: {} }\n    signature: bad\n    answer: 401\n  - nudge: { template: { name: outbid, body: [PS5] } }\n  - say: ok`,
-    `expect:\n  sent: [{ at: "08:00", template: outbid }, { phrased: true, text: PS5 }]\n  not_sent: [{}]`,
+    `expect:\n  sent: [{ at: "08:00", template: outbid }, { phrased: true, text: PS5 }, { carousel: true, text: PS5 }]\n  not_sent: [{}]`,
   ));
+  assert.deepEqual(ok.expect.sent?.[2], { carousel: true, text: "PS5" });
   assert.ok(isBusiness(ok));
   assert.deepEqual(ok.opening.map((s) => (s.event ? "event" : s.nudge ? "nudge" : s.wait ? "wait" : "say")), ["event", "wait", "event", "nudge", "say"]);
   assert.equal(waitMs("8h30m"), 8.5 * 3_600_000);
@@ -177,4 +178,5 @@ test("the format: a business run's steps parse, and a step that is two things is
   assert.throws(() => parseScenario(scenario("  - say: hi\n    wait: 1h")), /scenarios\/b\.yaml:5: opening\[0\]: one of say, event, nudge or wait per step, not say and wait/);
   assert.throws(() => parseScenario(scenario("  - wait: soon")), /a length of time/);
   assert.throws(() => parseScenario(scenario("  - say: hi\n    answer: 202")), /belong to an event step/);
+  assert.throws(() => parseScenario(scenario("  - say: hi", "expect:\n  sent: [{ carousel: true, template: outbid }]")), /a carousel is not a template/);
 });
