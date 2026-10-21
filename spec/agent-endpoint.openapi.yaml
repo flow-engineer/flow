@@ -112,14 +112,18 @@ components:
       description: The value of FLOW_FRAMEWORK_AGENT_TOKEN, when it is set where `flow test` runs.
 # What each platform a run plays shows, as ChannelInfo in src/types.ts: a reply is checked against
 # its run's platform. A key that is absent means the platform does not have that feature. maxLength
-# absent is 4,000. Kept in step with simulators/src/platforms.ts by test/check-endpoint.test.ts.
+# absent is 4,000. `platform` names the content rules a reply is also checked against (Flow
+# Messaging's, CONTENT_LIMITS in src/channels.ts), with Flow Messaging's own errors. Kept in step with
+# simulators/src/platforms.ts by test/check-endpoint.test.ts.
 x-chinwag-platforms:
   sms:
+    platform: sms
     reactions: false
     status: false
     formatting: plain
     maxLength: 1530
   whatsapp:
+    platform: whatsapp
     reactions: true
     status: false
     formatting: whatsapp
@@ -131,11 +135,13 @@ x-chinwag-platforms:
     images: { captionMax: 1024 }
     readReceipts: true
   imessage:
+    platform: imessage
     reactions: true
     status: false
     formatting: plain
-    images: { captionMax: 4000 }
+    images: { captionMax: 1024 }
   telegram:
+    platform: telegram
     reactions: true
     status: false
     formatting: markdown

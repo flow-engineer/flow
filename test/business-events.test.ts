@@ -629,7 +629,7 @@ test("the default log line masks numbers and never carries the message text", as
 
 const PERSON = "+15550000201";
 
-/** A real agent on a simulated WhatsApp provider, flowEvents mounted the way an app does it: routes, onTick, context, the phrasing check in the channel's send, attach. */
+/** A real agent on a simulated WhatsApp provider, flowEvents mounted the way an app does it: routes, onTick, context, the phrasing check in beforeSend, attach. */
 async function mounted() {
   const clock = { now: NOON };
   const scripted = scriptedModel();
@@ -647,17 +647,13 @@ async function mounted() {
     deadlineMs: 50,
     now: () => clock.now,
     scheduleCheckMs: 0,
-    channels: [{
-      ...channel,
-      send: (address, outbound) => {
-        const why = events.phrasing.check(address, outbound);
-        if (why) {
-          refused.push(why);
-          throw new Error(why);
-        }
-        return channel.send(address, outbound);
-      },
-    }],
+    channels: [channel],
+    beforeSend: (outbound, { address }) => {
+      const why = events.phrasing.check(address, outbound);
+      if (!why) return;
+      refused.push(why);
+      return { refuse: why };
+    },
     routes: events.routes,
     onTick: events.onTick,
     context: (conversationId) => events.context(conversationId),

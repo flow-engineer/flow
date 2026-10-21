@@ -170,6 +170,18 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
 - The simulators and the test cloud play an agent's own channels with these definitions (the web
   simulator plays a customUI), so the model sees the production tools; they show params such as
   app_link under the message instead of calling your sendMessage.
+- Every send is checked against its platform's content rules, Flow Messaging's (`ChannelInfo.platform`,
+  `CONTENT_LIMITS`, `contentRefusal`): what WhatsApp, Telegram, iMessage or SMS would refuse (a
+  carousel card's text over 2 line breaks, buttons whose text is over 1,024 characters on WhatsApp,
+  the same button label on two cards, an SMS over 10 segments) is refused before it goes, with
+  Flow Messaging's own error, in the playground, the test cloud and production alike; the agent is
+  told it and sends again.
+- To check, rewrite or refuse messages yourself (card text, links, wording), use `createAgent`'s
+  `beforeSend: (message, { channel, address, info, origin }) => ...`: return nothing to send it,
+  another message to send that, or `{ refuse: "why" }`. Never wrap a channel's `send` for it: the
+  playground and the test cloud never call it, and what you change there is not what the
+  transcript and the judge see. What `beforeSend` returns is what is checked, sent and recorded
+  (`message.out`, the history, the transcript); a refusal is a `message.refused` event.
 - `instructions` (on `customUI`, and in `whatsapp()`'s and `sms()`'s options) is your guidance for
   the agent on that channel, in its prompt only while the person uses it. Data a param carries,
   such as a link, comes from your tools' results: a tool that has a screen returns its link
@@ -238,8 +250,8 @@ before any send or turn (`queued`, or `refused`/`dropped`/`scheduled` decided th
 When the backend posts what happened (an order shipped, an item is back in stock) rather than what
 to send, mount `flowEvents({ secret, catalog, timezone })` (from `@flow-engineer/flow`): its
 `routes` (`POST /v1/events`, signed with `Flow-Signature`), `onTick` and `context(conversationId)`
-go on `createAgent`, `events.phrasing.check(address, outbound)` in the channel's send (throw its
-reason to refuse), then `events.attach(agent)`. Each type in the catalog has a delivery level
+go on `createAgent`, `events.phrasing.check(address, message)` in `createAgent`'s `beforeSend`
+(return `{ refuse: reason }`), then `events.attach(agent)`. Each type in the catalog has a delivery level
 (critical, standard, optional), its template and its values; the guide is `docs/events.md` in the
 package (`../docs/events.md` from this file).
 

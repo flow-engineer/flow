@@ -39,15 +39,15 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { declaredTemplate, fillTemplate, fitMessage } from "./channels.ts";
+import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type ContentRefusal } from "./channels.ts";
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { scheduleTools } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
-import { REACT, UPDATE, cardsOf, photoOf, reactInput, sendInput, sendRefusal, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
+import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
-import type { Attachment, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, PersonMessage, Photo, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
+import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, SendContext, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 
 export interface ConversationSettings {
   model: Model;
@@ -87,6 +87,8 @@ export interface ConversationSettings {
   quietHours?: QuietHours | false;
   /** The WhatsApp templates the owner declared: a sent one's text goes in the history. */
   templates: TemplateDefinition[];
+  /** The owner's check of every message, carousel and template before it goes (createAgent's beforeSend). */
+  beforeSend?: BeforeSend;
   /** The declared template Flow Framework sends when no other one fits a closed window (createAgent's fallbackTemplate). */
   fallbackTemplate?: string;
   /** Tag every message with its channel (the agent has several), even for a person on one so far. */
@@ -358,10 +360,18 @@ export class Conversation {
           return { error: error instanceof Error ? error.message.replace(/^flow: /, "") : String(error) };
         }
         const channel = this.owed.find((o) => o.windowClosed)?.channel ?? context.channel;
-        const failure = await this.send(channel, { type: "template", ...template });
-        if (failure) return { error: failure };
-        this.settings.emit(this.id, "message.out", { text: name, channel, template: true });
-        this.history.push({ role: "user", content: `[Chinwag] You sent them the template "${name}" on ${channel}. It reads:\n${reads}` });
+        const result = await this.sendMessage(channel, { type: "template", ...template }, "agent");
+        if ("refused" in result) return { error: result.refused };
+        if ("failure" in result) return { error: result.failure };
+        const sent = result.sent as Extract<Outbound, { type: "template" }>;
+        if (JSON.stringify(sent) !== JSON.stringify({ type: "template", ...template })) {
+          try {
+            const shown = declaredTemplate(this.settings.templates, sent);
+            reads = shown ? fillTemplate(shown, sent).body : "";
+          } catch {}
+        }
+        this.settings.emit(this.id, "message.out", { text: sent.name, channel, template: true });
+        this.history.push({ role: "user", content: `[Chinwag] You sent them the template "${sent.name}" on ${channel}. It reads:\n${reads}` });
         this.sent();
         return { delivered: true, channel };
       },
@@ -512,13 +522,17 @@ export class Conversation {
       return true;
     });
     const send = async () => {
-      const failure = reply ? await this.send(channel, { type: "message", text: reply }) : null;
+      const result = reply ? await this.sendMessage(channel, { type: "message", text: reply }, "framework") : null;
       if (!(await taken)) return;
-      if (failure) {
+      if (result && !("sent" in result)) {
         // Kept as answered with nothing, if it is not in the history yet; the agent hears it did not arrive.
         answer.reply = "";
-        this.undelivered(reply, failure);
-      } else if (reply) this.settings.emit(this.id, "message.out", { text: reply, channel, direct: true, answered: true });
+        this.undelivered(reply, "refused" in result ? result.refused : result.failure);
+      } else if (result) {
+        // What went is what the history keeps.
+        if (result.sent.type === "message") answer.reply = result.sent.text;
+        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent), channel, direct: true, answered: true });
+      }
       if (!this.running && !this.timer) void this.run();
     };
     return { id, taken, send };
@@ -807,7 +821,7 @@ export class Conversation {
     this.resultUnsent = false;
     this.persist(() => this.settings.store.updateConversation(this.id, { turnOpen: false }));
     const waiting = this.theirMessages ? [...this.unanswered] : [];
-    if (waiting.length) await this.send(waiting.includes(this.currentChannel()) ? this.currentChannel() : waiting[0], { type: "message", text: APOLOGY });
+    if (waiting.length) await this.sendMessage(waiting.includes(this.currentChannel()) ? this.currentChannel() : waiting[0], { type: "message", text: APOLOGY }, "framework");
   }
 
   private checkIdle(): void {
@@ -1168,25 +1182,21 @@ export class Conversation {
             ...(hasFields ? { fields } : {}),
             ...preview,
           });
-      const failure = await this.send(channel, outbound);
-      if (failure) {
-        this.undelivered(input.text, failure);
+      const result = await this.sendMessage(channel, outbound, "agent");
+      if ("refused" in result) return refused(result.refused);
+      if ("failure" in result) {
+        this.undelivered(input.text, result.failure);
         return done();
       }
-      this.settings.emit(this.id, "message.out", {
-        text: outbound.text,
-        channel,
-        buttons: input.buttons,
-        list: input.list,
-        ...(outbound.type === "message" ? { link: outbound.link, image: outbound.image } : {}),
-        ...(outbound.type === "carousel" ? { carousel: outbound.cards } : {}),
-        replyTo: input.reply_to,
-        ...(hasFields ? { fields } : {}),
-      });
+      // What went, after beforeSend, is what the events, the history and the transcript keep.
+      const sent = result.sent as Extract<Outbound, { type: "message" | "carousel" }>;
+      const changed = JSON.stringify(sent) !== JSON.stringify(outbound);
+      this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, ...(changed ? { rewritten: true } : {}) });
       this.sent();
       this.sentThisTurn.add(input.text.trim());
+      this.sentThisTurn.add(sent.text.trim());
       await this.acknowledged(channel);
-      return done(JSON.stringify({ delivered: true, channel }));
+      return done(JSON.stringify({ delivered: true, channel, ...(changed ? { sent: sentArgs(sent) } : {}) }));
     }
     if (call.name === REACT) {
       const input = reactInput.safeParse(raw);
@@ -1250,6 +1260,46 @@ export class Conversation {
     }
   }
 
+  /**
+   * A message, carousel or template to the person: through the owner's beforeSend, then the
+   * platform's content rules, then the channel. Returns what went (what the events, the history and
+   * the transcript keep), why it was refused (also a `message.refused` event), or why it failed on
+   * the way. `link` is the channel's link when it is not this conversation's current one.
+   */
+  private async sendMessage(channel: string, draft: OutboundMessage, origin: SendContext["origin"], link = this.channels.get(channel)): Promise<{ sent: OutboundMessage } | { refused: string } | { failure: string }> {
+    if (this.closed) return { failure: "this person was forgotten" };
+    if (!link) return { failure: `no way to reach them on ${channel} right now` };
+    const refuse = (outbound: OutboundMessage, by: "beforeSend" | "content", reason: string, refusal?: ContentRefusal) => {
+      const text = outbound.type === "template" ? outbound.name : outbound.text;
+      this.settings.emit(this.id, "message.refused", { channel, origin, text, by, reason, ...(refusal ? { code: refusal.type, param: refusal.param, message: refusal.message } : {}), outbound });
+      return { refused: reason };
+    };
+    let outbound = draft;
+    if (this.settings.beforeSend) {
+      let result: Awaited<ReturnType<BeforeSend>>;
+      try {
+        result = await this.settings.beforeSend(draft, { conversationId: this.id, channel, info: link.info, address: link.address, origin });
+      } catch (error) {
+        return refuse(draft, "beforeSend", `Not sent: beforeSend failed: ${errorText(error)}`);
+      }
+      if (result && "refuse" in result) return refuse(draft, "beforeSend", `Not sent: ${result.refuse}`);
+      if (result) {
+        const kinds = (o: OutboundMessage) => (o.type === "template" ? "template" : "message");
+        if (kinds(result) !== kinds(draft)) return refuse(draft, "beforeSend", `Not sent: beforeSend returned a ${result.type ?? "value"} for a ${draft.type}.`);
+        // A message it changed is fitted to the channel again, as the agent's are (a link without link buttons goes in the text).
+        outbound = result.type === "message" ? fitMessage(link.info, result) : result;
+      }
+    }
+    const refusal = contentRefusal(link.info, outbound);
+    if (refusal) return refuse(outbound, "content", contentRefusalText(link.info, refusal), refusal);
+    try {
+      await link.deliver(outbound);
+    } catch (error) {
+      return { failure: error instanceof Error ? error.message : String(error) };
+    }
+    return { sent: outbound };
+  }
+
   /** A fixed-text scheduled message or a text or template nudge, sent with no model turn. */
   private async sendDirect(d: Direct): Promise<void> {
     // Settled already (by an earlier process, or another one running beside this): never sent twice.
@@ -1284,25 +1334,25 @@ export class Conversation {
     // The same key in every process, so the channel's provider sends it once.
     const idempotencyKey = d.nudge ? `nudge:${d.nudge}` : d.run ? `run:${d.run}` : `inbox:${this.id}:${d.inbox}`;
     const outbound: Outbound = d.template ? { type: "template", ...d.template, idempotencyKey } : fitMessage(link.info, { type: "message" as const, text: d.text ?? "", ...(d.link ? { link: d.link } : {}), preview: false as const, idempotencyKey });
-    let failure: string | null = null;
-    if (this.closed) return settle("failed", "this person was forgotten");
-    try { await link.deliver(outbound); } catch (error) { failure = errorText(error); }
-    if (failure) return settle("failed", failure);
-    if (d.template) {
+    const result = await this.sendMessage(d.channel, outbound, "direct", link);
+    if ("refused" in result) return settle("refused", result.refused);
+    if ("failure" in result) return settle("failed", result.failure);
+    const sent = result.sent;
+    if (sent.type === "template") {
       // A declared template's text, so the agent knows what the person read (and tapped a reply to).
-      const declared = declaredTemplate(this.settings.templates, d.template);
+      const declared = declaredTemplate(this.settings.templates, sent);
       let reads = "";
       try {
-        if (declared) reads = ` It reads:\n${fillTemplate(declared, d.template).body}`;
+        if (declared) reads = ` It reads:\n${fillTemplate(declared, sent).body}`;
       } catch {}
-      this.history.push({ role: "user", content: `[Chinwag] The business sent them its template "${d.template.name}" on ${d.channel}.${reads}` });
+      this.history.push({ role: "user", content: `[Chinwag] The business sent them its template "${sent.name}" on ${d.channel}.${reads}` });
     } else {
       const callId = `direct_${d.inbox ?? Date.now()}`;
       this.history.push({ role: "user", content: `[Chinwag] The business sent them this message through you on ${d.channel}, as written:` });
-      this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(d.channel), arguments: JSON.stringify({ text: d.text }) }] });
+      this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(d.channel), arguments: JSON.stringify(sentArgs(sent)) }] });
       this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel: d.channel }) });
     }
-    this.settings.emit(this.id, "message.out", { text: d.text ?? d.template?.name, channel: d.channel, direct: true });
+    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel: d.channel, direct: true });
     settle("sent");
   }
 
@@ -1500,12 +1550,13 @@ export class Conversation {
     const link = this.channels.get(channel);
     if (!link) return;
     const outbound = fitMessage(link.info, { type: "message" as const, text: prompt.message, authentication: true, ...(prompt.url ? { link: { label: "Sign in", url: prompt.url } } : {}) });
-    const failure = await this.send(channel, outbound);
-    if (failure) { this.undelivered(prompt.message, failure); return; }
+    const result = await this.sendMessage(channel, outbound, "framework", link);
+    if (!("sent" in result)) { this.undelivered(prompt.message, "refused" in result ? result.refused : result.failure); return; }
+    const sent = result.sent as Extract<Outbound, { type: "message" | "carousel" }>;
     const callId = `auth_${randomUUID()}`;
-    this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(channel), arguments: JSON.stringify({ text: outbound.text, ...(outbound.link ? { link: outbound.link } : {}) }) }] });
+    this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(channel), arguments: JSON.stringify(sentArgs(sent)) }] });
     this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel, authentication: true }) });
-    this.settings.emit(this.id, "message.out", { text: outbound.text, link: outbound.link, channel, authentication: true });
+    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, authentication: true });
     this.sent();
     this.sentThisTurn.add(prompt.message.trim());
     await this.acknowledged(channel);
@@ -1599,11 +1650,13 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
         args = JSON.parse(call.arguments || "{}");
       } catch {}
       if (call.name.startsWith("send_")) {
-        let delivered: { delivered?: boolean; channel?: string; authentication?: boolean } = {};
+        let delivered: { delivered?: boolean; channel?: string; authentication?: boolean; sent?: Record<string, unknown> } = {};
         try {
           delivered = JSON.parse(result?.content ?? "");
         } catch {}
         if (!delivered.delivered || !delivered.channel) continue;
+        // beforeSend changed it: what went, not what the agent wrote.
+        if (delivered.sent && typeof delivered.sent === "object") args = delivered.sent;
         const fields = Object.fromEntries(Object.entries(args).filter(([k, v]) => !SEND_KEYS.has(k) && v !== undefined && v !== null && v !== ""));
         lines.push({
           kind: "out",
@@ -1693,6 +1746,13 @@ function forModel(entry: ChatMessage): ChatMessage {
 /** A tool's output as events carry it: whole up to 4,000 characters (for debugging and observability). */
 function clipOutput(text: string): string {
   return text.length > 4_000 ? `${text.slice(0, 4_000)}…` : text;
+}
+
+/** A sent message or carousel as its `message.out` event tells it. */
+function outDetail(sent: OutboundMessage): Record<string, unknown> {
+  if (sent.type === "template") return { text: sent.name, template: true };
+  if (sent.type === "carousel") return { text: sent.text, carousel: sent.cards, replyTo: sent.replyTo };
+  return { text: sent.text, buttons: sent.buttons, list: sent.list, link: sent.link, image: sent.image, replyTo: sent.replyTo, ...(sent.fields ? { fields: sent.fields } : {}), ...(sent.authentication ? { authentication: true } : {}) };
 }
 
 function errorText(error: unknown): string {

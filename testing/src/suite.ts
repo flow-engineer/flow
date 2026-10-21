@@ -161,9 +161,11 @@ const sentItem = z.strictObject({
   template: z.string().min(1).optional(),
   /** The agent's own words rather than a template. */
   phrased: z.literal(true).optional(),
-  /** Text the message (or the template's values) holds. */
+  /** A carousel (cards they swipe through), not a message or a template. */
+  carousel: z.literal(true).optional(),
+  /** Text the message (or the template's values, or the carousel's text and cards) holds. */
   text: withClock(z.string().min(1)).optional(),
-});
+}).refine((item) => !(item.carousel && item.template !== undefined), "a carousel is not a template: give carousel or template, not both");
 
 const openingStep = z
   .object({

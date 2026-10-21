@@ -131,6 +131,25 @@ test("a carousel shows as its text, then each card as a message, in order", asyn
   }
 });
 
+test("a simulator refuses what its platform refuses, with Flow Messaging's error, whoever sent it; a WebP photo shows", async () => {
+  const { fake, server, send, lines } = await start();
+  try {
+    await send("whatsapp", "what rooms?");
+    const photo = { url: "https://example.com/garden.webp" };
+    await assert.rejects(
+      async () => fake.deliver!({ type: "carousel", text: "Two rooms", cards: [{ image: photo, text: "a\nb\nc\nd", buttons: ["Book sea"] }, { image: photo, buttons: ["Book garden"] }] }),
+      /content\.cards\[0\]\.text has more than 2 line breaks\. \(invalid_request, content\.cards\[0\]\.text\)/,
+    );
+    await fake.deliver!({ type: "message", text: "The garden room", image: photo, buttons: ["Book it"] });
+    assert.deepEqual(
+      (await lines("whatsapp")).filter((l) => l.kind !== "in").map((l) => l.kind === "out" ? [l.kind, l.text, l.image] : [l.kind, l.kind === "undelivered" && l.reason]),
+      [["undelivered", "content.cards[0].text has more than 2 line breaks. (invalid_request, content.cards[0].text)"], ["out", "The garden room", photo]],
+    );
+  } finally {
+    await server.close();
+  }
+});
+
 test("the web simulator plays the agent's own custom UI, and shows the params it sent", async () => {
   const app: ChannelSummary = { name: "app", kind: "custom", info: { reactions: false, status: true, formatting: "markdown" } };
   const { fake, server, send, lines } = await start(undefined, [app]);

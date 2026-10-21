@@ -115,7 +115,7 @@ it critical. A message is never lowered. Watches last `watchDays` (30) and end a
 ## Wording
 
 Outside WhatsApp's 24-hour window the template goes. Inside it the agent phrases the message to fit
-the chat; every value and the link are checked by `events.phrasing.check` in the channel's send. A
+the chat; every value and the link are checked by `events.phrasing.check` in `beforeSend`. A
 message that drops a value or changes the link is refused, and the template goes instead; if the
 template fails, its text goes as a message with a link button (`wording: { linkInText: true }` puts
 the link in the text). `data.wording: "exact"` always uses the template.
@@ -218,20 +218,14 @@ const catalog: EventCatalog = {
 
 const events = flowEvents({ secret: process.env.FLOW_EVENTS_SECRET, catalog, timezone: "America/New_York", testList: eventTestList() });
 
-// The channel's send checks a phrased notification before it goes; a throw refuses it.
-const wa = whatsapp(provider);
-const checked = {
-  ...wa,
-  send: (to: string, out: Parameters<typeof wa.send>[1]) => {
-    const why = events.phrasing.check(to, out);
-    if (why) throw new Error(why);
-    return wa.send(to, out);
-  },
-};
-
 const agent = createAgent({
   // ...dir, model, tools, templates
-  channels: [checked],
+  channels: [whatsapp(provider)],
+  // A phrased notification is checked before it goes; { refuse } sends nothing and tells the agent why.
+  beforeSend: (message, { address }) => {
+    const why = events.phrasing.check(address, message);
+    return why ? { refuse: why } : undefined;
+  },
   routes: events.routes,
   onTick: events.onTick,
   context: (conversationId) => events.context(conversationId),

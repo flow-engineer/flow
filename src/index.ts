@@ -1,6 +1,8 @@
 export { Agent, createAgent, type AgentOptions, type AgentStatus, type Contact, type HostOptions, type HeldItem, type ScheduledItem, type NudgeInput, type NudgeResult, type NudgeState, type NudgeStatus, type PlaygroundSink, type ReceiveOptions, type TestPerson } from "./agent.ts";
 export {
   carouselMessages,
+  CONTENT_LIMITS,
+  contentRefusal,
   customUI,
   declaredTemplate,
   fillTemplate,
@@ -17,6 +19,8 @@ export {
   type Channel,
   type ChannelKind,
   type ChannelSummary,
+  type ContentLimits,
+  type ContentRefusal,
   type CustomUIProvider,
   type FilledTemplate,
   type Keywords,
@@ -36,6 +40,6 @@ export { Store, type StoreApi } from "./store.ts";
 export type { AgentFiles } from "./skills.ts";
 export type { TracesOptions } from "./traces.ts";
 export { tool, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Credentials, type SignIn, type Tool, type ToolContext, type ToolHints } from "./tools.ts";
-export type { Attachment, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, ListRow, Media, Model, ModelRequest, ModelResponse, Outbound, PersonMessage, Photo, Template, TemplateButton, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
+export type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, ListRow, Media, Model, ModelRequest, ModelResponse, Outbound, OutboundMessage, PersonMessage, Photo, SendContext, Template, TemplateButton, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 export { z } from "zod";
 export * from "./business-events/index.ts";

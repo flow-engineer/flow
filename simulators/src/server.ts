@@ -38,6 +38,8 @@ import type { AddressInfo } from "node:net";
 import type { TLSSocket } from "node:tls";
 import {
   carouselMessages,
+  contentRefusal,
+  WHATSAPP_CAROUSELS,
   declaredTemplate,
   fillTemplate,
   fitMessage,
@@ -463,7 +465,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
         push(k, { type: "lineUpdate", line });
       }
     }
-    if (event.type === "message.undelivered") {
+    if (event.type === "message.undelivered" || event.type === "message.refused") {
       emitLine(k, { kind: "undelivered", text: String(event.text), reason: String(event.reason), at: event.at });
     }
     push(k, { type: "trace", event });
@@ -473,6 +475,15 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
   function deliverer(p: Platform, k: string, templates: TemplateDefinition[] = []) {
     const deliver = (outbound: Outbound): void => {
       const t = thread(k);
+      // What the platform refuses (Flow Messaging's content rules), it refuses here too, with its error.
+      // An agent on Flow Framework checks this before it sends; this catches anything else (an agent
+      // over HTTP, an older client). A carousel that reached here is shown by a channel with carousels.
+      const refusal = contentRefusal(outbound.type === "carousel" ? { ...channelOf(p), carousels: WHATSAPP_CAROUSELS } : channelOf(p), outbound);
+      if (refusal) {
+        const reason = `${refusal.message} (${refusal.type}, ${refusal.param})`;
+        emitLine(k, { kind: "undelivered", text: outbound.type === "message" || outbound.type === "carousel" ? outbound.text : outbound.type, reason, at: Date.now() });
+        throw new Error(reason);
+      }
       if (outbound.type === "template") {
         const { type: _type, ...sent } = outbound;
         const declared = declaredTemplate(templates, sent);

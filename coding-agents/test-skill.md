@@ -141,8 +141,9 @@ expect:
   The same `id` twice is a duplicate, as it would be live.
 - A `nudge` is `agent.nudge` to the run's person; `wait` and `at` move the clock (never back).
 - `expect.sent` items: `at` (HH:MM on any day, or a date and time; to the minute), `template`
-  (its name), `phrased: true` (the agent's own words, not a template), `text` (in the message, or in
-  the template's values). Checked by code, like `calls`.
+  (its name), `phrased: true` (the agent's own words, not a template), `carousel: true` (a carousel,
+  not a message or template), `text` (in the message, the template's values, or the carousel's text
+  and cards). Checked by code, like `calls`.
 - A business run where the agent sent nothing is not a failure by itself: `expect` decides.
 - Timers of your own (held sends, reminders timed from your data) go in `createAgent`'s `onTick`,
   which runs on the agent's clock, never in a `setInterval` of your own.

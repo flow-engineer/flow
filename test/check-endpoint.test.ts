@@ -136,3 +136,8 @@ test("the spec's platform table is the simulators' platforms", () => {
   const platforms = Object.fromEntries(PLATFORMS.map((p) => [p.id, JSON.parse(JSON.stringify(channelOf(p)))]));
   assert.deepEqual(table, platforms);
 });
+
+test("an HTTP agent's reply meets its platform's content rules, refused with Flow Messaging's error", () => {
+  const checked = checkReply({ type: "message", text: "a".repeat(1025), buttons: ["Yes", "No"] }, WHATSAPP);
+  assert.deepEqual(checked, { refused: "Not sent, WhatsApp refuses it: text must be 1 to 1024 characters with buttons on WhatsApp. Fix it and send again." });
+});
