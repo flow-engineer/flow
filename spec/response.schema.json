@@ -60,10 +60,32 @@
         },
         "buttons": {
           "type": "array",
-          "description": "Reply buttons; a tap comes back as the person's message, with `choice`. Platforms with buttons only, within their max and labelMax.",
+          "description": "Reply buttons: a label (its id is the label), or { id, label }; a tap comes back as the person's message, with `choice` holding the id. Ids are 1 to 64 bytes and unique within the message. Platforms with buttons only, within their max and labelMax.",
           "items": {
-            "type": "string",
-            "minLength": 1
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "object",
+                "required": [
+                  "id",
+                  "label"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            ]
           }
         },
         "list": {

@@ -53,6 +53,7 @@ import {
   type ListRow,
   type Outbound,
   type Photo,
+  type ReplyButton,
   type FlowEvent,
   type PlaygroundSink,
   type Template,
@@ -298,14 +299,15 @@ export interface TestCloudSimulators {
 }
 
 export type Line =
-  | { kind: "in"; id: string | null; text: string; at: number; replyTo?: string; choice?: boolean; attachments?: Array<{ kind: Attachment["kind"]; name?: string }> }
+  | { kind: "in"; id: string | null; text: string; at: number; replyTo?: string; choice?: boolean; choiceId?: string; attachments?: Array<{ kind: Attachment["kind"]; name?: string }> }
   | {
       kind: "out";
       id: string;
       text: string;
       at: number;
       replyTo?: string;
-      buttons?: string[];
+      /** As the agent gave them: a label, or { id, label } (a tap sends back the id). */
+      buttons?: ReplyButton[];
       list?: { button: string; rows: ListRow[] };
       /** A button under the message that opens this page. */
       link?: { label: string; url: string };
@@ -635,11 +637,11 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     const incoming: Incoming = {
       text,
       ...(quoted && (quoted.kind === "in" || quoted.kind === "out") ? { replyTo: { text: quoted.text, fromAgent: quoted.kind === "out" } } : {}),
-      ...(choice?.title ? { choice: { id: choice.id, title: String(choice.title) } } : {}),
+      ...(choice?.title ? { choice: { ...(choice.id ? { id: String(choice.id) } : {}), title: String(choice.title) } } : {}),
       ...(attachments.length ? { attachments } : {}),
     };
     const files = attachments.map((a) => ({ kind: a.kind, ...(a.name ? { name: a.name } : {}) }));
-    const line: Extract<Line, { kind: "in" }> = { kind: "in", id: null, text, at: Date.now(), ...(quoted ? { replyTo: replyId } : {}), ...(choice?.title ? { choice: true } : {}), ...(files.length ? { attachments: files } : {}) };
+    const line: Extract<Line, { kind: "in" }> = { kind: "in", id: null, text, at: Date.now(), ...(quoted ? { replyTo: replyId } : {}), ...(choice?.title ? { choice: true } : {}), ...(choice?.title && choice.id && choice.id !== choice.title ? { choiceId: String(choice.id) } : {}), ...(files.length ? { attachments: files } : {}) };
     return { incoming, line };
   }
 
@@ -776,7 +778,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
         continue;
       }
       if (e.channel !== channel.name) continue;
-      if (e.kind === "in") lines.push({ kind: "in", id: e.id, text: e.text, at: e.at, ...(e.choice ? { choice: true } : {}) });
+      if (e.kind === "in") lines.push({ kind: "in", id: e.id, text: e.text, at: e.at, ...(e.choice ? { choice: true } : {}), ...(e.choiceId ? { choiceId: e.choiceId } : {}) });
       else if (e.kind === "out" && e.template) {
         // The store keeps a template's name and body text, not its other values: those show as declared.
         const declared = agent.templates?.().find((d) => d.name === e.template);

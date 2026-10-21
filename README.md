@@ -174,7 +174,7 @@ A channel is a definition: Flow Framework knows the platform's rules, your provi
 
 ```ts
 const wa = whatsapp({
-  sendMessage: (to, m) => api.send(to, m),            // m: { text, replyTo?, buttons?, list?, link?, image?: { url } | { fileId } }
+  sendMessage: (to, m) => api.send(to, m),            // m: { text, replyTo?, buttons?: (label | { id, label })[], list?, link?, image?: { url } | { fileId } }
   sendCarousel: (to, c) => api.carousel(to, c),       // optional: offers carousels; c: { text, cards: [{ image, text?, buttons? | link? }] }
   react: (to, id, emoji) => api.react(to, id, emoji),
 });
@@ -196,6 +196,7 @@ await agent.resume();
 await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" });
 ```
 
+- **Reply buttons carry their own id:** a button is a label, or `{ id, label }` when taps must be told apart (a carousel's cards may all say "Details", with ids `details:a`, `details:b`). A tap comes back as `choice: { id, title }`, and the model reads `tapped] Details (details:b)`. Ids are 1 to 64 bytes, unique within a message and across a carousel; labels may repeat.
 - **Each platform's rules are built in:** WhatsApp buttons, lists, replies, reactions and its 24-hour window; SMS as plain text in segments; your app's own fields. Features your provider lacks are never offered to the model.
 - **What the platform refuses is refused before it goes,** with the same error Flow Messaging gives (`content.cards[0].text has more than 2 line breaks.`), in the playground, the test cloud and production alike, and the agent sends again. The limits are one table, `CONTENT_LIMITS`; `contentRefusal(info, outbound)` checks one send.
 - **Your own checks go in `beforeSend`,** not in a wrapper around a channel's send (see [`createAgent` options](#createagent-options)): what it returns is what is checked, sent and recorded.
@@ -491,7 +492,7 @@ Before the session opens, the command sends one `HEAD` request to the URL (never
 }
 ```
 
-Keep the conversation's history by `conversationId`, as you would per phone number. `channel` is the platform the run plays (`whatsapp`, `sms`, `imessage`, `telegram`, `web`), or the name you give with `--channel`. `message.text` is `""` when the person only sent a file; a tapped button or list row also comes as `message.choice` (`{ id, title }`), a quoted message as `message.replyTo`. Answer `200` with the replies to send, in order, in the shape a Flow Framework agent sends (`{ "type": "message", "text", "buttons"?, "list"?, "link"?, "image"?, "replyTo"? }`, `{ "type": "reaction", "emoji", "messageId" }`, `{ "type": "template", ... }`, ...); `[]` sends nothing:
+Keep the conversation's history by `conversationId`, as you would per phone number. `channel` is the platform the run plays (`whatsapp`, `sms`, `imessage`, `telegram`, `web`), or the name you give with `--channel`. `message.text` is `""` when the person only sent a file; a tapped button or list row also comes as `message.choice` (`{ id, title }`, the button's or row's id), a quoted message as `message.replyTo`. Answer `200` with the replies to send, in order, in the shape a Flow Framework agent sends (`{ "type": "message", "text", "buttons"? (labels, or `{ id, label }`), "list"?, "link"?, "image"?, "replyTo"? }`, `{ "type": "reaction", "emoji", "messageId" }`, `{ "type": "template", ... }`, ...); `[]` sends nothing:
 
 ```json
 { "replies": [{ "type": "message", "text": "We're open 8am to 6pm today.", "buttons": ["Order ahead"] }] }

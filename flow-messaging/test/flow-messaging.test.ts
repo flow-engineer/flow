@@ -67,7 +67,7 @@ test("a link goes as a url button and a photo as media with its caption; a photo
   );
 });
 
-test("a carousel goes as one Flow carousel, each card's photo its header", async (t) => {
+test("a carousel goes as one Flow carousel, each card's photo its header and each button its own id, labels repeating across cards", async (t) => {
   const flow = await fakeFlow();
   const live = await liveAgent(flow);
   t.after(() => (flow.close(), live.close()));
@@ -81,8 +81,8 @@ test("a carousel goes as one Flow carousel, each card's photo its header", async
       call("send_whatsapp", {
         text: "Two rooms free tonight",
         carousel: [
-          { image: { url: "https://example.com/sea.jpg" }, text: "Sea view", buttons: ["Book sea"] },
-          { image: { file_id: "file_9" }, buttons: ["Book garden"] },
+          { image: { url: "https://example.com/sea.jpg" }, text: "Sea view", buttons: [{ id: "book:sea", label: "Book" }] },
+          { image: { file_id: "file_9" }, buttons: [{ id: "book:garden", label: "Book" }] },
         ],
       }),
     ),
@@ -92,8 +92,8 @@ test("a carousel goes as one Flow carousel, each card's photo its header", async
     type: "carousel",
     text: "Two rooms free tonight",
     cards: [
-      { header: { type: "image", url: "https://example.com/sea.jpg" }, text: "Sea view", buttons: [{ id: "Book sea", label: "Book sea" }] },
-      { header: { type: "image", file_id: "file_9" }, buttons: [{ id: "Book garden", label: "Book garden" }] },
+      { header: { type: "image", url: "https://example.com/sea.jpg" }, text: "Sea view", buttons: [{ id: "book:sea", label: "Book" }] },
+      { header: { type: "image", file_id: "file_9" }, buttons: [{ id: "book:garden", label: "Book" }] },
     ],
   });
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
@@ -120,7 +120,7 @@ test("a photo arrives as an attachment whose bytes come from Flow's files API wi
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
-test("taps come as choices and reactions to the agent's messages as reactions", async (t) => {
+test("taps come as choices, with the button's id, and reactions to the agent's messages as reactions", async (t) => {
   const flow = await fakeFlow();
   const live = await liveAgent(flow);
   t.after(() => (flow.close(), live.close()));
@@ -129,7 +129,8 @@ test("taps come as choices and reactions to the agent's messages as reactions", 
 
   await live.deliver(received(WA, "msg_1", { type: "button_reply", button_id: "tue", label: "Tuesday" }));
   const first = await live.nextCall(0);
-  assert.equal(lastUser(first.request.messages), "[whatsapp · msg_1, tapped] Tuesday");
+  assert.equal(lastUser(first.request.messages), "[whatsapp · msg_1, tapped] Tuesday (tue)");
+  assert.deepEqual(live.events.find((e) => e.type === "message.in")?.choice, { id: "tue", title: "Tuesday" });
   first.answer(respond(call("send_whatsapp", { text: "Booked for Tuesday" })));
   await flow.request(post("/v1/conversations/conv_wa/messages"));
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();

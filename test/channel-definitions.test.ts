@@ -207,6 +207,14 @@ test("contentRefusal refuses what Flow Messaging refuses, with its error type, f
     "content.cards[1].buttons[0].id",
     "Reply button ids must be unique across the carousel.",
   ]);
+  const details = (id: string) => ({ image: photo("a.jpg"), buttons: [{ id, label: "Details" }] });
+  assert.equal(refusal(wa, { type: "carousel", text: "Listings", cards: [details("details:a"), details("details:b")] }), null, "labels repeat across cards; ids tell them apart");
+  assert.deepEqual(refusal(wa, { type: "message", text: "Which?", buttons: [{ id: "pick", label: "This" }, { id: "pick", label: "That" }] }), ["invalid_request", "content.buttons[1].id", "Button ids must be unique within a message."]);
+  assert.deepEqual(refusal(wa, { type: "message", text: "Which?", buttons: [{ id: "é".repeat(32) + "a", label: "This" }] }), [
+    "invalid_request",
+    "content.buttons[0]",
+    "A reply button needs an id of 1 to 64 bytes and a label of 1 to 20.",
+  ]);
   assert.deepEqual(refusal(wa, { type: "message", text: long(1025), buttons: ["Yes", "No"] }), ["invalid_request", "content.text", "text must be 1 to 1024 characters with buttons on WhatsApp."]);
   assert.deepEqual(refusal(wa, { type: "message", text: long(1025), image: photo("a.jpg") }), ["invalid_request", "content.caption", "caption must be at most 1024 characters."]);
   assert.deepEqual(refusal(wa, { type: "message", text: "" }), ["invalid_request", "content.text", "text is empty; give 1 to 4096 characters on WhatsApp."]);

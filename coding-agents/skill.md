@@ -129,7 +129,7 @@ provider only says how to send:
 ```ts
 // src/channels/whatsapp.ts: one sendMessage, plus whatever else your provider can do
 export const wa = whatsapp({
-  sendMessage: (to, m) => api.send(to, m),        // m: { text, replyTo?, buttons?, list?, link?, image? }
+  sendMessage: (to, m) => api.send(to, m),        // m: { text, replyTo?, buttons?: (label | { id, label })[], list?, link?, image? }
   react: (to, id, emoji) => api.react(to, id, emoji),
   // no typing() or markRead(): those features are off, and the agent is never offered them
 }, { disable: ["lists"] });
@@ -165,7 +165,13 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
 - Carousels (WhatsApp's media carousel): a WhatsApp provider with `sendCarousel(to, { text, cards })`,
   or a customUI whose `info` has `carousels`, offers the agent a `carousel` of 2 to 10 cards, each
   `{ image, text?, buttons? | link? }` with the same kind and number of buttons on every card
-  (`WHATSAPP_CAROUSELS` has WhatsApp's limits). A channel that gets a carousel without a way to show
+  (`WHATSAPP_CAROUSELS` has WhatsApp's limits).
+- A reply button (a message's or a card's) is a label, whose id is the label, or `{ id, label }`;
+  the agent's send tool takes both. Ids are 1 to 64 bytes and unique within a message and across a
+  carousel; labels may repeat, so every card can say "Details" with ids `details:<listing>`. A tap
+  comes back as `Incoming.choice: { id, title }` (`message.in`'s `choice`, the transcript's
+  `choiceId`), and the model reads `tapped] Details (details:b)`. A provider reads `m.buttons` with
+  `replyButton(b)`, which gives `{ id, label }` either way. A channel that gets a carousel without a way to show
   one sends its text, then each card as a message, in order (`carouselMessages`).
 - The simulators and the test cloud play an agent's own channels with these definitions (the web
   simulator plays a customUI), so the model sees the production tools; they show params such as
@@ -173,7 +179,7 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
 - Every send is checked against its platform's content rules, Flow Messaging's (`ChannelInfo.platform`,
   `CONTENT_LIMITS`, `contentRefusal`): what WhatsApp, Telegram, iMessage or SMS would refuse (a
   carousel card's text over 2 line breaks, buttons whose text is over 1,024 characters on WhatsApp,
-  the same button label on two cards, an SMS over 10 segments) is refused before it goes, with
+  the same button id on two cards, an SMS over 10 segments) is refused before it goes, with
   Flow Messaging's own error, in the playground, the test cloud and production alike; the agent is
   told it and sends again.
 - To check, rewrite or refuse messages yourself (card text, links, wording), use `createAgent`'s

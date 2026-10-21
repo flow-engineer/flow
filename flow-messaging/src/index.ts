@@ -18,7 +18,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
-import { carouselMessages, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type Template, type WhatsAppFeature } from "../../src/index.ts";
+import { carouselMessages, replyButton, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type Template, type WhatsAppFeature } from "../../src/index.ts";
 import { Client, FlowMessagingError, idSegment, verifySignature } from "./client.ts";
 
 export { API_VERSION, FlowMessagingError, verifySignature } from "./client.ts";
@@ -211,7 +211,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     const buttons = message.link
       ? [{ url: message.link.url, label: message.link.label }]
       : message.buttons?.length
-        ? message.buttons.map((label) => ({ id: label, label }))
+        ? message.buttons.map(replyButton)
         : message.list?.rows.map((row) => ({ id: row.id, label: row.title }));
     if (buttons) return { type: "buttons", text: message.text, buttons, ...(message.image ? { header: { type: "image", ...file(message.image) } } : {}) };
     if (message.image) return { type: "media", kind: "image", ...file(message.image), ...(message.text ? { caption: message.text } : {}) };
@@ -226,7 +226,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       cards: carousel.cards.map((card) => ({
         header: { type: "image", ...file(card.image) },
         ...(card.text ? { text: card.text } : {}),
-        buttons: card.link ? [{ url: card.link.url, label: card.link.label }] : (card.buttons ?? []).map((label) => ({ id: label, label })),
+        buttons: card.link ? [{ url: card.link.url, label: card.link.label }] : (card.buttons ?? []).map(replyButton),
       })),
     };
   }
@@ -391,7 +391,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     else if (c.type === "button_reply") {
       const id = String(c.button_id ?? "");
       const title = String(c.label ?? id);
-      base = { text: title, choice: id && id !== title ? { id, title } : { title } };
+      base = { text: title, choice: id ? { id, title } : { title } };
     } else if (c.type === "voice" && c.transcript) base = { text: String(c.transcript) }; // Flow transcribed it already
     else if ((c.type === "voice" || c.type === "media") && c.file_id && c.kind !== "video") {
       // Photos, audio and documents go as attachments, their bytes fetched from Flow only when the agent can use them.

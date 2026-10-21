@@ -123,7 +123,8 @@ Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret
 **Out (agent to person):**
 
 - Text: Markdown on Telegram, plain text on WhatsApp, iMessage and SMS.
-- Reply buttons and lists, sent as Flow `buttons`. WhatsApp shows up to 3 reply buttons, or a list
+- Reply buttons and lists, sent as Flow `buttons`, each with its own id (a button given as a label
+  has the label as its id). WhatsApp shows up to 3 reply buttons, or a list
   for 4 to 10. Telegram shows an inline keyboard. iMessage has none, so the agent is not offered them.
 - A link: one URL button (WhatsApp's call-to-action button); on iMessage, the URL on its own line.
 - A photo (by URL, or a Flow file ID from `POST /v1/files`): a media message with the text as its
@@ -139,8 +140,8 @@ Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret
 **In (person to agent):**
 
 - Text.
-- Taps on buttons, list rows and template quick replies, as a choice. A quick reply's payload is
-  its ID.
+- Taps on buttons, list rows and template quick replies, as a choice: `{ id, title }`, the button's
+  or row's id and its label. A quick reply's payload is its ID.
 - Quotes, read from Flow.
 - Reactions to the agent's messages.
 - Late failures (`message.failed`), told to the agent as "Not delivered".

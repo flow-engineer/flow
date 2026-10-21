@@ -10,7 +10,7 @@
 //   customUI("app", new MyApp())                         your own web or mobile UI, with your params
 
 import type { z } from "zod";
-import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, Template, TemplateDefinition } from "./types.ts";
+import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, ReplyButton, Template, TemplateDefinition } from "./types.ts";
 
 export type ChannelKind = "sms" | "whatsapp" | "custom";
 
@@ -94,7 +94,8 @@ export interface Message {
   text: string;
   /** The person's message this one quotes. */
   replyTo?: string;
-  buttons?: string[];
+  /** Reply buttons: a label, or { id, label } (`replyButton` gives both either way). */
+  buttons?: ReplyButton[];
   list?: { button: string; rows: ListRow[] };
   /** A button that opens this page. Never with buttons or a list. */
   link?: { label: string; url: string };
@@ -379,7 +380,7 @@ export interface ContentRefusal {
  * the content Flow Framework's Flow Messaging channels make of it), or null. Only messages and
  * carousels are checked, on channels whose info names a platform. A link is a link button, a photo
  * with buttons or a link their header (else a photo with the text as its caption), a button's id is
- * its label (a list row's, its id), and a carousel on a channel without carousels is checked as the
+ * its own or its label (a list row's, its id), and a carousel on a channel without carousels is checked as the
  * messages it is sent as. Photos by file id are the provider's own and not checked here; nor are
  * media types (Flow converts WebP, GIF, BMP and TIFF; the rest is known only from the file's bytes).
  */
@@ -407,6 +408,11 @@ const isHttps = (s: string) => {
   }
 };
 
+/** A reply button's id and label: a plain label is its own id. */
+export function replyButton(button: ReplyButton): { id: string; label: string } {
+  return typeof button === "string" ? { id: button, label: button } : { id: button.id, label: button.label };
+}
+
 type FlowButton = { id: string; label: string } | { url: string; label: string };
 
 /** Buttons at `param` (reply ids unique across `seen`): Flow Messaging's checkButtonList. */
@@ -418,7 +424,7 @@ function buttonsRefusal(buttons: FlowButton[], param: string, seen: Set<string>,
       if (!isHttps(b.url) || label === 0 || label > SPEC.label) return refuse(bp, "A link button needs an https url and a label of 1 to 20 characters.");
       continue;
     }
-    if (b.id === "" || new TextEncoder().encode(b.id).length > SPEC.buttonId || label === 0 || label > SPEC.label) return refuse(bp, "A reply button needs an id of 1 to 64 characters and a label of 1 to 20.");
+    if (b.id === "" || new TextEncoder().encode(b.id).length > SPEC.buttonId || label === 0 || label > SPEC.label) return refuse(bp, "A reply button needs an id of 1 to 64 bytes and a label of 1 to 20.");
     if (seen.has(b.id)) return refuse(`${bp}.id`, duplicate);
     seen.add(b.id);
   }
@@ -431,7 +437,7 @@ function messageRefusal(limits: ContentLimits, m: Pick<Message, "text" | "button
   const buttons: FlowButton[] | undefined = m.link
     ? [{ url: m.link.url, label: m.link.label }]
     : m.buttons?.length
-      ? m.buttons.map((label) => ({ id: label, label }))
+      ? m.buttons.map(replyButton)
       : m.list?.rows.map((row) => ({ id: row.id, label: row.title }));
   const header = m.image && "url" in m.image ? m.image.url : undefined;
   if (buttons && limits.buttonsText) {
@@ -483,7 +489,7 @@ function carouselRefusal(c: Carousel): ContentRefusal | null {
       if (n === 0 || n > SPEC.cardText) return refuse(`${cp}.text`, `${cp}.text must be 1 to ${SPEC.cardText} characters.`);
       if (card.text.split("\n").length - 1 > SPEC.cardLineBreaks) return refuse(`${cp}.text`, `${cp}.text has more than ${SPEC.cardLineBreaks} line breaks.`);
     }
-    const buttons: FlowButton[] = card.link ? [{ url: card.link.url, label: card.link.label }] : (card.buttons ?? []).map((label) => ({ id: label, label }));
+    const buttons: FlowButton[] = card.link ? [{ url: card.link.url, label: card.link.label }] : (card.buttons ?? []).map(replyButton);
     if (buttons.length < 1 || buttons.length > SPEC.cardButtons) return refuse(`${cp}.buttons`, `${cp}.buttons must hold 1 to ${SPEC.cardButtons} buttons.`);
     const problem = buttonsRefusal(buttons, cp, seen, "Reply button ids must be unique across the carousel.");
     if (problem) return problem;

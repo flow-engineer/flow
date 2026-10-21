@@ -11,7 +11,7 @@
 import { z } from "zod";
 import { toSpec, tool } from "./tools.ts";
 import { CONTENT_LIMITS, type ContentRefusal } from "./channels.ts";
-import type { CarouselCard, ChannelInfo, Outbound, Photo, ToolSpec } from "./types.ts";
+import type { CarouselCard, ChannelInfo, Outbound, Photo, ReplyButton, ToolSpec } from "./types.ts";
 
 export const REACT = "react";
 export const UPDATE = "share_updates";
@@ -40,6 +40,8 @@ export function sendToolName(channel: string): string {
 const https = z.url({ protocol: /^https$/ });
 /** A photo by URL, or by a file id a tool gave (the provider's own). */
 const photo = z.union([z.object({ url: https }), z.object({ file_id: z.string().min(1) })]);
+/** A reply button: its label, or an id its tap comes back with and a label. */
+const replyButton = (labelMax: number) => z.union([z.string().min(1).max(labelMax), z.object({ id: z.string().min(1).max(64), label: z.string().min(1).max(labelMax) })]);
 
 /** A send tool's input on this channel: only the features it has, with its limits, and its own params. */
 export function sendInput(channel: ChannelInfo, several = false, params: Record<string, z.ZodType> = {}) {
@@ -54,10 +56,10 @@ export function sendInput(channel: ChannelInfo, several = false, params: Record<
   }
   if (channel.buttons) {
     shape.buttons = z
-      .array(z.string().min(1).max(channel.buttons.labelMax))
+      .array(replyButton(channel.buttons.labelMax))
       .max(channel.buttons.max)
       .optional()
-      .describe(`Up to ${channel.buttons.max} reply buttons, ${channel.buttons.labelMax} characters each; a tap comes back as their message`);
+      .describe(`Up to ${channel.buttons.max} reply buttons, ${channel.buttons.labelMax} characters each, or {id, label}; a tap comes back as their message, with the id`);
   }
   if (channel.lists) {
     shape.list = z
@@ -94,14 +96,14 @@ export function sendInput(channel: ChannelInfo, several = false, params: Record<
         z.object({
           image: photo,
           text: z.string().max(c.cardTextMax).optional(),
-          buttons: z.array(z.string().min(1).max(c.labelMax)).min(1).max(c.buttons).optional(),
+          buttons: z.array(replyButton(c.labelMax)).min(1).max(c.buttons).optional(),
           link: z.object({ label: z.string().min(1).max(c.labelMax), url: https }).optional(),
         }),
       )
       .min(2)
       .max(c.maxCards)
       .optional()
-      .describe(`Up to ${c.maxCards} cards they swipe through under your text: each a photo, up to ${c.cardTextMax} characters, and 1 to ${c.buttons} reply buttons or one link, the same on every card; not with buttons, a list, a link or an image`);
+      .describe(`Up to ${c.maxCards} cards they swipe through under your text: each a photo, up to ${c.cardTextMax} characters, and 1 to ${c.buttons} reply buttons ({id, label} tells cards apart) or one link, the same on every card; not with buttons, a list, a link or an image`);
   }
   for (const [name, schema] of Object.entries(params)) shape[name] = schema.optional();
   return z.object(shape);
@@ -110,11 +112,11 @@ export function sendInput(channel: ChannelInfo, several = false, params: Record<
 export type SendInput = {
   text: string;
   reply_to?: string;
-  buttons?: string[];
+  buttons?: ReplyButton[];
   list?: { button: string; rows: Array<{ id: string; title: string; description?: string }> };
   link?: { label: string; url: string };
   image?: { url: string } | { file_id: string };
-  carousel?: Array<{ image: { url: string } | { file_id: string }; text?: string; buttons?: string[]; link?: { label: string; url: string } }>;
+  carousel?: Array<{ image: { url: string } | { file_id: string }; text?: string; buttons?: ReplyButton[]; link?: { label: string; url: string } }>;
   confirm?: boolean;
 };
 

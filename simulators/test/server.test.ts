@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { z } from "zod";
 import { mcpServer } from "../../mcp/src/index.ts";
-import { createAgent, sqlite, tool, type ChannelInfo, type ChannelSummary, type Deliver, type Incoming, type Model, type TemplateDefinition } from "../../src/index.ts";
+import { createAgent, sqlite, tool, WHATSAPP_CAROUSELS, type ChannelInfo, type ChannelSummary, type Deliver, type Incoming, type Model, type TemplateDefinition } from "../../src/index.ts";
 import { WHATSAPP, call, gate, multi, respond } from "../../test/helpers.ts";
 import { simulators, type AgentConnection, type Line } from "../src/index.ts";
 
@@ -348,6 +348,35 @@ test("the playground shows the person's conversation from the agent's store, als
     assert.deepEqual(said, [["in", "a latte please", undefined], ["out", "Which size?", ["Small", "Large"]], ["out", "Our menu\nhttps://example.com/menu", undefined]]);
   } finally {
     await restarted.close();
+  }
+});
+
+test("carousel cards with the same button label and their own ids: a tap on card 2 reaches the agent with card 2's id", async () => {
+  const h = multi({ channels: { whatsapp: { info: { ...WHATSAPP, carousels: WHATSAPP_CAROUSELS }, phone: true } }, testPeople: [SAM] });
+  const server = await simulators().listen(h.agent, 0);
+  const post = (body: unknown) => fetch(`${server.url}/api/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "whatsapp", person: SAM.phone, ...(body as object) }) });
+  try {
+    assert.equal((await post({ text: "any flats?" })).status, 202);
+    const card = (id: string) => ({ image: { url: `https://example.com/${id}.jpg` }, text: `Listing ${id}`, buttons: [{ id: `details:${id}`, label: "Details" }] });
+    (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Two listings", carousel: [card("a"), card("b")] })));
+    const id = (await h.agent.testConversation(SAM.phone))!;
+    await h.agent.conversation(id)!.whenIdle();
+    const { lines } = (await (await fetch(`${server.url}/api/transcript?channel=whatsapp&person=${encodeURIComponent(SAM.phone)}`)).json()) as { lines: Line[] };
+    const second = lines.find((l) => l.kind === "out" && l.text === "Listing b");
+    assert.ok(second?.kind === "out");
+    assert.deepEqual(second.buttons, [{ id: "details:b", label: "Details" }], "the page gets the label to show and the id to send back");
+    // What the page sends on a tap of card 2's button.
+    const tapped = second.buttons![0] as { id: string; label: string };
+    assert.equal((await post({ text: tapped.label, choice: { id: tapped.id, title: tapped.label }, replyTo: second.id })).status, 202);
+    const next = await h.nextCall(1);
+    assert.match(String(next.request.messages.at(-1)?.content), /tapped\] Details \(details:b\)$/);
+    assert.deepEqual(h.events.filter((e) => e.type === "message.in").at(-1)?.choice, { id: "details:b", title: "Details" });
+    next.answer(respond(call("send_whatsapp", { text: "Listing b: two rooms." })));
+    await h.agent.conversation(id)!.whenIdle();
+    const tap = (await h.agent.transcript(id)).find((e) => e.kind === "in" && e.choice);
+    assert.ok(tap?.kind === "in" && tap.choiceId === "details:b", "the transcript keeps which button it was");
+  } finally {
+    await server.close();
   }
 });
 
