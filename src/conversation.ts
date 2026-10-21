@@ -1069,7 +1069,8 @@ export class Conversation {
     this.resumeTurn = false;
     this.theirMessages = false;
     this.promptDestination = undefined;
-    this.settings.emit(this.id, "turn.start", {});
+    // `turn`: its number, the same when a turn cut off by a restart runs again (on this runner or another).
+    this.settings.emit(this.id, "turn.start", { turn: turns });
     this.signInPrompts.clear();
     this.authBlocked.clear();
     this.authPromptsSent.clear();
@@ -1242,7 +1243,7 @@ export class Conversation {
     }
     this.resultUnsent = false;
     this.persist(() => store.updateConversation(this.id, { turnOpen: false }));
-    this.settings.emit(this.id, "turn.end", { ms: Date.now() - started });
+    this.settings.emit(this.id, "turn.end", { ms: Date.now() - started, turn: turns });
   }
 
   private isTalk(name: string): boolean {

@@ -411,7 +411,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     retries: true,
     resume: true,
     reopen: true,
-    ...(canBusiness ? { business: true } : {}),
+    ...(canBusiness ? { business: true, restart: true } : {}),
     ...(only ? { only } : {}),
   };
   const opened = await openOnce(`${base}/api/sessions`, open, options.openHeaders, controller.signal, postTimeoutMs, openRetryCapMs, log);

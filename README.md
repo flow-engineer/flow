@@ -378,7 +378,7 @@ expect:
     - The agent asks Sam to confirm before placing the order.
 ```
 
-`expect.calls` and `expect.never` name tools that must or must not be called, checked by code from the recorded calls. `now` and `timezone` set the test's clock, and dates in test files are written against it (`{{now + 1d | date}}`), so they never go stale ([coding-agents/test-skill.md](coding-agents/test-skill.md)). `tests/tools/*.yaml` describe how each tool behaves (normal, slow, each error). Run the suite from the agent's folder:
+`expect.calls` and `expect.never` name tools that must or must not be called, checked by code from the recorded calls. An opening step `restart: crash` or `restart: deploy` restarts the agent mid-conversation on the same store, and the cloud checks that every message was answered once and no turn was lost. `now` and `timezone` set the test's clock, and dates in test files are written against it (`{{now + 1d | date}}`), so they never go stale ([coding-agents/test-skill.md](coding-agents/test-skill.md)). `tests/tools/*.yaml` describe how each tool behaves (normal, slow, each error). Run the suite from the agent's folder:
 
 ```bash
 npx @flow-engineer/flow test --cloud https://flow.engineer/observe --synthetic --runs 3 --only latte-correction

@@ -101,9 +101,10 @@ time of day, then `| iso` (the default, with its offset), `| date` (2026-10-16),
 ### Scenarios the business starts
 
 A scenario can start with the business instead of the person: an event its backend sends, a nudge,
-or time passing. Such a run (a business run) gets an agent of its own, built by `buildAgent` with
+time passing, or a restart of the agent. Such a run (a business run) gets an agent of its own, built by `buildAgent` with
 the run's clock and the agent's own channels (pass `options.channels` and `options.testing` on to
-`createAgent`, `testing` spread as it is: `now` and `scheduleCheckMs: 0`), so the agent runs on
+`createAgent`, `testing` spread as it is: `now`, `scheduleCheckMs: 0`, the run's `database` and
+`runner`), so the agent runs on
 the test's clock: quiet hours, held sends, `expiresAt` and caps over days follow it.
 
 ```yaml
@@ -145,6 +146,24 @@ expect:
   not a message or template), `text` (in the message, the template's values, or the carousel's text
   and cards). Checked by code, like `calls`.
 - A business run where the agent sent nothing is not a failure by itself: `expect` decides.
+- `restart: crash` or `restart: deploy` restarts the agent mid-conversation, on the same store, to
+  catch double replies and lost turns across a crash or a deploy. Put it right after a `say` and it
+  lands while that message's turn runs (the real case: a message comes in a second before the new
+  revision is up). `crash`: the agent dies where it is (nothing more it does is sent or kept) and a
+  new one starts; it waits out the dead one's lease (15 s on the test's clock), then runs the cut-off
+  turn once. `deploy`: a new one starts beside the old one and takes every message from then on; the
+  old one finishes what it holds, a message the new one took meanwhile included, and stops. Each has
+  its own runner name (`runner-1`, `runner-2`, on every event). The cloud checks that every message
+  the person sent was answered, none twice, and that no turn was lost. `buildAgent` must pass
+  `options.testing` on to `createAgent` as it is (it carries the run's `database` and `runner`), or
+  the step fails saying so.
+
+  ```yaml
+  opening:
+    - say: "when is my class?"
+    - restart: deploy              # or crash
+    - say: "and where is it?"      # reaches the new agent
+  ```
 - Timers of your own (held sends, reminders timed from your data) go in `createAgent`'s `onTick`,
   which runs on the agent's clock, never in a `setInterval` of your own.
 

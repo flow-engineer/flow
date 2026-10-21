@@ -64,7 +64,7 @@ skill, not in AGENTS.md.
 
 Build the agent in one function that the playground and the tests both call, so they never
 drift apart. Tests pass their own model, events and simulated tools; a test the business starts
-also passes `channels` and `testing` (the run's clock), which go on to `createAgent` as they are
+also passes `channels` and `testing` (the run's clock, store and runner name), which go on to `createAgent` as they are
 (the `flow-framework-tests` skill):
 
 ```ts

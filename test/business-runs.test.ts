@@ -1,20 +1,22 @@
-// covers: testing/src/business.ts testing/src/client.ts testing/src/protocol.ts testing/src/suite.ts src/agent.ts
+// covers: testing/src/business.ts testing/src/client.ts testing/src/protocol.ts testing/src/suite.ts src/agent.ts src/conversation.ts
 // A business run on the developer's side: the run's own agent is built with the cloud's clock and
 // copies of its channels (the agent's own wrapper around a send still runs), the person is reachable
 // before they write, a signed event reaches the agent's route and a wrongly signed one is refused,
 // a send the agent holds goes out when the clock reaches it, with that time on the outbound, and the
-// person writes as on the channel, so the agent can nudge them.
+// person writes as on the channel, so the agent can nudge them. A restart mid-turn (a crash, a
+// deploy) answers each message once, on the store the run's agents share.
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { createAgent, flowEvents, whatsapp, type Channel, type EventSink, type Tool } from "../src/index.ts";
+import { createAgent, flowEvents, whatsapp, type Channel, type EventSink, type FlowEvent, type Tool } from "../src/index.ts";
+import { LEASE_MS } from "../src/conversation.ts";
 import { runInCloud, type ConnectOptions } from "../testing/src/client.ts";
 import { isBusiness, parseScenario, waitMs } from "../testing/src/suite.ts";
 import type { BusinessBuild } from "../testing/src/business.ts";
 import type { BusinessOutbound, Command, StepAnswer } from "../testing/src/protocol.ts";
-import { call, respond, scriptedModel, WHATSAPP } from "./helpers.ts";
+import { call, gate, respond, scriptedModel, WHATSAPP } from "./helpers.ts";
 
 const PERSON = "+15550100001";
 const START = Date.UTC(2026, 9, 20, 18, 0); // 23:30 in Kolkata
@@ -34,7 +36,8 @@ function buildAgent(options: { tools: Tool[]; events: EventSink[] } & Partial<Bu
     tools: options.tools,
     events: options.events,
     channels,
-    ...(options.testing ? { now: options.testing.now, scheduleCheckMs: options.testing.scheduleCheckMs } : {}),
+    // As the skill says: the run's clock, store and runner name, spread as they are.
+    ...options.testing,
     routes: {
       "/v1/events": async (request) => {
         const body = await request.text();
@@ -53,17 +56,27 @@ function buildAgent(options: { tools: Tool[]; events: EventSink[] } & Partial<Bu
   return agent;
 }
 
-/** A cloud that plays `script` one command at a time: the next goes once the agent answered the last (a step answer, or for a message its reply). */
-async function play(script: Command[], build: ConnectOptions["build"]) {
+/**
+ * A cloud that plays `script` one command at a time: the next goes once the agent answered the last (a step answer,
+ * or for a message its reply; a restart right after a message goes once it is taken, while its turn runs).
+ * `before(i)` holds the i-th command (the script's length: the end) until the test lets it go; `taken` hears each receipt.
+ */
+async function play(script: Command[], build: ConnectOptions["build"], hooks: { before?: (index: number) => Promise<unknown>; taken?: (messageId: string) => void } = {}) {
+  const before = hooks.before ?? (async () => {});
   const answers: StepAnswer[] = [];
   const outbound: BusinessOutbound[] = [];
   const receipts: unknown[] = [];
+  const events: FlowEvent[] = [];
   let opened: unknown;
   let stream: ServerResponse | undefined;
   let at = 0;
   const next = () => {
-    const command = script[at++] ?? { type: "finished", summary: { sessionId: "s1", suiteHash: "", testModel: "", runs: [], dashboard: "" } };
-    stream!.write(`data: ${JSON.stringify(command)}\n\n`);
+    if (at > script.length) return; // the end was sent
+    const index = at++;
+    void before(index).then(() => {
+      const command = script[index] ?? { type: "finished", summary: { sessionId: "s1", suiteHash: "", testModel: "", runs: [], dashboard: "" } };
+      stream!.write(`data: ${JSON.stringify(command)}\n\n`);
+    });
   };
   const cloud = createServer((req, res) => {
     let body = "";
@@ -85,7 +98,11 @@ async function play(script: Command[], build: ConnectOptions["build"]) {
         const sent = JSON.parse(body) as BusinessOutbound;
         outbound.push(sent);
         if (sent.outbound.type === "message" && script[at - 1]?.type === "message") next();
-      } else if (req.url!.endsWith("/receipts")) receipts.push(JSON.parse(body));
+      } else if (req.url!.endsWith("/receipts")) {
+        receipts.push(JSON.parse(body));
+        hooks.taken?.((JSON.parse(body) as { messageId: string }).messageId);
+        if (script[at - 1]?.type === "message" && script[at]?.type === "restart") next();
+      } else if (req.url!.endsWith("/events")) events.push(...(JSON.parse(body) as { events: FlowEvent[] }).events);
     });
   });
   await new Promise<void>((done) => cloud.listen(0, "127.0.0.1", done));
@@ -94,8 +111,13 @@ async function play(script: Command[], build: ConnectOptions["build"]) {
   } finally {
     cloud.close();
   }
-  return { opened, answers, outbound, receipts };
+  return { opened, answers, outbound, receipts, events };
 }
+
+/** Each message the agent sent, with the runner that sent it (runner-1, runner-2, ...). */
+const sentBy = (events: FlowEvent[]) => events.filter((e) => e.type === "message.out").map((e) => [e.text, String(e.runner).split(":")[0]]);
+/** Each turn's start and end, with its number and runner. */
+const turns = (events: FlowEvent[]) => events.filter((e) => e.type === "turn.start" || e.type === "turn.end").map((e) => [e.type, e.turn, String(e.runner).split(":")[0]]);
 
 
 test("a business run: its own clock and channels, a signed event, and a held send at 08:00", async () => {
@@ -175,8 +197,77 @@ test("the format: a business run's steps parse (expect.sent may ask for a carous
   assert.deepEqual(ok.opening.map((s) => (s.event ? "event" : s.nudge ? "nudge" : s.wait ? "wait" : "say")), ["event", "wait", "event", "nudge", "say"]);
   assert.equal(waitMs("8h30m"), 8.5 * 3_600_000);
   assert.ok(!isBusiness(parseScenario(scenario("  - say: hi"))));
-  assert.throws(() => parseScenario(scenario("  - say: hi\n    wait: 1h")), /scenarios\/b\.yaml:5: opening\[0\]: one of say, event, nudge or wait per step, not say and wait/);
+  assert.throws(() => parseScenario(scenario("  - say: hi\n    wait: 1h")), /scenarios\/b\.yaml:5: opening\[0\]: one of say, event, nudge, wait or restart per step, not say and wait/);
+  const restarts = parseScenario(scenario("  - say: hi\n  - restart: crash\n  - restart: deploy"));
+  assert.ok(isBusiness(restarts));
+  assert.deepEqual(restarts.opening.map((s) => s.restart ?? null), [null, "crash", "deploy"]);
+  assert.throws(() => parseScenario(scenario("  - restart: reboot")), /restart: crash or deploy/);
   assert.throws(() => parseScenario(scenario("  - wait: soon")), /a length of time/);
   assert.throws(() => parseScenario(scenario("  - say: hi\n    answer: 202")), /belong to an event step/);
   assert.throws(() => parseScenario(scenario("  - say: hi", "expect:\n  sent: [{ carousel: true, template: outbid }]")), /a carousel is not a template/);
+});
+
+test("a crash mid-turn: the dead agent sends nothing more, and its turn runs once on the next one after its lease", async () => {
+  const conversationId = "whatsapp:p4";
+  const scripted = scriptedModel();
+  const played = play([
+    { type: "open", conversationId, channelName: "whatsapp", channel: WHATSAPP, address: PERSON, now: START },
+    { type: "message", conversationId, messageId: "m1", incoming: { text: "when is my class?" }, channel: WHATSAPP, channelName: "whatsapp" },
+    { type: "restart", conversationId, step: 2, mode: "crash" },
+  ], (options) => buildAgent(options, [], scripted.model), { before: async (i) => i === 2 && scripted.nextCall(0) }); // it dies while the model thinks
+  const again = await scripted.nextCall(1);
+  assert.deepEqual(again.request.messages.filter((m) => m.role === "user").map((m) => m.content), ["[m1] when is my class?"]);
+  again.answer(respond(call("send_whatsapp", { text: "Thursday at 10." })));
+  scripted.calls[0].answer(respond(call("send_whatsapp", { text: "From the dead runner." }))); // too late: it is gone
+  const { opened, answers, outbound, events } = await played;
+  assert.equal((opened as { restart?: boolean }).restart, true);
+  assert.deepEqual(answers.map((a) => [a.step, a.at, a.error ?? null]), [[0, START, null], [2, START + LEASE_MS, null]]);
+  assert.deepEqual(outbound.flatMap((o) => (o.outbound.type === "message" ? [o.outbound.text] : [])), ["Thursday at 10."]);
+  assert.deepEqual(sentBy(events), [["Thursday at 10.", "runner-2"]]);
+  assert.deepEqual(turns(events), [["turn.start", 1, "runner-1"], ["turn.start", 1, "runner-2"], ["turn.end", 1, "runner-2"]]);
+});
+
+test("a deploy mid-turn: the old agent finishes its turn and a message the new one took meanwhile, then the new one carries on", async () => {
+  const conversationId = "whatsapp:p5";
+  const scripted = scriptedModel();
+  const message = (messageId: string, text: string): Command => ({ type: "message", conversationId, messageId, incoming: { text }, channel: WHATSAPP, channelName: "whatsapp" });
+  const m2 = gate();
+  const m3 = gate();
+  const done = gate();
+  const agents: Array<ReturnType<typeof buildAgent>> = [];
+  const played = play([
+    { type: "open", conversationId, channelName: "whatsapp", channel: WHATSAPP, address: PERSON, now: START },
+    message("m1", "when is my class?"),
+    { type: "restart", conversationId, step: 2, mode: "deploy" },
+    message("m2", "and where?"), // reaches the new agent while the old one's turn runs
+    message("m3", "thanks!"),
+  ], (options) => agents[agents.length] = buildAgent(options, [], scripted.model), {
+    before: async (i) => {
+      if (i === 2) await scripted.nextCall(0); // the new revision comes up while the model thinks
+      if (i === 5) await done.promise;
+      if (i !== 4) return;
+      // Once the old one let go of the conversation (it stops then).
+      await m3.promise;
+      const old = agents[1]!.conversation((await agents[2]!.reach({ channel: "whatsapp", address: PERSON })).conversationId);
+      await old?.whenIdle();
+      await old?.stored();
+    },
+    taken: (id) => id === "m2" && m2.open(),
+  });
+  const first = await scripted.nextCall(0);
+  await m2.promise;
+  first.answer(respond(call("send_whatsapp", { text: "Thursday at 10." })));
+  const second = await scripted.nextCall(1);
+  assert.deepEqual(second.request.messages.filter((m) => m.role === "user").map((m) => m.content), ["[m1] when is my class?", "[m2] and where?"]);
+  second.answer(respond(call("send_whatsapp", { text: "At the studio." })));
+  m3.open();
+  const third = await scripted.nextCall(2);
+  assert.deepEqual(third.request.messages.filter((m) => m.role === "user").map((m) => m.content), ["[m1] when is my class?", "[m2] and where?", "[m3] thanks!"]);
+  third.answer(respond(call("send_whatsapp", { text: "Any time." })));
+  await agents[2]!.conversation((await agents[2]!.reach({ channel: "whatsapp", address: PERSON })).conversationId)?.whenIdle();
+  done.open();
+  const { answers, events } = await played;
+  assert.deepEqual(answers.map((a) => [a.step, a.error ?? null]), [[0, null], [2, null]]);
+  assert.deepEqual(sentBy(events), [["Thursday at 10.", "runner-1"], ["At the studio.", "runner-1"], ["Any time.", "runner-2"]]);
+  assert.equal(scripted.calls.length, 3, "no turn ran twice");
 });

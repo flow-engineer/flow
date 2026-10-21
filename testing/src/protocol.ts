@@ -20,8 +20,9 @@
 // own on the agent's side, built with a clock the commands move (its own `now`, no schedule timer),
 // and the agent's own channels, whose sends come to the cloud as an outbound with `at`, the run's
 // clock. The cloud sends `open` first, then any of `message`, `reaction`, `event`, `nudge`,
-// `advance`, and `close` when the run is over. `open`, `event`, `nudge` and `advance` are each
-// answered by one StepAnswer once the agent has settled: everything they set off has been sent.
+// `advance`, `restart` (both sides said `restart`), and `close` when the run is over. `open`,
+// `event`, `nudge`, `advance` and `restart` are each answered by one StepAnswer once the agent has
+// settled: everything they set off has been sent (a deploy's answer comes once the new agent is up).
 //
 // When Opened says resume, every command on the stream carries `id: N` (1, 2, 3, ... per session).
 // A stream that drops, or sits silent past the idle watch, is opened again with Last-Event-ID set
@@ -69,6 +70,8 @@ export interface OpenSession {
   reopen?: boolean;
   /** The client plays business runs (open, event, nudge, advance, close). */
   business?: boolean;
+  /** The client plays a business run's `restart` step (a crash or a deploy of the agent mid-conversation). */
+  restart?: boolean;
   /** Play only these runs, numbered as given: a re-open after session_gone. Sent only to a cloud whose Opened said reopen,
    * and only when some run finished: the cloud checks it against the suite's files it already stores. */
   only?: RunKey[];
@@ -106,6 +109,8 @@ export interface Opened {
   reopen?: boolean;
   /** This cloud plays business runs; the client sent `business`. Absent on an older cloud. */
   business?: boolean;
+  /** This cloud sends `restart` steps; the client sent `restart`. Absent on an older cloud. */
+  restart?: boolean;
   /** What this workspace may do, printed when the session opens. Absent on an older cloud. */
   limits?: SessionLimits;
 }
@@ -154,6 +159,11 @@ export type BusinessCommand =
   | { type: "nudge"; conversationId: string; step: number; nudge: BusinessNudge }
   /** Time passes: the clock moves to `to` (epoch ms), a minute at a time, and what came due runs at each step. */
   | { type: "advance"; conversationId: string; step: number; to: number }
+  /** The agent restarts, on the same store: `crash`, the run's agent dies where it is (nothing more it does is
+   * sent or kept, its lease stays until it runs out) and a new one starts once the clock has moved past it;
+   * `deploy`, a new one starts beside it and takes every command from now on, while the old one finishes what it
+   * holds and stops. Each has a runner name of its own. Sent only when both sides said `restart`. */
+  | { type: "restart"; conversationId: string; step: number; mode: "crash" | "deploy" }
   /** The run is over: its agent is dropped. */
   | { type: "close"; conversationId: string };
 

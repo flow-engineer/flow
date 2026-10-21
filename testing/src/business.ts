@@ -3,14 +3,18 @@
 // cloud's commands move and with copies of the agent's own channels, so its sends go through what
 // the agent wraps around them and come to the cloud with the run's time. The person writes through
 // agent.message(), as a provider's webhook would, so they are a person the agent can nudge.
+// Each run's agent keeps its state in a database of the run's own, so a `restart` step starts a new
+// agent on the same store: as a crash (the old one dies where it is) or a deploy (the new one
+// starts beside it, and the old one finishes what it holds and stops).
 
 import { randomBytes } from "node:crypto";
-import { signEvent } from "../../src/index.ts";
-import type { Agent, Channel, EventSink, Incoming, Outbound, Tool } from "../../src/index.ts";
+import { signEvent, sqlite } from "../../src/index.ts";
+import type { Agent, Channel, Database, EventSink, Incoming, Outbound, Tool } from "../../src/index.ts";
+import { LEASE_MS } from "../../src/conversation.ts";
 import type { BusinessCommand, BusinessOutbound, Command, Receipt, StepAnswer } from "./protocol.ts";
 
 /** What a business run's agent must do: a Flow Framework Agent. */
-export type BusinessAgent = Pick<Agent, "channels" | "channel" | "message" | "reacted" | "nudge" | "reach" | "runDue" | "conversation" | "fetch">;
+export type BusinessAgent = Pick<Agent, "channels" | "channel" | "message" | "reacted" | "nudge" | "reach" | "runDue" | "conversation" | "fetch" | "resume" | "runner">;
 
 /** What buildAgent is given for a business run, beside its tools and events. */
 export interface BusinessBuild {
@@ -22,14 +26,38 @@ export interface BusinessBuild {
     scheduleCheckMs: 0;
     /** The secret the run's events are signed with (Flow-Signature): made for the run, never a real one. */
     eventsSecret: string;
+    /** The run's store, which an agent restarted in the run (a `restart` step) starts on again. */
+    database: Database;
+    /** This agent's runner name in the run: runner-1, then runner-2 after a restart, ... */
+    runner: string;
   };
 }
 
 /** One minute: the clock moves this far at a time, and what came due runs at each step. */
 export const STEP_MS = 60_000;
 
-interface Run {
+/** How long a deploy's old agent may take to finish what it holds before it is stopped where it is. */
+export const DRAIN_MS = 120_000;
+
+/** One agent of a run, from its start until it stops: a dead one sends, calls, records and keeps nothing more. */
+interface Life {
   agent: BusinessAgent;
+  dead: boolean;
+  /** The run's store as this agent reaches it: killed, every statement fails, as when its process died. */
+  database: Database & { kill(): void };
+}
+
+interface Run {
+  /** The agent that takes the run's commands. */
+  agent: BusinessAgent;
+  life: Life;
+  /** Every agent started in the run that has not stopped (a deploy's old one while it finishes). */
+  lives: Set<Life>;
+  database: Database;
+  /** How many agents the run has started. */
+  started: number;
+  /** The tools whose own code runs (tools.real). */
+  real: Set<string>;
   clock: number;
   secret: string;
   address: string;
@@ -64,21 +92,83 @@ export function businessRuns(ctx: BusinessContext) {
     const real = new Set(command.realTools ?? []);
     const unknown = [...real].filter((name) => !ctx.realTools.some((t) => t.name === name));
     if (unknown.length) return { conversationId: cloudId, step: 0, at: command.now, error: `the agent has no tool ${unknown.join(", ")} to run for real` };
-    const run = { clock: command.now, secret: `whsec_test_${randomBytes(18).toString("hex")}`, address: command.address, channelName: command.channelName, conversationId: "", deliveries: new Set(), sent: 0 } as unknown as Run;
-    // The run's events and tool calls are the cloud's conversation, whatever the agent calls it.
-    const events: EventSink = Object.assign((event: Parameters<EventSink>[0]) => ctx.events({ ...event, conversationId: cloudId }), { context: true });
-    const tools = ctx.tunnelTools.map((t): Tool => {
-      if (real.has(t.name)) return ctx.realTools.find((r) => r.name === t.name)!;
-      return { ...t, run: (input: unknown, context: Parameters<Tool["run"]>[1]) => t.run(input, { ...context, conversationId: cloudId }) } as Tool;
-    });
-    const channels = ctx.sessionAgent.channels().map(({ name }): Channel => {
-      const own = ctx.sessionAgent.channel(name)!;
-      return { ...own, send: (address: string, outbound: Outbound) => deliver(run, cloudId, address, outbound) };
-    });
-    run.agent = ctx.build({ tools, events: [events], channels, testing: { now: () => run.clock, scheduleCheckMs: 0, eventsSecret: run.secret } });
+    const run = { clock: command.now, secret: `whsec_test_${randomBytes(18).toString("hex")}`, address: command.address, channelName: command.channelName, conversationId: "", deliveries: new Set(), sent: 0, lives: new Set(), database: sqlite(), started: 0, real } as unknown as Run;
+    start(run, cloudId);
     run.conversationId = (await run.agent.reach({ channel: command.channelName, address: command.address })).conversationId;
     runs.set(cloudId, run);
     return { conversationId: cloudId, step: 0, at: run.clock };
+  };
+
+  /** Builds the run's next agent on its store and makes it the one that takes the run's commands. */
+  const start = (run: Run, cloudId: string): Life => {
+    const life = { dead: false, database: killable(run.database) } as Life;
+    const alive = <T>(work: () => Promise<T>): Promise<T> => (life.dead ? Promise.reject(new Error("the agent's process died")) : work());
+    // The run's events and tool calls are the cloud's conversation, whatever the agent calls it.
+    const events: EventSink = Object.assign((event: Parameters<EventSink>[0]) => void (life.dead || ctx.events({ ...event, conversationId: cloudId })), { context: true });
+    const tools = ctx.tunnelTools.map((t): Tool => {
+      const own = run.real.has(t.name) ? ctx.realTools.find((r) => r.name === t.name)! : t;
+      return { ...own, run: (input: unknown, context: Parameters<Tool["run"]>[1]) => alive(async () => own.run(input, own === t ? { ...context, conversationId: cloudId } : context)) } as Tool;
+    });
+    const channels = ctx.sessionAgent.channels().map(({ name }): Channel => {
+      const own = ctx.sessionAgent.channel(name)!;
+      return { ...own, send: (address: string, outbound: Outbound) => (life.dead ? Promise.resolve() : deliver(run, cloudId, address, outbound)) };
+    });
+    const runner = `runner-${++run.started}`;
+    life.agent = ctx.build({ tools, events: [events], channels, testing: { now: () => run.clock, scheduleCheckMs: 0, eventsSecret: run.secret, database: life.database, runner } });
+    if (run.started > 1 && !String(life.agent.runner ?? "").startsWith(`${runner}:`)) {
+      kill(run, life);
+      throw new Error("a restart needs buildAgent to pass options.testing on to createAgent as it is (its database and runner), so the new agent starts on the run's store");
+    }
+    run.lives.add(life);
+    run.life = life;
+    run.agent = life.agent;
+    return life;
+  };
+
+  /** The agent stops where it is: its turn in flight is cut off, and nothing it does from now on is sent or kept. */
+  const kill = (run: Run, life: Life) => {
+    life.dead = true;
+    run.lives.delete(life);
+    if (run.conversationId) life.agent.conversation(run.conversationId)?.close();
+    life.database.kill();
+  };
+
+  /**
+   * The agent restarts on the run's store. crash: it dies where it is, holding its lease; a new one
+   * starts and leaves the conversation to it, then the clock moves past the lease (LEASE_MS) and what
+   * was cut off runs on the new one. deploy: a new one starts beside it and takes the run's commands
+   * from now on; the old one finishes what it holds (with what the new one stores for it meanwhile)
+   * and stops, within DRAIN_MS. The step is answered once the new agent is up.
+   */
+  const restart = async (run: Run, command: Extract<BusinessCommand, { type: "restart" }>) => {
+    const old = run.life;
+    if (command.mode === "crash") kill(run, old);
+    const life = start(run, command.conversationId);
+    await life.agent.resume();
+    if (command.mode === "crash") {
+      await settle(run);
+      run.clock += LEASE_MS;
+    } else {
+      ctx.watch(retire(run, old), "the old agent of a deploy");
+    }
+  };
+
+  /** A deploy's old agent: once nothing runs or waits in the run's conversation there, it stops. */
+  const retire = async (run: Run, old: Life) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const drained = (async () => {
+      for (;;) {
+        const conversation = old.agent.conversation(run.conversationId);
+        await conversation?.whenIdle();
+        // Its last writes, the lease let go among them, before it stops.
+        await conversation?.stored();
+        await Promise.allSettled([...run.deliveries]);
+        if (!old.agent.conversation(run.conversationId)?.busy) return;
+      }
+    })();
+    await Promise.race([drained, new Promise<void>((done) => (timer = setTimeout(done, DRAIN_MS)))]);
+    clearTimeout(timer);
+    kill(run, old);
   };
 
   const deliver = (run: Run, cloudId: string, address: string, outbound: Outbound): Promise<void> => {
@@ -122,6 +212,7 @@ export function businessRuns(ctx: BusinessContext) {
     let result: Omit<StepAnswer, "conversationId" | "step" | "at"> = {};
     try {
       if (command.type === "event") result = await event(run, command);
+      else if (command.type === "restart") await restart(run, command);
       else if (command.type === "nudge") {
         const { expiresAt, ...rest } = command.nudge;
         const nudged = await run.agent.nudge({ to: { channel: run.channelName, address: run.address }, ...rest, ...(expiresAt !== undefined ? { expiresAt } : {}) });
@@ -153,10 +244,12 @@ export function businessRuns(ctx: BusinessContext) {
         return true;
       }
       if (command.type === "close") {
+        const run = runs.get(command.conversationId);
         runs.delete(command.conversationId);
+        for (const life of run?.lives ?? []) kill(run!, life);
         return true;
       }
-      if (command.type === "event" || command.type === "nudge" || command.type === "advance") {
+      if (command.type === "event" || command.type === "nudge" || command.type === "advance" || command.type === "restart") {
         ctx.watch((async () => {
           const run = runs.get(command.conversationId);
           const answer = run ? await step(run, command) : { conversationId: command.conversationId, step: command.step, at: 0, error: "no such run open" };
@@ -183,4 +276,19 @@ export function businessRuns(ctx: BusinessContext) {
       return true;
     },
   };
+}
+
+/** The run's store as one agent reaches it: once killed, every statement fails, as when its process died. */
+function killable(db: Database): Database & { kill(): void } {
+  let dead = false;
+  const guard = () => {
+    if (dead) throw new Error("the agent's process died");
+  };
+  const on = (inner: Omit<Database, "transaction">): Omit<Database, "transaction"> => ({
+    durable: inner.durable,
+    dialect: inner.dialect,
+    query: async (sql, params) => (guard(), inner.query(sql, params)),
+    run: async (sql, params) => (guard(), inner.run(sql, params)),
+  });
+  return { ...on(db), transaction: async (work) => (guard(), db.transaction((tx) => work(on(tx)))), kill: () => void (dead = true) };
 }
