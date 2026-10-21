@@ -91,7 +91,7 @@ test("a stream that dies prints the runs already in, keeps them with the rest as
     const code = await new Promise<number | null>((resolve) => child.on("exit", resolve));
     assert.equal(code, 2);
     assert.match(out, /FAIL {2}hello #1/);
-    assert.match(out, /1 of 3 runs finished before: the cloud closed the stream before the session finished/);
+    assert.match(out, /^1 of 3 runs finished before the session ended early \(2 not played\): the cloud closed the stream before the session finished$/m);
     assert.match(out, /http:\/\/dash\/s/);
     assert.match(out, /^Results: \.flow\/last-session\.json/m);
     const last = lastSession(dir);
@@ -101,6 +101,26 @@ test("a stream that dies prints the runs already in, keeps them with the rest as
   // A run that never played counts as not passed.
   const again = await cliOutput(["test", "--failed", "--cloud", "http://127.0.0.1:9"], dir);
   assert.match(again.out, /^Running again what did not pass in session s, on every channel each plays: bye, hello\.$/m);
+});
+
+test("a session the cloud ends before every run played says so, with the cloud's error and the runs not played, and exits 2", { timeout: 15_000 }, async () => {
+  const dir = agentDir({ bye: scenarioYaml("bye", "sms, whatsapp") });
+  const passed = runOf({ passed: true });
+  const stopped = await cloud(false, [{ type: "run", run: passed }, { type: "failed", error: "internal: the run's simulator answered 500" }]);
+  try {
+    const result = await cliStreams(["test", "--cloud", stopped.url, "--json"], dir);
+    assert.equal(result.code, 2, result.out);
+    assert.match(result.stderr, /^1 of 3 runs finished before the session ended early \(2 not played\): the cloud stopped the session: internal: the run's simulator answered 500$/m);
+    const report = JSON.parse(result.stdout);
+    assert.deepEqual([report.outcome, report.exitCode, report.counts.notPlayed], ["errored", 2, 2]);
+  } finally { stopped.close(); }
+  // A summary that leaves runs out ended early too, though every run in it passed.
+  const short = await cloud(false, [{ type: "finished", summary: { sessionId: "s", suiteHash: "h", testModel: "m", runs: [passed], dashboard: "http://dash/s" } }]);
+  try {
+    const result = await cliOutput(["test", "--cloud", short.url], dir);
+    assert.equal(result.code, 2, result.out);
+    assert.match(result.out, /^1 of 3 runs finished before the session ended early \(2 not played\): the cloud finished the session without playing every run$/m);
+  } finally { short.close(); }
 });
 
 /** Runs the CLI with these arguments, without the developer's cloud settings, and gives its exit code and output. */
@@ -188,7 +208,7 @@ test("Ctrl-C prints the same partial report, keeps what finished, and exits 130"
     child.kill("SIGINT");
     const code = await new Promise<number | null>((resolve) => child.on("exit", resolve));
     assert.equal(code, 130);
-    assert.match(out, /1 of 1 runs finished before: interrupted/);
+    assert.match(out, /All 1 runs finished before the session ended: interrupted/);
     assert.match(out, /http:\/\/dash\/s/);
     assert.match(out, /the cloud keeps playing; stop it from the dashboard: http:\/\/dash\/s/);
     assert.match(out, /^Results: \.flow\/last-session\.json/m);

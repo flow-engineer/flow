@@ -198,8 +198,9 @@ connects out to the cloud, which plays the person and the tools and judges.
    when the cloud could not play the scenario, plus `sessionInvalid` as in `--json`.
    Read these instead of parsing the printed lines.
    Exit status: 0 all passed; 1 a run failed, or nothing was sent (a wrong flag, a test file that does
-   not parse, no key); 2 the connection or the cloud failed, or runs errored and none failed; 3 the
-   cloud refused (key, busy, spend cap, capacity); 130 Ctrl-C. On 2 or 3 the agent is not at fault:
+   not parse, no key); 2 the connection or the cloud failed, or runs errored or were not played (the
+   session ended early: one line says how many and why) and none failed; 3 the cloud refused (key,
+   busy, spend cap, capacity); 130 Ctrl-C. On 2 or 3 the agent is not at fault:
    say what the cloud said (`error` in the report), do not change the agent for it.
 5. `--only a,b` runs only those scenarios (file names without `.yaml`). `--failed` runs only the ones
    that did not pass in the last session, on every channel each plays; it goes with `--runs`, never

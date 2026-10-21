@@ -99,8 +99,9 @@ Exit status:
        no FLOW_FRAMEWORK_CLOUD_KEY. The message is printed on its own
   2    The connection, the tunnel or the stream failed (before or after the session opened),
        the cloud answered 5xx or no JSON, the cloud ended the session for its own failure, or
-       runs errored (the cloud could not play or judge them) and none failed. After the open:
-       the runs that had finished, then "N of M runs finished before: <reason>" and the dashboard
+       runs errored (the cloud could not play or judge them) or were not played, and none failed.
+       After the open, when the session ended before every run played: the runs that had finished,
+       then "N of M runs finished before the session ended early (K not played): <reason>" and the dashboard
   3    The cloud refused: the open (a bad or wrong key 401/403, an invalid request 400, busy
        429 rate_limited, the spend cap 429 spend_cap, 503 capacity), or it ended the session
        for the spend cap or capacity. A busy open with Retry-After up to 60 s is sent once more
@@ -352,11 +353,10 @@ checkSuite(chosen);
 files = forUrl(chosen);
 if (agentUrl) await checkAgentReachable(agentUrl);
 perScenario = runs;
-const expected = expectedRuns(files, perScenario);
 
 function reportStop(done: RunSummary[], reason: string, link: string, ended: Ended) {
   for (const run of done) printRun(run);
-  console.error(`${done.length} of ${expected} runs finished before: ${reason}`);
+  endedEarly(done, reason, console.error);
   if (link) console.error(link);
   if (ended === "interrupted" && link) console.error(`the cloud keeps playing; stop it from the dashboard: ${link}`);
   saveSession(ended, done, link, console.error);
@@ -391,7 +391,9 @@ try {
     reportStop(error.runs, reason, dashboard, "stopped");
     end("transport", { received: error.runs, error: reportError(error, reason) });
   }
-  console.error(reason);
+  // Once the session has opened, the reason is said with how many runs it left unplayed.
+  if (sessionId) endedEarly(seen, reason, console.error);
+  else console.error(reason);
   endedInvalid = sessionInvalid(error, files.filter((f) => f.path.startsWith("scenarios/")).map((f) => ({ scenario: f.path.slice("scenarios/".length, -".yaml".length), path: f.path })));
   if (endedInvalid) for (const line of sessionInvalidLines(endedInvalid)) console.error(line);
   // The cloud stopped a session that had opened: what finished is kept, the rest is not_played.
@@ -418,10 +420,19 @@ for (const channel of [...new Set(summary.runs.map((r) => r.channel))]) {
 for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m) => ({ scenario: m.scenario, invalid: m.summary?.invalid }))))) say(line);
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
 say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
+if (mergedRuns(summary.runs).some((m) => m.verdict === "not_played")) endedEarly(summary.runs, "the cloud finished the session without playing every run", say);
 sessionId = summary.sessionId || sessionId;
 dashboard = summary.dashboard || dashboard;
 saveSession("finished", summary.runs, dashboard, say);
 end(finishedOutcome(mergedRuns(summary.runs)), { received: summary.runs });
+
+/** The one line that says the session ended before every run played: how many finished, how many did not, and why. */
+function endedEarly(received: RunSummary[], reason: string, print: (line: string) => void): void {
+  const runs = mergedRuns(received);
+  const notPlayed = runs.filter((m) => m.verdict === "not_played").length;
+  // Every run finished (Ctrl-C after the last one): nothing was left unplayed, so the line says only why it ended.
+  print(notPlayed ? `${runs.length - notPlayed} of ${runs.length} runs finished before the session ended early (${notPlayed} not played): ${reason}` : `All ${runs.length} runs finished before the session ended: ${reason}`);
+}
 
 /** How a session ended: its summary came, it broke off or the cloud stopped it, or Ctrl-C. */
 type Ended = LastSession["ended"];
@@ -593,17 +604,6 @@ function failedLastTime(suite: ReturnType<typeof loadSuite>): Set<string> {
   if (!kept.length) invalid(`None of the scenarios that did not pass in session ${last.sessionId} are still in tests/scenarios: run flow test.`);
   say(`Running again what did not pass in session ${last.sessionId}, on every channel each plays: ${kept.join(", ")}.`);
   return new Set(kept);
-}
-
-/** Scenarios actually sent, times the channels each one plays, times --runs. */
-function expectedRuns(sent: ReturnType<typeof loadSuite>, runs: number): number {
-  if (!(runs > 0)) return 0;
-  let count = 0;
-  for (const file of sent) {
-    if (!file.path.startsWith("scenarios/")) continue;
-    count += parseScenario(file).channels.length * runs;
-  }
-  return count;
 }
 
 /** Why the session stopped or never opened; a network failure names the address and its code. */
