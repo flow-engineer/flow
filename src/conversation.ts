@@ -747,7 +747,7 @@ export class Conversation {
     try {
       epoch = await this.settings.store.claimConversation(this.id, this.settings.runner, now, now + LEASE_MS);
     } catch (error) {
-      if (!leaseWarned) console.warn(`flow: runner ${this.settings.runner} could not take conversation ${this.id}'s lease; going on without it (later failures are not logged):`, error);
+      if (!leaseWarned) console.warn("flow: runner %s could not take conversation %s's lease; going on without it (later failures are not logged):", this.settings.runner, this.id, error);
       leaseWarned = true;
       return "mine";
     }
@@ -773,7 +773,7 @@ export class Conversation {
     if (!this.renewal) return;
     if ((await this.claim()) === "mine") return;
     // This runner stalled past its lease and another took the conversation: it stops here.
-    console.warn(`flow: runner ${this.settings.runner} lost conversation ${this.id} to another runner; it stops working on it`);
+    console.warn("flow: runner %s lost conversation %s to another runner; it stops working on it", this.settings.runner, this.id);
     this.close();
     this.leave(false);
   }
@@ -806,7 +806,7 @@ export class Conversation {
     try {
       rows = await this.settings.store.openInbox(this.id);
     } catch (error) {
-      console.warn(`flow: runner ${this.settings.runner} could not read conversation ${this.id}'s inbox:`, error);
+      console.warn("flow: runner %s could not read conversation %s's inbox:", this.settings.runner, this.id, error);
       return false;
     }
     for (const row of rows) {

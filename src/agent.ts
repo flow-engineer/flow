@@ -1195,7 +1195,7 @@ export class Agent {
         if (row) this.rows.set(id, row);
         if (!this.conversations.has(id)) this.open(id);
       })
-      .catch((error) => console.warn(`flow: runner ${this.runner} could not read conversation ${id} again:`, error));
+      .catch((error) => console.warn("flow: runner %s could not read conversation %s again:", this.runner, id, error));
   }
 
   /**
