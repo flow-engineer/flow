@@ -8,7 +8,8 @@ import type { SessionLimits } from "./protocol.ts";
 /** How a `flow test` ended, one per exit status (0 passed; 1 failed, invalid; 2 errored, transport; 3 refused; 130 interrupted). */
 export type Outcome = "passed" | "failed" | "errored" | "transport" | "refused" | "interrupted" | "invalid";
 
-export type Verdict = "passed" | "failed" | "errored" | "not_played";
+/** flaky: the run failed, and the cloud played it once more and it passed (it counts as failed only with --strict). */
+export type Verdict = "passed" | "failed" | "flaky" | "errored" | "not_played";
 
 export interface ReportError {
   message: string;
@@ -34,6 +35,12 @@ export interface ReportRun {
   failedChecks: Array<{ kind: string; text: string; reason: string }>;
   /** The scenario file the cloud could not play and what is wrong in it (error scenario_invalid); else null. */
   invalid: { path: string; reason: string } | null;
+  /** The cloud's second play of this failed run; null when it played it once (it passed, or an older cloud). */
+  rerun: { runId: string; passed: boolean; watch: string } | null;
+  /** On a failed run played again: flaky when the second play passed, failing when it failed too; else null. */
+  label: "flaky" | "failing" | null;
+  /** How many person, tool and judge answers this run replayed from stored ones; null when the cloud said none. */
+  replayed: { person: number; tools: number; judge: number } | null;
 }
 
 /** A scenario the cloud could not play, once per scenario. */
@@ -62,7 +69,11 @@ export interface JsonReport {
   dashboard: string | null;
   suiteHash: string | null;
   error: ReportError | null;
-  counts: { runs: number; passed: number; failed: number; errored: number; notPlayed: number };
+  /** runs: the suite's runs (a cloud's second play of a failed run is not one of its own). failed: the runs
+   * that failed, and with --strict the flaky ones too; flaky: the runs that failed once and passed when played again. */
+  counts: { runs: number; passed: number; failed: number; flaky: number; errored: number; notPlayed: number };
+  /** --strict: a flaky run counts as failed (outcome failed, exit 1). */
+  strict: boolean;
   costUsd: { agent: number; test: number };
   runs: ReportRun[];
   /** Each scenario the cloud could not play; the other scenarios played. */
@@ -74,18 +85,21 @@ export interface JsonReport {
 }
 
 /** A run's verdict: errored when the cloud names an error for it or ended it run_failed, since the cloud
- * could not play or judge it and that says nothing about the agent (a judge_failed run can end goal_met). */
-export function runVerdict(run: { passed: boolean; ended: string; error?: string }): Exclude<Verdict, "not_played"> {
+ * could not play or judge it and that says nothing about the agent (a judge_failed run can end goal_met);
+ * flaky when it failed and passed when the cloud played it again. */
+export function runVerdict(run: { passed: boolean; ended: string; error?: string; label?: string }): Exclude<Verdict, "not_played"> {
   if (run.error || run.ended === "run_failed") return "errored";
-  return run.passed ? "passed" : "failed";
+  if (run.passed) return "passed";
+  return run.label === "flaky" ? "flaky" : "failed";
 }
 
 export const EXIT: Record<Outcome, number> = { passed: 0, failed: 1, invalid: 1, errored: 2, transport: 2, refused: 3, interrupted: 130 };
 
-/** A session that ran to its summary: failed when a run failed, errored when the cloud could not play or judge a run (or never played it). */
-export function finishedOutcome(runs: Array<{ verdict: Verdict }>): Outcome {
-  if (runs.some((r) => r.verdict === "failed")) return "failed";
-  if (runs.some((r) => r.verdict !== "passed")) return "errored";
+/** A session that ran to its summary: failed when a run failed (or, with `strict`, was flaky), errored when the
+ * cloud could not play or judge a run (or never played it). A flaky run alone does not fail it. */
+export function finishedOutcome(runs: Array<{ verdict: Verdict }>, strict = false): Outcome {
+  if (runs.some((r) => r.verdict === "failed" || (strict && r.verdict === "flaky"))) return "failed";
+  if (runs.some((r) => r.verdict !== "passed" && r.verdict !== "flaky")) return "errored";
   return "passed";
 }
 

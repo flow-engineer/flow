@@ -3,7 +3,7 @@
 // `flow init` the same agent in the current folder (testing/src/new.ts). `flow chat` talks to the
 // agent in this folder from the terminal (testing/src/chat.ts). `flow test`, or `flow` with flags, runs an agent's tests in the cloud,
 // from the agent's folder:
-//   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--json]
+//   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--strict] [--fresh] [--json]
 // A hosted cloud (any --cloud off this machine, the default included) needs the
 // agent's CI key in FLOW_FRAMEWORK_CLOUD_KEY and --synthetic, the attestation that the test files hold no real
 // customer or member data. --agent-version (else GITHUB_SHA), --ref (else GitHub's branch) and
@@ -67,9 +67,13 @@ const TEST_OPTIONS = `Options for test:
   --cloud <url>            The test cloud (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)
   --runs <n>               Runs per scenario (default: 1)
   --only <ids>             Only these scenarios, comma-separated (file names without .yaml)
-  --failed                 Only the scenarios that failed, errored or never played in the last
-                           session (.flow/last-session.json), on every channel each plays.
+  --failed                 Only the scenarios that failed, were flaky, errored or never played in
+                           the last session (.flow/last-session.json), on every channel each plays.
                            Goes with --runs, not with --only
+  --strict                 Count a flaky run (failed, then passed when the cloud played it again)
+                           as failed: exit 1
+  --fresh                  Play every simulator anew: the cloud replays no stored person, tool or
+                           judge answers
   --synthetic              Attest the test files hold no real customer data (a hosted cloud needs it)
   --json                   Print one JSON report on stdout when it ends, whatever the exit; every
                            other line goes to stderr
@@ -93,9 +97,15 @@ line ("Up to 8 runs at once · daily test budget: $5 ($3.75 left) · 2 sessions 
 workspace") and --json reports them as limits (null from a cloud that does not send them).
 A suite with more runs than that plays them in turn, so its time grows with the run count.
 
+Flaky runs: the cloud plays a run that failed once more. When the second play passes, the run is
+flaky ("FLAKY" on its line, and its own section in the summary with both watch links); when it fails
+too, the run failed. A flaky run does not fail the session unless --strict. The cloud also replays
+the person's, the tools' and the judge's stored answers for a scenario it has played unchanged, so
+runs vary less and --runs 3 is rarely needed; --fresh plays everything anew.
+
 Exit status:
-  0    Every run passed
-  1    A run failed. Or nothing was sent: a wrong flag, a test file that does not parse,
+  0    Every run passed, or was flaky (without --strict)
+  1    A run failed (with --strict, or was flaky). Or nothing was sent: a wrong flag, a test file that does not parse,
        no FLOW_FRAMEWORK_CLOUD_KEY. The message is printed on its own
   2    The connection, the tunnel or the stream failed (before or after the session opened),
        the cloud answered 5xx or no JSON, the cloud ended the session for its own failure, or
@@ -110,7 +120,7 @@ Exit status:
 
 Results: once the session has opened, every exit writes .flow/last-session.json in the agent's
 folder: the session id, the cloud's agent id, dashboard link, suite hash and time, and per run its
-scenario, channel, number, run id, verdict (passed, failed, errored or not_played) and failed checks
+scenario, channel, number, run id, verdict (passed, failed, flaky, errored or not_played) and failed checks
 with the judge's reasons (and, for a scenario the cloud could not play, its file and what is wrong). Never the messages. The folder is git-ignored and the suite synthetic.
 
 Environment (also read from the agent folder's .env, or --dotenv; variables already set win;
@@ -174,6 +184,10 @@ const TEST_FLAGS = {
   only: { type: "string" },
   /** Only the scenarios that did not pass in .flow/last-session.json. */
   failed: { type: "boolean", default: false },
+  /** A flaky run counts as failed. */
+  strict: { type: "boolean", default: false },
+  /** The cloud replays no stored simulator answers. */
+  fresh: { type: "boolean", default: false },
   synthetic: { type: "boolean", default: false },
   json: { type: "boolean", default: false },
   dotenv: { type: "string" },
@@ -377,6 +391,7 @@ try {
     files,
     testsDir: join(dir, "tests"),
     runs: perScenario,
+    fresh: values.fresh,
     openHeaders,
     log: say,
     verbose: values.verbose,
@@ -403,19 +418,27 @@ try {
 
 say("");
 for (const r of summary.runs) printRun(r);
-const passed = summary.runs.filter((r) => runVerdict(r) === "passed").length;
-const errored = summary.runs.filter((r) => runVerdict(r) === "errored").length;
+// The suite's runs: a second play of a failed run (rerunOf) is shown under its original, never counted.
+const played = summary.runs.filter((r) => !r.rerunOf);
+const passed = played.filter((r) => runVerdict(r) === "passed").length;
+const errored = played.filter((r) => runVerdict(r) === "errored").length;
+// Cost counts every play, second plays included: the cloud spent it.
 const total = (pick: (r: (typeof summary.runs)[number]) => number) => summary.runs.reduce((n, r) => n + pick(r), 0);
 const agentModels = [...new Set(summary.runs.flatMap((r) => r.agentModels))].join(", ") || "unknown";
-const noModel = summary.runs.filter((r) => r.agentModels.length === 0 && r.agentUsage.input + r.agentUsage.output === 0).length;
+const noModel = played.filter((r) => r.agentModels.length === 0 && r.agentUsage.input + r.agentUsage.output === 0).length;
 const modelCalls = noModel ? `${noModel} ${noModel === 1 ? "run never called" : "runs never called"} the agent's model.` : "Every run called the agent's model.";
-const checkFails = summary.runs.filter((r) => runVerdict(r) === "failed" && r.checks.some((c) => !c.pass)).length;
+const checkFails = played.filter((r) => runVerdict(r) === "failed" && r.checks.some((c) => !c.pass)).length;
 const erroredLine = errored ? ` ${errored} errored (the cloud could not play or judge ${errored === 1 ? "it" : "them"}).` : "";
 const tokens = (n: number) => n.toLocaleString("en-US");
-say(`\n${passed} of ${summary.runs.length} runs passed.${erroredLine} ${modelCalls} ${checkFails} failed a check. Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
-for (const channel of [...new Set(summary.runs.map((r) => r.channel))]) {
-  const runs = summary.runs.filter((r) => r.channel === channel);
+say(`\n${passed} of ${played.length} runs passed.${erroredLine} ${modelCalls} ${checkFails} failed a check. Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
+for (const channel of [...new Set(played.map((r) => r.channel))]) {
+  const runs = played.filter((r) => r.channel === channel);
   say(`  ${channel}: ${runs.filter((r) => runVerdict(r) === "passed").length} of ${runs.length} passed`);
+}
+const flaky = played.filter((r) => runVerdict(r) === "flaky");
+if (flaky.length) {
+  say(`${flaky.length} flaky (failed once, passed when played again)${values.strict ? ", counted as failed (--strict)" : ""}:`);
+  for (const r of flaky) say(`  ${r.scenario} #${r.run} (${r.channel}): ${r.watch}${r.rerun ? ` then ${r.rerun.watch}` : ""}`);
 }
 for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m) => ({ scenario: m.scenario, invalid: m.summary?.invalid }))))) say(line);
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
@@ -424,7 +447,7 @@ if (mergedRuns(summary.runs).some((m) => m.verdict === "not_played")) endedEarly
 sessionId = summary.sessionId || sessionId;
 dashboard = summary.dashboard || dashboard;
 saveSession("finished", summary.runs, dashboard, say);
-end(finishedOutcome(mergedRuns(summary.runs)), { received: summary.runs });
+end(finishedOutcome(mergedRuns(summary.runs), values.strict), { received: summary.runs });
 
 /** The one line that says the session ended before every run played: how many finished, how many did not, and why. */
 function endedEarly(received: RunSummary[], reason: string, print: (line: string) => void): void {
@@ -452,7 +475,8 @@ function mergedRuns(received: RunSummary[]): Merged[] {
   const fileOf = new Map<string, string>();
   const byRun = new Map<string, RunSummary>();
   const key = (scenario: string, channel: string, run: number) => `${scenario}\n${channel}\n${run}`;
-  for (const r of received) byRun.set(key(r.scenario, r.channel, r.run), r);
+  // A second play of a failed run has its original's scenario, channel and number: it never takes its place.
+  for (const r of received) if (!r.rerunOf) byRun.set(key(r.scenario, r.channel, r.run), r);
   const merged = (scenario: string, r: RunSummary): Merged => ({
     scenario,
     channel: r.channel,
@@ -537,6 +561,9 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       watch: m.summary?.watch || null,
       failedChecks: failedChecks(m.summary),
       invalid: m.summary?.invalid ?? null,
+      rerun: m.summary?.rerun ?? null,
+      label: m.summary?.label ?? null,
+      replayed: m.summary?.replayed ?? null,
     })) : [];
     const count = (verdict: Verdict) => runs.filter((r) => r.verdict === verdict).length;
     const cost = (pick: (r: RunSummary) => number) => received.reduce((n, r) => n + pick(r), 0);
@@ -549,7 +576,8 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       dashboard: dashboard || null,
       suiteHash: files.length ? suiteHash(files) : null,
       error: options.error ?? null,
-      counts: { runs: runs.length, passed: count("passed"), failed: count("failed"), errored: count("errored"), notPlayed: count("not_played") },
+      counts: { runs: runs.length, passed: count("passed"), failed: count("failed") + (values.strict ? count("flaky") : 0), flaky: count("flaky"), errored: count("errored"), notPlayed: count("not_played") },
+      strict: values.strict,
       costUsd: { agent: cost((r) => r.agentUsage.costUsd), test: cost((r) => r.testUsage.costUsd) },
       runs,
       invalid: invalidScenarios(runs),

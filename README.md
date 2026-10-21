@@ -390,13 +390,15 @@ Exit status:
 
 | Exit | Meaning |
 |---|---|
-| 0 | Every run passed. |
-| 1 | A run failed. Or nothing was sent: a wrong flag, a test file that does not parse, no `FLOW_FRAMEWORK_CLOUD_KEY`; the message is printed on its own. |
+| 0 | Every run passed, or was flaky (without `--strict`). |
+| 1 | A run failed (with `--strict`, or was flaky). Or nothing was sent: a wrong flag, a test file that does not parse, no `FLOW_FRAMEWORK_CLOUD_KEY`; the message is printed on its own. |
 | 2 | The connection, the tunnel or the stream failed (before or after the session opened), the cloud answered 5xx or no JSON, the cloud ended the session for its own failure, or runs errored (the cloud could not play or judge them) or were not played (the session ended early), and none failed. |
 | 3 | The cloud refused: the open (a bad or wrong key, 401/403; an invalid request, 400; busy, 429 `rate_limited`; the spend cap, 429 `spend_cap`; 503 `capacity`), or it ended the session for the spend cap or capacity. |
 | 130 | Interrupted (Ctrl-C). |
 
 A busy cloud's refused open (429 other than the spend cap, or 503 `capacity`) with a Retry-After of 60 s or less is sent once more after it, with one line saying so; the spend cap never is. On a cloud that resumes, a dropped stream is opened again for up to 2 minutes, picking up after the last command. On a cloud that can re-open, a session the cloud lost is opened once more for only the runs with no result (the log names them, since they are played and paid for again), and the report covers both sessions with both dashboard links. Whenever a session ends before every run played (the tunnel, the stream or the connection failed, the cloud stopped it, or its summary left runs out), the runs that had already finished are printed, then `N of M runs finished before the session ended early (K not played): <reason>`, with the cloud's error as the reason when it sent one, then the dashboard link; it exits 2 (3 when the cloud stopped it for the spend cap or capacity). Ctrl-C prints that same partial report, says the cloud keeps playing until it is stopped from the dashboard, and exits 130.
+
+**Flaky runs.** The cloud plays a run that failed once more. When the second play passes the run is flaky: its line reads `FLAKY`, with `played again: passed <watch>` under it, and the summary lists it in its own section (`1 flaky (failed once, passed when played again):` with both watch links), apart from the failures. A flaky run does not fail the session (exit 0 when it is all that did not pass); `--strict` counts it as failed (exit 1). When the second play fails too, the run failed. The cloud also replays the person's, the tools' and the judge's stored answers for a scenario it has played unchanged, so runs vary less and `--runs 3` with a "2 of 3" bar should rarely be needed; `--fresh` plays every simulator anew. An older cloud does neither, and the output is as before.
 
 Each run's line carries its id (`FAIL  latte-correction #1 (whatsapp) trn_…: 6 turns, …`). `--dotenv <path>` reads the environment from that file instead of the folder's `.env` (variables already set still win; no value is printed), and `--verbose` also prints slow event uploads.
 
@@ -407,20 +409,22 @@ Each run's line carries its id (`FAIL  latte-correction #1 (whatsapp) trn_…: 6
   "version": 1, "outcome": "failed", "exitCode": 1,
   "sessionId": "tse_…", "agent": "agt_…", "dashboard": "https://…", "suiteHash": "…",
   "error": null,
-  "counts": { "runs": 2, "passed": 1, "failed": 1, "errored": 0, "notPlayed": 0 },
+  "counts": { "runs": 2, "passed": 1, "failed": 1, "flaky": 0, "errored": 0, "notPlayed": 0 },
+  "strict": false,
   "costUsd": { "agent": 0.0123, "test": 0.0456 },
   "runs": [
     { "runId": "trn_…", "scenario": "latte-correction", "channel": "whatsapp", "run": 1, "verdict": "failed",
       "error": null, "ended": "goal_met", "turns": 6, "watch": "https://…",
       "failedChecks": [{ "kind": "judge", "text": "The agent asks Sam to confirm before placing the order.", "reason": "…" }],
-      "invalid": null }
+      "invalid": null, "rerun": { "runId": "trn_…", "passed": false, "watch": "https://…" }, "label": "failing",
+      "replayed": { "person": 3, "tools": 1, "judge": 0 } }
   ],
   "invalid": [],
   "sessionInvalid": null
 }
 ```
 
-`outcome` is `passed` (exit 0), `failed` or `invalid` (1), `errored` or `transport` (2), `refused` (3) or `interrupted` (130). A run's `verdict` is `errored` whenever the cloud names an `error` for it (such as `judge_failed`, `simulator_failed` or `spend_cap`), whatever it `ended` as: the cloud could not play or judge it, so it says nothing about the agent. Its line reads `ERROR` instead of `PASS` or `FAIL`, and the run's `error` is that code (else `null`). `error` is `{ "message", "status", "type", "retryAfterSeconds" }` when the session did not finish (`type` is the cloud's code, such as `spend_cap`; the others are `null` when it did not say).
+`outcome` is `passed` (exit 0), `failed` or `invalid` (1), `errored` or `transport` (2), `refused` (3) or `interrupted` (130). A run's `verdict` is `errored` whenever the cloud names an `error` for it (such as `judge_failed`, `simulator_failed` or `spend_cap`), whatever it `ended` as: the cloud could not play or judge it, so it says nothing about the agent. Its line reads `ERROR` instead of `PASS` or `FAIL`, and the run's `error` is that code (else `null`). A run's `verdict` is `flaky` when it failed and passed when the cloud played it again; `rerun` is that second play (`{ "runId", "passed", "watch" }`, else `null`), `label` is `flaky` or `failing` (it failed again) on a run played again (else `null`), and `replayed` counts the stored simulator answers the run replayed (else `null`). The second play is never a run of its own in `runs` or `counts`. `counts.failed` leaves flaky runs out unless `--strict` (`strict: true`); `counts.flaky` counts them. `error` is `{ "message", "status", "type", "retryAfterSeconds" }` when the session did not finish (`type` is the cloud's code, such as `spend_cap`; the others are `null` when it did not say).
 
 A scenario the cloud cannot play (a key it does not know, a value it cannot read) does not stop the others: its runs are `errored` with `error` `scenario_invalid` and `invalid` `{ "path", "reason" }` (the reason starts `unsupported:` when the cloud does not know a key), its line reads `INVALID` with the file and what is wrong, and the top-level `invalid` lists each such scenario once as `{ "scenario", "path", "reason" }`. When the cloud ends the whole session `scenario_invalid` (a tools or checks file it cannot read, or an older cloud), `sessionInvalid` is `{ "reason", "olderCloud", "sent" }`: what the cloud said after the code (else `null`), whether that suggests a cloud older than this client, and the scenarios sent as `{ "scenario", "path" }`; the same lines are printed.
 
@@ -440,11 +444,11 @@ A scenario the cloud cannot play (a key it does not know, a value it cannot read
 
 A run of a scenario the cloud could not play also has `invalid` (`{ "path", "reason" }`), and a session the cloud ended `scenario_invalid` has `sessionInvalid`, as in `--json`.
 
-`ended` is `finished`, `stopped` (the session broke off or the cloud stopped it) or `interrupted`. `agent` is the cloud's id for the agent (a hosted cloud names it), which `flow show` reads. `only` is the scenarios the session was limited to, `null` for the whole suite. `verdict` is `passed`, `failed`, `errored` (the cloud could not play or judge the run) or `not_played` (the session ended first; its `runId` is `null`).
+`ended` is `finished`, `stopped` (the session broke off or the cloud stopped it) or `interrupted`. `agent` is the cloud's id for the agent (a hosted cloud names it), which `flow show` reads. `only` is the scenarios the session was limited to, `null` for the whole suite. `verdict` is `passed`, `failed`, `flaky` (failed, then passed when the cloud played it again), `errored` (the cloud could not play or judge the run) or `not_played` (the session ended first; its `runId` is `null`).
 
 `flow show <run-id>` prints one run's record from the cloud, read with `FLOW_FRAMEWORK_CLOUD_KEY`: the verdict, every check with the judge's reason, then the conversation in time order with each tool call the simulator played (its input, output and what it changed). `flow show last` picks the first run in `.flow/last-session.json` that did not pass (its first run when all passed) and names the others. `--json` prints the record exactly as the cloud answered it. It exits 0 when it printed; 1 for a wrong flag, no key or last session, no such run (404) or one past the 30 days runs are kept (410); 2 when the cloud did not answer or answered 5xx; 3 when it refused the key (401, 403) or is busy (429).
 
-`--failed` runs again only the scenarios that did not pass in that file (failed, errored or not played), on every channel each plays: a scenario's channels are part of its file, so one channel cannot be picked alone. It goes with `--runs`; with `--only` it stops and says to pick one, since the two would each pick the scenarios. With nothing to run again it prints `Nothing failed in the last session (<id>).` and exits 0 (and says when that session ran only some scenarios); with no file it says to run `flow test` first and exits 1. The loop, for you or a coding agent:
+`--failed` runs again only the scenarios that did not pass in that file (failed, flaky, errored or not played), on every channel each plays: a scenario's channels are part of its file, so one channel cannot be picked alone. It goes with `--runs`; with `--only` it stops and says to pick one, since the two would each pick the scenarios. With nothing to run again it prints `Nothing failed in the last session (<id>).` and exits 0 (and says when that session ran only some scenarios); with no file it says to run `flow test` first and exits 1. The loop, for you or a coding agent:
 
 ```bash
 npx @flow-engineer/flow test --synthetic           # the whole suite

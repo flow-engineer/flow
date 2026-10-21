@@ -33,6 +33,11 @@
 // cloud lost the session (its tunnel restarted). The client opens one new session with `only`, the
 // runs that have no result yet, and merges the two reports. Never more than once.
 //
+// When Opened says flaky, a run that fails is played once more: the failed run's `run` command carries
+// `rerun` and `label`, and the second play comes as a `run` command of its own with `rerunOf`, in any
+// order (match them by runId); it is not a run of the suite. When Opened says replay, the cloud
+// replays stored person, tool and judge answers for a scenario version it has played; `fresh` asks it not to.
+//
 // The open goes to the cloud's front door; every later call goes to Opened.tunnel (else the same
 // address) and carries `authorization: Bearer <token>` from Opened.
 
@@ -72,6 +77,10 @@ export interface OpenSession {
   business?: boolean;
   /** The client plays a business run's `restart` step (a crash or a deploy of the agent mid-conversation). */
   restart?: boolean;
+  /** The client reports flaky runs: when a run fails, the cloud plays it once more and labels it. */
+  flaky?: boolean;
+  /** Play every simulator afresh: the cloud replays no stored person, tool or judge answers. */
+  fresh?: boolean;
   /** Play only these runs, numbered as given: a re-open after session_gone. Sent only to a cloud whose Opened said reopen,
    * and only when some run finished: the cloud checks it against the suite's files it already stores. */
   only?: RunKey[];
@@ -111,6 +120,10 @@ export interface Opened {
   business?: boolean;
   /** This cloud sends `restart` steps; the client sent `restart`. Absent on an older cloud. */
   restart?: boolean;
+  /** This cloud plays a failed run once more and labels it; the client sent `flaky`. Absent on an older cloud. */
+  flaky?: boolean;
+  /** This cloud replays stored simulator answers for the same scenario version (absent with `fresh`, or on an older cloud). */
+  replay?: boolean;
   /** What this workspace may do, printed when the session opens. Absent on an older cloud. */
   limits?: SessionLimits;
 }
@@ -262,6 +275,15 @@ export interface RunSummary {
   /** With error scenario_invalid: the scenario file the cloud could not play, and what is wrong in it
    * (`unsupported: ...` when the cloud does not know a key). */
   invalid?: { path: string; reason: string };
+  /** This run is the cloud's automatic second play of the failed run with that runId (both sides said `flaky`):
+   * not a run of its own. The cloud sends it as a `run` command and in the summary's runs, in any order. */
+  rerunOf?: string;
+  /** On a failed run the cloud played again: the second play. */
+  rerun?: { runId: string; passed: boolean; watch: string };
+  /** On a failed run the cloud played again: flaky when the second play passed, failing when it failed too. */
+  label?: "flaky" | "failing";
+  /** How many simulator answers this run replayed from stored ones (person, tool simulator, judge). */
+  replayed?: { person: number; tools: number; judge: number };
 }
 
 export interface SessionSummary {

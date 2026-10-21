@@ -37,7 +37,8 @@ export interface LastSession {
     run: number;
     /** The cloud's id for the run, for `flow show`; null when it was not played. */
     runId?: string | null;
-    verdict: "passed" | "failed" | "errored" | "not_played";
+    /** flaky: failed, then passed when the cloud played it again. */
+    verdict: "passed" | "failed" | "flaky" | "errored" | "not_played";
     /** The checks as the test file says them, with the judge's reason. The file is local and
      * git-ignored, and the suite is synthetic by attestation; the messages themselves are never kept. */
     failedChecks: Array<{ kind: string; text: string; reason?: string }>;
@@ -88,7 +89,7 @@ interface RunRecord {
   checks?: Array<{ kind?: string; text?: string; pass?: boolean; reason?: string }>;
   error?: unknown;
   detail?: unknown;
-  summary?: { passed?: boolean; ended?: string; turns?: number; watch?: string; error?: string };
+  summary?: { passed?: boolean; ended?: string; turns?: number; watch?: string; error?: string; label?: string; rerun?: { passed?: boolean; watch?: string } };
 }
 
 type Line =
@@ -200,7 +201,7 @@ function readLast(): LastSession | string {
 /** The first run that did not pass, else the first run; says which on stderr and names the others that did not pass. */
 function pickLast(last: LastSession): string | undefined {
   const withId = last.runs.filter((r) => r.runId);
-  const notPassed = withId.filter((r) => r.verdict === "failed" || r.verdict === "errored");
+  const notPassed = withId.filter((r) => r.verdict === "failed" || r.verdict === "flaky" || r.verdict === "errored");
   const chosen = notPassed[0] ?? withId[0];
   if (!chosen) return undefined;
   console.error(`Showing ${chosen.scenario} #${chosen.run} (${chosen.channel}), ${chosen.verdict}: ${chosen.runId}`);
@@ -247,7 +248,7 @@ function render(record: RunRecord, runId: string): string[] {
   const passed = s.passed ?? (checks.length > 0 && checks.every((c) => c.pass));
   // An error (judge_failed, spend_cap, ...) or run_failed: the cloud could not play or judge the run.
   const error = record.error ?? s.error;
-  const verdict = error || s.ended === "run_failed" ? "ERROR" : passed ? "PASS" : "FAIL";
+  const verdict = error || s.ended === "run_failed" ? "ERROR" : passed ? "PASS" : s.label === "flaky" ? "FLAKY" : "FAIL";
   const where = record.scenario?.path ?? record.scenario?.id ?? "?";
   out.push(`${verdict}  ${where}${record.scenario?.title ? ` (${record.scenario.title})` : ""}`);
   out.push(`  channel ${record.channel ?? "?"}, run ${record.run ?? "?"}, ${record.runId ?? runId}; ended: ${s.ended ?? "?"}${s.turns === undefined ? "" : `, ${s.turns} turn${s.turns === 1 ? "" : "s"}`}`);
@@ -300,6 +301,7 @@ function render(record: RunRecord, runId: string): string[] {
     out.push("", ...indent(typeof record.detail === "string" ? record.detail : JSON.stringify(record.detail, null, 2), "Detail: ", "  "));
   }
   if (s.watch) out.push("", `Watch: ${s.watch}`);
+  if (s.rerun?.watch) out.push(`Played again: ${s.rerun.passed ? "passed" : "failed"} ${s.rerun.watch}`);
   return out;
 }
 
