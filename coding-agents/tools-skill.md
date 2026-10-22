@@ -51,6 +51,10 @@ export const findSlots = tool({
   `deadlineMs`, 60 s by default), and its result comes back into the chat by itself. Set
   `deadlineMs` on a tool for its own limit: shorter for one that should never hold a reply long,
   longer for one known to be slow.
+- A restart while a tool runs in the background tells the agent it may or may not have finished.
+  Set `onRestart: "rerun"` only on a tool that is safe to run twice with `context.idempotencyKey`
+  (a report, a lookup, a write the backend dedupes by that key): it then runs again once and its
+  result comes back by itself.
 - Say what you covered. An agent reads a list as complete: return the range or filter you
   searched ("Mon Oct 12 through Sun Oct 18", "all open times") and never cut results short
   silently. If there are more, say so.

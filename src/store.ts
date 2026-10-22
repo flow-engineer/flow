@@ -121,6 +121,11 @@ const MIGRATIONS: Array<((t: Types) => string) | null> = [
   (t) => `CREATE TABLE person_values (
      agent_id TEXT NOT NULL, conversation_id TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, updated_at ${t.int} NOT NULL,
      PRIMARY KEY (agent_id, conversation_id, name))`,
+  // A background tool that may run again after a restart keeps its call's input and idempotency key;
+  // `on_restart` is 'report' (today's), 'rerun', or 'rerun:1' once it was run again (never twice).
+  () => `ALTER TABLE background_tools ADD COLUMN input TEXT;
+   ALTER TABLE background_tools ADD COLUMN idempotency_key TEXT;
+   ALTER TABLE background_tools ADD COLUMN on_restart TEXT NOT NULL DEFAULT 'report'`,
 ];
 
 /** At most this many values per person, each at most VALUE_BYTES as JSON, named like `onboarding.step`. */
@@ -136,6 +141,19 @@ export function valueRefusal(name: string, value: unknown): string | null {
   if (text === undefined) return `${name}: only JSON values (text, numbers, true/false, lists, objects)`;
   if (Buffer.byteLength(text) > VALUE_BYTES) return `${name}: the value is over ${VALUE_BYTES} bytes as JSON`;
   return null;
+}
+
+/** A tool still running in the background when it was last stored. */
+export interface TaskRow {
+  taskId: string;
+  callId: string;
+  tool: string;
+  startedAt: number;
+  /** The call's arguments and idempotency key, kept only for a tool that may run again after a restart. */
+  input: string | null;
+  idempotencyKey: string | null;
+  /** report: the agent is told it was cut off; rerun: it runs again once; rerun:1: it was run again already. */
+  onRestart: "report" | "rerun" | "rerun:1";
 }
 
 /** Quiet hours, "HH:MM" to "HH:MM" in the person's own time; they may wrap midnight. */
@@ -234,9 +252,10 @@ const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
 /**
  * What an agent needs of its store: a Store, or something that forwards each call to a Store
  * elsewhere (a store service that holds the database, so the agent never holds its credentials).
- * flowEvents' state methods are optional: without them that state stays in memory.
+ * flowEvents' state methods are optional: without them that state stays in memory; without
+ * rerunTask, a background tool cut off by a restart is reported, never run again.
  */
-export type StoreApi = Omit<Store, "db" | "agentId" | keyof EventStateStore | keyof SendsStore> & Partial<EventStateStore> & Partial<SendsStore>;
+export type StoreApi = Omit<Store, "db" | "agentId" | keyof EventStateStore | keyof SendsStore | "rerunTask"> & Partial<EventStateStore> & Partial<SendsStore> & Partial<Pick<Store, "rerunTask">>;
 
 /** Where the agent's sends are written ahead; a store without it sends them as before (cut off by a restart, the model is told it may not have gone). */
 export type SendsStore = Pick<Store, "beginSends" | "settleSend" | "sendsFor" | "pruneSends">;
@@ -672,17 +691,31 @@ export class Store {
 
   // Background tools.
 
-  async addTask(conversationId: string, taskId: string, callId: string, tool: string, startedAt: number, fence?: Fence): Promise<void> {
-    await this.write(conversationId, fence, (db) => db.run("INSERT INTO background_tools (agent_id, conversation_id, task_id, call_id, tool, started_at) VALUES (?, ?, ?, ?, ?, ?)", [this.agentId, conversationId, taskId, callId, tool, startedAt]));
+  /** Records a tool that moved to the background; with `rerun`, a restart may run it again once with that input and key. */
+  async addTask(conversationId: string, taskId: string, callId: string, tool: string, startedAt: number, fence?: Fence, rerun?: { input: string; idempotencyKey: string }): Promise<void> {
+    await this.write(conversationId, fence, (db) =>
+      db.run("INSERT INTO background_tools (agent_id, conversation_id, task_id, call_id, tool, started_at, input, idempotency_key, on_restart) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [
+        this.agentId, conversationId, taskId, callId, tool, startedAt, rerun?.input ?? null, rerun?.idempotencyKey ?? null, rerun ? "rerun" : "report",
+      ]),
+    );
   }
 
   async removeTask(conversationId: string, taskId: string, fence?: Fence): Promise<void> {
     await this.write(conversationId, fence, (db) => db.run("DELETE FROM background_tools WHERE agent_id = ? AND conversation_id = ? AND task_id = ?", [this.agentId, conversationId, taskId]));
   }
 
-  async tasks(conversationId: string): Promise<Array<{ taskId: string; tool: string; startedAt: number }>> {
-    const rows = await this.db.query("SELECT task_id, tool, started_at FROM background_tools WHERE agent_id = ? AND conversation_id = ?", [this.agentId, conversationId]);
-    return rows.map((r) => ({ taskId: String(r.task_id), tool: String(r.tool), startedAt: Number(r.started_at) }));
+  async tasks(conversationId: string): Promise<TaskRow[]> {
+    const rows = await this.db.query("SELECT * FROM background_tools WHERE agent_id = ? AND conversation_id = ?", [this.agentId, conversationId]);
+    return rows.map((r) => ({
+      taskId: String(r.task_id), callId: String(r.call_id), tool: String(r.tool), startedAt: Number(r.started_at),
+      input: (r.input as string | null) ?? null, idempotencyKey: (r.idempotency_key as string | null) ?? null,
+      onRestart: r.on_restart === "rerun" ? "rerun" : r.on_restart === "rerun:1" ? "rerun:1" : "report",
+    }));
+  }
+
+  /** Marks a background tool as run again after a restart, only if it was not yet: true for the one caller that runs it. */
+  async rerunTask(conversationId: string, taskId: string, fence?: Fence): Promise<boolean> {
+    return (await this.write(conversationId, fence, (db) => db.run("UPDATE background_tools SET on_restart = 'rerun:1' WHERE agent_id = ? AND conversation_id = ? AND task_id = ? AND on_restart = 'rerun'", [this.agentId, conversationId, taskId]))) > 0;
   }
 
   /** Conversations with something left to do after a restart. */
