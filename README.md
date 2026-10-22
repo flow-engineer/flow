@@ -48,7 +48,7 @@ Test it first in the playground (the link `npm start` prints: the test people an
 
 **Shared test numbers and privacy.** The free trial runs on Flow's shared Telegram bot, WhatsApp number and iMessage line. A join code binds that phone to one app, so its messages go only to that app's agent; sending another app's code moves it. Trial chats are test data, kept for the account's retention (30 days by default). Do not use the trial for real customers' data: connect your own number for that.
 
-**Stability.** 0.x: the CLI's commands, `--json` fields and exit codes in [docs/agents.md](docs/agents.md) stay compatible within 0.2.x; a breaking change comes with a minor version bump and a release note. Pin the version in `package.json` for production.
+**Stability.** Flow Framework is 0.x: until 1.0 its API (exports, options, file formats, the CLI's commands, `--json` fields and exit codes) may change between releases. Every release's notes call out each breaking change with a migration note saying what to change. The API freezes at 1.0. Pin the exact version in `package.json` for production, and read the notes before you move it.
 
 **Host it.** `npx @flow-engineer/flow deploy` puts the agent on Flow's hosting, so it keeps answering while the laptop sleeps: staging first, then `deploy promote` to production; it sends the `.env`'s keys as the agent's secrets itself. `deploy status` shows what is live and its URL, `flow logs` its log lines. It needs the agent's CI key (`FLOW_FRAMEWORK_CLOUD_KEY`, which `flow setup` writes) and a `buildAgent` that passes `options.host` on to `createAgent` ([docs/agents.md](docs/agents.md), "Host it").
 
@@ -203,6 +203,7 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
 - **What the platform refuses is refused before it goes,** with the same error Flow Messaging gives (`content.cards[0].text has more than 2 line breaks.`), in the playground, the test cloud and production alike, and the agent sends again. The limits are one table, `CONTENT_LIMITS`; `contentRefusal(info, outbound)` checks one send.
 - **Your own checks go in `beforeSend`,** not in a wrapper around a channel's send (see [`createAgent` options](#createagent-options)): what it returns is what is checked, sent and recorded.
 - **One person, one conversation.** The same number on SMS and WhatsApp is one person, however each provider writes it (`+1 555 010 0100`, `15550100100`: both are `+15550100100`), also when their first messages on both arrive at once. If your SMS provider gives national numbers (`098765 43210`), set `createAgent({ defaultCountryCode: "+91" })`: on every phone channel but WhatsApp, a number with no `+` or `00` is then read as that country's (its trunk 0 dropped), so it joins `919876543210` on WhatsApp; without it, bare digits are taken as international. Anything else (your app, your website) is joined only by your `resolve`. Flow Framework never guesses. A tool sees who the person is as `context.person`, the stable id to key their data by: `key:<your resolve's value>`, else `phone:<E.164>` (`phone:+15550100100`), else `<channel>:<address>`. `context.key` is your `resolve`'s value as it returned it (`customer-7`), or null when the person is known only by phone or channel, so `members.get(context.key)` finds them.
+- **Every channel's options and params** (`whatsapp()`, `sms()`, `customUI()` and Flow Messaging's) are in [docs/channels.md](docs/channels.md).
 - **The agent gets one send tool per channel** (`send_sms`, `send_whatsapp`, `send_app`) and answers each message where it came in. `instructions` guide the agent on that channel only.
 
 ## What the agent knows about the person
@@ -621,6 +622,10 @@ For agents with tools we recommend **Claude Haiku 5.5** (`anthropic/claude-haiku
 | `shareUpdates` | Live status lines on web and app UIs (on); a string replaces the guidance |
 | `traces` | Where traces go (from the environment by default, see above) |
 | `events` | Where events go |
+
+## Patterns that worked
+
+Enforce what matters in `beforeSend`, keep prompts for judgement, render in code, refuse with a reason the model can act on, and test a long chat: [docs/patterns.md](docs/patterns.md).
 
 ## With a coding agent
 
