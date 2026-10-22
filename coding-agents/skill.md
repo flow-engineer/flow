@@ -13,7 +13,9 @@ You write the agent's prompt, skills and tools; Flow Framework handles the conve
 More skills go with this one: `flow-framework-tools` (`tools-skill.md`) before writing or changing a
 tool, `flow-framework-tests` (`test-skill.md`) before writing or changing a test, `flow-framework-context`
 (`context-skill.md`) before writing tools for a company that already has an app, API or database,
-and `flow-framework-auth` (`auth-skill.md`) when tools need to know who the person is.
+and `flow-framework-auth` (`auth-skill.md`) when tools need to know who the person is. In an agent's
+folder each is `.claude/skills/<name>/SKILL.md` (`.claude/skills/flow-framework-tools/SKILL.md`); the
+package keeps them as `node_modules/@flow-engineer/flow/coding-agents/<file>.md`.
 
 ## Start a new agent
 
@@ -495,9 +497,21 @@ createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamabl
 - Every part can be changed: `instructions` replaces the instructions, `descriptor(tool, generated)`
   changes any tool's MCP descriptor, `extend(server)` adds handlers of your own (resources,
   prompts) to the SDK's server, `path` moves the endpoint, `allowedHosts` checks the Host header.
-- Try it locally with `claude mcp add --transport http acme http://localhost:8790/mcp`.
-- Run `npx flow check` from the agent's folder before serving: it refuses tools that cannot be
-  described exactly (the `flow-framework-tools` skill lists the rules).
+- Run `npx @flow-engineer/flow check` from the agent's folder before serving: it refuses tools that
+  cannot be described exactly (the `flow-framework-tools` skill lists the rules).
+- Check it yourself, in the chat you are in: never ask the owner to open another coding agent to
+  try it (a server added to a coding agent only loads in a new chat). `flow inspect` is an MCP
+  client for testing, whether or not the agent has a CLI, and installs nothing into it. Start `npm run mcp` as a
+  process that outlives your turn (`mkdir -p .flow && nohup npm run mcp > .flow/mcp.log 2>&1 &`; a
+  coding agent's background tasks can be stopped), then, with
+  `inspect` standing for `npx -y -p @flow-engineer/flow -p @modelcontextprotocol/client@2.3.1 flow inspect http://127.0.0.1:8790/mcp`:
+  `inspect tools` lists what a host sees, schemas included, and `inspect call <tool> '<json>'` calls a
+  tool as a host would and prints the raw result (`resources`, `read <uri>`, `prompts` and `prompt <name>` too).
+  Tools that need sign-in: run `inspect auth` in the background (it prints what the server
+  advertises and the link, then waits), give the owner the link, and once they say they signed in it
+  prints the client and the token's scope; then call the tool. `--token <token>` sends an API key or
+  test token instead.
+- Then give the owner the line for their own host: `claude mcp add --transport http acme http://127.0.0.1:8790/mcp`.
 
 ## A CLI for the organization
 
@@ -549,8 +563,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   every command. `acme auth login` signs in on the organization's own login (tokens in
   `~/.config/acme/`, mode 600), `ACME_TOKEN` is for CI, `acme tools` lists every tool and schema, and
   `acme skill --write ~/.claude/skills` installs the CLI's SKILL.md, made from the tools and the CLI
-  file, for coding agents. For any MCP server without a CLI file, `npx flow cli --server <url> -h`.
-- `npx flow check` checks the CLI file against the tools: a command naming a tool that does not
+  file, for coding agents. For any MCP server without a CLI file, `npx @flow-engineer/flow cli --server <url> -h`.
+- `npx @flow-engineer/flow check` checks the CLI file against the tools: a command naming a tool that does not
   exist, an `args` field the input lacks, a `columns` or `view` field the output lacks, two commands
   with one name, a word that is both a command and a group, or one of the CLI's own words (`auth`,
   `tools`, `skill`) is an error; a tool no command names is a warning (it keeps its own name).

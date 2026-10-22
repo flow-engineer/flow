@@ -1,7 +1,9 @@
 # Working on Flow Framework
 
-Flow Framework is a framework for consumer chat agents: agents people reach on WhatsApp, SMS, iMessage,
-Telegram or a web or app chat, that feel like a person texting back.
+Flow Framework lets a product ship to every chat interface from one codebase: messaging agents on
+WhatsApp, SMS, iMessage, Telegram and web or app chat; MCP servers for Claude, ChatGPT and other
+assistants; native plugins; and CLIs for people and coding agents. Tools and skills are shared
+across these surfaces. A project can start with any one of them.
 
 ## Keep it general
 - Nothing specific to one business goes in this repository: no customer names, data, prompts
@@ -41,6 +43,20 @@ Telegram or a web or app chat, that feel like a person texting back.
 - The full suite (`npm test`, at the root, in `simulators/` and in `flow-messaging/`) runs before a change is merged.
 - Tests that call real models (a simulated person, a judge) run only when someone starts them,
   never in CI, and print what they cost.
+
+## Documentation: update it with the code
+
+- Public documentation is maintained in the private GitHub repository **flow-engineer/docs**.
+  Do not create or maintain a separate documentation site in this repository or assume a local
+  checkout location. Follow the docs repository's agent instructions and writing conventions.
+- Every change to a public API, CLI command, configuration, authentication flow, default,
+  limitation or user-visible behavior must include the corresponding update in the docs repository
+  before release. New features need a working example and an expected result. Link the companion
+  documentation change in the implementation PR; explain explicitly when no docs change is needed.
+- Keep documentation concise, accurate and useful to people and coding agents. Check examples
+  against current code, preserve safety rules and limitations, and run the docs repository's checks.
+- Keep package- and service-embedded guidance consistent with the published guides. These runtime
+  assets remain here for compatibility; they are not a second hand-written website.
 
 ## Coding-agent skills
 - `coding-agents/` teaches coding agents to build on Flow Framework (`skill.md`, with MCP and the CLI),
