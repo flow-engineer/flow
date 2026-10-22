@@ -225,10 +225,8 @@ const scenarioSchema = z.object({
     goal: withClock(z.string()),
     knows: z.array(withClock(z.string())).optional(),
   }),
-  /** The conversation so far: the run starts after these, as if they had been said (oldest first, a minute apart). */
-  history: z.array(historyItem).min(1).max(400).optional(),
-  /** How long before the run's clock the history's last message was said; 1h when left out. */
-  history_ends: z.string().refine((t) => waitMs(t) !== null, "a length of time such as 2h, 45m or 3d").optional(),
+  /** The conversation so far: the run starts after these, as if they had been said (oldest first). */
+  history: z.array(historyItem).min(1).max(200).optional(),
   opening: z.array(openingStep).min(1),
   /** Tools whose own code runs in this scenario, in place of the cloud's simulation (state the agent keeps itself). */
   tools: z.strictObject({ real: z.array(z.string().min(1)).min(1) }).optional(),
@@ -248,7 +246,7 @@ const scenarioSchema = z.object({
       not_sent: z.array(sentItem).optional(),
     })
     .default({}),
-}).refine((s) => s.history_ends === undefined || s.history !== undefined, { message: "history_ends goes with history", path: ["history_ends"] });
+});
 
 const toolFileSchema = z.object({
   tool: z.string().min(1),

@@ -627,7 +627,8 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     } else if (command.type === "finished") {
       pauseIdle();
       if (!drained) await drainWork();
-      const problems = sendPath.problems();
+      // Checked on an agent of this framework, whose send announces each message; another one's (a stub, --agent-url) has its own ways.
+      const problems = canBusiness ? sendPath.problems() : [];
       return problems.length ? { ...command.summary, sendPath: problems } : command.summary;
     } else if (command.type === "failed") {
       throw new CloudEnded(command.error);

@@ -103,25 +103,22 @@ export function runOutcome(run: { passed: boolean; ended: string; error?: string
   return run.passed ? "passed" : "failed";
 }
 
-/** What a credit or infra run's line says: the cloud's sentence, else one per kind. */
-export function outcomeReason(run: { error?: string; ended: string; errorMessage?: string }, outcome: RunOutcome): string {
+/** Why a credit run says nothing about the agent: the cloud's sentence, else one per code. */
+export function creditReason(run: { error?: string; errorMessage?: string }): string {
   if (run.errorMessage) return run.errorMessage;
-  if (outcome === "credit") {
-    return run.error === "spend_cap"
-      ? "the workspace's daily test budget ran out, so this run says nothing about the agent"
-      : "the agent's model refused its calls for credit, so this run says nothing about the agent: add a model key or top up, then run it again";
-  }
-  return `${run.error ?? run.ended}: the cloud could not play or judge this run, not the agent's fault`;
+  return run.error === "spend_cap"
+    ? "the workspace's daily test budget ran out, so this run says nothing about the agent"
+    : "the agent's model refused its calls for credit, so this run says nothing about the agent: add a model key or top up, then run it again";
 }
 
 /** Each scenario's pass rate per channel, in the order the runs come, as the cloud's summary says it (protocol.ts ScenarioSummary):
  * runs counts the ones that passed or failed; flaky when some but not all passed, or a run failed and passed when the cloud played it again. */
-export function scenarioRates(runs: Array<{ scenario: string; channel: string; verdict: Verdict; outcome: RunOutcome | null }>): ScenarioSummary[] {
+export function scenarioRates(runs: Array<{ scenario: string; path?: string; channel: string; verdict: Verdict; outcome: RunOutcome | null }>): ScenarioSummary[] {
   const out = new Map<string, ScenarioSummary & { mixed: boolean }>();
   for (const r of runs) {
     const key = `${r.scenario}\n${r.channel}`;
     let s = out.get(key);
-    if (!s) out.set(key, (s = { scenario: r.scenario, channel: r.channel, runs: 0, passedRuns: 0, credit: 0, infra: 0, mixed: false }));
+    if (!s) out.set(key, (s = { scenario: r.scenario, ...(r.path ? { path: r.path } : {}), channel: r.channel, runs: 0, passedRuns: 0, credit: 0, infra: 0, mixed: false }));
     if (r.outcome === "credit" || r.outcome === "infra") s[r.outcome]++;
     if (r.outcome === "passed" || r.outcome === "failed") {
       s.runs++;

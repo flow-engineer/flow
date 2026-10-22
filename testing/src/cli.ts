@@ -29,7 +29,7 @@ import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 import { hasModelKey } from "../../src/model.ts";
 import { PLUGIN_LINE, pluginCli } from "./plugin.ts";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
-import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions } from "./client.ts";
+import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions, type SendPathProblem } from "./client.ts";
 import type { SessionLimits } from "./protocol.ts";
 import { runPrinter } from "./print-run.ts";
 import { checkEndpointCli } from "./check-endpoint.ts";
@@ -40,10 +40,10 @@ import { DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
-import { EXIT, finishedOutcome, invalidLines, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
+import { EXIT, finishedOutcome, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
-import type { RunSummary } from "./protocol.ts";
+import type { RunOutcome, RunSummary } from "./protocol.ts";
 
 const NEW_LINE = `  flow new <name> [--display-name <name>]
                             Make ./<name>/, a new agent started from the café example
@@ -287,6 +287,8 @@ let agentId = "";
 const seen: RunSummary[] = [];
 /** Set when the cloud ended the whole session scenario_invalid. */
 let endedInvalid: SessionInvalid | null = null;
+/** Conversations whose messages did not all go through the agent's send (client.ts sendPathCheck). */
+let sendPath: SendPathProblem[] = [];
 
 if (command !== undefined && (command !== "test" || rest.length)) invalid(`flow: unknown command "${positionals.join(" ")}".\n\n${USAGE}`);
 
@@ -428,19 +430,31 @@ for (const r of summary.runs) printRun(r);
 // The suite's runs: a second play of a failed run (rerunOf) is shown under its original, never counted.
 const played = summary.runs.filter((r) => !r.rerunOf);
 const passed = played.filter((r) => runVerdict(r) === "passed").length;
-const errored = played.filter((r) => runVerdict(r) === "errored").length;
+const failedRuns = played.filter((r) => runVerdict(r) === "failed").length;
+const credit = played.filter((r) => runOutcome(r) === "credit");
+const infra = played.filter((r) => runOutcome(r) === "infra" && !r.invalid).length;
 // Cost counts every play, second plays included: the cloud spent it.
 const total = (pick: (r: (typeof summary.runs)[number]) => number) => summary.runs.reduce((n, r) => n + pick(r), 0);
 const agentModels = [...new Set(summary.runs.flatMap((r) => r.agentModels))].join(", ") || "unknown";
 const noModel = played.filter((r) => r.agentModels.length === 0 && r.agentUsage.input + r.agentUsage.output === 0).length;
 const modelCalls = noModel ? `${noModel} ${noModel === 1 ? "run never called" : "runs never called"} the agent's model.` : "Every run called the agent's model.";
 const checkFails = played.filter((r) => runVerdict(r) === "failed" && r.checks.some((c) => !c.pass)).length;
-const erroredLine = errored ? ` ${errored} errored (the cloud could not play or judge ${errored === 1 ? "it" : "them"}).` : "";
+// Credit and infrastructure runs say nothing about the agent: each has its own count, never with the failures.
+const failedLine = failedRuns ? ` ${failedRuns} failed${checkFails && checkFails < failedRuns ? ` (${checkFails} on a check)` : ""}.` : "";
+const creditLine = credit.length ? ` ${credit.length} stopped for credit (not the agent's fault, not counted as failed).` : "";
+const infraLine = infra ? ` ${infra} hit an infrastructure error (the cloud could not play or judge ${infra === 1 ? "it" : "them"}; not counted as failed).` : "";
 const tokens = (n: number) => n.toLocaleString("en-US");
-say(`\n${passed} of ${played.length} runs passed.${erroredLine} ${modelCalls} ${checkFails} failed a check. Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
+say(`\n${passed} of ${played.length} runs passed.${failedLine}${creditLine}${infraLine} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
+if (credit.length) say(`Credit: ${creditReason(credit[0]!)}`);
 for (const channel of [...new Set(played.map((r) => r.channel))]) {
   const runs = played.filter((r) => r.channel === channel);
   say(`  ${channel}: ${runs.filter((r) => runVerdict(r) === "passed").length} of ${runs.length} passed`);
+}
+// With --runs above 1 (or a run played again), each scenario's pass rate: credit and infrastructure runs are not counted.
+const rates = scenarioRates(mergedRuns(summary.runs).map((m) => ({ ...m, scenario: m.id })));
+if (perScenario > 1 || rates.some((r) => r.label === "flaky")) {
+  say("Pass rate per scenario (runs that passed or failed; credit and infrastructure runs not counted):");
+  for (const r of rates) say(`  ${rateLine(r)}`);
 }
 const flaky = played.filter((r) => runVerdict(r) === "flaky");
 if (flaky.length) {
@@ -451,10 +465,22 @@ for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
 say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
 if (mergedRuns(summary.runs).some((m) => m.verdict === "not_played")) endedEarly(summary.runs, "the cloud finished the session without playing every run", say);
+sendPath = summary.sendPath ?? [];
+if (sendPath.length) {
+  say(`${sendPath.length} ${sendPath.length === 1 ? "conversation" : "conversations"} sent messages by a second path: every message must go through the agent's send (its channels), so the session failed:`);
+  for (const p of sendPath) say(`  ${p.conversationId}: ${p.delivered} reached the cloud through the agent's channels, ${p.announced} the agent says it sent (message.out)`);
+}
 sessionId = summary.sessionId || sessionId;
 dashboard = summary.dashboard || dashboard;
 saveSession("finished", summary.runs, dashboard, say);
-end(finishedOutcome(mergedRuns(summary.runs), values.strict), { received: summary.runs });
+end(sendPath.length ? "failed" : finishedOutcome(mergedRuns(summary.runs), values.strict), { received: summary.runs });
+
+/** "late-order (sms): 2/3 passed, flaky", with the runs that were not counted. */
+function rateLine(r: ReturnType<typeof scenarioRates>[number]): string {
+  const left = [r.credit ? `${r.credit} stopped for credit` : "", r.infra ? `${r.infra} infrastructure error${r.infra === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ");
+  const rate = r.runs ? `${r.passedRuns}/${r.runs} passed${r.label === "flaky" ? ", flaky" : r.passedRuns === r.runs ? "" : ", failing"}` : "nothing counted";
+  return `${r.scenario} (${r.channel}): ${rate}${left ? ` (${left}, not counted)` : ""}`;
+}
 
 /** The one line that says the session ended before every run played: how many finished, how many did not, and why. */
 function endedEarly(received: RunSummary[], reason: string, print: (line: string) => void): void {
@@ -470,9 +496,15 @@ type Ended = LastSession["ended"];
 /** One run the session was to play, with what the cloud reported for it (none: it was never played). */
 interface Merged {
   scenario: string;
+  /** The scenario's id (its file's `id:`), as the cloud names it. */
+  id: string;
+  /** Its file in the tests folder: scenarios/<scenario>.yaml. */
+  path: string;
   channel: string;
   run: number;
   verdict: Verdict;
+  /** null: never played. */
+  outcome: RunOutcome | null;
   summary?: RunSummary;
 }
 
@@ -484,12 +516,15 @@ function mergedRuns(received: RunSummary[]): Merged[] {
   const key = (scenario: string, channel: string, run: number) => `${scenario}\n${channel}\n${run}`;
   // A second play of a failed run has its original's scenario, channel and number: it never takes its place.
   for (const r of received) if (!r.rerunOf) byRun.set(key(r.scenario, r.channel, r.run), r);
-  const merged = (scenario: string, r: RunSummary): Merged => ({
+  const merged = (scenario: string, r: RunSummary, id = r.scenario): Merged => ({
     scenario,
+    id,
+    path: `scenarios/${scenario}.yaml`,
     channel: r.channel,
     run: r.run,
     // An error or run_failed: the cloud could not play or judge the run, which says nothing about the agent.
     verdict: runVerdict(r),
+    outcome: runOutcome(r),
     summary: r,
   });
   const out: Merged[] = [];
@@ -503,7 +538,7 @@ function mergedRuns(received: RunSummary[]): Merged[] {
         const r = byRun.get(key(scenario.id, channel, run)) ?? byRun.get(key(id, channel, run));
         byRun.delete(key(scenario.id, channel, run));
         if (r) byRun.delete(key(r.scenario, channel, run));
-        out.push(r ? merged(id, r) : { scenario: id, channel, run, verdict: "not_played" });
+        out.push(r ? merged(id, r, scenario.id) : { scenario: id, id: scenario.id, path: file.path, channel, run, verdict: "not_played", outcome: null });
       }
     }
   }
@@ -534,6 +569,7 @@ function saveSession(ended: Ended, received: RunSummary[], link: string, print: 
       run: m.run,
       runId: m.summary?.runId ?? null,
       verdict: m.verdict,
+      outcome: m.outcome,
       failedChecks: failedChecks(m.summary),
       ...(m.summary?.invalid ? { invalid: m.summary.invalid } : {}),
     })),
@@ -562,6 +598,7 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       channel: m.channel,
       run: m.run,
       verdict: m.verdict,
+      outcome: m.outcome,
       error: m.summary?.error || null,
       ended: m.summary?.ended ?? null,
       turns: m.summary?.turns ?? null,
@@ -583,7 +620,12 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       dashboard: dashboard || null,
       suiteHash: files.length ? suiteHash(files) : null,
       error: options.error ?? null,
-      counts: { runs: runs.length, passed: count("passed"), failed: count("failed") + (values.strict ? count("flaky") : 0), flaky: count("flaky"), errored: count("errored"), notPlayed: count("not_played") },
+      counts: {
+        runs: runs.length, passed: count("passed"), failed: count("failed") + (values.strict ? count("flaky") : 0), flaky: count("flaky"), errored: count("errored"), notPlayed: count("not_played"),
+        credit: runs.filter((r) => r.outcome === "credit").length, infra: runs.filter((r) => r.outcome === "infra").length,
+      },
+      scenarios: sessionId ? scenarioRates(mergedRuns(received).map((m) => ({ ...m, scenario: m.id }))) : [],
+      sendPath,
       strict: values.strict,
       costUsd: { agent: cost((r) => r.agentUsage.costUsd), test: cost((r) => r.testUsage.costUsd) },
       runs,
