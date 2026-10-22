@@ -14,8 +14,8 @@
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env src/main.ts",
-    "mcp": "node src/mcp.ts",
-    "cli": "node src/cli.ts",
+    "mcp": "node --env-file-if-exists=.env src/mcp.ts",
+    "cli": "node --env-file-if-exists=.env src/cli.ts",
     "typecheck": "../../node_modules/.bin/tsc --noEmit -p ."
   }
 }

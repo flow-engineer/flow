@@ -11,7 +11,7 @@ import { randomBytes } from "node:crypto";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import Provider, { errors, interactionPolicy, type ClientMetadata, type Configuration, type JWKS } from "oidc-provider";
-import type { McpAuth } from "../../mcp/src/server.ts";
+import type { McpAuth, McpIdentity } from "../../mcp/src/server.ts";
 import { oauthStore, type OAuthStorage } from "./store.ts";
 
 export interface OAuthBridgeOptions {
@@ -40,7 +40,8 @@ export interface OAuthBridgeOptions {
     issue(input: { key: string; clientId: string; resource: string; connection: string; authorization: string }): Promise<BrandTokens>;
     refresh(input: { clientId: string; resource: string; refreshToken: string }): Promise<BrandTokens>;
     revoke(input: { clientId: string; token: string }): Promise<void>;
-    verify(input: { token: string; resource: string }): Promise<{ key: string; scopes?: string[] } | null>;
+    /** `credentials`, when given, is this request's backend access for tools (the token's own API key, say), as McpIdentity's. */
+    verify(input: { token: string; resource: string }): Promise<McpIdentity | null>;
   };
   /** Clients registered ahead (an MCP host that cannot register itself). Others register dynamically. */
   clients?: ClientMetadata[];
