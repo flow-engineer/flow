@@ -50,6 +50,13 @@ export const findSlots = tool({
 - Say what you covered. An agent reads a list as complete: return the range or filter you
   searched ("Mon Oct 12 through Sun Oct 18", "all open times") and never cut results short
   silently. If there are more, say so.
+- A tool that lists things the person picks from or reads back (orders, bookings) returns them as
+  records, so the agent shows them exactly as the backend gave them and the framework lays them out
+  per channel (a WhatsApp list, Telegram buttons, numbered text on iMessage and SMS), pages them
+  and maps a tap or a typed number back to the row:
+  `const orders = records({ kind: "orders", id: (o) => o.id, title: (o) => ..., detail: (o) => ..., pick: "View order" })`,
+  then `run: async (_in, ctx) => orders.of(rows, { total })`. Ids are 1 to 64 bytes and unique;
+  at most 100 rows are kept. Over MCP and the CLI the result is the rows as given.
 
 ## Tools from the context pack
 

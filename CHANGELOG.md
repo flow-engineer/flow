@@ -2,6 +2,33 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.6.0 (unreleased)
+
+### Changes
+
+- **Show records.** A tool returns rows with `records({ kind, id, title, detail, image, pick }).of(rows)`;
+  the model gets the rows and a handle (`r1`) and shows them with its send tool's new
+  `show: { records: "r1", ids? }`, offered once a tool returned records. Flow Framework renders
+  them per channel (`recordsMessages`): a WhatsApp list (on Flow Messaging, titles in the list and
+  details numbered in the text), Telegram numbered lines with a button per row, numbered text on
+  iMessage, SMS and for rows nobody picks, cards when every row has a photo and the channel has
+  carousels. Pages of 10 (5 on SMS); "More" (its row or button, or MORE typed) sends the next page
+  with no model call. A tap on a row, or its number typed while the records are the latest
+  message, comes back as `choice: { id, title, records, kind }` with the row's data for the model.
+  Ids the tool did not return are refused. `message.out` carries `records` (kind, handle, count,
+  shown ids, page, pages, deliveredAs).
+- A custom UI may take records itself: `info.records: { maxRows }` with `sendRecords(to, page)`.
+- `ChannelInfo.lists.descriptions: false` says a channel's lists show no row descriptions (Flow
+  Messaging's WhatsApp).
+- Store migration 10: a `records` table (handles per conversation, the newest 20 for 7 days,
+  erased with the person).
+
+### Migration notes
+
+- Nothing to do. `beforeSend` gets a records send as the messages it is rendered as; channels
+  without `info.records` never get a `records` outbound. A store you pass yourself may add
+  `saveRecords`/`loadRecords`; without them handles are kept in memory only.
+
 ## 0.5.0 (unreleased)
 
 ### Changes
