@@ -198,6 +198,10 @@ await agent.resume();
 await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" });
 ```
 
+`sendMessage` resolves when your platform accepted the message and rejects when it refused it: the
+agent's next message waits for it, and a rejection reaches the agent as Not delivered. What is
+ordered, what is sent once and what `send()` resolving means: [docs/guarantees.md](docs/guarantees.md).
+
 - **Reply buttons carry their own id:** a button is a label, or `{ id, label }` when taps must be told apart (a carousel's cards may all say "Details", with ids `details:a`, `details:b`). A tap comes back as `choice: { id, title }`, and the model reads `tapped] Details (details:b)`. Ids are 1 to 64 bytes, unique within a message and across a carousel; labels may repeat. A channel whose `info.buttonIds` is true gives the id back on the tap (Flow Messaging's WhatsApp and Telegram, the simulators); elsewhere a provider may know only the label, so number labels yourself where taps must be told apart.
 - **Each platform's rules are built in:** WhatsApp buttons, lists, replies, reactions and its 24-hour window; SMS as plain text in segments; your app's own fields. Features your provider lacks are never offered to the model.
 - **What the platform refuses is refused before it goes,** with the same error Flow Messaging gives (`content.cards[0].text has more than 2 line breaks.`), in the playground, the test cloud and production alike, and the agent sends again. The limits are one table, `CONTENT_LIMITS`; `contentRefusal(info, outbound)` checks one send.
