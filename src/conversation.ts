@@ -49,7 +49,7 @@ import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type Conten
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { scheduleTools } from "./schedules.ts";
-import { transient, type ConversationRow, type Fence, type InboxRow, type NoContactRow, type QuietHours, type SendRow, type StoreApi, type TimeZoneSource } from "./store.ts";
+import { transient, type ConversationRow, type Fence, type InboxRow, type NoContactRow, type QuietHours, type SendRow, type StoreApi, type TaskRow, type TimeZoneSource } from "./store.ts";
 import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type PersonValues, type Tool, type ToolContext } from "./tools.ts";
@@ -178,6 +178,8 @@ interface Files {
 interface Running {
   call: ToolCall;
   input: string;
+  /** Its idempotency key, the same each time this call runs. */
+  key: string;
   startedAt: number;
   limitMs: number;
   authorized: Promise<void>;
@@ -916,6 +918,8 @@ export class Conversation {
       for (const c of open) this.history.push({ role: "tool", toolCallId: c.id, content: (await this.resumeSend(c, sends.get(c.id))) ?? INTERRUPTED });
     }
     for (const task of await store.tasks(this.id)) {
+      this.taskCount = Math.max(this.taskCount, Number(/^task_(\d+)$/.exec(task.taskId)?.[1] ?? 0));
+      if (await this.rerun(task)) continue;
       this.note(`[Chinwag] ${task.tool} (${task.taskId}) was still running in the background when the agent restarted. It may or may not have finished; check before telling them it is done.`);
       this.persist(() => store.removeTask(this.id, task.taskId, this.fence()));
     }
@@ -928,6 +932,29 @@ export class Conversation {
     const row = await store.conversation(this.id);
     this.resumeTurn = row?.turnOpen === true;
     if ((this.resumeTurn || this.hasWork()) && !this.running) this.schedule(0);
+  }
+
+  /**
+   * A background tool a restart cut off runs again, once, with its input and idempotency key, when
+   * it asked for that (onRestart "rerun") and was not run again already. False: it is reported.
+   */
+  private async rerun(row: TaskRow): Promise<boolean> {
+    const { store } = this.settings;
+    const tool = this.settings.tools.get(row.tool);
+    if (row.onRestart !== "rerun" || tool?.onRestart !== "rerun" || row.input === null || row.idempotencyKey === null || !store.rerunTask) return false;
+    try {
+      if (!(await store.rerunTask(this.id, row.taskId, this.fence()))) return false;
+    } catch (error) {
+      // Another runner took it (its next write here stops this copy), or the store failed: reported.
+      console.warn("flow: could not mark conversation %s's background tool %s as run again; it is reported instead:", this.id, row.taskId, error);
+      return false;
+    }
+    const call: ToolCall = { id: row.callId, name: row.tool, arguments: row.input };
+    const started = this.start(call, row.idempotencyKey);
+    if (typeof started === "string") return false;
+    this.settings.emit(this.id, "tool.rerun", { callId: call.id, tool: call.name, task: row.taskId });
+    this.background(started, { id: row.taskId, tool: call.name, input: started.input, startedAt: started.startedAt });
+    return true;
   }
 
   private async sendsWrittenAhead(callIds: string[]): Promise<Map<string, SendRow>> {
@@ -1779,7 +1806,7 @@ export class Conversation {
   }
 
   /** Start one tool call; the model's input is checked first (a refusal is the call's result). */
-  private start(call: ToolCall): Running | string {
+  private start(call: ToolCall, rerunKey?: string): Running | string {
     const tool = this.builtins.get(call.name) ?? this.settings.tools.get(call.name);
     if (!tool) return `There is no tool named ${call.name}.`;
     let raw: unknown;
@@ -1800,7 +1827,7 @@ export class Conversation {
     }
 
     this.settings.emit(this.id, "tool.start", { callId: call.id, tool: call.name, input: parsed.data });
-    const key = createHash("sha256").update(`${this.id}\u0000${this.turns}\u0000${call.name}\u0000${input}`).digest("hex").slice(0, 32);
+    const key = rerunKey ?? createHash("sha256").update(`${this.id}\u0000${this.turns}\u0000${call.name}\u0000${input}`).digest("hex").slice(0, 32);
     const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal };
     const credentials = this.settings.credentialProvider?.(identityContext) ?? this.settings.credentials;
     let context = toolContext(identityContext, credentials);
@@ -1810,6 +1837,7 @@ export class Conversation {
     const r: Running = {
       call,
       input,
+      key,
       startedAt: Date.now(),
       limitMs: tool.deadlineMs ?? this.settings.deadlineMs,
       authorized,
@@ -1885,22 +1913,30 @@ export class Conversation {
   private detach(r: Running, why: Detach): string {
     const { call, startedAt } = r;
     const task: Task = { id: `task_${++this.taskCount}`, tool: call.name, input: r.input, startedAt };
-    this.tasks.set(task.id, task);
-    this.persist(() => this.settings.store.addTask(this.id, task.id, call.id, call.name, startedAt, this.fence()));
+    const rerun = this.settings.tools.get(call.name)?.onRestart === "rerun" ? { input: call.arguments || "{}", idempotencyKey: r.key } : undefined;
+    this.persist(() => this.settings.store.addTask(this.id, task.id, call.id, call.name, startedAt, this.fence(), rerun));
     this.settings.emit(this.id, "tool.detached", { callId: call.id, tool: call.name, task: task.id, ms: Date.now() - startedAt, why });
-    void r.outcome.then((result) => {
-      this.tasks.delete(task.id);
-      this.persist(() => this.settings.store.removeTask(this.id, task.id, this.fence()));
-      this.settings.emit(this.id, "task.done", { callId: call.id, tool: call.name, task: task.id, ms: Date.now() - startedAt, ok: result.ok, output: clipOutput(result.text) });
-      this.note(`[Background result: ${call.name} (${task.id})] ${this.capped(result.text)}\n[Chinwag] They have not seen this result: tell them with ${this.sendToolsNow()}.`);
-      this.checkIdle();
-    });
+    this.background(r, task);
     return (
       `[Chinwag] ${call.name} started and is still running in the background (${task.id}). Do not call ${call.name} again: ` +
       `its result will come to you here when it finishes. Until then don't tell them it is done; when it arrives, tell them with ${this.sendToolsNow()}.` +
       (why === "partial" ? " The other results are in: tell them this now only if it answers what they asked; the rest is coming." : "")
     );
   }
+
+  /** A tool running in the background: once it is done its row goes and its result comes back as a note. */
+  private background(r: Running, task: Task): void {
+    const { call } = r;
+    this.tasks.set(task.id, task);
+    void r.outcome.then((result) => {
+      this.tasks.delete(task.id);
+      this.persist(() => this.settings.store.removeTask(this.id, task.id, this.fence()));
+      this.settings.emit(this.id, "task.done", { callId: call.id, tool: call.name, task: task.id, ms: Date.now() - task.startedAt, ok: result.ok, output: clipOutput(result.text) });
+      this.note(`[Background result: ${call.name} (${task.id})] ${this.capped(result.text)}\n[Chinwag] They have not seen this result: tell them with ${this.sendToolsNow()}.`);
+      this.checkIdle();
+    });
+  }
+
 }
 
 /** The business may not message first on this channel now (WhatsApp, past 24 hours). */

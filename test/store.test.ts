@@ -165,6 +165,59 @@ test("a background tool cut off by a restart is reported to the agent, never run
   assert.equal(runs, 1, "the tool was not called again");
 });
 
+test("a background tool with onRestart rerun runs again once after a restart, with the same idempotency key, and its result comes back", async () => {
+  const path = file();
+  const keys: string[] = [];
+  const firstRun = gate<string>();
+  const rerun = gate<string>();
+  const reran = gate();
+  const report = tool({ name: "report", description: "", input: z.object({ month: z.string() }), onRestart: "rerun", run: (_input, ctx) => (keys.push(ctx.idempotencyKey), keys.length === 1 ? firstRun.promise : (reran.open(), rerun.promise)) });
+  const before = multi({ channels: CHANNELS, database: sqlite(path), tools: [report] });
+  await before.agent.resume();
+  const a = await before.message("sms", "+15550100100", "my March report please");
+  (await before.nextCall(0)).answer(respond(call("send_sms", { text: "Building it." }), call("report", { month: "March" })));
+  (await before.nextCall(1)).answer(respond());
+  await before.agent.conversation(a!.conversationId)!.stored();
+
+  const after = multi({ channels: CHANNELS, database: sqlite(path), dir: before.dir, tools: [report], now: leaseOver });
+  await after.agent.resume();
+  await reran.promise;
+  assert.equal(keys[1], keys[0], "with the same idempotency key");
+  rerun.open("March: 42 orders");
+  const first = await after.nextCall(0);
+  assert.match(users(first.request.messages).at(-1)!, /^\[Background result: report \(task_1\)\] March: 42 orders/);
+  first.answer(respond(call("send_sms", { text: "March: 42 orders." })));
+  await after.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.equal(keys.length, 2);
+});
+
+test("a background tool cut off again while it runs again is reported, not run a third time", async () => {
+  const path = file();
+  let runs = 0;
+  const never = gate<string>();
+  const reran = gate();
+  const report = tool({ name: "report", description: "", input: z.object({}), onRestart: "rerun", run: () => (++runs === 2 && reran.open(), never.promise) });
+  const before = multi({ channels: CHANNELS, database: sqlite(path), tools: [report] });
+  await before.agent.resume();
+  const a = await before.message("sms", "+15550100100", "my report please");
+  (await before.nextCall(0)).answer(respond(call("send_sms", { text: "Building it." }), call("report")));
+  (await before.nextCall(1)).answer(respond());
+  await before.agent.conversation(a!.conversationId)!.stored();
+
+  const second = multi({ channels: CHANNELS, database: sqlite(path), dir: before.dir, tools: [report], now: leaseOver });
+  await second.agent.resume();
+  await reran.promise;
+  await second.agent.conversation(a!.conversationId)!.stored();
+
+  const third = multi({ channels: CHANNELS, database: sqlite(path), dir: before.dir, tools: [report], now: () => Date.now() + 3 * LEASE_MS });
+  await third.agent.resume();
+  const first = await third.nextCall(0);
+  assert.match(users(first.request.messages).at(-1)!, /report \(task_1\) was still running in the background when the agent restarted/);
+  first.answer(respond(call("send_sms", { text: "Let me check on that report." })));
+  await third.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.equal(runs, 2, "not run a third time");
+});
+
 test("receive() keeps a one-channel conversation across a restart too", async () => {
   const path = file();
   const dir = multi({ channels: CHANNELS }).dir;

@@ -41,6 +41,12 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   At most 64 per person, 4 KB each as JSON, names like `onboarding.step`; a refused set throws, in
   words the model can read. The model is never shown them on their own: only where the agent's
   instructions or tools show them. They are for conversation state, not business records.
+- **A background tool may run again after a restart.** A tool with `onRestart: "rerun"` that was
+  running in the background when the agent restarted runs again once, with the same input and
+  `context.idempotencyKey`, and its result comes back as a background result (new event
+  `tool.rerun`). A second restart during that run reports it, as every background tool is reported
+  today (`onRestart: "report"`, the default). Use it only for a tool that is safe to run twice with
+  that key; jobs longer than a deploy belong in the business's own queue.
 
 ### Migration notes
 
@@ -69,6 +75,11 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - Store migration 13 adds the `person_values` table; new store methods `values(conversationId)` and
   `setValue(conversationId, name, value, at, fence?)`. On a store service that has not got them,
   `ctx.values` calls fail (the tool gets the error).
+- Store migration 14 adds `input`, `idempotency_key` and `on_restart` to `background_tools`.
+  `addTask` takes an optional seventh argument, `{ input, idempotencyKey }` (after the fence),
+  `tasks` returns `callId`, `input`, `idempotencyKey` and `onRestart` too, and the new store method
+  `rerunTask(conversationId, taskId, fence?)` marks a task as run again (true for the one caller
+  that may). A store service without `rerunTask` keeps today's behaviour: the tool is reported.
 
 ## 0.5.0 (unreleased)
 

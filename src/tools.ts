@@ -107,6 +107,14 @@ export interface Tool<Input = any> {
   signIn?: SignIn;
   /** How the tool behaves, for hosts to decide what to ask the person first. Nothing enforces them. */
   hints?: ToolHints;
+  /**
+   * What happens when the agent restarts while this tool runs in the background. "report" (the
+   * default): the agent is told it was cut off and may or may not have finished. "rerun": it runs
+   * again once, with the same input and `context.idempotencyKey`, and its result comes back as a
+   * background result; a second restart during that run reports it. Use it only for a tool that is
+   * safe to run twice with that key.
+   */
+  onRestart?: "report" | "rerun";
 }
 
 export type SignIn = "required" | "optional" | "none";
