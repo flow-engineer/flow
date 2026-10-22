@@ -23,6 +23,10 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   epoch, and the store refuses them once another runner has taken the conversation (`StaleRunner`,
   exported). A runner that stalled past its lease then sends nothing of the step it was on and
   stops working on the conversation, instead of writing over the runner that now holds it.
+- **flowEvents' saved state is compare-and-set.** Each save names the version it read; when another
+  runner saved since (the old and the new revision of a deploy, side by side), its snapshot is
+  merged in (what is in memory wins, nothing is added twice) and saved again. Neither runner's
+  held sends, caps or watches are lost to the other's save.
 
 ### Migration notes
 
@@ -42,6 +46,10 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   argument; one that does not yet (an older one) drops it, and writes are unfenced as in 0.5. To
   fence over a service, it should answer a refused write so the agent's error is named
   `StaleRunner`.
+- Store migration 12 adds `event_state.version`. `loadEventState` also returns `version`, and
+  `saveEventState` takes it as an optional fifth argument and returns the new version, or null when
+  another runner saved since (nothing is written then). A store service that has not run migration
+  12, or drops the argument, saves as in 0.5 (last save wins).
 
 ## 0.5.0 (unreleased)
 

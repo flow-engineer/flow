@@ -334,6 +334,8 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
   let store: EventStateStore | null = null;
   let loaded: Promise<unknown> = Promise.resolve();
   let lastSaved: string | null = null;
+  /** The saved snapshot's version this runner last read or wrote (undefined: a store without versions): a save over another runner's is refused. */
+  let version: number | undefined;
   let saveQueued = false;
   let lastTaken = 0;
   /** Events processed since the last save: marked done with the snapshot that holds what they changed. */
@@ -356,6 +358,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     }
     if (saved.state) restore(JSON.parse(saved.state));
     lastSaved = saved.state;
+    version = saved.version;
     store = kept;
     // Taken before the restart and not processed then: processed now, in the order they came.
     for (const body of saved.pending) {
@@ -416,14 +419,21 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     });
   }
 
-  /** Adds a saved snapshot to the state, in place (a shared state keeps its objects); what is in memory wins. */
+  /**
+   * Adds a saved snapshot to the state, in place (a shared state keeps its objects); what is in
+   * memory wins, and an item already there is not added twice (another runner's snapshot, merged).
+   */
   function restore(saved: any) {
+    const missing = <T>(list: T[], key: (item: T) => string) => {
+      const have = new Set(list.map(key));
+      return (items: T[] | undefined) => (items ?? []).filter((item) => !have.has(key(item)));
+    };
     for (const id of saved.cancelled ?? []) state.cancelled.add(id);
-    state.outbox.splice(0, 0, ...(saved.outbox ?? []));
-    state.watches.splice(0, 0, ...(saved.watches ?? []));
+    state.outbox.splice(0, 0, ...missing(state.outbox, (p) => `${p.eventId} ${p.address}`)(saved.outbox));
+    state.watches.splice(0, 0, ...missing<W>(state.watches, (w) => w.id)(saved.watches));
     for (const topic of saved.closed ?? []) state.closed.add(topic);
     for (const key of saved.muted ?? []) state.muted.add(key);
-    state.nudges.splice(0, 0, ...(saved.nudges ?? []));
+    state.nudges.splice(0, 0, ...missing(state.nudges, (n) => `${n.address} ${n.topic ?? ""} ${n.kind ?? ""} ${n.at}`)(saved.nudges));
     for (const [name, map] of [["optionalLast", state.optionalLast], ["lastNudged", state.lastNudged], ["copies", state.copies], ["told", state.told], ["addresses", state.addresses]] as const) {
       for (const [k, v] of saved[name] ?? []) if (!(map as Map<string, unknown>).has(k)) (map as Map<string, unknown>).set(k, v);
     }
@@ -435,13 +445,26 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     saveQueued = true;
     later(async () => {
       saveQueued = false;
-      const t = now();
-      const snap = snapshot(t);
       const finished = done.splice(0);
-      if (snap === lastSaved && !finished.length) return;
       try {
-        await store!.saveEventState(snap === lastSaved ? null : snap, finished, t, t - SEEN_MS);
-        lastSaved = snap;
+        // Saved only over the version this runner read; another runner saved since (a deploy's
+        // overlap): its snapshot is merged in and saved again, once; else the next change tries.
+        for (let attempt = 0; ; attempt++) {
+          const t = now();
+          const snap = snapshot(t);
+          if (snap === lastSaved && !finished.length) return;
+          const saved = await store!.saveEventState(snap === lastSaved ? null : snap, finished, t, t - SEEN_MS, version);
+          if (saved !== null) {
+            lastSaved = snap;
+            if (typeof saved === "number") version = saved;
+            return;
+          }
+          if (attempt) throw new Error("another runner kept saving the state; saved with the next change");
+          const theirs = await store!.loadEventState();
+          if (theirs.state) restore(JSON.parse(theirs.state));
+          lastSaved = theirs.state;
+          version = theirs.version;
+        }
       } catch (error) {
         done.push(...finished);
         throw error;
