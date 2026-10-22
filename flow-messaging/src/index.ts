@@ -130,7 +130,7 @@ const LIST_TITLE_MAX = 20;
 const MAX_BODY_BYTES = 1_000_000;
 /** Event ids remembered to drop Flow's redeliveries (deliveries are at least once). */
 const SEEN_MAX = 10_000;
-/** The events the handler acts on; the stream asks for only these (and message.delivered when sends wait for it). */
+/** The events the handler acts on; the stream asks for only these (less message.sent when sends resolve on the 202, plus message.delivered when they wait for it). */
 const HANDLED = ["message.received", "message.failed", "reaction.added", "contact.deleted", "message.sent"];
 /** How far a message has got: a send waiting for one status is done at it or any later one. */
 const PROGRESS: Record<string, number> = { queued: 0, sent: 1, delivered: 2, read: 3 };
@@ -177,7 +177,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   const handling = new Map<string, Promise<void>>();
   const waitFor = options.waitFor ?? "sent";
   const waitTimeoutMs = options.waitTimeoutMs ?? 30_000;
-  const handled = waitFor === "delivered" ? [...HANDLED, "message.delivered"] : HANDLED;
+  // The status events sends wait for: none when they resolve on the 202.
+  const handled = waitFor === "queued" ? HANDLED.filter((t) => t !== "message.sent") : waitFor === "delivered" ? [...HANDLED, "message.delivered"] : HANDLED;
   /** Sends waiting for their message's status, by Flow message id: true once settled by it. */
   const waiting = new Map<string, (status: string, error?: FlowMessage["error"]) => boolean>();
   const early = new Map<string, { status: string; error?: FlowMessage["error"] }>();
@@ -529,7 +530,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       if (settle) {
         // A failure its send is waiting on is told through that send, not again as Not delivered.
         if (settle(status, m.error) && status === "failed") return;
-      } else if (status !== "failed") {
+      } else if (status !== "failed" && waitFor !== "queued") {
         early.set(m.id, { status, error: m.error });
         if (early.size > EARLY_MAX) early.delete(early.keys().next().value!);
       }
