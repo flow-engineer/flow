@@ -45,7 +45,8 @@ export async function fakeFlow() {
     if (r.method === "GET" && r.path.startsWith("/v1/templates")) return { status: 200, body: { data: templates, has_more: false } };
     const into = r.path.match(/^\/v1\/conversations\/([^/]+)\/messages$/)?.[1];
     if (r.method === "POST" && (into || r.path === "/v1/messages")) {
-      return { status: 202, body: { id: `msg_out${++sent}`, conversation: into ?? "conv_started", direction: "out", status: "queued", content: r.body.content } };
+      // The channel took it by the time Flow answered (a send that waits for message.sent queues a "queued" answer).
+      return { status: 202, body: { id: `msg_out${++sent}`, conversation: into ?? "conv_started", direction: "out", status: "sent", content: r.body.content } };
     }
     if (r.method === "POST" && /\/(typing|read)$/.test(r.path)) return { status: 202, body: { conversation: r.path.split("/")[3], action: "read" } };
     return notFound();

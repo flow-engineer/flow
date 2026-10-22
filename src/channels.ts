@@ -10,7 +10,7 @@
 //   customUI("app", new MyApp())                         your own web or mobile UI, with your params
 
 import type { z } from "zod";
-import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, ReplyButton, Template, TemplateDefinition } from "./types.ts";
+import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, ReplyButton, SendReceipt, Template, TemplateDefinition } from "./types.ts";
 
 export type ChannelKind = "sms" | "whatsapp" | "custom";
 
@@ -30,7 +30,8 @@ export interface Channel {
   instructions?: string;
   /** Opt-out keywords this channel honours (SMS and WhatsApp have them by default). */
   keywords?: Keywords;
-  send(address: string, outbound: Outbound): Promise<void> | void;
+  /** Resolves once the channel has the outbound (the platform accepted it), optionally with a receipt; see Deliver. */
+  send(address: string, outbound: Outbound): Promise<void | SendReceipt> | void | SendReceipt;
 }
 
 /**
@@ -171,7 +172,7 @@ export const WHATSAPP: ChannelInfo = {
 export const WHATSAPP_CAROUSELS: NonNullable<ChannelInfo["carousels"]> = { maxCards: 10, textMax: 1024, cardTextMax: 160, buttons: 2, labelMax: 20 };
 
 /** SMS: plain text; providers join up to 10 segments into one text (1,530 GSM-7 characters). */
-export const SMS: ChannelInfo = { platform: "sms", reactions: false, status: false, formatting: "plain", maxLength: 1530 };
+export const SMS: ChannelInfo = { platform: "sms", reactions: false, status: false, formatting: "plain", maxLength: 1530, templates: false, typing: false };
 
 export type WhatsAppFeature = "buttons" | "lists" | "links" | "images" | "carousels" | "replies" | "reactions" | "typing" | "readReceipts" | "templates";
 
@@ -189,6 +190,8 @@ export function whatsapp(provider: WhatsAppProvider, options: { name?: string; d
     linkButton: has("links", f.links !== false) ? WHATSAPP.linkButton : undefined,
     images: has("images", f.images !== false) ? WHATSAPP.images : undefined,
     carousels: has("carousels", Boolean(provider.sendCarousel)) ? WHATSAPP_CAROUSELS : undefined,
+    templates: has("templates", Boolean(provider.sendTemplate)),
+    typing: has("typing", Boolean(provider.typing)),
   };
   return {
     name: options.name ?? "whatsapp",
@@ -385,6 +388,8 @@ export interface ContentRefusal {
  * media types (Flow converts WebP, GIF, BMP and TIFF; the rest is known only from the file's bytes).
  */
 export function contentRefusal(info: ChannelInfo, outbound: Outbound): ContentRefusal | null {
+  // Flow Messaging's own refusal of a template where the channel has none.
+  if (outbound.type === "template" && info.templates === false) return refuse("content.type", `${info.platform ? CONTENT_LIMITS[info.platform].name : "This channel"} has no templates; send a message instead.`);
   const limits = info.platform ? CONTENT_LIMITS[info.platform] : undefined;
   if (!limits) return null;
   if (outbound.type === "message") return messageRefusal(limits, outbound);
