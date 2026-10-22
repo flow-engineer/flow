@@ -55,7 +55,9 @@ export const findSlots = tool({
 
 - One tool per task in `context/workflows.arazzo.yaml`, never one per endpoint: "place an order"
   is one tool even when it is three API calls. A host or a small model chooses well among a few
-  task-shaped tools and badly among dozens of raw ones.
+  task-shaped tools and badly among dozens of raw ones. A product with many tasks (all a dashboard
+  does) still gets one tool per task: name them by area with a shared prefix (`billing_`, `team_`)
+  and give the CLI one group per area.
 - Take the input and output shapes from `context/openapi.yaml` with `context/overlay.yaml` applied,
   the words and rules from `business.md`, and leave out the personal fields `data.md` marks unless
   the task needs them.
