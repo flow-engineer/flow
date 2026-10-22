@@ -105,6 +105,16 @@ for people and coding agents; see [AGENTS.md](AGENTS.md).
 
 [Tools](https://docs.flow.engineer/build-agent) · [Skills](https://docs.flow.engineer/skills) · [Models and options](https://docs.flow.engineer/reference)
 
+In this repository: [channel options](docs/channels.md) · [patterns that worked](docs/patterns.md) (enforce what matters in `beforeSend`, keep prompts for judgement, render in code, refuse with a reason the model can act on, test a long chat).
+
+## Stability
+
+Flow Framework is 0.x: until 1.0 its API (exports, options, file formats, the CLI's commands,
+`--json` fields and exit codes) may change between releases. Every release's notes call out each
+breaking change with a migration note saying what to change. The API freezes at 1.0. Pin the exact
+version in `package.json` for production, and read the notes before you move it. What freezes at
+1.0: [docs/stability.md](docs/stability.md).
+
 ## License
 
 [Apache-2.0](LICENSE)
