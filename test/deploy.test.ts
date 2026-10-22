@@ -1,7 +1,8 @@
 // covers: testing/src/deploy.ts
 // `flow deploy` (testing/src/deploy.ts) against a fake cloud: the CI key from the environment or
 // the agent's .env, the folder packed without its secrets or dependencies, a deploy followed until
-// live or refused, and secrets sent with their names printed and their values never.
+// live or refused, an agent on a newer Flow Framework than hosting's refused before the upload,
+// and secrets sent with their names printed and their values never.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -21,7 +22,7 @@ interface Call {
 }
 
 /** A fake cloud: the routes `flow deploy` calls, a deploy that builds once then ends as `ending`. */
-async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean; neverDeployed?: boolean } = {}) {
+async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean; neverDeployed?: boolean; framework?: string } = {}) {
   const calls: Call[] = [];
   let looks = 0;
   const server = createServer(async (req, res) => {
@@ -34,6 +35,7 @@ async function cloud(options: { ending?: "live" | "refused"; address?: boolean; 
     const send = (status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     const env = (calls.find((c) => c.path === "/v1/hosting/deploys")?.body?.environment as string) ?? "production";
     const deploy = (status: string, id = "hdp_1") => ({ id, created_at: `2026-10-20T10:0${id.at(-1)}:00Z`, updated_at: `2026-10-20T10:0${id.at(-1)}:30Z`, environment: env, status, version: "abc123", error: null, findings: status === "refused" ? [{ level: "error", code: "ignores_host", message: "buildAgent does not pass host" }] : [{ level: "warning", code: "ignores_host", message: "state in memory" }] });
+    if (req.method === "GET" && path === "/v1/hosting/framework" && options.framework) return send(200, { framework: { version: options.framework } });
     if (req.method === "POST" && path === "/v1/hosting/deploys") return send(201, { deploy: deploy("uploading"), upload_url: `${url}/upload/hdp_1` });
     if (req.method === "PUT" && path === "/upload/hdp_1") return send(200, {});
     if (req.method === "POST" && path === "/v1/hosting/deploys/hdp_1/start") return send(200, { deploy: deploy("building") });
@@ -350,4 +352,34 @@ test("promote sends the .env's new or changed values to production first", async
   assert.equal((await run(["promote", "--dir", dir], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url })).code, 0);
   assert.deepEqual(route(fake.calls).slice(0, 2), ["PUT /v1/hosting/secrets/ANTHROPIC_API_KEY", "POST /v1/hosting/promote"]);
   assert.equal(fake.calls[0]!.body!.environment, "production");
+});
+
+/** An agent folder whose package-lock.json pins @flow-engineer/flow at `version`. */
+function lockedAt(version: string): string {
+  const dir = agentFolder();
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ dependencies: { "@flow-engineer/flow": `^${version}` } }));
+  writeFileSync(join(dir, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/@flow-engineer/flow": { version } } }));
+  return dir;
+}
+
+test("an agent locked to a newer Flow Framework line than hosting's is refused before anything is sent", async () => {
+  const fake = await cloud({ framework: "0.4.11" });
+  const dir = lockedAt("0.5.0");
+  writeFileSync(join(dir, ".env"), "OPENROUTER_API_KEY=sk-or-1");
+  const { code, stdout, printed } = await run(["--dir", dir, "--json"], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url });
+  assert.equal(code, 1, printed);
+  assert.deepEqual(fake.calls.map((c) => `${c.method} ${c.path}`), ["GET /v1/hosting/framework"], "no deploy, secret or upload");
+  const answer = JSON.parse(stdout);
+  assert.equal(answer.error.code, "chinwag_too_new");
+  assert.match(answer.error.message, /@flow-engineer\/flow 0\.5\.0; Flow hosts Flow Framework 0\.4\.x \(0\.4\.11\)/);
+  assert.match(answer.next, /npm install @flow-engineer\/flow@0\.4\.11, then npx @flow-engineer\/flow deploy/);
+});
+
+test("the framework check deploys as before on the same line, or when the cloud does not say", async () => {
+  for (const [framework, locked] of [["0.4.11", "0.4.12"], [undefined, "0.5.0"]] as const) {
+    const fake = await cloud({ framework });
+    const { code, printed } = await run(["--dir", lockedAt(locked), "--version", "abc123"], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url });
+    assert.equal(code, 0, printed);
+    assert.deepEqual(fake.calls.slice(0, 2).map((c) => `${c.method} ${c.path}`), ["GET /v1/hosting/framework", "POST /v1/hosting/deploys"]);
+  }
 });
