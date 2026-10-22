@@ -9,6 +9,7 @@ import { z } from "zod";
 import { mcpServer } from "../../mcp/src/index.ts";
 import { createAgent, sqlite, tool, WHATSAPP_CAROUSELS, type ChannelInfo, type ChannelSummary, type Deliver, type Incoming, type Model, type TemplateDefinition } from "../../src/index.ts";
 import { WHATSAPP, call, gate, multi, respond } from "../../test/helpers.ts";
+import { IMESSAGE, TELEGRAM } from "../../flow-messaging/src/index.ts";
 import { simulators, type AgentConnection, type Line } from "../src/index.ts";
 
 /** An agent that answers nothing by itself: the test delivers through the last `deliver` it got. */
@@ -314,7 +315,14 @@ test("a file sent from a simulator reaches the agent with its bytes, the message
     assert.deepEqual({ text: fake.incomings[0].text, kind: file.kind, mime: file.mime, name: file.name }, { text: "", kind: "document", mime: "application/pdf", name: "invoice.pdf" });
     assert.deepEqual(await file.data(), bytes);
     const [line] = await lines("whatsapp");
-    assert.deepEqual(line.kind === "in" && line.attachments, [{ kind: "document", name: "invoice.pdf" }]);
+    assert.ok(line.kind === "in" && line.attachments);
+    const [shown] = line.attachments;
+    assert.deepEqual({ ...shown, url: undefined }, { kind: "document", name: "invoice.pdf", mime: "application/pdf", size: 50_000, url: undefined });
+    // The simulator shows it again from its url: a document only ever as a download, never as a page of the playground.
+    const again = await fetch(server.url + shown.url);
+    assert.equal(again.headers.get("content-type"), "application/octet-stream");
+    assert.match(again.headers.get("content-disposition") ?? "", /^attachment; filename\*=UTF-8''invoice\.pdf$/);
+    assert.deepEqual(new Uint8Array(await again.arrayBuffer()), bytes);
   } finally {
     await server.close();
   }
@@ -351,7 +359,7 @@ test("the playground shows the person's conversation from the agent's store, als
   }
 });
 
-test("carousel cards with the same button label and their own ids: a tap on card 2 reaches the agent with card 2's id", async () => {
+test("a carousel shows as one message to swipe through; a tap on card 2's button, labelled like card 1's, reaches the agent with card 2's id", async () => {
   const h = multi({ channels: { whatsapp: { info: { ...WHATSAPP, carousels: WHATSAPP_CAROUSELS }, phone: true } }, testPeople: [SAM] });
   const server = await simulators().listen(h.agent, 0);
   const post = (body: unknown) => fetch(`${server.url}/api/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "whatsapp", person: SAM.phone, ...(body as object) }) });
@@ -362,12 +370,14 @@ test("carousel cards with the same button label and their own ids: a tap on card
     const id = (await h.agent.testConversation(SAM.phone))!;
     await h.agent.conversation(id)!.whenIdle();
     const { lines } = (await (await fetch(`${server.url}/api/transcript?channel=whatsapp&person=${encodeURIComponent(SAM.phone)}`)).json()) as { lines: Line[] };
-    const second = lines.find((l) => l.kind === "out" && l.text === "Listing b");
-    assert.ok(second?.kind === "out");
-    assert.deepEqual(second.buttons, [{ id: "details:b", label: "Details" }], "the page gets the label to show and the id to send back");
+    const shown = lines.filter((l) => l.kind === "out");
+    assert.equal(shown.length, 1, "one message, not one per card");
+    const carousel = shown[0];
+    assert.ok(carousel.kind === "out" && carousel.text === "Two listings" && carousel.carousel?.length === 2);
+    assert.deepEqual(carousel.carousel[1].buttons, [{ id: "details:b", label: "Details" }], "the page gets the label to show and the id to send back");
     // What the page sends on a tap of card 2's button.
-    const tapped = second.buttons![0] as { id: string; label: string };
-    assert.equal((await post({ text: tapped.label, choice: { id: tapped.id, title: tapped.label }, replyTo: second.id })).status, 202);
+    const tapped = carousel.carousel[1].buttons![0] as { id: string; label: string };
+    assert.equal((await post({ text: tapped.label, choice: { id: tapped.id, title: tapped.label }, replyTo: carousel.id })).status, 202);
     const next = await h.nextCall(1);
     assert.match(String(next.request.messages.at(-1)?.content), /tapped\] Details \(details:b\)$/);
     assert.deepEqual(h.events.filter((e) => e.type === "message.in").at(-1)?.choice, { id: "details:b", title: "Details" });
@@ -663,6 +673,67 @@ test("a business run: the agent's sends reach a person's thread before they have
     const lines: Line[] = (await (await fetch(`${server.url}/api/transcript?platform=whatsapp&person=p`)).json()).lines;
     assert.equal(lines.length, 1);
     assert.equal(lines[0]!.kind, "out");
+  } finally {
+    await server.close();
+  }
+});
+
+test("Telegram and iMessage channels (custom ones, as Flow Messaging's are) play in their own simulators; a tap on an inline button arrives as Telegram's callback query", async () => {
+  const h = multi({ channels: { telegram: { info: TELEGRAM }, imessage: { info: IMESSAGE } }, testPeople: [SAM] });
+  const server = await simulators().listen(h.agent, 0);
+  const post = (body: unknown) => fetch(`${server.url}/api/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "telegram", person: SAM.phone, ...(body as object) }) });
+  try {
+    const { channels } = (await (await fetch(`${server.url}/api/platforms`)).json()) as { channels: Array<{ name: string; platform: { id: string; buttons?: unknown } }> };
+    assert.deepEqual(channels.map((c) => [c.name, c.platform.id]), [["telegram", "telegram"], ["imessage", "imessage"]]);
+    assert.deepEqual(channels[0].platform.buttons, TELEGRAM.buttons);
+
+    assert.equal((await post({ text: "hot or iced?" })).status, 202);
+    (await h.nextCall(0)).answer(respond(call("send_telegram", { text: "Which one?", buttons: [{ id: "hot", label: "Hot" }, { id: "iced", label: "Iced" }] })));
+    const id = (await h.agent.testConversation(SAM.phone))!;
+    await h.agent.conversation(id)!.whenIdle();
+    const transcript = async () => ((await (await fetch(`${server.url}/api/transcript?channel=telegram&person=${encodeURIComponent(SAM.phone)}`)).json()) as { lines: Line[] }).lines;
+    const asked = (await transcript()).find((l) => l.kind === "out");
+    assert.ok(asked?.kind === "out" && asked.api);
+    assert.equal(asked.api.api, "POST https://api.telegram.org/bot<token>/sendMessage");
+    assert.deepEqual((asked.api.body as { reply_markup: unknown }).reply_markup, { inline_keyboard: [[{ text: "Hot", callback_data: "hot" }], [{ text: "Iced", callback_data: "iced" }]] });
+
+    assert.equal((await post({ text: "Iced", choice: { id: "iced", title: "Iced" }, replyTo: asked.id })).status, 202);
+    (await h.nextCall(1)).answer(respond(call("send_telegram", { text: "Iced it is." })));
+    await h.agent.conversation(id)!.whenIdle();
+    const tap = (await transcript()).find((l) => l.kind === "in" && l.choice);
+    assert.ok(tap?.kind === "in" && tap.api);
+    const update = tap.api.body as { callback_query?: { data: string; message: { text: string } } };
+    assert.equal(update.callback_query?.data, "iced");
+    assert.equal(update.callback_query?.message.text, "Which one?");
+  } finally {
+    await server.close();
+  }
+});
+
+test("each message carries what the platform's API carried: WhatsApp's Graph request and webhook, an SMS provider's fields", async () => {
+  const { fake, server, post, send, lines } = await start();
+  try {
+    await send("whatsapp", "a table for two?");
+    fake.deliver!({ type: "message", text: "Which time?", replyTo: "m1", buttons: [{ id: "t7", label: "7 pm" }, "8 pm"] });
+    const asked = (await lines("whatsapp")).at(-1);
+    assert.ok(asked?.kind === "out" && asked.api);
+    assert.equal(asked.api.api, "POST https://graph.facebook.com/v21.0/PHONE_NUMBER_ID/messages");
+    const request = asked.api.body as { context: { message_id: string }; interactive: { type: string; action: { buttons: unknown[] } } };
+    assert.equal(request.interactive.type, "button");
+    assert.deepEqual(request.interactive.action.buttons, [{ type: "reply", reply: { id: "t7", title: "7 pm" } }, { type: "reply", reply: { id: "8 pm", title: "8 pm" } }]);
+
+    assert.equal((await post("/api/messages", { platform: "whatsapp", person: "p", text: "7 pm", choice: { id: "t7", title: "7 pm" }, replyTo: asked.id })).status, 202);
+    const tap = (await lines("whatsapp")).at(-1);
+    assert.ok(tap?.kind === "in" && tap.api);
+    const [message] = (tap.api.body as { entry: Array<{ changes: Array<{ value: { messages: Array<{ type: string; context: { id: string }; interactive: unknown }> } }> }> }).entry[0].changes[0].value.messages;
+    assert.equal(message.type, "interactive");
+    assert.deepEqual(message.interactive, { type: "button_reply", button_reply: { id: "t7", title: "7 pm" } });
+    assert.ok(message.context.id.startsWith("wamid."), "the tap names the message its button was on");
+
+    await send("sms", "hello");
+    const text = (await lines("sms")).at(-1);
+    assert.ok(text?.kind === "in" && text.api);
+    assert.deepEqual({ Body: (text.api.body as { Body: string }).Body, NumSegments: (text.api.body as { NumSegments: string }).NumSegments }, { Body: "hello", NumSegments: "1" });
   } finally {
     await server.close();
   }

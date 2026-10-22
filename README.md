@@ -59,6 +59,10 @@ npm run cli -- --help
 npm run cli -- menu --json
 ```
 
+To test any MCP server from the current chat, use `npx @flow-engineer/flow inspect <url> tools`
+with the URL the server prints. `call`, `auth`, `resources` and `prompts` exercise its tools,
+sign-in and other capabilities as a host does, without requiring a CLI configuration.
+
 These tool calls need no model key. To reach Claude or ChatGPT remotely, host the MCP server over
 HTTPS and connect it in the host. [MCP and sign-in](https://docs.flow.engineer/framework/mcp) · [Plugin packages](https://docs.flow.engineer/plugins)
 
@@ -86,7 +90,9 @@ Read the [coding-agent guide](https://docs.flow.engineer/agents), or explore the
 
 Check tools, skills and CLI configuration with `npx @flow-engineer/flow check`. Test the messaging
 agent with simulated conversations, inspect traces, and deploy on your own infrastructure or
-Flow Cloud. Flow Messaging provides channels through one API; you can also bring your own providers.
+Flow Cloud. The playground simulators follow each app’s behavior, including channel-specific
+controls, media and voice notes; Debug mode shows the underlying platform payloads. Flow Messaging
+provides channels through one API; you can also bring your own providers.
 
 [Deployment](https://docs.flow.engineer/hosting) · [Self-hosting](https://docs.flow.engineer/self-hosting) · [Testing](https://docs.flow.engineer/testing) · [Traces](https://docs.flow.engineer/traces)
 

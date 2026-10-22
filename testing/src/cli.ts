@@ -62,6 +62,8 @@ const MCP_LINE = `  flow mcp update        Write the tools of the MCP servers th
                             mcp.lock.json, from the agent's folder; commit it after the tests`;
 const CLI_LINE = `  flow cli --server <url> <command>
                             Any MCP server's tools as commands (flow cli --server <url> --help)`;
+const INSPECT_LINE = `  flow inspect <url> <command>
+                            Test any MCP server as a host does, with raw results (flow inspect --help)`;
 const NEW_USAGE = `Usage:\n${NEW_LINE}\n\n  -h, --help                Show this help`;
 const TEST_OPTIONS = `Options for test:
   --cloud <url>            The test cloud (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)
@@ -134,7 +136,7 @@ the CHINWAG_ names from before the rename still work):
                            GEMINI_API_KEY: the first with a value is used, else FLOW_KEY
                            (the agent's Flow key, on its trial credit; flow setup writes it)`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
-const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}
+const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${INSPECT_LINE}
 ${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${DEPLOY_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
 
 /** What to do after new or init, from step 2; a model key comes first when none is set here. */
@@ -171,6 +173,11 @@ if (process.argv[2] === "cli") {
   // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client, an optional peer.
   const { defineCli, runCli } = await import("../../cli/src/index.ts");
   process.exit(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
+}
+if (process.argv[2] === "inspect") {
+  // Loaded only here: it needs @modelcontextprotocol/client, an optional peer.
+  const { inspectCli } = await import("./inspect.ts");
+  process.exit(await inspectCli(process.argv.slice(3)));
 }
 if (process.argv[2] === "deploy") process.exit(await deployCli(process.argv.slice(3)));
 if (process.argv[2] === "logs") process.exit(await logsCli(process.argv.slice(3)));

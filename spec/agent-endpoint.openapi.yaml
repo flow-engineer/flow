@@ -140,13 +140,22 @@ x-chinwag-platforms:
     reactions: true
     status: false
     formatting: plain
+    maxLength: 9999
+    replies: true
     images: { captionMax: 1024 }
+    readReceipts: true
   telegram:
     platform: telegram
     reactions: true
     status: false
     formatting: markdown
+    maxLength: 4096
+    replies: true
+    buttons: { max: 10, labelMax: 20 }
+    buttonIds: true
+    linkButton: { labelMax: 20 }
     images: { captionMax: 1024 }
+    readReceipts: false
   web:
     reactions: true
     status: true

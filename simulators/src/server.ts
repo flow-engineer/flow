@@ -22,6 +22,7 @@
 //   GET  /api/status                         busy / idle, background tasks
 //   GET  /api/platforms                      each platform's rules, the agent's channels and test people, link cards,
 //                                            the action labels (the Person tab's "Their account")
+//   GET  /api/media/<id>                     a file the person sent (a line's attachment url), kept in memory a while
 //
 // The test cloud (`testCloud: true`, for Flow Framework's test cloud only): generated people per run, any
 // person id, through AgentConnection.receive; the same API with `platform` for `channel`, `person`
@@ -44,6 +45,7 @@ import {
   fillTemplate,
   fitMessage,
   type Attachment,
+  type CarouselCard,
   type ChannelInfo,
   type ChannelSummary,
   type Deliver,
@@ -65,7 +67,7 @@ import type { Agent } from "../../src/agent.ts";
 import type { CliConfig } from "../../cli/src/commands.ts";
 import type { CliIO } from "../../cli/src/run.ts";
 import { requireToken, sameSecret, wrongTries } from "../../src/http.ts";
-import { PLATFORMS, channelOf, platform as platformOf, smsSegments, type Platform } from "./platforms.ts";
+import { PLATFORMS, channelOf, platform as platformOf, smsSegments, wirePayload, type Platform, type Wire } from "./platforms.ts";
 
 /** What the test cloud's simulators need from an agent. */
 export interface AgentConnection {
@@ -299,13 +301,29 @@ export interface TestCloudSimulators {
 }
 
 export type Line =
-  | { kind: "in"; id: string | null; text: string; at: number; replyTo?: string; choice?: boolean; choiceId?: string; attachments?: Array<{ kind: Attachment["kind"]; name?: string }> }
+  | {
+      kind: "in";
+      id: string | null;
+      text: string;
+      at: number;
+      replyTo?: string;
+      choice?: boolean;
+      choiceId?: string;
+      /** The files they sent: `url` shows one (GET /api/media/<id>, under the simulators' base) while it is kept. */
+      attachments?: Array<{ kind: Attachment["kind"]; name?: string; mime?: string; size?: number; url?: string }>;
+      /** The webhook the platform's API would have delivered it as (the debug view). */
+      api?: Wire;
+    }
   | {
       kind: "out";
       id: string;
       text: string;
       at: number;
       replyTo?: string;
+      /** The request the agent's provider would have made on the platform's API (the debug view). */
+      api?: Wire;
+      /** A carousel shown as one (WhatsApp, a UI with carousels): its cards, the text above them. */
+      carousel?: CarouselCard[];
       /** As the agent gave them: a label, or { id, label } (a tap sends back the id). */
       buttons?: ReplyButton[];
       list?: { button: string; rows: ListRow[] };
@@ -357,6 +375,11 @@ const MAX_BODY = 16_384;
 /** A message may carry files (base64): up to 4, about 11 MB in all, above the largest the agent reads (10 MB). */
 const MAX_MESSAGE_BODY = 15_000_000;
 const MAX_FILES = 4;
+/** The person's files kept to show them again: the latest, up to this many and this many bytes. */
+const MEDIA_KEPT = 64;
+const MEDIA_BYTES = 96_000_000;
+/** What a kept file may be served as, inline; anything else is served as a download. */
+const SHOWN_MEDIA = /^(image\/(png|jpeg|gif|webp|heic|heif|avif)|audio\/[\w.+-]+|video\/(mp4|webm|quicktime))$/;
 const COOKIE = "chinwag_playground";
 /** The events kept per conversation for pollers, and how long one stays kept after nobody asked for it. */
 const RECENT_EVENTS = 500;
@@ -373,6 +396,9 @@ interface Recent {
   waiters: Set<() => void>;
   touched: number;
 }
+
+/** Who a conversation is with, for the made-up addresses in its API payloads. */
+type Who = { name: string; phone: string };
 
 interface Thread {
   lines: Line[];
@@ -396,6 +422,37 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
   const boot = () => (started ||= `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`);
   const clients = new Map<string, Set<ServerResponse>>();
   const threads = new Map<string, Thread>();
+  /** The person's files, by a random id, so the simulator shows the photo, voice note or document they sent. */
+  const media = new Map<string, { mime: string; name?: string; bytes: Uint8Array }>();
+
+  function keep(file: { mime: string; name?: string; bytes: Uint8Array }): string {
+    const id = randomBytes(12).toString("base64url");
+    media.set(id, file);
+    let total = 0;
+    for (const f of media.values()) total += f.bytes.length;
+    for (const [old, f] of media) {
+      if (media.size <= MEDIA_KEPT && total <= MEDIA_BYTES) break;
+      if (old === id) break;
+      media.delete(old);
+      total -= f.bytes.length;
+    }
+    return id;
+  }
+
+  /** A kept file: a photo, voice note or video shown inline; anything else only as a download, never as a page of this origin. */
+  function serveMedia(res: ServerResponse, id: string): void {
+    const file = media.get(id);
+    if (!file) return void res.writeHead(404, { "cache-control": "no-store" }).end();
+    const shown = SHOWN_MEDIA.test(file.mime);
+    res.writeHead(200, {
+      "content-type": shown ? file.mime : "application/octet-stream",
+      "content-length": String(file.bytes.length),
+      "content-disposition": `${shown ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(file.name ?? "file")}`,
+      "content-security-policy": "default-src 'none'; sandbox",
+      "x-content-type-options": "nosniff",
+      "cache-control": "private, max-age=3600",
+    }).end(file.bytes);
+  }
 
   const thread = (k: string) => {
     let t = threads.get(k);
@@ -474,7 +531,8 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
   }
 
   /** What the platform does with one thing the agent sends. Throws when it would not arrive. */
-  function deliverer(p: Platform, k: string, templates: TemplateDefinition[] = []) {
+  function deliverer(p: Platform, k: string, templates: TemplateDefinition[] = [], who: Who = { name: "", phone: "" }) {
+    const emitOut = (line: Extract<Line, { kind: "out" }>) => emitLine(k, wired(p, line, who));
     const deliver = (outbound: Outbound): void => {
       const t = thread(k);
       // What the platform refuses (Flow Messaging's content rules), it refuses here too, with its error.
@@ -498,19 +556,25 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
           throw error;
         }
         const { body, ...shown } = filled ?? { body: valuesOf(sent) };
-        emitLine(k, { kind: "out", id: `a${++t.agentCount}`, text: body, at: Date.now(), template: { name: sent.name, ...shown } });
+        emitOut({ kind: "out", id: `a${++t.agentCount}`, text: body, at: Date.now(), template: { name: sent.name, ...shown } });
         return;
       }
       if (outbound.type === "carousel") {
-        // Shown as the cards one by one, as a channel without carousels gets them.
         const { type: _type, ...carousel } = outbound;
+        // In the playground WhatsApp and a UI show it as one message the person swipes through. Telegram
+        // gets the cards one by one (Flow Messaging sends them so), and so does the test cloud, whose runs
+        // mark a carousel's lines themselves.
+        if (!cloud && (p.id === "whatsapp" || p.id === "web")) {
+          emitOut({ kind: "out", id: `a${++t.agentCount}`, text: carousel.text, at: Date.now(), ...(carousel.replyTo ? { replyTo: carousel.replyTo } : {}), carousel: carousel.cards });
+          return;
+        }
         for (const m of carouselMessages(channelOf(p), carousel)) deliver({ type: "message", ...m });
         return;
       }
       if (outbound.type === "message") {
         if (t.optedOut) throw new Error("the person texted STOP, so the carrier blocks messages to them");
         const sms = p.segments ? smsSegments(outbound.text) : undefined;
-        emitLine(k, {
+        emitOut({
           kind: "out",
           id: `a${++t.agentCount}`,
           text: outbound.text,
@@ -558,7 +622,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       const sms = smsSegments(reply);
       // In the playground the agent's ids come from the store, so the carrier's lines have their own.
       const id = cloud ? `a${++t.agentCount}` : `c${++t.carrierCount}`;
-      emitLine(k, { kind: "out", id, text: reply, at: Date.now(), carrier: true, sms: { segments: sms.segments, encoding: sms.encoding } });
+      emitLine(k, wired(p, { kind: "out", id, text: reply, at: Date.now(), carrier: true, sms: { segments: sms.segments, encoding: sms.encoding } }, { name: "", phone: k.slice(k.indexOf(":") + 1) }));
     }
   }
 
@@ -633,16 +697,26 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     const replyId = replies && typeof body?.replyTo === "string" ? body.replyTo : undefined;
     const quoted = replyId ? findLine(k, replyId) : undefined;
     const choice = body?.choice && typeof body.choice === "object" ? (body.choice as { id?: string; title?: string }) : undefined;
-    const attachments = attachmentsOf(body);
+    const sent = filesOf(body);
+    const attachments: Attachment[] = sent.map(({ bytes, ...a }) => ({ ...a, data: async () => bytes }));
     const incoming: Incoming = {
       text,
       ...(quoted && (quoted.kind === "in" || quoted.kind === "out") ? { replyTo: { text: quoted.text, fromAgent: quoted.kind === "out" } } : {}),
       ...(choice?.title ? { choice: { ...(choice.id ? { id: String(choice.id) } : {}), title: String(choice.title) } } : {}),
       ...(attachments.length ? { attachments } : {}),
     };
-    const files = attachments.map((a) => ({ kind: a.kind, ...(a.name ? { name: a.name } : {}) }));
+    const files = sent.map((f) => ({ kind: f.kind, ...(f.name ? { name: f.name } : {}), mime: f.mime, size: f.bytes.length, url: `/api/media/${keep(f)}` }));
     const line: Extract<Line, { kind: "in" }> = { kind: "in", id: null, text, at: Date.now(), ...(quoted ? { replyTo: replyId } : {}), ...(choice?.title ? { choice: true } : {}), ...(choice?.title && choice.id && choice.id !== choice.title ? { choiceId: String(choice.id) } : {}), ...(files.length ? { attachments: files } : {}) };
     return { incoming, line };
+  }
+
+  /** The line with what the platform's API carried for it: the webhook for theirs, the request for the agent's. */
+  function wired<L extends Line>(p: Platform, line: L, who: Who, k?: string): L {
+    if (line.kind !== "in" && line.kind !== "out") return line;
+    const quoted = line.kind === "in" && line.replyTo && k ? findLine(k, line.replyTo) : undefined;
+    const api = wirePayload(p, line, who, quoted?.kind === "in" || quoted?.kind === "out" ? quoted : undefined);
+    if (api) line.api = api;
+    return line;
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -683,6 +757,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       }
       if (req.method === "GET" && path === "/api/events") return events(req, res, qk, url);
       if (req.method === "GET" && path === "/api/poll") return poll(res, qk, url);
+      if (req.method === "GET" && path.startsWith("/api/media/")) return serveMedia(res, path.slice("/api/media/".length));
 
       const body = req.method === "POST" ? await readBody(req, path === "/api/messages" ? MAX_MESSAGE_BODY : MAX_BODY) : null;
       const p = typeof body?.platform === "string" ? platformOf(body.platform) : qp;
@@ -703,15 +778,16 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
       if (req.method === "POST" && path === "/api/messages") {
         const text = typeof body?.text === "string" ? body.text.trim().slice(0, 4_000) : "";
-        if (!text && !attachmentsOf(body).length) return json(res, 400, { error: "text or a file is required" });
+        if (!text && !filesOf(body).length) return json(res, 400, { error: "text or a file is required" });
         const { incoming, line } = incomingOf(k, body, text, Boolean(p.replies));
         emitLine(k, line);
         carrier(p, k, text);
         const id = conversationId(k);
         const own = ownChannel(agent, p, id);
-        const messageId = agent.receive(id, incoming, deliverer(p, k), own ? { channel: own.info, channelName: own.name } : { channel: channelOf(p) });
+        const who = { name: person, phone: person };
+        const messageId = agent.receive(id, incoming, deliverer(p, k, [], who), own ? { channel: own.info, channelName: own.name } : { channel: channelOf(p) });
         line.id = messageId;
-        push(k, { type: "id", at: line.at, messageId });
+        push(k, { type: "id", at: line.at, messageId, api: wired(p, line, who, k).api });
         return json(res, 202, { messageId, at: line.at });
       }
       res.writeHead(404).end();
@@ -721,7 +797,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       events: cloudEvents,
       deliverer: (platform, person) => {
         const p = platformOf(platform);
-        return deliverer(p, key(p.id, person));
+        return deliverer(p, key(p.id, person), [], { name: person, phone: person });
       },
       listen: (agent, port) => serve(guarded((req, res) => handle(agent, req, res, "")), port),
       handler: (agent, base = "") => guarded((req, res) => handle(agent, req, res, base)),
@@ -759,7 +835,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     agent.attachPlayground(({ conversationId, person, channel, outbound }) => {
       rememberPerson(conversationId, { ...person, visitorChannel: channel });
       const own = agent.channels().find((c) => c.name === channel);
-      if (own) for (const other of people.get(conversationId)!.values()) deliverer(platformFor(own), threadKey(channel, other), agent.templates?.())(outbound);
+      if (own) for (const other of people.get(conversationId)!.values()) deliverer(platformFor(own), threadKey(channel, other), agent.templates?.(), other)(outbound);
     });
   }
 
@@ -772,13 +848,15 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     const p = platformFor(channel);
     let count = 0;
     const lines: Line[] = [];
+    // What only the simulator kept of the person's messages: the files they sent, the message they replied to.
+    const kept = new Map(t.lines.flatMap((l) => (l.kind === "in" && l.id ? [[l.id, { ...(l.attachments ? { attachments: l.attachments } : {}), ...(l.replyTo ? { replyTo: l.replyTo } : {}) }] as const] : [])));
     for (const e of id ? await agent.transcript(id) : []) {
       if (e.kind === "tool") {
         lines.push({ kind: "tool", callId: e.callId, tool: e.tool, input: e.input, at: e.at, status: e.ok ? "done" : "failed", output: e.output });
         continue;
       }
       if (e.channel !== channel.name) continue;
-      if (e.kind === "in") lines.push({ kind: "in", id: e.id, text: e.text, at: e.at, ...(e.choice ? { choice: true } : {}), ...(e.choiceId ? { choiceId: e.choiceId } : {}) });
+      if (e.kind === "in") lines.push({ kind: "in", id: e.id, text: e.text, at: e.at, ...(e.choice ? { choice: true } : {}), ...(e.choiceId ? { choiceId: e.choiceId } : {}), ...kept.get(e.id) });
       else if (e.kind === "out" && e.template) {
         // The store keeps a template's name and body text, not its other values: those show as declared.
         const declared = agent.templates?.().find((d) => d.name === e.template);
@@ -787,7 +865,8 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       else {
         // The agent's message as this platform showed it (a link's URL in the text where it has no link button).
         const { kind: _kind, channel: _channel, template: _template, carousel, ...sent } = e;
-        const shown = carousel ? carouselMessages(channel.info, { text: sent.text, cards: carousel }) : [fitMessage(channel.info, sent)];
+        const swiped = carousel && (p.id === "whatsapp" || p.id === "web");
+        const shown = swiped ? [{ ...sent, carousel }] : carousel ? carouselMessages(channel.info, { text: sent.text, cards: carousel }) : [fitMessage(channel.info, sent)];
         for (const rest of shown) {
           const sms = p.segments ? smsSegments(rest.text) : undefined;
           lines.push({ kind: "out", id: `a${++count}`, at: e.at, ...rest, ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}) });
@@ -798,6 +877,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     const onlyHere = t.lines.filter((l) => (l.kind === "out" && l.carrier) || (l.kind === "in" && !(l.id && stored.has(l.id))));
     t.lines = [...lines, ...onlyHere].sort((a, b) => a.at - b.at);
     t.agentCount = count;
+    for (const l of t.lines) wired(p, l, person, k);
     return t;
   }
 
@@ -813,6 +893,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       if (!cli) { res.writeHead(404).end(); return; }
       return cli.handle(req, res);
     }
+    if (req.method === "GET" && path.startsWith("/api/media/")) return serveMedia(res, path.slice("/api/media/".length));
 
     if (req.method === "GET" && path === "/") return html(res, page(playPage, base));
     if (req.method === "GET" && path === "/person") return html(res, page(personPage, base));
@@ -962,7 +1043,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
     if (req.method === "POST" && path === "/api/messages") {
       const text = typeof body?.text === "string" ? body.text.trim().slice(0, 4_000) : "";
-      if (!text && !attachmentsOf(body).length) return json(res, 400, { error: "text or a file is required" });
+      if (!text && !filesOf(body).length) return json(res, 400, { error: "text or a file is required" });
       const { incoming, line } = incomingOf(k, body, text, Boolean(p.replies));
       console.info(JSON.stringify({ chinwag: "playground.message", person: person.name, channel: channel.name, at: new Date(line.at).toISOString() }));
       emitLine(k, line);
@@ -971,7 +1052,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
         : await agent.simulate({ person: person.phone, channel: channel.name, message: incoming });
       if (taken) rememberPerson(taken.conversationId, person);
       line.id = taken?.messageId ?? null;
-      push(k, { type: "id", at: line.at, messageId: line.id });
+      push(k, { type: "id", at: line.at, messageId: line.id, api: wired(p, line, person, k).api });
       return json(res, 202, { messageId: line.id, at: line.at });
     }
     res.writeHead(404).end();
@@ -1090,17 +1171,24 @@ function inside(url: URL, base: string): string {
   return base && url.pathname.startsWith(base) ? url.pathname.slice(base.length) || "/" : url.pathname;
 }
 
-/** The simulator that plays one of the agent's channels: SMS, WhatsApp, or the web for a custom UI. */
+/**
+ * The simulator that plays one of the agent's channels: SMS, WhatsApp, Telegram or iMessage (a custom
+ * channel on that platform, as Flow Messaging's are), else the web for a custom UI.
+ */
 function platformFor(channel: ChannelSummary): Platform {
-  return { ...platformOf(channel.kind === "custom" ? "web" : channel.kind), ...channel.info };
+  return { ...platformOf(simulatorOf(channel)), ...channel.info };
+}
+
+function simulatorOf(channel: ChannelSummary): Platform["id"] {
+  if (channel.kind !== "custom") return platformOf(channel.kind).id;
+  return channel.info.platform === "telegram" || channel.info.platform === "imessage" ? channel.info.platform : "web";
 }
 
 const digits = (phone: string) => phone.replace(/[^\d]/g, "");
 
 /** The agent's own channel a simulator plays, if it has one of that kind. */
 function ownChannel(agent: AgentConnection, p: Platform, conversationId: string): ChannelSummary | undefined {
-  const kind = p.id === "web" ? "custom" : p.id;
-  return agent.channels?.(conversationId).find((c) => c.kind === kind);
+  return agent.channels?.(conversationId).find((c) => simulatorOf(c) === p.id);
 }
 
 /** A template the agent did not declare: the values it was sent with, one per line. */
@@ -1118,12 +1206,12 @@ function asDeclared(d: TemplateDefinition): Omit<FilledTemplate, "body"> {
 }
 
 /** The files of a message, from the page: { kind, mime, name?, data (base64) }. */
-function attachmentsOf(body: Record<string, unknown> | null): Attachment[] {
+function filesOf(body: Record<string, unknown> | null): Array<{ kind: Attachment["kind"]; mime: string; name?: string; bytes: Uint8Array }> {
   if (!Array.isArray(body?.attachments)) return [];
-  return body.attachments.slice(0, MAX_FILES).flatMap((a): Attachment[] => {
+  return body.attachments.slice(0, MAX_FILES).flatMap((a) => {
     if (!a || typeof a !== "object" || typeof a.mime !== "string" || typeof a.data !== "string" || !["image", "audio", "document"].includes(a.kind)) return [];
     const bytes = new Uint8Array(Buffer.from(a.data, "base64"));
-    return [{ kind: a.kind, mime: a.mime.slice(0, 100), ...(typeof a.name === "string" && a.name ? { name: a.name.slice(0, 200) } : {}), data: async () => bytes }];
+    return [{ kind: a.kind as Attachment["kind"], mime: a.mime.slice(0, 100), ...(typeof a.name === "string" && a.name ? { name: a.name.slice(0, 200) } : {}), bytes }];
   });
 }
 
