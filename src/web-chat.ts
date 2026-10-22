@@ -293,9 +293,8 @@ export function webChat(options: WebChatOptions): WebChat {
     const conversationId = await agent!.conversationOf({ channel: name, address: visitor.address });
     const entries = conversationId ? await agent!.transcript(conversationId) : [];
     const shown = entries.flatMap((e): Array<WebChatEventBody & { at: number }> => {
-      if (e.channel !== name || e.at >= since) return [];
+      if ((e.kind !== "in" && e.kind !== "out") || e.channel !== name || e.at >= since) return [];
       if (e.kind === "in") return [{ type: "message", from: "person", id: e.id, text: e.text, ...(e.choice ? { choice: { ...(e.choiceId ? { id: e.choiceId } : {}), title: e.text } } : {}), at: e.at }];
-      if (e.kind !== "out") return [];
       if (e.carousel) return [{ type: "carousel", text: e.text, cards: e.carousel, at: e.at }];
       return [{ type: "message", from: "agent", text: e.text, ...(e.buttons?.length ? { buttons: e.buttons.map(replyButton) } : {}), ...(e.list ? { list: e.list } : {}), ...(e.link ? { link: e.link } : {}), ...(e.image ? { image: e.image } : {}), ...(e.fields ? { fields: e.fields } : {}), at: e.at }];
     });
