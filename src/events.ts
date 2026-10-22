@@ -29,6 +29,7 @@ export interface FlowEvent {
     | "message.refused"
     | "message.slow"
     | "send.resumed"
+    | "store.write_failed"
     | "reaction.in"
     | "attachment.failed"
     | "keyword"

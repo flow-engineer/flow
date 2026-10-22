@@ -27,6 +27,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   runner saved since (the old and the new revision of a deploy, side by side), its snapshot is
   merged in (what is in memory wins, nothing is added twice) and saved again. Neither runner's
   held sends, caps or watches are lost to the other's save.
+- **Store calls are tried again when they fail for a passing reason** (a busy database, a
+  serialization conflict, a lost connection, a timeout, a store service's 5xx): three more tries,
+  after 0.2, 1 and 5 seconds, in order, since the conversation's writes wait for each other. A
+  conversation write that still fails is a new event, `store.write_failed` (the error's name and
+  code only), and `agent.status().store` is `"failing"` until a write is stored again (`"ok"`, or
+  `"memory"` with no database). The chat goes on replying: a reply missed is worse than a history
+  line lost.
 
 ### Migration notes
 
@@ -50,6 +57,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `saveEventState` takes it as an optional fifth argument and returns the new version, or null when
   another runner saved since (nothing is written then). A store service that has not run migration
   12, or drops the argument, saves as in 0.5 (last save wins).
+- `AgentStatus` has a new field, `store`. During a store outage a step that sends waits up to about
+  6 seconds for its write before the send goes.
 
 ## 0.5.0 (unreleased)
 

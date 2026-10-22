@@ -21,7 +21,7 @@ import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
 import { businessSchedule, claimDue, summary } from "./schedules.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
-import { Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
+import { retrying, Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
 import { clock, quietUntil, validZone } from "./time.ts";
 import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } from "./tools.ts";
 import { traces, tracesFromEnv, type Traces, type TracesOptions } from "./traces.ts";
@@ -247,6 +247,8 @@ export interface AgentStatus {
   idleForMs: number;
   conversations: number;
   backgroundTasks: number;
+  /** "memory": nothing survives a restart; "failing": the latest write failed after its tries again (a `store.write_failed` event); else "ok". */
+  store: "ok" | "failing" | "memory";
 }
 
 export interface ReceiveOptions {
@@ -350,6 +352,8 @@ export class Agent {
   private readonly options: AgentOptions;
   private readonly settings: ConversationSettings;
   private readonly store: StoreApi;
+  /** The latest conversation write failed after its tries again: `status().store` says so until one succeeds. */
+  private storeFailing = false;
   /** This process among the agent's runners (`runner`). */
   readonly runner: string;
   private readonly startedAt = Date.now();
@@ -404,7 +408,7 @@ export class Agent {
     if (options.profile && !tools.some((t) => t.name === PROFILE_TOOL)) tools.push(profileTool(options.profile));
     if (skills.length && !options.inlineSkills) tools.push(skillTool(skills, (id, name) => emit(id, "skill.loaded", { skill: name })));
     if (options.store && (options.database || options.id)) throw new Error("flow: give an agent a store or a database (and id), not both");
-    this.store = options.store ?? new Store(options.database ?? sqlite(), options.id ?? "default");
+    this.store = retrying(options.store ?? new Store(options.database ?? sqlite(), options.id ?? "default"));
     this.settings = {
       model: options.model,
       transcribe: options.transcribe,
@@ -430,6 +434,7 @@ export class Agent {
       emit,
       runner: this.runner,
       away: (conversation, again) => this.away(conversation, again),
+      storeHealth: (ok) => void (this.storeFailing = !ok),
       store: this.store,
       ready: this.store.migrate(),
       now: this.now,
@@ -1210,6 +1215,7 @@ export class Agent {
       idleForMs: busy ? 0 : idle,
       conversations: all.length,
       backgroundTasks: all.reduce((n, c) => n + c.backgroundTasks.length, 0),
+      store: !this.store.durable ? "memory" : this.storeFailing ? "failing" : "ok",
     };
   }
 

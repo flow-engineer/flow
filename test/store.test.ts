@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { z } from "zod";
 import { createAgent, sqlite, SMS_KEYWORDS, Store, tool, type ChannelInfo, type Database, type Outbound } from "../src/index.ts";
 import { LEASE_MS, RESEND_WITHIN_MS } from "../src/conversation.ts";
+import { STORE_RETRY_MS } from "../src/store.ts";
 import { SMS, WHATSAPP, call, gate, last, multi, respond, scriptedModel, users } from "./helpers.ts";
 
 const CHANNELS = { sms: { info: SMS, phone: true } };
@@ -591,4 +592,52 @@ test("a runner that stalled past its lease sends nothing once another runner too
   assert.deepEqual(other.texts("sms"), ["Thursday at 10."]);
   const entries = await new Store(sqlite(path), "default").history(id);
   assert.equal(entries.filter((e) => e.role === "assistant").length, 1, "only the runner holding it wrote the step");
+});
+
+/** A database whose writes fail as a busy database's do, while `failing()` says so (asked once a write). */
+function busyAt(db: Database, failing: () => boolean): Database {
+  const guard = (sql: string) => {
+    if (/^(INSERT|UPDATE|DELETE)/.test(sql) && failing()) throw Object.assign(new Error("database is locked"), { errcode: 5 });
+  };
+  const on = (inner: Omit<Database, "transaction">): Omit<Database, "transaction"> => ({
+    durable: inner.durable,
+    dialect: inner.dialect,
+    query: async (sql, params) => (guard(sql), inner.query(sql, params)),
+    run: async (sql, params) => (guard(sql), inner.run(sql, params)),
+  });
+  return { ...on(db), transaction: (work) => db.transaction((tx) => work(on(tx))) };
+}
+
+test("a store write that fails for a passing reason is tried again in order; one that keeps failing is a store.write_failed event and status().store says failing, and the chat still replies", async () => {
+  const delays = STORE_RETRY_MS.splice(0, STORE_RETRY_MS.length, 0, 0, 0);
+  try {
+    const path = file();
+    let failures = 0;
+    const h = multi({ channels: CHANNELS, database: busyAt(sqlite(path), () => failures-- > 0) });
+    await h.agent.resume();
+    failures = 2;
+    const a = await h.message("sms", "+15550100100", "when is my session?");
+    (await h.nextCall(0)).answer(respond(call("send_sms", { text: "Thursday at 10." })));
+    await h.agent.conversation(a!.conversationId)!.whenIdle();
+    assert.equal(h.events.filter((e) => e.type === "store.write_failed").length, 0, "tried again until it was stored");
+    assert.equal(h.agent.status().store, "ok");
+    const stored = await new Store(sqlite(path), "default").history(a!.conversationId);
+    assert.deepEqual(stored.map((e) => e.role), ["user", "assistant", "tool", "assistant"], "nothing was lost");
+
+    failures = Number.POSITIVE_INFINITY;
+    await h.message("sms", "+15550100100", "and where?");
+    (await h.nextCall(1)).answer(respond(call("send_sms", { text: "At the studio." })));
+    await h.agent.conversation(a!.conversationId)!.whenIdle();
+    assert.deepEqual(h.texts("sms"), ["Thursday at 10.", "At the studio."], "the reply still went");
+    assert.ok(h.events.some((e) => e.type === "store.write_failed" && e.error === "Error"));
+    assert.equal(h.agent.status().store, "failing");
+
+    failures = 0;
+    await h.message("sms", "+15550100100", "thanks");
+    (await h.nextCall(2)).answer(respond(call("send_sms", { text: "Any time." })));
+    await h.agent.conversation(a!.conversationId)!.whenIdle();
+    assert.equal(h.agent.status().store, "ok", "ok again once a write is stored");
+  } finally {
+    STORE_RETRY_MS.splice(0, STORE_RETRY_MS.length, ...delays);
+  }
 });

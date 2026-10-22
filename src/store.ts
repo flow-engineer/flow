@@ -253,6 +253,45 @@ export class StaleRunner extends Error {
 /** Where flowEvents keeps its send state. */
 export type EventStateStore = Pick<Store, "loadEventState" | "takeEvents" | "saveEventState">;
 
+/** How long a store call that failed for a passing reason waits before each try again (three tries more, in order). */
+export const STORE_RETRY_MS = [200, 1000, 5000];
+
+/**
+ * A failure that may pass: the database busy or a serialization conflict, a lost connection, a
+ * timeout, a store service's 5xx. A refused write (StaleRunner) or a broken statement is not.
+ */
+export function transient(error: unknown): boolean {
+  if (!(error instanceof Error) || error.name === "StaleRunner") return false;
+  const e = error as Error & { code?: unknown; errcode?: unknown; cause?: unknown };
+  const code = String(e.code ?? "");
+  if (e.errcode === 5 || e.errcode === 6 || code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") return true;
+  if (code === "40001" || code === "40P01" || code.startsWith("08") || code.startsWith("57P0")) return true;
+  if (["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE", "EAI_AGAIN"].includes(code) || code.startsWith("UND_ERR")) return true;
+  if (e.name === "TimeoutError" || e.name === "AbortError" || e.message === "fetch failed") return true;
+  if (/^flow-agent-store: \w+: (HTTP 5\d\d|the store failed)/.test(e.message)) return true;
+  return e.cause !== undefined && e.cause !== error && transient(e.cause);
+}
+
+/** `store` with each call tried again, after STORE_RETRY_MS, while it fails for a passing reason; in order, since a caller awaits it. */
+export function retrying<S extends object>(store: S): S {
+  return new Proxy(store, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof value !== "function" || property === "then") return value;
+      return async (...args: unknown[]) => {
+        for (let attempt = 0; ; attempt++) {
+          try {
+            return await value.apply(target, args);
+          } catch (error) {
+            if (attempt >= STORE_RETRY_MS.length || !transient(error)) throw error;
+            await new Promise((resolve) => setTimeout(resolve, STORE_RETRY_MS[attempt]));
+          }
+        }
+      };
+    },
+  });
+}
+
 export class Store {
   readonly db: Database;
   readonly agentId: string;
@@ -281,7 +320,11 @@ export class Store {
           await tx.run("INSERT INTO parley_migrations (version, applied_at) VALUES (?, ?)", [i + 1, Date.now()]);
         });
       }
-    })();
+    })().catch((error) => {
+      // A failure that may pass is tried again by the next call, not kept.
+      this.ready = null;
+      throw error;
+    });
     return this.ready;
   }
 
