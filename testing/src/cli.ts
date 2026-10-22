@@ -67,7 +67,8 @@ const INSPECT_LINE = `  flow inspect <url> <command>
 const NEW_USAGE = `Usage:\n${NEW_LINE}\n\n  -h, --help                Show this help`;
 const TEST_OPTIONS = `Options for test:
   --cloud <url>            The test cloud (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)
-  --runs <n>               Runs per scenario (default: 1)
+  --runs <n>               Runs per scenario (default: 1); above 1 the summary gives each
+                           scenario's pass rate on each channel, flaky when some runs passed
   --only <ids>             Only these scenarios, comma-separated (file names without .yaml)
   --failed                 Only the scenarios that failed, were flaky, errored or never played in
                            the last session (.flow/last-session.json), on every channel each plays.
@@ -105,9 +106,15 @@ too, the run failed. A flaky run does not fail the session unless --strict. The 
 the person's, the tools' and the judge's stored answers for a scenario it has played unchanged, so
 runs vary less and --runs 3 is rarely needed; --fresh plays everything anew.
 
+Outcomes: each run passed, failed, stopped for credit (the workspace's daily test budget, or the
+agent's model refused for credit: CREDIT on its line) or hit an infrastructure error (the cloud
+could not play or judge it: ERROR). Credit and infrastructure runs are counted apart, never as
+failures, and are left out of the pass rate. A message that reached the cloud without the agent's
+send (or one the agent says it sent that never arrived) is a second send path: the session fails.
+
 Exit status:
   0    Every run passed, or was flaky (without --strict)
-  1    A run failed (with --strict, or was flaky). Or nothing was sent: a wrong flag, a test file that does not parse,
+  1    A run failed (with --strict, or was flaky), or a message took a second send path. Or nothing was sent: a wrong flag, a test file that does not parse,
        no FLOW_FRAMEWORK_CLOUD_KEY. The message is printed on its own
   2    The connection, the tunnel or the stream failed (before or after the session opened),
        the cloud answered 5xx or no JSON, the cloud ended the session for its own failure, or
