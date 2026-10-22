@@ -93,6 +93,7 @@ export interface StreamHandle {
 /** Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos (one with buttons is one message), carousels (Flow sends their cards one by one), Markdown, no read receipts for bots. */
 export const TELEGRAM: ChannelInfo = {
   platform: "telegram",
+  idempotentSends: true,
   reactions: true,
   status: false,
   formatting: "markdown",
@@ -115,6 +116,7 @@ export const TELEGRAM: ChannelInfo = {
  */
 export const IMESSAGE: ChannelInfo = {
   platform: "imessage",
+  idempotentSends: true,
   reactions: true,
   status: false,
   formatting: "plain",
@@ -368,14 +370,15 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   function whatsapp(o: FlowChannelOptions & { disable?: WhatsAppFeature[] } = {}): Channel {
     const route = register("whatsapp", o);
     const channel = whatsappChannel(provider(route), { name: route.name, disable: o.disable, instructions: o.instructions });
-    // Flow Messaging sends every reply button's own id and gives it back on the tap.
-    return { ...channel, info: { ...channel.info, ...(channel.info.buttons ? { buttonIds: true } : {}), ...(channel.info.lists ? { lists: { ...channel.info.lists, titleMax: LIST_TITLE_MAX } } : {}) } };
+    // Flow Messaging sends every reply button's own id and gives it back on the tap, and keeps each send's Idempotency-Key 24 h.
+    return { ...channel, info: { ...channel.info, idempotentSends: true, ...(channel.info.buttons ? { buttonIds: true } : {}), ...(channel.info.lists ? { lists: { ...channel.info.lists, titleMax: LIST_TITLE_MAX } } : {}) } };
   }
 
   /** US SMS from a Flow number: plain text; STOP, START and HELP are Flow's. */
   function sms(o: FlowChannelOptions = {}): Channel {
     const route = register("sms", o);
-    return smsChannel(provider(route), { name: route.name, instructions: o.instructions });
+    const channel = smsChannel(provider(route), { name: route.name, instructions: o.instructions });
+    return { ...channel, info: { ...channel.info, idempotentSends: true } };
   }
 
   /** A Telegram bot connected to Flow. Flow Framework has no Telegram kind yet, so it is a custom channel. */

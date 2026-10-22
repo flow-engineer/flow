@@ -72,9 +72,16 @@ redelivers events it is not sure arrived. The agent takes each message once:
 - **Retries of one send** (Flow Messaging's on a 429 or 5xx) repeat the same key: never a second
   message.
 - **The agent's replies** are sent once by the framework: a send that was accepted is in the history
-  and never sent again, also after a restart. One case is **at least once**: a process that stops
-  after the platform accepted a reply but before the store recorded it runs the turn again, and the
-  agent may say it again.
+  and never sent again, also after a restart. With a database (`sqlite(file)`, `postgres(...)`), each
+  send is **written ahead**: the step that makes it is stored, with the send `pending`, before it
+  goes, and it goes with its own idempotency key, `send:<conversation>:<turn>:<call>`. A process that
+  stops before that write sent nothing of the step: it runs again. One that stops after the send
+  went but before its result was stored:
+  - on a channel whose info says `idempotentSends` (Flow Messaging's), the send goes again with the
+    same key before the turn carries on, so the person gets it **once** (`send.resumed`). Past 24
+    hours it is not sent again (the key may be gone).
+  - on any other channel, the agent is told it may or may not have gone, and decides.
+  - a send already settled (sent, failed or refused) gives the agent that result, never "may or may not".
 - **A send that timed out** (`unconfirmed`) is never sent again, so it is at most once from here; the
   platform may still deliver it.
 - **Flow Messaging's own resend.** When a channel took a message but never answered, Flow resends it
@@ -91,7 +98,9 @@ provider does its part:
 - Resolve `sendMessage` when your platform's API has accepted the message, and reject (with a
   readable reason) when it refused it. Never resolve early to go faster: the next message would
   overtake it, and the agent would be told it was delivered.
-- Pass `idempotencyKey` on to your platform when it takes one.
+- Pass `idempotencyKey` on to your platform when it takes one. If your channel's send honours it
+  for at least 24 hours (a second send with the same key never reaches the person again), set
+  `info.idempotentSends: true`, and a reply a restart cut off goes again with its key.
 - If your platform's acceptance can take long, wait at most a bounded time and resolve
   `{ status: "unconfirmed" }` past it, rather than hanging the conversation.
 
@@ -101,7 +110,8 @@ provider does its part:
 `whatsapp()`, `sms()` and `customUI()` over a provider that waits for the check, and each Flow
 Messaging channel with its signal coming by webhook, by the stream and by reading the message back.
 For each one it checks that `send()` resolves only after the platform accepted the message, rejects
-with the platform's reason, passes idempotency keys on, resolves a carousel only after its last
+with the platform's reason, passes idempotency keys on (the business's and an agent's reply written
+ahead), resolves a carousel only after its last
 part, and that an agent's messages reach the platform one at a time, in order.
 
 It runs on demand and before every release (`npm run test:conformance`, [releasing.md](releasing.md)),

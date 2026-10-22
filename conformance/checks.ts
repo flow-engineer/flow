@@ -8,7 +8,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { carouselMessages, createAgent, type Carousel, type Channel, type Outbound } from "../src/index.ts";
+import { carouselMessages, createAgent, sqlite, type Carousel, type Channel, type Outbound } from "../src/index.ts";
 import { respond, scriptedModel } from "../test/helpers.ts";
 
 /** One message as the platform got it, held until the check settles it. */
@@ -90,6 +90,22 @@ export function conformance(name: string, make: () => Promise<Rig>): void {
     assert.equal(arrival.idempotencyKey, "nudge:conformance-1");
     await arrival.accept();
     await sending;
+  });
+
+  withRig("an agent's reply, written ahead in a durable store, carries its send key to the platform, so a restart can send it again with the same key", async (rig) => {
+    const dir = mkdtempSync(join(tmpdir(), "flow-conformance-"));
+    writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
+    const scripted = scriptedModel();
+    const agent = createAgent({ dir, model: scripted.model, channels: [rig.channel], database: sqlite(join(dir, "flow.db")), debounceMs: 0, deadlineMs: 50, scheduleCheckMs: 0 });
+    await agent.resume();
+    const arrived = await agent.message({ channel: rig.channel.name, from: rig.to, message: "hi" });
+    const first = await scripted.nextCall(0);
+    const send = first.request.tools.find((t) => t.name.startsWith("send_"))!.name;
+    first.answer(respond({ id: "c1", name: send, arguments: JSON.stringify({ text: "Hello" }) }));
+    const arrival = await rig.arrival(0);
+    assert.equal(arrival.idempotencyKey, `send:${arrived!.conversationId}:1:c1`);
+    await arrival.accept();
+    await agent.conversation(arrived!.conversationId)!.whenIdle();
   });
 
   withRig("a carousel resolves only once the platform accepted all of it", async (rig) => {

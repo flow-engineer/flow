@@ -28,6 +28,7 @@ export interface FlowEvent {
     | "message.undelivered"
     | "message.refused"
     | "message.slow"
+    | "send.resumed"
     | "reaction.in"
     | "attachment.failed"
     | "keyword"

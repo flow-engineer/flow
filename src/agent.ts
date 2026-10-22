@@ -16,7 +16,7 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
-import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
+import { Conversation, PROFILE_TOOL, RESEND_WITHIN_MS, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
 import { businessSchedule, claimDue, summary } from "./schedules.ts";
@@ -1162,7 +1162,8 @@ export class Agent {
 
   /**
    * Looks for due scheduled messages once and hands each to its conversation. Returns how many.
-   * Once an hour, one runner also deletes provider message ids older than `keepMessageIdsDays`.
+   * Once an hour, one runner also deletes provider message ids older than `keepMessageIdsDays`,
+   * and sends written ahead more than a day ago.
    */
   async runDue(): Promise<number> {
     await this.settings.ready;
@@ -1191,6 +1192,8 @@ export class Agent {
     if (!(await this.store.claimUpkeep("prune_message_ids", now, now + HOUR_MS))) return;
     const before = now - (this.options.keepMessageIdsDays ?? 7) * 24 * HOUR_MS;
     while ((await this.store.pruneInbound(before, PRUNE_BATCH)) === PRUNE_BATCH);
+    // Sends written ahead are no use once they can no longer be sent again (a day), settled or not.
+    if (this.store.pruneSends) while ((await this.store.pruneSends(now - RESEND_WITHIN_MS, PRUNE_BATCH)) === PRUNE_BATCH);
   }
 
   /** The agent's channels without their sends: what the simulators and the test cloud play. */

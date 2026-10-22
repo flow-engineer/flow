@@ -29,6 +29,11 @@
 //   confirms it.
 // - Everything is kept in the store as it happens: the history, the inbox of events not yet
 //   handled, background tools in flight. After a restart the conversation carries on.
+// - With a durable store, the agent's sends are written ahead: a step's send calls are stored,
+//   pending, with the step, before any of them goes, and each goes with its own idempotency key
+//   (send:<conversation>:<turn>:<call>). Cut off by a restart, a pending send goes again with the
+//   same key on a channel that dedupes by it (info.idempotentSends) within a day, before the turn
+//   carries on; a settled one gives the model its result; any other is "may or may not".
 // - Scheduled messages and nudges arrive through the inbox and wait for the turn in progress.
 // - A message the agent's own rules answer with no model call (its intercept, a STOP, START or
 //   HELP keyword) is kept with what was sent back, in order with the person's other messages, and
@@ -44,7 +49,7 @@ import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type Conten
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { scheduleTools } from "./schedules.ts";
-import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
+import type { ConversationRow, InboxRow, NoContactRow, QuietHours, SendRow, StoreApi, TimeZoneSource } from "./store.ts";
 import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
@@ -128,6 +133,9 @@ const APOLOGY = "Sorry, something went wrong on my side. Could you send that aga
 export const LEASE_MS = 15_000;
 const RENEW_MS = 5_000;
 let leaseWarned = false;
+/** How long a send written ahead may be sent again after a restart: Flow Messaging keeps idempotency keys for 24 h. */
+export const RESEND_WITHIN_MS = 24 * 60 * 60 * 1000;
+let sendsWarned = false;
 const EARLIER = "[Chinwag] Older messages of this conversation are no longer shown to you.";
 const RESET = "[Chinwag] The conversation starts again here: earlier messages are no longer shown to you.";
 
@@ -298,6 +306,8 @@ export class Conversation {
   private authPromptsSent = new Set<string>();
   /** The send tool for each channel, this turn. */
   private sendTools = new Map<string, string>();
+  /** The idempotency key of each send call written ahead, by call id. */
+  private readonly sendKeys = new Map<string, string>();
   private readonly builtins: Map<string, Tool>;
   private readonly builtinSpecs: ToolSpec[];
   private readonly loaded: Promise<void>;
@@ -866,7 +876,10 @@ export class Conversation {
     const answered = new Set(history.flatMap((e) => (e.role === "tool" ? [e.toolCallId] : [])));
     const lastCalls = [...history].reverse().find((e) => e.role === "assistant" && e.toolCalls?.length);
     if (lastCalls?.role === "assistant") {
-      for (const c of lastCalls.toolCalls ?? []) if (!answered.has(c.id)) this.history.push({ role: "tool", toolCallId: c.id, content: INTERRUPTED });
+      const open = (lastCalls.toolCalls ?? []).filter((c) => !answered.has(c.id));
+      const sends = await this.sendsWrittenAhead(open.map((c) => c.id));
+      // In the order the agent wrote them, before the turn carries on.
+      for (const c of open) this.history.push({ role: "tool", toolCallId: c.id, content: (await this.resumeSend(c, sends.get(c.id))) ?? INTERRUPTED });
     }
     for (const task of await store.tasks(this.id)) {
       this.note(`[Chinwag] ${task.tool} (${task.taskId}) was still running in the background when the agent restarted. It may or may not have finished; check before telling them it is done.`);
@@ -881,6 +894,37 @@ export class Conversation {
     const row = await store.conversation(this.id);
     this.resumeTurn = row?.turnOpen === true;
     if ((this.resumeTurn || this.hasWork()) && !this.running) this.schedule(0);
+  }
+
+  private async sendsWrittenAhead(callIds: string[]): Promise<Map<string, SendRow>> {
+    const { store } = this.settings;
+    if (!callIds.length || !store.durable || !store.sendsFor) return new Map();
+    try {
+      return new Map((await store.sendsFor(this.id, callIds)).map((r) => [r.callId, r]));
+    } catch (error) {
+      console.warn("flow: could not read conversation %s's sends written ahead:", this.id, error);
+      return new Map();
+    }
+  }
+
+  /**
+   * A send call a restart cut off, written ahead: how it ended, if it was settled; a pending one
+   * goes again with its key on a channel that dedupes by it, within a day. Null: not known.
+   */
+  private async resumeSend(call: ToolCall, row: SendRow | undefined): Promise<string | null> {
+    if (!row) return null;
+    if (row.status !== "pending") return row.result ?? "";
+    const link = this.channels.get(row.channel);
+    const fresh = this.settings.now() - row.createdAt < RESEND_WITHIN_MS;
+    if (!link?.info.idempotentSends || !fresh || call.name !== sendToolName(row.channel)) {
+      this.settings.emit(this.id, "send.resumed", { key: row.key, channel: row.channel, outcome: "unknown", reason: !link ? "no link to the channel" : !link.info.idempotentSends ? "the channel does not dedupe sends" : !fresh ? "older than a day" : "its send tool is gone" });
+      return null;
+    }
+    this.sendTools = new Map(this.views().map((v) => [sendToolName(v.name), v.name]));
+    this.sendKeys.set(call.id, row.key);
+    const said = await this.talk(call);
+    this.settings.emit(this.id, "send.resumed", { key: row.key, channel: row.channel, outcome: said.outcome ?? "sent" });
+    return said.content;
   }
 
   /** Messages from the person the agent has yet to answer (not those answered with no model call). */
@@ -1054,11 +1098,45 @@ export class Conversation {
 
   /** Stores history entries not yet stored, and marks the inbox rows they came from handled. */
   private flush(items: Array<{ inbox?: number }> = []): void {
+    const { seq, entries } = this.unsaved();
+    if (!entries.length && !items.length) return;
+    this.persist(() => this.settings.store.appendHistory(this.id, seq, entries, items.flatMap((i) => (i.inbox === undefined ? [] : [i.inbox]))));
+  }
+
+  /** History entries not yet stored, from `seq` on; they count as stored from now. */
+  private unsaved(): { seq: number; entries: ChatMessage[] } {
     const seq = this.saved;
     const entries = this.history.slice(seq).map((e) => (e.role === "user" && e.media ? { ...e, media: e.media.map(stored) } : e));
     this.saved = this.history.length;
-    if (!entries.length && !items.length) return;
-    this.persist(() => this.settings.store.appendHistory(this.id, seq, entries, items.flatMap((i) => (i.inbox === undefined ? [] : [i.inbox]))));
+    return { seq, entries };
+  }
+
+  /**
+   * Stores a step whose response makes send calls: with a durable store, its entries and those
+   * sends, pending, with their keys, in one write that is awaited, so nothing goes before its
+   * intent is stored. A store that cannot write sends ahead stores the entries as before.
+   */
+  private async flushStep(talk: ToolCall[]): Promise<void> {
+    const { store } = this.settings;
+    this.sendKeys.clear();
+    const sends = store.durable && store.beginSends
+      ? talk.flatMap((c) => (this.sendTools.has(c.name) ? [{ key: `send:${this.id}:${this.turns}:${c.id}`, callId: c.id, channel: this.sendTools.get(c.name)! }] : []))
+      : [];
+    if (!sends.length) return this.flush();
+    for (const s of sends) this.sendKeys.set(s.callId, s.key);
+    const { seq, entries } = this.unsaved();
+    const at = this.settings.now();
+    await this.persist(async () => {
+      try {
+        await store.beginSends!(this.id, seq, entries, sends, at);
+      } catch (error) {
+        // An older store service, or a write that failed: the step is stored as before and its
+        // sends still go, keyed, but a restart cannot tell how they ended.
+        if (!sendsWarned) console.warn("flow: could not write conversation %s's sends ahead; they go anyway (later failures are not logged):", this.id, error);
+        sendsWarned = true;
+        await store.appendHistory(this.id, seq, entries);
+      }
+    });
   }
 
   /** Only the latest MEDIA_SHOWN photos and PDFs keep their bytes; older ones are named, not shown. */
@@ -1221,7 +1299,7 @@ export class Conversation {
       }
 
       this.history.push({ role: "assistant", content: response.text, toolCalls: response.toolCalls });
-      this.flush();
+      await this.flushStep(talk);
       if (work.length) acted = true;
       const working = this.runTools(work);
       const said: Array<{ content: string; refused: boolean }> = [];
@@ -1289,9 +1367,20 @@ export class Conversation {
    * delivered; one that failed on the way is told as a message of its own. `refused` is a call
    * that did nothing because of its input: the agent gets another step to fix it.
    */
-  private async talk(call: ToolCall): Promise<{ content: string; refused: boolean }> {
-    const refused = (content: string) => ({ content, refused: true });
-    const done = (content = "") => ({ content, refused: false });
+  private async talk(call: ToolCall): Promise<{ content: string; refused: boolean; outcome?: "sent" | "failed" | "refused" }> {
+    // A send written ahead is settled with what the model is told, so a restart tells it the same.
+    const key = this.sendKeys.get(call.id);
+    this.sendKeys.delete(call.id);
+    const settle = <T extends { content: string; refused: boolean }>(r: T, outcome: "sent" | "failed" | "refused") => {
+      const { store } = this.settings;
+      if (key && store.settleSend) {
+        const at = this.settings.now();
+        this.persist(() => store.settleSend!(key, outcome, r.content, at));
+      }
+      return { ...r, outcome };
+    };
+    const refused = (content: string) => settle({ content, refused: true }, "refused");
+    const done = (content = "", outcome: "sent" | "failed" | "refused" = "sent") => settle({ content, refused: false }, outcome);
     let raw: unknown;
     try {
       raw = JSON.parse(call.arguments || "{}");
@@ -1338,11 +1427,11 @@ export class Conversation {
             ...(hasFields ? { fields } : {}),
             ...preview,
           });
-      const result = await this.sendMessage(channel, outbound, "agent");
+      const result = await this.sendMessage(channel, outbound, "agent", link, key);
       if ("refused" in result) return refused(result.refused);
       if ("failure" in result) {
         this.undelivered(input.text, result.failure);
-        return done();
+        return done("", "failed");
       }
       // What went, after beforeSend, is what the events, the history and the transcript keep.
       const sent = result.sent as Extract<Outbound, { type: "message" | "carousel" }>;
@@ -1422,7 +1511,7 @@ export class Conversation {
    * the transcript keep), why it was refused (also a `message.refused` event), or why it failed on
    * the way. `link` is the channel's link when it is not this conversation's current one.
    */
-  private async sendMessage(channel: string, draft: OutboundMessage, origin: SendContext["origin"], link = this.channels.get(channel)): Promise<{ sent: OutboundMessage } | { refused: string } | { failure: string }> {
+  private async sendMessage(channel: string, draft: OutboundMessage, origin: SendContext["origin"], link = this.channels.get(channel), idempotencyKey?: string): Promise<{ sent: OutboundMessage } | { refused: string } | { failure: string }> {
     if (this.closed) return { failure: "this person was forgotten" };
     if (!link) return { failure: `no way to reach them on ${channel} right now` };
     const refuse = (outbound: OutboundMessage, by: "beforeSend" | "content", reason: string, refusal?: ContentRefusal) => {
@@ -1450,7 +1539,8 @@ export class Conversation {
     if (refusal) return refuse(outbound, "content", contentRefusalText(link.info, refusal), refusal);
     let receipt: void | SendReceipt;
     try {
-      receipt = await link.deliver(outbound);
+      // A send written ahead goes with its key, set after beforeSend so no rewrite drops it.
+      receipt = await link.deliver(idempotencyKey ? { ...outbound, idempotencyKey } : outbound);
     } catch (error) {
       return { failure: error instanceof Error ? error.message : String(error) };
     }
