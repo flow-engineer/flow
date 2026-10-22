@@ -1,10 +1,13 @@
-// covers: src/business-events/engine.ts src/business-events/signature.ts src/business-events/quiet.ts src/business-events/phrasing.ts src/business-events/testlist.ts src/agent.ts
+// covers: src/business-events/engine.ts src/business-events/signature.ts src/business-events/quiet.ts src/business-events/phrasing.ts src/business-events/testlist.ts src/agent.ts src/store.ts
 // Business events: a made-up shop's backend posts signed events; flowEvents answers each request,
 // sends by delivery level (quiet hours, one a day, collapse, cancel, expiry), lets the agent phrase
 // it inside the window (values and link checked), raises what people watch, caps nudges, keeps the
 // business's own copies as context, and keeps staging sends to the test list. Most tests use a fake
-// sender (no model); the last ones mount it on a real agent.
+// sender (no model); the last ones mount it on a real agent, one across a restart.
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   createAgent,
@@ -12,6 +15,7 @@ import {
   flowEvents,
   quietHoursEnd,
   signEvent,
+  sqlite,
   verifyEventSignature,
   whatsapp,
   type BusinessEvent,
@@ -707,4 +711,49 @@ test("mounted on createAgent: a held exact send goes as the template on the agen
   turn.answer(respond(call("send_whatsapp", { text: "It's $5 now." })));
   await h.agent.conversation(h.conversationId)!.whenIdle();
   assert.equal(h.sent.length, before + 1, "the copy itself was never sent");
+});
+
+test("mounted on an agent with a durable database: after a restart a taken event id is not processed again, a held send still goes, and an optional one still waits its day", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "flow-events-")), "agent.db");
+  const clock = { now: NOON };
+  const start = async () => {
+    const sent: string[] = [];
+    const events = flowEvents({ secret: SECRET, catalog, now: () => clock.now, log: () => {} });
+    const agent = createAgent({
+      files: { "AGENTS.md": "A shop's agent." },
+      model: scriptedModel().model,
+      now: () => clock.now,
+      scheduleCheckMs: 0,
+      database: sqlite(path),
+      channels: [whatsapp({ sendMessage: async (_to, m) => void sent.push(`text:${m.text}`), sendTemplate: async (_to, t) => void sent.push(`template:${t.name}`) })],
+      routes: events.routes,
+      onTick: events.onTick,
+    });
+    events.attach(agent);
+    await agent.resume();
+    const post = async (e: BusinessEvent) => {
+      const raw = JSON.stringify(e);
+      const r = await agent.fetch(new Request("http://agent.test/v1/events", { method: "POST", headers: { "flow-signature": signEvent(SECRET, raw, clock.now) }, body: raw }));
+      await events.idle();
+      return ((await r.json()) as { status: string }).status;
+    };
+    return { agent, events, sent, post };
+  };
+  const exact = { user: { phone: PERSON }, wording: "exact" };
+  const shipped = envelope("order.shipped", exact);
+
+  const before = await start();
+  assert.equal(await before.post(shipped), "accepted");
+  assert.equal(await before.post(envelope("restock", { ...exact, collapseKey: "mug" })), "accepted");
+  clock.now = NIGHT;
+  assert.equal(await before.post(envelope("order.delayed", exact)), "accepted");
+  assert.deepEqual(before.sent, ["template:order_shipped", "template:restock"], "the late one is held for quiet hours");
+
+  const after = await start();
+  assert.equal(await after.post(shipped), "duplicate");
+  clock.now = MORNING;
+  assert.equal(await after.post(envelope("restock", { ...exact, collapseKey: "mug" })), "accepted");
+  await after.agent.runDue();
+  await after.events.idle();
+  assert.deepEqual(after.sent, ["template:order_delayed"], "the held send went; the second restock waits its day");
 });

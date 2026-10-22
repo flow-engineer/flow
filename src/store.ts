@@ -96,6 +96,11 @@ const MIGRATIONS: Array<(t: Types) => string> = [
   (t) => `CREATE TABLE conversation_leases (
      agent_id TEXT NOT NULL, conversation_id TEXT NOT NULL, runner TEXT NOT NULL, until ${t.int} NOT NULL, epoch ${t.int} NOT NULL,
      PRIMARY KEY (agent_id, conversation_id))`,
+  // flowEvents' send state (business events), so a restart does not forget it: one JSON snapshot
+  // per agent (held sends, caps, watches...), and each event id it took, kept a while to stop repeats.
+  (t) => `CREATE TABLE event_state (agent_id TEXT NOT NULL, state TEXT NOT NULL, saved_at ${t.int} NOT NULL, PRIMARY KEY (agent_id));
+   CREATE TABLE event_seen (agent_id TEXT NOT NULL, id TEXT NOT NULL, at ${t.int} NOT NULL, PRIMARY KEY (agent_id, id));
+   CREATE INDEX event_seen_at ON event_seen (agent_id, at)`,
 ];
 
 /** Quiet hours, "HH:MM" to "HH:MM" in the person's own time; they may wrap midnight. */
@@ -194,8 +199,12 @@ const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
 /**
  * What an agent needs of its store: a Store, or something that forwards each call to a Store
  * elsewhere (a store service that holds the database, so the agent never holds its credentials).
+ * flowEvents' state methods are optional: without them that state stays in memory.
  */
-export type StoreApi = Omit<Store, "db" | "agentId">;
+export type StoreApi = Omit<Store, "db" | "agentId" | "loadEventState" | "saveEventState"> & Partial<Pick<Store, "loadEventState" | "saveEventState">>;
+
+/** Where flowEvents keeps its send state. */
+export type EventStateStore = Pick<Store, "loadEventState" | "saveEventState">;
 
 export class Store {
   readonly db: Database;
@@ -227,6 +236,24 @@ export class Store {
       }
     })();
     return this.ready;
+  }
+
+  // flowEvents' send state (business events).
+
+  /** The saved snapshot (null: none yet) and the event ids taken. */
+  async loadEventState(): Promise<{ state: string | null; seen: string[] }> {
+    const [row] = await this.db.query("SELECT state FROM event_state WHERE agent_id = ?", [this.agentId]);
+    const seen = await this.db.query("SELECT id FROM event_seen WHERE agent_id = ?", [this.agentId]);
+    return { state: typeof row?.state === "string" ? row.state : null, seen: seen.map((r) => String(r.id)) };
+  }
+
+  /** Saves the snapshot (null: unchanged) and newly taken event ids at `at`; forgets ids taken before `forgetBefore`. */
+  async saveEventState(state: string | null, seen: string[], at: number, forgetBefore: number): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      if (state !== null) await tx.run("INSERT INTO event_state (agent_id, state, saved_at) VALUES (?, ?, ?) ON CONFLICT (agent_id) DO UPDATE SET state = excluded.state, saved_at = excluded.saved_at", [this.agentId, state, at]);
+      for (const id of seen) await tx.run("INSERT INTO event_seen (agent_id, id, at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING", [this.agentId, id, at]);
+      await tx.run("DELETE FROM event_seen WHERE agent_id = ? AND at < ?", [this.agentId, forgetBefore]);
+    });
   }
 
   // People and their channels.
