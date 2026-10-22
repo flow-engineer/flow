@@ -136,6 +136,32 @@ The rules each function keeps:
 - `verify` checks signature (or lookup), expiry, `resource` and revocation and returns `{ key,
   scopes? }` or null. It runs on every MCP request; keep it fast.
 - `revoke` ends that token. `active` false makes every later `verify` and refresh fail.
+- `verify` may also return `credentials` (`McpIdentity`'s): that request's backend access for the
+  tools, so they call the brand's API as the person without decrypting the token a second time.
+
+**What the brand's backend must offer.** Check this before writing the functions, and tell the
+owner on day one what is missing: each gap is a change to the brand's backend (the
+`flow-framework-context` skill says how to propose and make it), not a placeholder in the agent.
+
+| Function | The backend needs |
+| --- | --- |
+| code route, `exchange` | a server-side check of the site's session, and somewhere to keep a code's id until it is used |
+| `active` | the account's status (disabled, deleted) by user id |
+| `issue`, `refresh` | a way to mint the credential its API trusts for this user, or a signing secret for the brand's own tokens |
+| `verify` | that credential checked on every request, fast |
+| `revoke` | that credential ended (a key deleted, a token listed as revoked until it expires) |
+
+Used code ids, single-use proofs and revoked token ids are the brand's: keep them in its database.
+In memory is for the laptop only; a restart forgets them.
+
+**A brand whose API takes per-user API keys.** The key is the credential its API trusts, so it is
+minted per connection and ends with it. When a server can mint it for a user id, `issue` mints it
+and returns a token that carries it (sealed with the brand's secret) or a reference to it;
+`verify` returns `{ key, credentials }` with the API key, and `revoke` deletes it. When only the
+person's browser session can mint it, the code route mints it and keeps it with the code in the
+brand's store; with no store it may seal it into the code itself (AES-GCM under the code's secret,
+with the code's expiry and id), the one case where the redirect carries a credential, encrypted.
+`exchange` then passes it to `issue` as `authorization`.
 
 For Cognito with a custom page, the page stores the Cognito `sub` with the code and tokens are the
 brand's own (a signed JWT is enough); Cognito's tokens are never handed to MCP hosts. For Firebase,
@@ -148,30 +174,33 @@ secrets.
 
 ## Test it on the laptop
 
-Everything runs on localhost. Claude and ChatGPT cannot reach localhost; the agent's CLI runs the
-same OAuth they do (discovery, registration, PKCE, refresh), so it stands in for them. Run each step
+Everything runs on localhost. Claude and ChatGPT cannot reach localhost; `flow inspect` runs the
+same OAuth they do (discovery, registration, PKCE, refresh), so it stands in for them. Below,
+`inspect` is `npx -y -p @flow-engineer/flow -p @modelcontextprotocol/client@2.3.1 flow inspect
+http://127.0.0.1:<port>/mcp` (the `flow-framework` skill says more). Run each step
 and compare; stop at the first that differs and fix it before going on.
 
 1. **Run the brand's app and the agent locally**, the bridge with `issuer: "http://127.0.0.1:<port>"`,
    `development: true` and `databaseStorage(sqlite(), issuer)` (in memory is fine). The bridge
    answers only on its issuer's own host: use that exact host everywhere (`127.0.0.1` and `localhost`
-   are different hosts), and allow that origin for `return_to`. A sign-in left more than 10 minutes
+   are different hosts), and allow that origin for `return_to`. Pin the port (`MCP_PORT`): the issuer
+   and the brand's allowed `return_to` follow it, so a moved port breaks sign-in. A sign-in left more than 10 minutes
    expires at the bridge; start it again. `curl
    http://127.0.0.1:<port>/.well-known/oauth-protected-resource/mcp` lists the issuer under
    `authorization_servers`, and `curl http://127.0.0.1:<port>/.well-known/oauth-authorization-server`
    answers with `registration_endpoint`.
-2. **Signed out.** Call a `signIn: "required"` tool through the CLI. Expected: exit 3, "Sign in
+2. **Signed out.** `inspect call <tool>` on a `signIn: "required"` tool. Expected: exit 3, "Sign in
    first".
-3. **Sign in once, end to end.** `<cli> auth login --server http://127.0.0.1:<port>/mcp` opens the
-   browser on the brand's own login page, then shows "Signed in. You can close this tab". Expected:
-   exit 0, and `<cli> auth status --json` says `"signedIn": true, "source": "login"`.
+3. **Sign in once, end to end.** `inspect auth` (in the background) prints the link; it opens the
+   brand's own login page, then shows "Signed in. You can close this tab". Expected: exit 0, and the
+   token's scope printed.
 4. **The right person.** Call a required tool that returns `context.key` (add a `whoami` tool while
    testing). Expected: the brand's user id for the account just used.
 5. **Refresh.** Expire the access token at the brand (or issue a short `expires_in`) and call the
    tool again. Expected: the same user id, one `refresh` call at the brand, no new sign-in.
-6. **Sign-out.** `<cli> auth logout`, then the tool. Expected: exit 3. `active` false, or a revoked
+6. **Sign-out.** `inspect auth logout`, then the tool. Expected: exit 3. `active` false, or a revoked
    token, gives the same.
-7. **Every way a person arrives**, each from a fresh `<cli> auth logout` then `auth login`:
+7. **Every way a person arrives**, each from a fresh `inspect auth`:
    signed out on the site (the same tab goes to the login page, then back on its own after sign-in);
    already signed in (no page shown, straight to "Signed in"); signed in with an expired site token
    (refreshed, then through); a hand-off link with no parameters ("Invalid link"); a pending
@@ -184,6 +213,10 @@ and compare; stop at the first that differs and fix it before going on.
 `test/oauth.test.ts` in the framework runs steps 2 to 6 against a made-up brand and a simulated
 browser; copy its `brand()` and `browse()` helpers to make the same check a test in the agent's
 repository. Steps 7 and 8 need the brand's real login page in a browser.
+
+Codex and Claude Code run the same OAuth as the CLI. `codex mcp add <name> --url
+http://127.0.0.1:<port>/mcp` starts sign-in at once and waits for the browser: run it in the
+background and give the owner the link. `codex mcp list` then shows the server with OAuth.
 
 Then tell the user, in one short message: which account they signed in as (the user id), that the
 CLI and MCP saw that id, and anything that failed with the step's output.
