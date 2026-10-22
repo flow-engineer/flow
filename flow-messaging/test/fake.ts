@@ -9,7 +9,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAgent, type Database, type FlowEvent } from "../../src/index.ts";
+import { createAgent, type Database, type FlowEvent, type Tool } from "../../src/index.ts";
 import { scriptedModel } from "./helpers.ts";
 import { flowMessaging, type FlowMessagingOptions } from "../src/index.ts";
 
@@ -136,7 +136,7 @@ function gateOf() {
 }
 
 /** An agent on the three Flow channels, with its webhook served, driven by a scripted model. */
-export async function liveAgent(flow: { url: string }, options: { database?: Database; messaging?: Pick<FlowMessagingOptions, "waitFor" | "waitTimeoutMs"> } = {}) {
+export async function liveAgent(flow: { url: string }, options: { database?: Database; messaging?: Pick<FlowMessagingOptions, "waitFor" | "waitTimeoutMs">; tools?: Tool[] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "flow-fm-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
@@ -147,6 +147,7 @@ export async function liveAgent(flow: { url: string }, options: { database?: Dat
     model: scripted.model,
     channels: [fm.whatsapp({ sender: SENDERS.whatsapp }), fm.telegram({ sender: SENDERS.telegram }), fm.sms({ sender: SENDERS.sms })],
     database: options.database,
+    tools: options.tools,
     debounceMs: 0,
     deadlineMs: 50,
     scheduleCheckMs: 0,

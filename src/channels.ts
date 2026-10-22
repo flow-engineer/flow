@@ -10,7 +10,7 @@
 //   customUI("app", new MyApp())                         your own web or mobile UI, with your params
 
 import type { z } from "zod";
-import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, ReplyButton, SendReceipt, Template, TemplateDefinition } from "./types.ts";
+import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, RecordRow, RecordsOutbound, ReplyButton, SendReceipt, Template, TemplateDefinition } from "./types.ts";
 
 export type ChannelKind = "sms" | "whatsapp" | "custom";
 
@@ -146,6 +146,12 @@ export interface CustomUIProvider {
   sendMessage(to: string, message: Message & Record<string, unknown>): Promise<void | SendReceipt>;
   /** A carousel, on a UI whose info declares carousels; without it the cards go one by one through sendMessage. */
   sendCarousel?(to: string, carousel: Carousel): Promise<void | SendReceipt>;
+  /**
+   * One page of records, on a UI whose info declares `records`: the rows and where the page is, for
+   * your UI to draw (a pick comes back as a choice with the row's id). Without it each page goes
+   * through sendMessage as Markdown numbered lines.
+   */
+  sendRecords?(to: string, records: RecordsPage): Promise<void | SendReceipt>;
   react?(to: string, messageId: string, emoji: string): Promise<void>;
   typing?(to: string, on: boolean): Promise<void>;
   markRead?(to: string, messageIds: string[]): Promise<void>;
@@ -247,9 +253,11 @@ export function sms(provider: SmsProvider, options: { name?: string; instruction
 }
 
 export function customUI(name: string, provider: CustomUIProvider): Channel {
+  const { records, ...declared } = provider.info ?? {};
   const info: ChannelInfo = {
     formatting: "markdown",
-    ...provider.info,
+    ...declared,
+    ...(records && provider.sendRecords ? { records } : {}),
     reactions: Boolean(provider.react),
     status: Boolean(provider.status),
     readReceipts: Boolean(provider.markRead),
@@ -274,6 +282,8 @@ export function customUI(name: string, provider: CustomUIProvider): Channel {
           return provider.markRead?.(to, outbound.messageIds);
         case "status":
           return provider.status?.(to, outbound.text);
+        case "records":
+          return provider.sendRecords?.(to, recordsPage(info, outbound));
         case "template":
           throw new Error(`${name} has no templates`);
       }
@@ -352,6 +362,141 @@ export function fitMessage<M extends { text: string; link?: { label: string; url
   } as M;
 }
 
+/** The id of the "More" row or button under a page of records: a tap sends the next page. */
+export const RECORDS_MORE = "chinwag:more";
+
+/** One page of records, as a custom UI's sendRecords gets it. */
+export interface RecordsPage {
+  text: string;
+  kind: string;
+  /** This page's rows, each with its number in the whole list (from 1). */
+  rows: Array<RecordRow & { number: number }>;
+  pick?: { label: string };
+  handle?: string;
+  /** This page (from 1), how many there are, and how many rows in all. */
+  page: number;
+  pages: number;
+  total: number;
+  replyTo?: string;
+}
+
+type RecordsMode = "cards" | "list" | "buttons" | "text";
+
+/**
+ * How records are paged on a channel: what renders them (cards when every row has a photo and the
+ * channel has carousels, else a list, else buttons, else numbered text; read-only rows always as
+ * text), how many a page holds (a channel's records.maxRows, else 5 on SMS, else 10, within its
+ * list's or buttons' maximum) and how many of those are rows (one is "More" on a list or buttons
+ * when there are more pages).
+ */
+export function recordsLayout(info: ChannelInfo, records: Pick<RecordsOutbound, "rows" | "pick" | "page">): { mode: RecordsMode; perPage: number; pages: number } {
+  const total = records.rows.length;
+  let size = records.page?.size ?? info.records?.maxRows ?? (info.platform === "sms" ? 5 : 10);
+  // A channel that takes records itself draws them its own way: pages hold only rows.
+  let mode: RecordsMode = "text";
+  if (info.records) mode = "text";
+  else if (records.pick && info.carousels && total >= 2 && records.rows.every((r) => r.image)) {
+    mode = "cards";
+    size = Math.min(size, info.carousels.maxCards);
+  } else if (records.pick && info.lists) {
+    mode = "list";
+    size = Math.min(size, info.lists.maxRows);
+  } else if (records.pick && info.buttons && info.buttons.max >= 2) {
+    mode = "buttons";
+    size = Math.min(size, info.buttons.max);
+  }
+  size = Math.max(1, size);
+  const perPage = (mode === "list" || mode === "buttons") && total > size ? Math.max(1, size - 1) : size;
+  return { mode, perPage, pages: Math.max(1, Math.ceil(total / perPage)) };
+}
+
+/** One page of records with its rows numbered, as a custom UI's sendRecords gets it. */
+export function recordsPage(info: ChannelInfo, records: RecordsOutbound): RecordsPage {
+  const { perPage, pages } = recordsLayout(info, records);
+  const page = Math.min(Math.max(1, records.page?.number ?? 1), pages);
+  const from = (page - 1) * perPage;
+  return {
+    text: records.text,
+    kind: records.kind,
+    rows: records.rows.slice(from, from + perPage).map((row, i) => ({ ...row, number: from + i + 1 })),
+    ...(records.pick ? { pick: records.pick } : {}),
+    ...(records.handle ? { handle: records.handle } : {}),
+    page,
+    pages,
+    total: records.rows.length,
+    ...(records.replyTo ? { replyTo: records.replyTo } : {}),
+  };
+}
+
+/** Cuts text to `max` code points, ending with "…" when cut. */
+function trimTo(text: string, max: number): string {
+  const chars = [...text];
+  return chars.length <= max ? text : `${chars.slice(0, Math.max(0, max - 1)).join("").trimEnd()}…`;
+}
+
+/**
+ * One page of records as the messages a channel without `records` is sent, in order: WhatsApp a
+ * list (details as row descriptions, or numbered in the text where rows have none), Telegram
+ * numbered lines and a button per row, iMessage, SMS and read-only rows numbered text that says to
+ * reply with a number (and MORE), photos with a pick button as a carousel. Each fitted to the
+ * channel's limits (details trimmed, then left out); ids are never cut.
+ */
+export function recordsMessages(info: ChannelInfo, records: RecordsOutbound): Array<Extract<Outbound, { type: "message" | "carousel" }>> {
+  const { mode } = recordsLayout(info, records);
+  const page = recordsPage(info, records);
+  const more = page.page < page.pages;
+  const nextCount = Math.min(page.rows.length, page.total - (page.rows.at(-1)?.number ?? 0));
+  const keyed = (i: number) => (records.idempotencyKey ? { idempotencyKey: i ? `${records.idempotencyKey}:${i}` : records.idempotencyKey } : {});
+  const head = { ...(records.replyTo ? { replyTo: records.replyTo } : {}), ...(records.preview === false ? { preview: false as const } : {}) };
+  const bold = (t: string) => (info.formatting === "whatsapp" ? `*${t}*` : info.formatting === "markdown" ? `**${t}**` : t);
+  const limits = info.platform ? CONTENT_LIMITS[info.platform] : undefined;
+  const fits = (max: number) => (text: string) => (limits?.smsSegments ? smsSegmentsOf(text).segments <= 3 : (limits?.utf16 ? text.length : codePoints(text)) <= max);
+  /** The intro, numbered lines and a footer, with details trimmed and then left out until it fits. */
+  const body = (fit: (text: string) => boolean, footer: string[] = []) => {
+    for (const [titleMax, detailMax] of [[60, 120], [60, 60], [60, 0], [30, 0]]) {
+      const lines = page.rows.map((r) => `${r.number}. ${bold(trimTo(r.title, titleMax))}${r.detail && detailMax ? `\n${trimTo(r.detail, detailMax)}` : ""}`);
+      const text = [records.text, lines.join("\n"), ...footer].filter(Boolean).join("\n\n");
+      if (fit(text) || titleMax === 30) return text;
+    }
+    return records.text;
+  };
+  const maxText = info.maxLength ?? 4_000;
+  if (mode === "cards" && page.rows.length >= 2) {
+    const c = info.carousels!;
+    const cards: CarouselCard[] = page.rows.map((r) => ({
+      image: r.image!,
+      text: trimTo(r.detail ? `${r.title}\n${r.detail}` : r.title, c.cardTextMax),
+      buttons: [{ id: r.id, label: trimTo(records.pick!.label, c.labelMax) }],
+    }));
+    const out: Array<Extract<Outbound, { type: "message" | "carousel" }>> = [{ type: "carousel", text: records.text, cards, ...head, ...keyed(0) }];
+    if (more) {
+      const count = `${page.rows[0].number}–${page.rows.at(-1)!.number} / ${page.total}`;
+      out.push(info.buttons ? { type: "message", text: count, buttons: [{ id: RECORDS_MORE, label: "More" }], ...keyed(1) } : { type: "message", text: `${count}\n\nReply MORE for the next ${nextCount}.`, ...keyed(1) });
+    }
+    return out;
+  }
+  const moreButton = more ? [{ id: RECORDS_MORE, label: "More" }] : [];
+  if (mode === "list" || (mode === "cards" && info.lists)) {
+    const l = info.lists!;
+    const described = l.descriptions !== false;
+    const max = limits?.buttonsText ?? maxText;
+    const rows: ListRow[] = page.rows.map((r) => ({ id: r.id, title: trimTo(r.title, l.titleMax), ...(described && r.detail ? { description: trimTo(r.detail, 72) } : {}) }));
+    const text = described ? records.text : body(fits(max));
+    return [{ type: "message", text, list: { button: trimTo(records.pick!.label, l.buttonMax), rows: [...rows, ...moreButton.map((m) => ({ id: m.id, title: m.label }))] }, ...head, ...keyed(0) }];
+  }
+  if (mode === "buttons" || (mode === "cards" && info.buttons)) {
+    const b = info.buttons!;
+    const max = limits?.buttonsText ?? maxText;
+    const buttons = [...page.rows.map((r) => ({ id: r.id, label: trimTo(`${r.number}. ${r.title}`, b.labelMax) })), ...moreButton];
+    return [{ type: "message", text: body(fits(max)), buttons, ...head, ...keyed(0) }];
+  }
+  const footer = [
+    ...(records.pick ? ["Reply with a number to pick one."] : []),
+    ...(more ? [`Reply MORE for the next ${nextCount}.`] : []),
+  ];
+  return [{ type: "message", text: body(fits(maxText), [footer.join(" ")].filter(Boolean)), ...head, ...keyed(0) }];
+}
+
 /**
  * Each platform's content limits as Flow Messaging enforces them (its API spec, flow-engineer/sdk,
  * and the checks its server runs on every send: the channel's text, caption and buttons-text limits,
@@ -409,6 +554,14 @@ export function contentRefusal(info: ChannelInfo, outbound: Outbound): ContentRe
   const limits = info.platform ? CONTENT_LIMITS[info.platform] : undefined;
   if (!limits) return null;
   if (outbound.type === "message") return messageRefusal(limits, outbound);
+  if (outbound.type === "records") {
+    if (info.records) return null;
+    for (const m of recordsMessages(info, outbound)) {
+      const refusal = contentRefusal(info, m);
+      if (refusal) return refusal;
+    }
+    return null;
+  }
   if (outbound.type !== "carousel") return null;
   if (info.carousels) return carouselRefusal(outbound);
   for (const m of carouselMessages(info, carouselOf(outbound))) {

@@ -40,15 +40,16 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type ContentRefusal } from "./channels.ts";
+import { RECORDS_MORE, contentRefusal, declaredTemplate, fillTemplate, fitMessage, recordsLayout, recordsMessages, recordsPage, type ContentRefusal } from "./channels.ts";
+import { handleOf, isRecords, type RecordsHandle, type RecordsResult } from "./records.ts";
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { scheduleTools } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
-import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
+import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, pickedNote, reactInput, recordsResultText, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
-import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
+import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, RecordRow, RecordsOutbound, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 
 export interface ConversationSettings {
   model: Model;
@@ -213,7 +214,21 @@ interface Pending {
 interface Answer {
   reply: string;
   note?: string;
+  /** A page of records Flow Framework sent for them ("More"), as the history keeps it. */
+  show?: { records: string; ids: string[]; page: number };
 }
+
+/** The records message that is the latest the person got on a channel: what a typed number or MORE refers to. */
+interface Shown {
+  channel: string;
+  handle: string;
+  ids: string[];
+  page: number;
+}
+
+/** Records handles are kept this long, and only the newest RECORDS_KEPT of them. */
+const RECORDS_DAYS_MS = 7 * 24 * 3_600_000;
+const RECORDS_KEPT = 20;
 
 interface Note {
   text: string;
@@ -257,6 +272,15 @@ export class Conversation {
   private sentThisTurn = new Set<string>();
   /** The texts sent to the person so far, oldest first: read from the history at the first send, then kept up to date (SendContext.sent). */
   private sentTexts: string[] | null = null;
+  /** Records tools returned, by handle (r1), the newest RECORDS_KEPT; and how many handles were given. */
+  private readonly handles = new Map<string, RecordsHandle>();
+  private handleCount = 0;
+  /** The latest message the person got, when it was records. */
+  private shown: Shown | null = null;
+  /** What the agent is told of a records row a message picked, by the message's id, until it arrives. */
+  private readonly pickNotes = new Map<string, string>();
+  /** The conversation was read from the store (or is new): what it last showed is known. */
+  private loadedNow = false;
   /** Where this turn's entries start in the history: a reset placed during the turn keeps them. */
   private turnFrom = 0;
   private direct: Direct[] = [];
@@ -353,6 +377,7 @@ export class Conversation {
     this.builtins = new Map(builtins.map((t) => [t.name, t]));
     this.builtinSpecs = builtins.map(toSpec);
     this.loaded = settings.ready.then(() => (existing ? this.claimAndLoad() : settings.store.createConversation(id, personKey)));
+    void this.loaded.then(() => (this.loadedNow = true), () => (this.loadedNow = true));
     this.writes = this.loaded.catch((error) => console.warn("flow: conversation %s did not load:", id, error));
   }
 
@@ -429,7 +454,7 @@ export class Conversation {
 
   /** A message from the person on `channel`; returns the id the agent sees it by. */
   receive(input: string | Incoming, options: { channel: string; messageId?: string }): string {
-    const incoming: Incoming = typeof input === "string" ? { text: input } : input;
+    let incoming: Incoming = typeof input === "string" ? { text: input } : input;
     const channel = options.channel;
     if (options.messageId !== undefined && this.messageIds.get(options.messageId) === channel) {
       // The channel gave this message before (a retry): it is taken once.
@@ -438,17 +463,36 @@ export class Conversation {
     }
     const id = options.messageId ?? `m${++this.messageCount}`;
     this.messageIds.set(id, channel);
+    /** A pick from the records they were shown becomes one; a More is answered here. True when it was. */
+    const answeredHere = () => {
+      const pick = this.recordsPick(incoming, channel);
+      if (pick && "more" in pick) {
+        // The next page of the records they were shown, sent by Flow Framework with no model call.
+        const answered = this.answered(incoming, { channel, messageId: options.messageId, id, show: pick.more }, "");
+        if (answered) void answered.taken.then((taken) => (taken ? answered.send() : undefined));
+        return true;
+      }
+      if (pick) {
+        incoming = pick.incoming;
+        this.pickNotes.set(id, pick.note);
+      }
+      return false;
+    };
     void this.typing(true, channel);
     // A file or voice note is read before message.in. Say the message arrived first, so a test
     // run is not settled as silence while the transcript is still being made.
     if (incoming.attachments?.length) this.settings.emit(this.id, "message.arrived", { messageId: id, channel });
-    if (!incoming.attachments?.length && !this.preparing) {
-      this.arrive(incoming, id, channel, options.messageId !== undefined, { marks: [], media: [] });
+    // Only a tap, a number or MORE can answer records: only those wait for the store's copy.
+    const couldPick = Boolean(incoming.choice) || /^\s*(#?\d{1,3}\.?|more[.!]?)\s*$/i.test(incoming.text);
+    if (!incoming.attachments?.length && !this.preparing && (this.loadedNow || !couldPick)) {
+      if (!answeredHere()) this.arrive(incoming, id, channel, options.messageId !== undefined, { marks: [], media: [] });
       return id;
     }
-    // Its files are read first (a voice note transcribed), and messages after it wait their turn.
-    const ready = (this.preparing ?? Promise.resolve())
+    // Its files are read first (a voice note transcribed), and messages after it wait their turn;
+    // before the conversation is read from the store, so a pick finds the records they were shown.
+    const ready = (this.preparing ?? this.loaded.then(() => undefined, () => undefined))
       .then(async () => {
+        if (answeredHere()) return;
         const files = await this.readFiles(incoming.attachments ?? []);
         if (!this.closed) this.arrive(incoming, id, channel, options.messageId !== undefined, files);
       })
@@ -465,7 +509,9 @@ export class Conversation {
   /** The message is ready for the agent: it joins the reply in progress, or starts one. */
   private arrive(incoming: Incoming, id: string, channel: string, ownId: boolean, files: Files): void {
     const at = this.settings.now();
-    const item: Pending = { id, text: describe(incoming, files), shown: shownText(incoming, files), ...choiceOf(incoming), channel, ...(files.media.length ? { media: files.media } : {}) };
+    const picked = this.pickNotes.get(id);
+    this.pickNotes.delete(id);
+    const item: Pending = { id, text: describe(incoming, files) + (picked ? `\n${picked}` : ""), shown: shownText(incoming, files), ...choiceOf(incoming), channel, ...(files.media.length ? { media: files.media } : {}) };
     this.pending.push(item);
     this.recentChannels = [...this.recentChannels, channel].slice(-5);
     const link = this.channels.get(channel);
@@ -511,17 +557,18 @@ export class Conversation {
    * reply, unless it was not taken; it starts the delivery at once, so call it once `taken` where
    * a retry must not be answered twice.
    */
-  answered(input: string | Incoming, options: { channel: string; messageId?: string; claimed?: Promise<boolean>; note?: string }, reply: string): { id: string; taken: Promise<boolean>; send(): Promise<void> } | null {
+  answered(input: string | Incoming, options: { channel: string; messageId?: string; claimed?: Promise<boolean>; note?: string; show?: { records: string; ids: string[]; page: number }; id?: string }, reply: string): { id: string; taken: Promise<boolean>; send(): Promise<void> } | null {
     const incoming: Incoming = typeof input === "string" ? { text: input } : input;
     const { channel, messageId } = options;
-    if (messageId !== undefined && this.messageIds.get(messageId) === channel) {
+    // `id`: receive() already gave this message its id (and checked it is new).
+    if (options.id === undefined && messageId !== undefined && this.messageIds.get(messageId) === channel) {
       this.settings.emit(this.id, "message.duplicate", { messageId, channel });
       return null;
     }
-    const id = messageId ?? `m${++this.messageCount}`;
+    const id = options.id ?? messageId ?? `m${++this.messageCount}`;
     this.messageIds.set(id, channel);
     const none: Files = { marks: [], media: [] };
-    const answer: Answer = { reply, ...(options.note ? { note: options.note } : {}) };
+    const answer: Answer = { reply, ...(options.note ? { note: options.note } : {}), ...(options.show ? { note: `[Chinwag] Chinwag sent them page ${options.show.page} of ${options.show.records} for this, with no call to you.`, show: options.show } : {}) };
     const item: Pending = { id, text: describe(incoming, none), shown: shownText(incoming, none), ...choiceOf(incoming), channel, answer };
     this.pending.push(item);
     const at = this.settings.now();
@@ -554,7 +601,8 @@ export class Conversation {
       return true;
     });
     const send = async () => {
-      const result = reply ? await this.sendMessage(channel, { type: "message", text: reply }, "framework") : null;
+      const page = options.show ? this.recordsPageOutbound(channel, options.show) : null;
+      const result = page ? await this.sendMessage(channel, page, "framework") : reply ? await this.sendMessage(channel, { type: "message", text: reply }, "framework") : null;
       if (!(await taken)) return;
       if (result && !("sent" in result)) {
         // Kept as answered with nothing, if it is not in the history yet; the agent hears it did not arrive.
@@ -562,8 +610,10 @@ export class Conversation {
         this.undelivered(reply, "refused" in result ? result.refused : result.failure);
       } else if (result) {
         // What went is what the history keeps.
-        if (result.sent.type === "message") answer.reply = result.sent.text;
-        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent), channel, direct: true, answered: true });
+        if (result.sent.type === "message" || result.sent.type === "records") answer.reply = result.sent.text;
+        if (result.sent.type === "records") answer.show = { ...sentArgs(result.sent).show!, page: result.sent.page?.number ?? 1 } as Answer["show"];
+        else delete answer.show;
+        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent, this.channels.get(channel)?.info), channel, direct: true, answered: true });
       }
       if (!this.running && !this.timer) void this.run();
     };
@@ -858,6 +908,12 @@ export class Conversation {
     this.history.push(...history);
     this.sentTexts = null;
     const only = [...this.channels.keys()][0] ?? "chat";
+    for (const kept of (await store.loadRecords?.(this.id, this.settings.now() - RECORDS_DAYS_MS)) ?? []) this.handles.set(kept.handle, kept);
+    // Handles are never given twice, also once forgotten: the highest any result named.
+    for (const entry of history) if (entry.role === "tool") for (const m of entry.content.matchAll(/\[Chinwag\] records r(\d+):/g)) this.handleCount = Math.max(this.handleCount, Number(m[1]));
+    for (const h of this.handles.keys()) this.handleCount = Math.max(this.handleCount, Number(h.slice(1)) || 0);
+    const last = transcriptOf(history.map((entry) => ({ entry, at: 0 })), only).filter((e) => e.kind === "out").at(-1);
+    if (last?.kind === "out" && last.records) this.shown = { channel: last.channel, handle: last.records.handle, ids: last.records.ids, page: last.records.page };
     for (const entry of history) {
       if (entry.role !== "user") continue;
       for (const m of personMessages(entry, only)) this.messageIds.set(m.id, m.channel);
@@ -1032,12 +1088,15 @@ export class Conversation {
           continue;
         }
         read();
-        const how = m.answer.reply ? `[Chinwag] The business's own rules answered this for you on ${m.channel}, as written:` : `[Chinwag] The business's own rules took this message for you on ${m.channel} and sent nothing back.`;
+        const how = m.answer.show ? "" : m.answer.reply ? `[Chinwag] The business's own rules answered this for you on ${m.channel}, as written:` : `[Chinwag] The business's own rules took this message for you on ${m.channel} and sent nothing back.`;
         this.history.push({ role: "user", content: [line(m), m.answer.note, how].filter(Boolean).join("\n"), messages: [said(m)] });
         if (m.answer.reply) {
           const callId = `answered_${randomUUID().slice(0, 8)}`;
-          this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(m.channel), arguments: JSON.stringify({ text: m.answer.reply }) }] });
-          this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel: m.channel }) });
+          const show = m.answer.show;
+          const page = show ? this.recordsPageOutbound(m.channel, show) : null;
+          const info = this.channels.get(m.channel)?.info;
+          this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(m.channel), arguments: JSON.stringify({ text: m.answer.reply, ...(show ? { show } : {}) }) }] });
+          this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel: m.channel, ...(page && info ? { records: recordsShown(info, page) } : {}) }) });
         }
       }
       read();
@@ -1143,7 +1202,7 @@ export class Conversation {
       this.sendTools = new Map(views.map((v) => [sendToolName(v.name), v.name]));
       const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), context].filter(Boolean).join("\n\n");
       const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
-      const specs = [...ownSpecs, ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk)];
+      const specs = [...ownSpecs, ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk, this.handles.size > 0)];
       const abort = new AbortController();
       if (restarts < this.settings.maxRestarts) this.stepAbort = abort;
       const callStarted = Date.now();
@@ -1305,7 +1364,7 @@ export class Conversation {
       // Some models fill every optional field, with "" or null when they have nothing: that is not sent.
       const given = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
       for (const k of Object.keys(link.params ?? {})) if (given[k] === "" || given[k] === null) delete given[k];
-      const parsed = sendInput(link.info, several, link.params).safeParse(raw);
+      const parsed = sendInput(link.info, several, link.params, this.handles.size > 0).safeParse(raw);
       if (!parsed.success) return refused(`Not sent, fix and send again: ${parsed.error.message}`);
       const input = parsed.data as SendInput;
       const fields = Object.fromEntries(Object.keys(link.params ?? {}).flatMap((k) => ((input as Record<string, unknown>)[k] === undefined ? [] : [[k, (input as Record<string, unknown>)[k]]])));
@@ -1319,7 +1378,13 @@ export class Conversation {
       if (refusal) return refused(refusal);
       // A turn the person did not start: no link preview leads the notification (types.ts, `preview`).
       const preview = this.businessTurn ? { preview: false as const } : {};
-      const outbound: Outbound = input.carousel
+      let shown: RecordsOutbound | undefined;
+      if (input.show) {
+        const made = this.recordsOutbound(input.show.records, input.show.ids, input.text);
+        if (typeof made === "string") return refused(made);
+        shown = { ...made, ...(input.reply_to ? { replyTo: input.reply_to } : {}), ...preview };
+      }
+      const outbound: OutboundMessage | RecordsOutbound = shown ?? (input.carousel
         ? {
             type: "carousel",
             text: input.text,
@@ -1337,7 +1402,7 @@ export class Conversation {
             ...(input.image ? { image: photoOf(input.image) } : {}),
             ...(hasFields ? { fields } : {}),
             ...preview,
-          });
+          }));
       const result = await this.sendMessage(channel, outbound, "agent");
       if ("refused" in result) return refused(result.refused);
       if ("failure" in result) {
@@ -1345,14 +1410,14 @@ export class Conversation {
         return done();
       }
       // What went, after beforeSend, is what the events, the history and the transcript keep.
-      const sent = result.sent as Extract<Outbound, { type: "message" | "carousel" }>;
+      const sent = result.sent as Extract<Outbound, { type: "message" | "carousel" | "records" }>;
       const changed = JSON.stringify(sent) !== JSON.stringify(outbound);
-      this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, ...(changed ? { rewritten: true } : {}) });
+      this.settings.emit(this.id, "message.out", { ...outDetail(sent, link.info), channel, ...(changed ? { rewritten: true } : {}) });
       this.sent();
       this.sentThisTurn.add(input.text.trim());
       this.sentThisTurn.add(sent.text.trim());
       await this.acknowledged(channel);
-      return done(JSON.stringify({ delivered: true, channel, ...(changed ? { sent: sentArgs(sent) } : {}) }));
+      return done(JSON.stringify({ delivered: true, channel, ...(changed || sent.type === "records" ? { sent: sentArgs(sent) } : {}), ...(sent.type === "records" ? { records: recordsShown(link.info, sent) } : {}) }));
     }
     if (call.name === REACT) {
       const input = reactInput.safeParse(raw);
@@ -1417,12 +1482,14 @@ export class Conversation {
   }
 
   /**
-   * A message, carousel or template to the person: through the owner's beforeSend, then the
-   * platform's content rules, then the channel. Returns what went (what the events, the history and
-   * the transcript keep), why it was refused (also a `message.refused` event), or why it failed on
-   * the way. `link` is the channel's link when it is not this conversation's current one.
+   * A message, carousel, records or template to the person: through the owner's beforeSend, then
+   * the platform's content rules, then the channel. Records go through both as the messages they
+   * are shown as on this channel (`recordsMessages`), any one refused refusing them all. Returns
+   * what went (what the events, the history and the transcript keep), why it was refused (also a
+   * `message.refused` event), or why it failed on the way. `link` is the channel's link when it is
+   * not this conversation's current one.
    */
-  private async sendMessage(channel: string, draft: OutboundMessage, origin: SendContext["origin"], link = this.channels.get(channel)): Promise<{ sent: OutboundMessage } | { refused: string } | { failure: string }> {
+  private async sendMessage(channel: string, draft: OutboundMessage | RecordsOutbound, origin: SendContext["origin"], link = this.channels.get(channel)): Promise<{ sent: OutboundMessage | RecordsOutbound } | { refused: string } | { failure: string }> {
     if (this.closed) return { failure: "this person was forgotten" };
     if (!link) return { failure: `no way to reach them on ${channel} right now` };
     const refuse = (outbound: OutboundMessage, by: "beforeSend" | "content", reason: string, refusal?: ContentRefusal) => {
@@ -1430,36 +1497,110 @@ export class Conversation {
       this.settings.emit(this.id, "message.refused", { channel, origin, text, by, reason, ...(refusal ? { code: refusal.type, param: refusal.param, message: refusal.message } : {}), outbound });
       return { refused: reason };
     };
-    let outbound = draft;
-    if (this.settings.beforeSend) {
-      let result: Awaited<ReturnType<BeforeSend>>;
-      try {
-        result = await this.settings.beforeSend(draft, { conversationId: this.id, channel, info: link.info, address: link.address, origin, sent: [...this.sentSoFar()] });
-      } catch (error) {
-        return refuse(draft, "beforeSend", `Not sent: beforeSend failed: ${errorText(error)}`);
+    const parts: OutboundMessage[] = draft.type === "records" ? recordsMessages(link.info, draft) : [draft];
+    const ready: OutboundMessage[] = [];
+    for (const part of parts) {
+      let outbound = part;
+      if (this.settings.beforeSend) {
+        let result: Awaited<ReturnType<BeforeSend>>;
+        try {
+          result = await this.settings.beforeSend(part, { conversationId: this.id, channel, info: link.info, address: link.address, origin, sent: [...this.sentSoFar()] });
+        } catch (error) {
+          return refuse(part, "beforeSend", `Not sent: beforeSend failed: ${errorText(error)}`);
+        }
+        if (result && "refuse" in result) return refuse(part, "beforeSend", `Not sent: ${result.refuse}`);
+        if (result) {
+          const kinds = (o: OutboundMessage) => (o.type === "template" ? "template" : "message");
+          if (kinds(result) !== kinds(part)) return refuse(part, "beforeSend", `Not sent: beforeSend returned a ${result.type ?? "value"} for a ${part.type}.`);
+          // A message it changed is fitted to the channel again, as the agent's are (a link without link buttons goes in the text).
+          outbound = result.type === "message" ? fitMessage(link.info, result) : result;
+        }
       }
-      if (result && "refuse" in result) return refuse(draft, "beforeSend", `Not sent: ${result.refuse}`);
-      if (result) {
-        const kinds = (o: OutboundMessage) => (o.type === "template" ? "template" : "message");
-        if (kinds(result) !== kinds(draft)) return refuse(draft, "beforeSend", `Not sent: beforeSend returned a ${result.type ?? "value"} for a ${draft.type}.`);
-        // A message it changed is fitted to the channel again, as the agent's are (a link without link buttons goes in the text).
-        outbound = result.type === "message" ? fitMessage(link.info, result) : result;
-      }
+      const refusal = contentRefusal(link.info, outbound);
+      if (refusal) return refuse(outbound, "content", contentRefusalText(link.info, refusal), refusal);
+      ready.push(outbound);
     }
-    const refusal = contentRefusal(link.info, outbound);
-    if (refusal) return refuse(outbound, "content", contentRefusalText(link.info, refusal), refusal);
+    // A channel that takes records draws them itself, unless beforeSend changed how they read.
+    const whole = draft.type === "records" && link.info.records && JSON.stringify(ready) === JSON.stringify(parts);
     let receipt: void | SendReceipt;
     try {
-      receipt = await link.deliver(outbound);
+      const receipts: Array<void | SendReceipt> = [];
+      if (whole) receipts.push(await link.deliver(draft));
+      else for (const m of ready) receipts.push(await link.deliver(m));
+      receipt = receipts.find((r) => r?.status === "unconfirmed") ?? receipts.find((r) => r?.status === "queued") ?? receipts.find(Boolean);
     } catch (error) {
       return { failure: error instanceof Error ? error.message : String(error) };
     }
-    if (outbound.type !== "template") this.sentSoFar().push(outbound.text);
+    for (const m of ready) if (m.type !== "template") this.sentSoFar().push(m.text);
+    this.shown = draft.type === "records" && draft.handle ? { channel, handle: draft.handle, ids: draft.rows.map((r) => r.id), page: draft.page?.number ?? 1 } : null;
+    const sent = draft.type === "records" ? draft : ready[0];
     // The channel's wait for its signal ran out: it may still arrive, and is never sent again.
     if (receipt?.status === "unconfirmed") {
-      this.settings.emit(this.id, "message.slow", { channel, origin, text: outbound.type === "template" ? outbound.name : outbound.text, ...(receipt.waitedMs !== undefined ? { waitedMs: receipt.waitedMs } : {}) });
+      this.settings.emit(this.id, "message.slow", { channel, origin, text: sent.type === "template" ? sent.name : sent.text, ...(receipt.waitedMs !== undefined ? { waitedMs: receipt.waitedMs } : {}) });
     }
-    return { sent: outbound };
+    return { sent };
+  }
+
+  /**
+   * A message that answers the records they were shown last on this channel: a tap on a row, its
+   * number typed ("2", "#2", "2."; only when the rows can be picked), or More (its row or button, or
+   * MORE typed) while there is a next page. Anything else is theirs as they wrote it.
+   */
+  private recordsPick(incoming: Incoming, channel: string): { more: { records: string; ids: string[]; page: number } } | { incoming: Incoming; note: string } | null {
+    const shown = this.shown;
+    const info = this.channels.get(channel)?.info;
+    if (!shown || shown.channel !== channel || !info) return null;
+    const kept = this.handles.get(shown.handle);
+    const pick = kept?.pick ? { label: kept.pick } : undefined;
+    const { perPage, pages } = recordsLayoutOf(info, shown.ids, kept);
+    const nextPage = kept && shown.page < pages ? { more: { records: shown.handle, ids: shown.ids, page: shown.page + 1 } } : null;
+    const chosen = (id: string) => {
+      const row = kept?.rows.find((r) => r.id === id);
+      return { incoming: { ...incoming, choice: { id, title: row?.title ?? id, records: shown.handle, ...(kept ? { kind: kept.kind } : {}) } }, note: pickedNote(id, shown.handle, kept) };
+    };
+    if (incoming.choice) {
+      if (incoming.choice.id === RECORDS_MORE) return nextPage;
+      const id = incoming.choice.id ?? incoming.choice.title;
+      return shown.ids.includes(id) ? chosen(id) : null;
+    }
+    if (incoming.attachments?.length) return null;
+    const text = incoming.text.trim();
+    if (/^more[.!]?$/i.test(text)) return nextPage;
+    const n = /^#?(\d{1,3})\.?$/.exec(text);
+    const upTo = Math.min(shown.page * perPage, shown.ids.length);
+    if (n && pick && Number(n[1]) >= 1 && Number(n[1]) <= upTo) return chosen(shown.ids[Number(n[1]) - 1]);
+    return null;
+  }
+
+  /** The page of records a More asked for, its text the rows' numbers (11–20 / 37). */
+  private recordsPageOutbound(channel: string, show: { records: string; ids: string[]; page: number }): RecordsOutbound | null {
+    const info = this.channels.get(channel)?.info;
+    const made = this.recordsOutbound(show.records, show.ids.filter((id) => this.handles.get(show.records)?.rows.some((r) => r.id === id)), "", show.page);
+    if (!info || typeof made === "string") return null;
+    const page = recordsPage(info, made);
+    return { ...made, text: `${page.rows[0]?.number ?? 1}–${page.rows.at(-1)?.number ?? 1} / ${page.total}` };
+  }
+
+  /** A tool's records() result: kept under a new handle, and what the model reads of it. */
+  private keepRecords(result: RecordsResult): string {
+    const handle = `r${++this.handleCount}`;
+    const kept = handleOf(handle, result, this.settings.now());
+    this.handles.set(handle, kept);
+    for (const old of [...this.handles.keys()].slice(0, Math.max(0, this.handles.size - RECORDS_KEPT))) this.handles.delete(old);
+    if (this.settings.store.saveRecords) this.persist(() => this.settings.store.saveRecords!(this.id, kept, kept.at - RECORDS_DAYS_MS, RECORDS_KEPT));
+    return recordsResultText(handle, result, render(result));
+  }
+
+  /** The records outbound for a handle's rows (only `ids`, in order, when given), or why there is none. */
+  private recordsOutbound(handle: string, ids: string[] | undefined, text: string, page = 1): RecordsOutbound | string {
+    const kept = this.handles.get(handle);
+    if (!kept) return `Not sent: there are no records ${handle} here (they are kept ${RECORDS_DAYS_MS / 86_400_000} days). Call the tool again.`;
+    const byId = new Map(kept.rows.map((r) => [r.id, r]));
+    const missing = ids?.find((id) => !byId.has(id));
+    if (missing) return `Not sent: ${missing} is not in ${handle}. Show only rows the tool returned.`;
+    const rows: RecordRow[] = ids ? [...new Set(ids)].map((id) => byId.get(id)!) : kept.rows;
+    if (!rows.length) return `Not sent: ${handle} has no rows. Tell them in words.`;
+    return { type: "records", text, kind: kept.kind, rows, handle, ...(kept.pick ? { pick: { label: kept.pick } } : {}), ...(page > 1 ? { page: { number: page } } : {}) };
   }
 
   private sentSoFar(): string[] {
@@ -1719,7 +1860,7 @@ export class Conversation {
           } finally { r.startedAt = Date.now(); authorize(); }
         })
         .then(
-          (output) => ({ ok: true, text: render(output) }),
+          (output) => ({ ok: true, text: isRecords(output) ? this.keepRecords(output) : render(output) }),
           (error) => ({ ok: false, text: `Failed: ${error instanceof Error ? error.message : String(error)}` }),
         ),
     };
@@ -1801,11 +1942,13 @@ export type TranscriptEntry =
       fields?: Record<string, unknown>;
       /** A WhatsApp template the business sent, by name; the text is its body when it was declared. */
       template?: string;
+      /** Records shown (the send's `show`): their handle, every id shown, and the page that went. */
+      records?: RecordsShown & { handle: string; ids: string[] };
     }
   | { kind: "reaction"; channel: string; messageId: string; emoji: string; at: number }
   | { kind: "tool"; callId: string; tool: string; input: unknown; output: string; ok: boolean; at: number };
 
-const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "carousel", "confirm"]);
+const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "carousel", "confirm", "show"]);
 
 /**
  * The history as the person saw it: their messages (with their ids and channels), what the agent
@@ -1839,7 +1982,7 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
         args = JSON.parse(call.arguments || "{}");
       } catch {}
       if (call.name.startsWith("send_")) {
-        let delivered: { delivered?: boolean; channel?: string; authentication?: boolean; sent?: Record<string, unknown> } = {};
+        let delivered: { delivered?: boolean; channel?: string; authentication?: boolean; sent?: Record<string, unknown>; records?: RecordsShown } = {};
         try {
           delivered = JSON.parse(result?.content ?? "");
         } catch {}
@@ -1860,6 +2003,7 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
           ...(args.image ? { image: photoOf(args.image as never) } : {}),
           ...(Array.isArray(args.carousel) ? { carousel: cardsOf(args.carousel as never) } : {}),
           ...(Object.keys(fields).length ? { fields } : {}),
+          ...(delivered.records && args.show && typeof args.show === "object" ? { records: { ...delivered.records, handle: String((args.show as Record<string, unknown>).records), ids: ((args.show as Record<string, unknown>).ids as string[] | undefined) ?? delivered.records.rows.map((r) => r.id) } } : {}),
         });
       } else if (call.name === REACT) {
         const channel = channelOf.get(String(args.message_id));
@@ -1953,9 +2097,38 @@ function clipOutput(text: string): string {
   return text.length > 4_000 ? `${text.slice(0, 4_000)}…` : text;
 }
 
-/** A sent message or carousel as its `message.out` event tells it. */
-function outDetail(sent: OutboundMessage): Record<string, unknown> {
+/** How records are paged on a channel, from the ids shown and the handle's pick. */
+function recordsLayoutOf(info: ChannelInfo, ids: string[], kept: RecordsHandle | undefined) {
+  const byId = new Map(kept?.rows.map((r) => [r.id, r]));
+  return recordsLayout(info, { rows: ids.map((id) => byId.get(id) ?? { id, title: id }), ...(kept?.pick ? { pick: { label: kept.pick } } : {}) });
+}
+
+/** A records send as its result, the history and the transcript keep it: what kind, which page, and that page's rows. */
+export interface RecordsShown {
+  kind: string;
+  page: number;
+  pages: number;
+  /** How many rows were shown in all (every page). */
+  count: number;
+  /** How it reached the person: rows a channel's UI drew, a list, buttons, cards or numbered text. */
+  as: "records" | "list" | "buttons" | "cards" | "text";
+  rows: Array<{ id: string; title: string; detail?: string }>;
+}
+
+function recordsShown(info: ChannelInfo, sent: RecordsOutbound): RecordsShown {
+  const page = recordsPage(info, sent);
+  const first = info.records ? null : recordsMessages(info, sent)[0];
+  const as = info.records ? "records" : first?.type === "carousel" ? "cards" : first?.list ? "list" : first?.buttons?.length ? "buttons" : "text";
+  return { kind: sent.kind, page: page.page, pages: page.pages, count: sent.rows.length, as, rows: page.rows.map((r) => ({ id: r.id, title: r.title, ...(r.detail ? { detail: r.detail } : {}) })) };
+}
+
+/** A sent message, carousel or records as its `message.out` event tells it. */
+function outDetail(sent: OutboundMessage | RecordsOutbound, info?: ChannelInfo): Record<string, unknown> {
   if (sent.type === "template") return { text: sent.name, template: true };
+  if (sent.type === "records") {
+    const shown = info ? recordsShown(info, sent) : undefined;
+    return { text: sent.text, replyTo: sent.replyTo, records: { kind: sent.kind, handle: sent.handle, count: sent.rows.length, ...(shown ? { shown: shown.rows.map((r) => r.id), page: shown.page, pages: shown.pages, deliveredAs: shown.as } : {}) } };
+  }
   if (sent.type === "carousel") return { text: sent.text, carousel: sent.cards, replyTo: sent.replyTo };
   return { text: sent.text, buttons: sent.buttons, list: sent.list, link: sent.link, image: sent.image, replyTo: sent.replyTo, ...(sent.fields ? { fields: sent.fields } : {}), ...(sent.authentication ? { authentication: true } : {}) };
 }

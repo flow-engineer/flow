@@ -103,6 +103,40 @@ export interface CarouselCard {
   link?: { label: string; url: string };
 }
 
+/** One record as the person sees it in a records message: an id the tool gave, a title, and a detail line. */
+export interface RecordRow {
+  /** 1 to 64 bytes, unique in its records; a pick comes back with it as `choice.id`. */
+  id: string;
+  title: string;
+  detail?: string;
+  /** Used only where every shown row has one and the channel has carousels. */
+  image?: Photo;
+}
+
+/**
+ * Rows a tool returned, shown to the person as the framework renders them on the channel (a list,
+ * buttons, numbered lines), a page at a time. Channels without `info.records` are sent the rendered
+ * messages (`recordsMessages`), never this.
+ */
+export interface RecordsOutbound {
+  type: "records";
+  /** The agent's own intro, above the rows. */
+  text: string;
+  /** What the rows are (orders, bookings): shown to the model, in events and in tests. */
+  kind: string;
+  /** All the rows to show, in order; one page of them goes per message. */
+  rows: RecordRow[];
+  /** The label of the button that picks one; without it the rows are read-only. */
+  pick?: { label: string };
+  /** The conversation's handle for these rows (r1), when a tool's records() result gave them. */
+  handle?: string;
+  /** Which page (from 1, default 1) and how many rows a page holds (default: the channel's). */
+  page?: { number?: number; size?: number };
+  replyTo?: string;
+  preview?: false;
+  idempotencyKey?: string;
+}
+
 /** What a conversation sends to its channel. */
 export type Outbound =
   | {
@@ -136,6 +170,8 @@ export type Outbound =
    * channels with carousels. A channel that cannot show one sends the text, then each card as a message, in order.
    */
   | { type: "carousel"; text: string; cards: CarouselCard[]; replyTo?: string; preview?: false; idempotencyKey?: string }
+  /** Records a tool returned (see RecordsOutbound): rendered per channel by Flow Framework. */
+  | RecordsOutbound
   /** The agent has picked these messages up (WhatsApp's blue ticks). */
   | { type: "read"; messageIds: string[] }
   /** A reaction on one of the person's messages, by the id Flow Framework gave it. */
@@ -146,7 +182,7 @@ export type Outbound =
   | { type: "status"; text: string | null }
   | { type: "typing"; on: boolean };
 
-/** What the person reads: a message, a carousel or a template. */
+/** What the person reads: a message, a carousel or a template (records reach beforeSend as the messages they are rendered as). */
 export type OutboundMessage = Extract<Outbound, { type: "message" | "carousel" | "template" }>;
 
 /** Where a message is going, and what started it: what `beforeSend` gets with it. */
@@ -255,7 +291,13 @@ export interface ChannelInfo {
    */
   buttonIds?: boolean;
   /** A list the person picks one row from. */
-  lists?: { maxRows: number; titleMax: number; buttonMax: number };
+  lists?: {
+    maxRows: number;
+    titleMax: number;
+    buttonMax: number;
+    /** false: rows' descriptions are not shown (Flow Messaging's WhatsApp today), so records put their details in the text. */
+    descriptions?: boolean;
+  };
   /** One button under a message that opens a web page (WhatsApp's call-to-action URL button). */
   linkButton?: { labelMax: number };
   /** Photos sent by URL, with the message's text as their caption. */
@@ -266,6 +308,11 @@ export interface ChannelInfo {
    * here, with its error, in the playground, the test cloud and production alike.
    */
   platform?: "whatsapp" | "telegram" | "imessage" | "sms";
+  /**
+   * The channel takes records outbounds itself (a custom UI's sendRecords), at most maxRows a page.
+   * Absent: Flow Framework sends each page as the messages `recordsMessages` renders.
+   */
+  records?: { maxRows: number };
   /** Carousels: 2 to maxCards cards, each a photo, up to cardTextMax characters and 1 to `buttons` reply buttons (or one link). */
   carousels?: { maxCards: number; textMax: number; cardTextMax: number; buttons: number; labelMax: number };
   /** The channel shows the person when their message has been read. */
@@ -291,7 +338,13 @@ export interface Incoming {
   /** The message they replied to (theirs or the agent's), quoted. */
   replyTo?: { text: string; fromAgent: boolean };
   /** They tapped a button or picked a list row rather than typing: its id (a button's, a row's) and its label. */
-  choice?: { id?: string; title: string };
+  choice?: {
+    id?: string;
+    title: string;
+    /** A row of a records message: its handle (r1) and kind, set by Flow Framework (a tap or a typed number). */
+    records?: string;
+    kind?: string;
+  };
   /** Photos, voice notes and documents sent with it; `text` is then their caption, or "". */
   attachments?: Attachment[];
 }

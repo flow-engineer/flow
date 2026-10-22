@@ -6,6 +6,7 @@
 
 import type { Database, Row } from "./db.ts";
 import type { ChatMessage } from "./types.ts";
+import type { RecordsHandle } from "./records.ts";
 
 /**
  * The column types that differ between engines. Times are milliseconds since the epoch, past a
@@ -102,6 +103,11 @@ const MIGRATIONS: Array<(t: Types) => string> = [
   (t) => `CREATE TABLE event_state (agent_id TEXT NOT NULL, state TEXT NOT NULL, saved_at ${t.int} NOT NULL, PRIMARY KEY (agent_id));
    CREATE TABLE event_seen (agent_id TEXT NOT NULL, id TEXT NOT NULL, at ${t.int} NOT NULL, body TEXT, PRIMARY KEY (agent_id, id));
    CREATE INDEX event_seen_at ON event_seen (agent_id, at)`,
+  // Records a tool returned (records().of), under the conversation's handle for them (r1): what a
+  // pick or a "More" finds its rows in. The newest 20 per conversation, for 7 days.
+  (t) => `CREATE TABLE records (
+     agent_id TEXT NOT NULL, conversation_id TEXT NOT NULL, handle TEXT NOT NULL, body TEXT NOT NULL, at ${t.int} NOT NULL,
+     PRIMARY KEY (agent_id, conversation_id, handle))`,
 ];
 
 /** Quiet hours, "HH:MM" to "HH:MM" in the person's own time; they may wrap midnight. */
@@ -202,7 +208,10 @@ const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
  * elsewhere (a store service that holds the database, so the agent never holds its credentials).
  * flowEvents' state methods are optional: without them that state stays in memory.
  */
-export type StoreApi = Omit<Store, "db" | "agentId" | keyof EventStateStore> & Partial<EventStateStore>;
+export type StoreApi = Omit<Store, "db" | "agentId" | keyof EventStateStore | keyof RecordsStore> & Partial<EventStateStore> & Partial<RecordsStore>;
+
+/** Where conversations keep records handles; a store without it keeps them in memory only. */
+export type RecordsStore = Pick<Store, "saveRecords" | "loadRecords">;
 
 /** Where flowEvents keeps its send state. */
 export type EventStateStore = Pick<Store, "loadEventState" | "takeEvents" | "saveEventState">;
@@ -345,11 +354,30 @@ export class Store {
     const scope = [this.agentId, conversationId];
     await this.db.transaction(async (tx) => {
       await tx.run("DELETE FROM schedule_runs WHERE agent_id = ? AND schedule_id IN (SELECT id FROM schedules WHERE agent_id = ? AND conversation_id = ?)", [this.agentId, ...scope]);
-      for (const table of ["schedules", "nudges", "no_contact", "background_tools", "inbox", "messages", "inbound", "identities"]) {
+      for (const table of ["schedules", "nudges", "no_contact", "background_tools", "inbox", "messages", "inbound", "identities", "records"]) {
         await tx.run(`DELETE FROM ${table} WHERE agent_id = ? AND conversation_id = ?`, scope);
       }
       await tx.run("DELETE FROM conversations WHERE agent_id = ? AND id = ?", scope);
     });
+  }
+
+  /**
+   * Keeps one records handle of a conversation, and forgets its handles older than `forgetBefore`
+   * or past the newest `keep`.
+   */
+  async saveRecords(conversationId: string, handle: RecordsHandle, forgetBefore: number, keep: number): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await tx.run("INSERT INTO records (agent_id, conversation_id, handle, body, at) VALUES (?, ?, ?, ?, ?)", [this.agentId, conversationId, handle.handle, JSON.stringify(handle), handle.at]);
+      await tx.run("DELETE FROM records WHERE agent_id = ? AND conversation_id = ? AND at < ?", [this.agentId, conversationId, forgetBefore]);
+      const rows = await tx.query("SELECT handle FROM records WHERE agent_id = ? AND conversation_id = ? ORDER BY at DESC, handle DESC", [this.agentId, conversationId]);
+      for (const r of rows.slice(keep)) await tx.run("DELETE FROM records WHERE agent_id = ? AND conversation_id = ? AND handle = ?", [this.agentId, conversationId, String(r.handle)]);
+    });
+  }
+
+  /** A conversation's records handles kept since `since`, oldest first. */
+  async loadRecords(conversationId: string, since: number): Promise<RecordsHandle[]> {
+    const rows = await this.db.query("SELECT body FROM records WHERE agent_id = ? AND conversation_id = ? AND at >= ? ORDER BY at, handle", [this.agentId, conversationId, since]);
+    return rows.map((r) => JSON.parse(String(r.body)) as RecordsHandle);
   }
 
   async updateConversation(id: string, fields: { turnOpen?: boolean; turns?: number; messageCount?: number; recentChannels?: string[]; timeZone?: string; timeZoneSource?: TimeZoneSource; quietHours?: QuietHours | "off" | null }): Promise<void> {
