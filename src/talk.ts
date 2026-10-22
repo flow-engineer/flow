@@ -11,6 +11,7 @@
 import { z } from "zod";
 import { toSpec, tool } from "./tools.ts";
 import { CONTENT_LIMITS, type ContentRefusal } from "./channels.ts";
+import type { RecordsHandle, RecordsResult } from "./records.ts";
 import type { CarouselCard, ChannelInfo, Outbound, Photo, ReplyButton, ToolSpec } from "./types.ts";
 
 export const REACT = "react";
@@ -105,6 +106,13 @@ export function sendInput(channel: ChannelInfo, several = false, params: Record<
       .optional()
       .describe(`Up to ${c.maxCards} cards they swipe through under your text: each a photo, up to ${c.cardTextMax} characters, and 1 to ${c.buttons} reply buttons ({id, label} tells cards apart) or one link, the same on every card; not with buttons, a list, a link or an image`);
   }
+  shape.show = z
+    .object({
+      records: z.string().regex(/^r\d+$/).describe("The records a tool's result named, such as r1"),
+      ids: z.array(z.string().min(1).max(64)).min(1).max(100).optional().describe("Only these rows, in this order"),
+    })
+    .optional()
+    .describe("Show them records a tool returned, under your text, exactly as the tool gave them, laid out for this channel; their pick comes back as their message. Not with buttons, a list, a link, an image or a carousel");
   for (const [name, schema] of Object.entries(params)) shape[name] = schema.optional();
   return z.object(shape);
 }
@@ -117,6 +125,8 @@ export type SendInput = {
   link?: { label: string; url: string };
   image?: { url: string } | { file_id: string };
   carousel?: Array<{ image: { url: string } | { file_id: string }; text?: string; buttons?: ReplyButton[]; link?: { label: string; url: string } }>;
+  /** Records a tool returned, by handle; `ids` a subset in order. In the history, `ids` are all that were shown and `page` which page. */
+  show?: { records: string; ids?: string[]; page?: number };
   confirm?: boolean;
 };
 
@@ -137,6 +147,7 @@ export function cardsOf(cards: NonNullable<SendInput["carousel"]>): CarouselCard
 
 /** Why a send that fits its schema still cannot go out as written (WhatsApp's rules), or null. */
 export function sendRefusal(channel: ChannelInfo, input: SendInput): string | null {
+  if (input.show && (input.buttons?.length || input.list || input.link || input.image || input.carousel)) return "Not sent: records go alone, without buttons, a list, a link, an image or a carousel. Send them in separate messages.";
   if (input.link && (input.buttons?.length || input.list)) return "Not sent: a message with a link cannot also have buttons or a list. Send them in separate messages.";
   if (input.carousel) {
     if (input.buttons?.length || input.list || input.link || input.image) return "Not sent: a carousel goes alone, without buttons, a list, a link or an image. Send them in separate messages.";
@@ -167,8 +178,15 @@ export function contentRefusalText(channel: ChannelInfo, refusal: ContentRefusal
 }
 
 /** A message or carousel as it was sent, in the send tool's words: what the history and the transcript keep. */
-export function sentArgs(outbound: Extract<Outbound, { type: "message" | "carousel" }>): SendInput & Record<string, unknown> {
+export function sentArgs(outbound: Extract<Outbound, { type: "message" | "carousel" | "records" }>): SendInput & Record<string, unknown> {
   const tool = (p: Photo) => ("url" in p ? { url: p.url } : { file_id: p.fileId });
+  if (outbound.type === "records") {
+    return {
+      text: outbound.text,
+      ...(outbound.replyTo ? { reply_to: outbound.replyTo } : {}),
+      show: { records: outbound.handle ?? "", ids: outbound.rows.map((r) => r.id), ...(outbound.page?.number && outbound.page.number > 1 ? { page: outbound.page.number } : {}) },
+    };
+  }
   if (outbound.type === "carousel") {
     return {
       text: outbound.text,
@@ -185,6 +203,22 @@ export function sentArgs(outbound: Extract<Outbound, { type: "message" | "carous
     ...(outbound.image ? { image: tool(outbound.image) } : {}),
     ...outbound.fields,
   };
+}
+
+/** What the model reads for a tool's records() result: the rows as the tool returned them, and their handle. */
+export function recordsResultText(handle: string, result: RecordsResult, rendered: string): string {
+  const ids = result.rows.map((r) => r.id);
+  const shown = ids.length > 10 ? `${ids.slice(0, 10).join(", ")}, ...` : ids.join(", ");
+  const cut = result.total > result.rows.length ? ` (the first ${result.rows.length} of ${result.total}: ask them to narrow it if they need others)` : "";
+  return `${rendered}\n[Chinwag] records ${handle}: ${result.rows.length} ${result.kind}${cut}, ids ${shown || "none"}. To show them, send with show: { records: "${handle}" } (ids: to show only some), not by writing them out.`;
+}
+
+/** What the agent is told about a row the person picked from records. */
+export function pickedNote(id: string, handle: string, kept: RecordsHandle | undefined): string {
+  if (!kept) return `[Chinwag] They picked ${id} from records ${handle}, which are no longer kept: look it up again if you need it.`;
+  const i = kept.rows.findIndex((r) => r.id === id);
+  const row = kept.data && i >= 0 ? kept.data[i] : kept.rows[i];
+  return `[Chinwag] They picked ${id} from ${kept.kind} ${handle}: ${JSON.stringify(row ?? null)}`;
 }
 
 const reactTool = tool({
