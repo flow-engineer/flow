@@ -718,13 +718,26 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   return { answer, warnings };
 }
 
-/** iMessage's count of the people it may reach on the trial, as a line; undefined when the answer had none. */
+/** iMessage's count of the people it may reach on the trial (an older answer's `contacts`), as a line; undefined when the answer had none. */
 function peopleLine(t: { contacts?: { limit: number; used: number } } | undefined): string | undefined {
   const people = t?.contacts;
   return people && typeof people.used === "number" && typeof people.limit === "number" ? `iMessage: ${people.used} of ${people.limit} people` : undefined;
 }
 
-const trialNote = (t: { limit: number | null; used: number } | undefined) => (t && typeof t.limit === "number" ? ` (free trial: ${t.used} of ${t.limit} messages used)` : "");
+/**
+ * A channel's free-trial count: people when the answer has `held` (Flow Messaging counts people
+ * since Oct 2026, the ones past the limit waiting for a place), else messages (an older answer).
+ */
+function trialCount(t: { limit: number | null; used: number; held?: number } | undefined): string | undefined {
+  if (!t || typeof t.limit !== "number") return undefined;
+  if (typeof t.held !== "number") return `${t.used} of ${t.limit} messages used`;
+  return `${t.used} of ${t.limit} people${t.held > 0 ? `, ${t.held} waiting for a place` : ""}`;
+}
+
+const trialNote = (t: { limit: number | null; used: number; held?: number } | undefined) => {
+  const count = trialCount(t);
+  return count ? ` (free trial: ${count})` : "";
+};
 
 /** An answer's field when it is an object (flow_key, model_credit), else undefined (an older server sends none). */
 function objectField<T>(fields: Record<string, unknown>, name: string): T | undefined {
@@ -984,8 +997,8 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
   // The trial's counts for the channel the link is on, when setup just gave them; no other channel's.
   const counts = trial?.[channel];
   if (counts) {
-    const note = trialNote(counts);
-    if (note) say(`${CHANNEL_NAME[channel]} ${note.trim().slice(1, -1)}`); // "WhatsApp free trial: 3 of 300 messages used"
+    const count = trialCount(counts);
+    if (count) say(`${CHANNEL_NAME[channel]} free trial: ${count}`); // "Telegram free trial: 3 of 25 people, 2 waiting for a place"
     if (channel === "imessage") {
       const people = peopleLine(counts);
       if (people) say(people);

@@ -955,6 +955,27 @@ test("link --channel whatsapp writes WhatsApp's page as FLOW_FRAMEWORK_TRY_URL a
   assert.match(plain.out, /^iMessage: 1 of 2 people$/m, "iMessage's own people count, on iMessage's link");
 });
 
+test("a trial answer with held counts people (Flow Messaging since Oct 2026): setup, link and status say who waits for a place, with no messages line", async (t) => {
+  const trial = { telegram: { limit: 25, used: 25, held: 2 }, whatsapp: { limit: 25, used: 3, held: 0 }, imessage: { limit: 25, used: 1, held: 0 } };
+  const flow = await flowServer([], 200, { setup: { whatsapp_sender: "snd_wa", imessage_sender: "snd_im", trial }, tryOpen: ["telegram", "whatsapp", "imessage"] });
+  t.after(flow.close);
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  const cwd = agentDir();
+  const set = await run(["setup"], { url: flow.url, config: temp(), cwd, env });
+  assert.equal(set.code, 0, set.err);
+  assert.match(set.out, /^On Telegram: .* \(free trial: 25 of 25 people, 2 waiting for a place\)$/m);
+  assert.match(set.out, /^On WhatsApp: .* \(free trial: 3 of 25 people\)$/m);
+  assert.ok(!/messages used|iMessage: \d+ of \d+ people/.test(set.out), set.out);
+
+  const link = await run(["link", "--channel", "telegram"], { url: flow.url, config: temp(), cwd: agentDir(), env });
+  assert.equal(link.code, 0, link.err);
+  assert.match(link.out, /^Telegram free trial: 25 of 25 people, 2 waiting for a place$/m);
+
+  const status = await run(["status"], { url: flow.url, config: temp(), cwd, env });
+  assert.equal(status.code, 0, status.err);
+  assert.match(status.out, /^iMessage: sender in \.env; open now \(free trial: 1 of 25 people\)$/m);
+});
+
 test("link and setup --display-name rename the agent: package.json's displayName and its prompt, then the phone link says Hi <name>", async (t) => {
   const flow = await flowServer([], 200, { tryOpen: ["telegram"] });
   t.after(flow.close);
