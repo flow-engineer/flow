@@ -279,6 +279,8 @@ export class Conversation {
   private shown: Shown | null = null;
   /** What the agent is told of a records row a message picked, by the message's id, until it arrives. */
   private readonly pickNotes = new Map<string, string>();
+  /** The conversation was read from the store (or is new): what it last showed is known. */
+  private loadedNow = false;
   /** Where this turn's entries start in the history: a reset placed during the turn keeps them. */
   private turnFrom = 0;
   private direct: Direct[] = [];
@@ -375,6 +377,7 @@ export class Conversation {
     this.builtins = new Map(builtins.map((t) => [t.name, t]));
     this.builtinSpecs = builtins.map(toSpec);
     this.loaded = settings.ready.then(() => (existing ? this.claimAndLoad() : settings.store.createConversation(id, personKey)));
+    void this.loaded.then(() => (this.loadedNow = true), () => (this.loadedNow = true));
     this.writes = this.loaded.catch((error) => console.warn("flow: conversation %s did not load:", id, error));
   }
 
@@ -458,29 +461,36 @@ export class Conversation {
       this.settings.emit(this.id, "message.duplicate", { messageId: options.messageId, channel });
       return options.messageId;
     }
-    const pick = this.recordsPick(incoming, channel);
-    if (pick && "more" in pick) {
-      // The next page of the records they were shown, sent by Flow Framework with no model call.
-      const answered = this.answered(incoming, { channel, messageId: options.messageId, show: pick.more }, "");
-      if (!answered) return options.messageId ?? "";
-      void answered.taken.then((taken) => (taken ? answered.send() : undefined));
-      return answered.id;
-    }
-    if (pick) incoming = pick.incoming;
     const id = options.messageId ?? `m${++this.messageCount}`;
-    if (pick) this.pickNotes.set(id, pick.note);
     this.messageIds.set(id, channel);
+    /** A pick from the records they were shown becomes one; a More is answered here. True when it was. */
+    const answeredHere = () => {
+      const pick = this.recordsPick(incoming, channel);
+      if (pick && "more" in pick) {
+        // The next page of the records they were shown, sent by Flow Framework with no model call.
+        const answered = this.answered(incoming, { channel, messageId: options.messageId, id, show: pick.more }, "");
+        if (answered) void answered.taken.then((taken) => (taken ? answered.send() : undefined));
+        return true;
+      }
+      if (pick) {
+        incoming = pick.incoming;
+        this.pickNotes.set(id, pick.note);
+      }
+      return false;
+    };
     void this.typing(true, channel);
     // A file or voice note is read before message.in. Say the message arrived first, so a test
     // run is not settled as silence while the transcript is still being made.
     if (incoming.attachments?.length) this.settings.emit(this.id, "message.arrived", { messageId: id, channel });
-    if (!incoming.attachments?.length && !this.preparing) {
-      this.arrive(incoming, id, channel, options.messageId !== undefined, { marks: [], media: [] });
+    if (!incoming.attachments?.length && !this.preparing && this.loadedNow) {
+      if (!answeredHere()) this.arrive(incoming, id, channel, options.messageId !== undefined, { marks: [], media: [] });
       return id;
     }
-    // Its files are read first (a voice note transcribed), and messages after it wait their turn.
-    const ready = (this.preparing ?? Promise.resolve())
+    // Its files are read first (a voice note transcribed), and messages after it wait their turn;
+    // before the conversation is read from the store, so a pick finds the records they were shown.
+    const ready = (this.preparing ?? this.loaded.then(() => undefined, () => undefined))
       .then(async () => {
+        if (answeredHere()) return;
         const files = await this.readFiles(incoming.attachments ?? []);
         if (!this.closed) this.arrive(incoming, id, channel, options.messageId !== undefined, files);
       })
@@ -545,14 +555,15 @@ export class Conversation {
    * reply, unless it was not taken; it starts the delivery at once, so call it once `taken` where
    * a retry must not be answered twice.
    */
-  answered(input: string | Incoming, options: { channel: string; messageId?: string; claimed?: Promise<boolean>; note?: string; show?: { records: string; ids: string[]; page: number } }, reply: string): { id: string; taken: Promise<boolean>; send(): Promise<void> } | null {
+  answered(input: string | Incoming, options: { channel: string; messageId?: string; claimed?: Promise<boolean>; note?: string; show?: { records: string; ids: string[]; page: number }; id?: string }, reply: string): { id: string; taken: Promise<boolean>; send(): Promise<void> } | null {
     const incoming: Incoming = typeof input === "string" ? { text: input } : input;
     const { channel, messageId } = options;
-    if (messageId !== undefined && this.messageIds.get(messageId) === channel) {
+    // `id`: receive() already gave this message its id (and checked it is new).
+    if (options.id === undefined && messageId !== undefined && this.messageIds.get(messageId) === channel) {
       this.settings.emit(this.id, "message.duplicate", { messageId, channel });
       return null;
     }
-    const id = messageId ?? `m${++this.messageCount}`;
+    const id = options.id ?? messageId ?? `m${++this.messageCount}`;
     this.messageIds.set(id, channel);
     const none: Files = { marks: [], media: [] };
     const answer: Answer = { reply, ...(options.note ? { note: options.note } : {}), ...(options.show ? { note: `[Chinwag] Chinwag sent them page ${options.show.page} of ${options.show.records} for this, with no call to you.`, show: options.show } : {}) };
@@ -1404,7 +1415,7 @@ export class Conversation {
       this.sentThisTurn.add(input.text.trim());
       this.sentThisTurn.add(sent.text.trim());
       await this.acknowledged(channel);
-      return done(JSON.stringify({ delivered: true, channel, ...(changed ? { sent: sentArgs(sent) } : {}), ...(sent.type === "records" ? { records: recordsShown(link.info, sent) } : {}) }));
+      return done(JSON.stringify({ delivered: true, channel, ...(changed || sent.type === "records" ? { sent: sentArgs(sent) } : {}), ...(sent.type === "records" ? { records: recordsShown(link.info, sent) } : {}) }));
     }
     if (call.name === REACT) {
       const input = reactInput.safeParse(raw);
