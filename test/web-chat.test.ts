@@ -7,7 +7,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, sms, sqlite, webChat, webChatSignIn, type Database, type FlowEvent, type WebChatOptions } from "../src/index.ts";
+import { createAgent, memoryMailbox, sms, sqlite, webChat, webChatSignIn, type Database, type FlowEvent, type WebChatOptions } from "../src/index.ts";
 import { webChatClient, type WebChatClientEvent } from "../src/web-chat-client.ts";
 import { call, respond, scriptedModel } from "./helpers.ts";
 
@@ -161,4 +161,14 @@ test("a visitor past the message limit is refused with 429, and a malformed mess
   assert.equal((await post({ id: "c", text: "photo", attachments: [] })).status, 400);
   (await t.nextCall(0)).answer(respond(call("send_web", { text: "One." })));
   await t.agent.conversation(t.events.find((e) => e.type === "message.in")!.conversationId)!.whenIdle();
+});
+
+test("a message the business started, kept twice with its idempotency key (two runners, a restart), is in the visitor's mailbox once", async () => {
+  const mailbox = memoryMailbox();
+  const { cursor } = await mailbox.start("visitor:v1");
+  const first = await mailbox.append("visitor:v1", { type: "message", from: "agent", text: "Your table is ready" }, "nudge:n1");
+  const again = await mailbox.append("visitor:v1", { type: "message", from: "agent", text: "Your table is ready" }, "nudge:n1");
+  assert.equal(again.cursor, first.cursor);
+  const read = await mailbox.read("visitor:v1", cursor, 0);
+  assert.ok(!("reset" in read) && read.events.length === 1);
 });

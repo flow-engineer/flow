@@ -201,6 +201,11 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   `agent.resetHistory({ to, note })`: the model then sees only what comes after, with your note.
   Nothing is deleted. A long chat is also cut to `history.maxTokens` (default 24,000, or 60% of the
   model's `contextTokens` when less).
+- A chat box on the business's own site is `webChat({ secret, origins })`: a channel plus the routes
+  it serves (`routes: web.routes`, then `web.attach(agent)`), a browser client
+  (`@flow-engineer/flow/web-chat`) and an HTTP contract ([docs/channels.md](../docs/channels.md#webchatoptions)).
+  A signed-in visitor comes with a token the business's server signs (`webChatSignIn(secret, key)`),
+  never a key from the browser.
 - `instructions` (on `customUI`, and in `whatsapp()`'s and `sms()`'s options) is your guidance for
   the agent on that channel, in its prompt only while the person uses it. Data a param carries,
   such as a link, comes from your tools' results: a tool that has a screen returns its link

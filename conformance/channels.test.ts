@@ -1,11 +1,12 @@
-// covers: src/channels.ts src/conversation.ts flow-messaging/src/index.ts flow-messaging/src/client.ts
+// covers: src/channels.ts src/conversation.ts src/web-chat.ts flow-messaging/src/index.ts flow-messaging/src/client.ts
 // Every channel adapter Flow Framework ships, through the delivery guarantees (checks.ts): the
-// built-in whatsapp(), sms() and customUI() over a provider that waits for the check, and each of
+// built-in whatsapp(), sms() and customUI() over a provider that waits for the check, webChat() over
+// a mailbox that waits for it, and each of
 // Flow Messaging's channels with its signal coming by webhook, by the stream, and by reading back.
 
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { customUI, sms, whatsapp, type Channel, type Message } from "../src/index.ts";
+import { customUI, memoryMailbox, sms, webChat, whatsapp, type Channel, type Message, type WebChatMailbox } from "../src/index.ts";
 import { flowMessaging } from "../flow-messaging/src/index.ts";
 import { fakeFlow, sign, SECRET, type Recorded } from "../flow-messaging/test/fake.ts";
 import { conformance, type Arrival, type Rig } from "./checks.ts";
@@ -36,6 +37,19 @@ function builtIn(make: (take: ReturnType<typeof heldProvider>["take"]) => Channe
 conformance("whatsapp()", builtIn((take) => whatsapp({ sendMessage: (_to, m) => take(m), typing: async () => {}, markRead: async () => {} }), "+15550100199"));
 conformance("sms()", builtIn((take) => sms({ sendMessage: (_to, m) => take(m) }), "+15550100199"));
 conformance("customUI()", builtIn((take) => customUI("app", { sendMessage: (_to, m) => take(m) }), "user-1"));
+
+/** The web chat's platform is the visitor's mailbox: its messages wait there for the check; typing and status lines go at once. */
+function heldMailbox(take: ReturnType<typeof heldProvider>["take"]): WebChatMailbox {
+  const inner = memoryMailbox();
+  return {
+    ...inner,
+    async append(address, event, idempotencyKey) {
+      if (event.type === "message" || event.type === "carousel") await take({ text: event.text, idempotencyKey });
+      return inner.append(address, event, idempotencyKey);
+    },
+  };
+}
+conformance("webChat()", builtIn((take) => webChat({ secret: "conformance-".repeat(4), mailbox: heldMailbox(take) }), "visitor:conformance"));
 
 type Kind = "whatsapp" | "sms" | "telegram" | "imessage";
 type Signal = "webhook" | "stream" | "read back";

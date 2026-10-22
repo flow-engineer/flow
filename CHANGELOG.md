@@ -2,6 +2,26 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.6.0 (unreleased)
+
+### Changes
+
+- **Web chat.** `webChat({ secret, origins })` is a channel for a chat box on the business's own
+  site, served by the agent's own routes (`routes: web.routes`, then `web.attach(agent)`): HTTP
+  long-polling, sessions per visitor, sign-in tokens the business's server signs
+  (`webChatSignIn`) so a signed-in visitor is one person with their other channels, allowed sites,
+  per-visitor limits, history from the store. Its `send()` resolves once the visitor's mailbox kept
+  the message (`memoryMailbox()`, or your own `WebChatMailbox` for several runners). The browser
+  client is `webChatClient` from the new entry point `@flow-engineer/flow/web-chat`. The playground
+  and the test cloud play it in the web simulator; the conformance suite runs it through every
+  delivery check. [docs/channels.md](docs/channels.md#webchatoptions)
+- `agent.message({ ..., key })` takes a person's key your server verified; `agent.conversationOf({ channel, address })`
+  gives the conversation an address belongs to.
+
+### Migration notes
+
+- None: nothing an agent uses changed.
+
 ## 0.5.0 (unreleased)
 
 ### Changes

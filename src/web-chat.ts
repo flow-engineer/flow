@@ -58,8 +58,12 @@ export type WebChatEvent = WebChatEventBody & { cursor: string; at: number };
  * reply one runner writes reaches a browser polling another.
  */
 export interface WebChatMailbox {
-  /** Keeps one event for a visitor; resolves with it once it is kept (that is the platform accepting it), rejects when it cannot. */
-  append(address: string, event: WebChatEventBody): Promise<WebChatEvent>;
+  /**
+   * Keeps one event for a visitor; resolves with it once it is kept (that is the platform accepting
+   * it), rejects when it cannot. With `idempotencyKey` (a message the business started), an event
+   * already kept with that key is not kept again: it resolves with that one.
+   */
+  append(address: string, event: WebChatEventBody, idempotencyKey?: string): Promise<WebChatEvent>;
   /**
    * The visitor's events after `after`, waiting up to `waitMs` for the first when there are none
    * (or until `signal` aborts). `reset` when `after` is not a cursor it can continue from (another
@@ -81,7 +85,8 @@ export function memoryMailbox(options: { keep?: number; visitors?: number; idleM
   const idleMs = options.idleMs ?? 24 * 3_600_000;
   const now = options.now ?? Date.now;
   const epoch = randomUUID().slice(0, 8);
-  type Box = { events: Array<WebChatEvent & { seq: number }>; seq: number; used: number; waiters: Set<() => void> };
+  type Held = WebChatEvent & { seq: number; key?: string };
+  type Box = { events: Held[]; seq: number; used: number; waiters: Set<() => void> };
   const boxes = new Map<string, Box>();
 
   function box(address: string): Box {
@@ -99,16 +104,18 @@ export function memoryMailbox(options: { keep?: number; visitors?: number; idleM
     return b;
   }
   const cursorOf = (seq: number) => `${epoch}:${seq}`;
+  const bare = ({ seq: _seq, key: _key, ...event }: Held) => event as WebChatEvent;
 
   return {
-    async append(address, event) {
+    async append(address, event, idempotencyKey) {
       const b = box(address);
-      const kept = { ...event, seq: ++b.seq, cursor: cursorOf(b.seq), at: now() } as WebChatEvent & { seq: number };
+      const earlier = idempotencyKey ? b.events.find((e) => e.key === idempotencyKey) : undefined;
+      if (earlier) return bare(earlier);
+      const kept = { ...event, seq: ++b.seq, cursor: cursorOf(b.seq), at: now(), ...(idempotencyKey ? { key: idempotencyKey } : {}) } as Held;
       b.events.push(kept);
       if (b.events.length > keep) b.events.splice(0, b.events.length - keep);
       for (const wake of b.waiters) wake();
-      const { seq: _seq, ...out } = kept;
-      return out as WebChatEvent;
+      return bare(kept);
     },
     async read(address, after, waitMs, signal) {
       const [from, n] = after.split(":");
@@ -130,7 +137,7 @@ export function memoryMailbox(options: { keep?: number; visitors?: number; idleM
           signal?.addEventListener("abort", done);
         });
       }
-      const events = newer().map(({ seq: _seq, ...e }) => e as WebChatEvent);
+      const events = newer().map(bare);
       return { events, cursor: events.at(-1)?.cursor ?? after };
     },
     async start(address) {
@@ -211,8 +218,8 @@ export function webChat(options: WebChatOptions): WebChat {
   const pages = new Map<string, WebChatPage>();
   let agent: WebChatAgent | null = null;
 
-  const put = async (address: string, event: WebChatEventBody): Promise<SendReceipt> => {
-    await mailbox.append(address, event);
+  const put = async (address: string, event: WebChatEventBody, idempotencyKey?: string): Promise<SendReceipt> => {
+    await mailbox.append(address, event, idempotencyKey);
     return { status: "sent" };
   };
 
@@ -230,9 +237,9 @@ export function webChat(options: WebChatOptions): WebChat {
           ...(outbound.link ? { link: outbound.link } : {}),
           ...(outbound.image ? { image: outbound.image } : {}),
           ...(outbound.fields && Object.keys(outbound.fields).length ? { fields: outbound.fields } : {}),
-        });
+        }, outbound.idempotencyKey);
       case "carousel":
-        return put(address, { type: "carousel", text: outbound.text, cards: outbound.cards, ...(outbound.replyTo ? { replyTo: outbound.replyTo } : {}) });
+        return put(address, { type: "carousel", text: outbound.text, cards: outbound.cards, ...(outbound.replyTo ? { replyTo: outbound.replyTo } : {}) }, outbound.idempotencyKey);
       case "typing":
         return info.typing ? put(address, { type: "typing", on: outbound.on }).then(() => undefined) : undefined;
       case "status":

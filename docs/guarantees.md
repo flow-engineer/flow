@@ -14,6 +14,7 @@ platform refused it**, with the platform's reason. Accepted means the platform t
 |---|---|
 | Flow Messaging (WhatsApp, SMS, Telegram, iMessage) | Flow reports `message.sent`: the channel itself took it (not only Flow's `202`, which means queued). `waitFor: "delivered"` waits for `message.delivered` instead, where the channel reports it. |
 | `whatsapp(provider)`, `sms(provider)`, `customUI(name, provider)` | Your provider's `sendMessage` (or `sendCarousel`, `sendTemplate`) resolves. Write it to resolve when your platform's API accepted the message, not before. |
+| `webChat()` | The visitor's mailbox kept it (`memoryMailbox()` by default, or yours); the browser reads it from there. |
 | The playground and the test cloud | The simulator has it. |
 
 A send may resolve with a receipt (`SendReceipt`) saying how far the message got: `sent`,
@@ -55,6 +56,9 @@ What follows from it:
 Platforms deliver at least once: a webhook is retried until it is answered, and Flow Messaging
 redelivers events it is not sure arrived. The agent takes each message once:
 
+- The web chat's client sends each message with its own id, the same on every retry: it is the
+  message's id for the agent, so a retry is a `message.duplicate`. Its echo in the visitor's mailbox
+  may come twice; the client shows each id once.
 - Flow Messaging events are dropped when their id was handled before in this process (the last
   10,000), so a redelivery, or the same event by both the stream and a webhook, reaches the agent
   once. A failure to handle an event answers the webhook 500 (or does not move the stream's cursor),
@@ -98,7 +102,8 @@ provider does its part:
 ## The conformance suite
 
 `conformance/` runs each adapter through the checks above against a platform the checks hold:
-`whatsapp()`, `sms()` and `customUI()` over a provider that waits for the check, and each Flow
+`whatsapp()`, `sms()` and `customUI()` over a provider that waits for the check, `webChat()` over a
+mailbox that waits for it, and each Flow
 Messaging channel with its signal coming by webhook, by the stream and by reading the message back.
 For each one it checks that `send()` resolves only after the platform accepted the message, rejects
 with the platform's reason, passes idempotency keys on, resolves a carousel only after its last
