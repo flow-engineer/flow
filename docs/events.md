@@ -9,6 +9,9 @@ the no-contact rules apply to every one.
 `flowEvents` (from `@flow-engineer/flow`) is the engine. What your events mean (which types exist,
 their templates and wording, your own rules) stays in your app.
 
+Use [`agent.nudge()`](https://docs.flow.engineer/nudges) for a direct follow-up. Use business
+events when your backend publishes a catalog of events with delivery levels, expiry and topic rules.
+
 ## The envelope
 
 ```json
