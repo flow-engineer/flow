@@ -4,6 +4,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,8 +41,67 @@ var toolDefinitions = json.RawMessage(`[
         "item": {"type": "string"},
         "size": {"type": "string"},
         "milk": {"type": "string"},
-        "quantity": {"type": "integer", "minimum": 1, "maximum": 20, "default": 1}}}}}}}}
+        "quantity": {"type": "integer", "minimum": 1, "maximum": 20, "default": 1}}}}}}}},
+  {"type": "function", "function": {
+    "name": "show_menu",
+    "description": "Show the person the menu, or some items of it, as a list they pick from (laid out for their chat app). Use it instead of writing the menu out.",
+    "parameters": {"type": "object", "properties": {
+      "items": {"type": "array", "items": {"type": "string"}, "description": "Only these items, by name; the whole menu when left out"}}}}}
 ]`)
+
+// recordsReply is a records reply (spec/response.schema.json): rows made here from the menu, never
+// retyped by the model. Flow Framework lays them out for the person's platform (a WhatsApp list,
+// numbered text on SMS) and a tap comes back as message.choice with the row's id.
+type recordsReply struct {
+	Type string      `json:"type"`
+	Text string      `json:"text"`
+	Kind string      `json:"kind"`
+	Rows []recordRow `json:"rows"`
+	Pick *pickLabel  `json:"pick,omitempty"`
+}
+
+type recordRow struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Detail string `json:"detail,omitempty"`
+}
+
+type pickLabel struct {
+	Label string `json:"label"`
+}
+
+// menuRecords is the menu (only the named items, when any are named) as a records reply, or nil when none match.
+func menuRecords(arguments string) *recordsReply {
+	var input struct {
+		Items []string `json:"items"`
+	}
+	json.Unmarshal([]byte(arguments), &input) // bad arguments: the whole menu
+	var rows []recordRow
+	for _, m := range menu {
+		if len(input.Items) > 0 && !named(input.Items, m.Item) {
+			continue
+		}
+		sizes := make([]string, 0, len(m.Sizes))
+		for size, price := range m.Sizes {
+			sizes = append(sizes, fmt.Sprintf("%s $%.2f", size, price))
+		}
+		sort.Strings(sizes)
+		rows = append(rows, recordRow{ID: strings.ReplaceAll(strings.ToLower(m.Item), " ", "-"), Title: m.Item, Detail: strings.Join(sizes, ", ")})
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	return &recordsReply{Type: "records", Text: "Our menu", Kind: "menu", Rows: rows, Pick: &pickLabel{Label: "Choose"}}
+}
+
+func named(names []string, item string) bool {
+	for _, n := range names {
+		if strings.EqualFold(n, item) {
+			return true
+		}
+	}
+	return false
+}
 
 type orderItem struct {
 	Item     string `json:"item"`
@@ -69,6 +129,12 @@ func runTool(name, arguments string) any {
 			return map[string]string{"error": "Arguments are not valid JSON: " + err.Error()}
 		}
 		return placeOrder(input.Items)
+	case "show_menu":
+		// The rows go to the person as a records reply (agent.turn); the model is told how many.
+		if shown := menuRecords(arguments); shown != nil {
+			return map[string]int{"shown": len(shown.Rows)}
+		}
+		return map[string]int{"shown": 0}
 	}
 	return map[string]string{"error": "Unknown tool: " + name}
 }

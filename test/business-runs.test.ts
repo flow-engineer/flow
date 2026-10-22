@@ -13,7 +13,7 @@ import { test } from "node:test";
 import { createAgent, flowEvents, whatsapp, type Channel, type EventSink, type FlowEvent, type Tool } from "../src/index.ts";
 import { LEASE_MS } from "../src/conversation.ts";
 import { runInCloud, type ConnectOptions } from "../testing/src/client.ts";
-import { isBusiness, parseScenario, waitMs } from "../testing/src/suite.ts";
+import { isBusiness, parseScenario, usesRecords, waitMs } from "../testing/src/suite.ts";
 import type { BusinessBuild } from "../testing/src/business.ts";
 import type { BusinessOutbound, Command, StepAnswer } from "../testing/src/protocol.ts";
 import { call, gate, respond, scriptedModel, WHATSAPP } from "./helpers.ts";
@@ -186,7 +186,7 @@ test("a business run against flowEvents' own route: a signed event is 202, a wro
   await events!.idle();
 });
 
-test("the format: a business run's steps parse (expect.sent may ask for a carousel), and a step that is two things is refused at its line", () => {
+test("the format: a business run's steps parse (expect.sent may ask for a carousel or records, a step may pick a row), and a step that is two things is refused at its line", () => {
   const scenario = (opening: string, expect = "") => ({ path: "scenarios/b.yaml", content: `id: b\nchannels: [whatsapp]\nperson: { address: "+15550100001", persona: p, goal: g }\nopening:\n${opening}\n${expect}` });
   const ok = parseScenario(scenario(
     `  - event: { type: test.outbid, delivery: critical, subject: "user:1", data: { phone: "+15550100001" } }\n    at: "23:30"\n  - wait: 8h30m\n  - event: { id: e1, type: t, subject: s, data: {} }\n    signature: bad\n    answer: 401\n  - nudge: { template: { name: outbid, body: [PS5] } }\n  - say: ok`,
@@ -197,7 +197,7 @@ test("the format: a business run's steps parse (expect.sent may ask for a carous
   assert.deepEqual(ok.opening.map((s) => (s.event ? "event" : s.nudge ? "nudge" : s.wait ? "wait" : "say")), ["event", "wait", "event", "nudge", "say"]);
   assert.equal(waitMs("8h30m"), 8.5 * 3_600_000);
   assert.ok(!isBusiness(parseScenario(scenario("  - say: hi"))));
-  assert.throws(() => parseScenario(scenario("  - say: hi\n    wait: 1h")), /scenarios\/b\.yaml:5: opening\[0\]: one of say, event, nudge, wait or restart per step, not say and wait/);
+  assert.throws(() => parseScenario(scenario("  - say: hi\n    wait: 1h")), /scenarios\/b\.yaml:5: opening\[0\]: one of say, event, nudge, wait, restart or pick per step, not say and wait/);
   const restarts = parseScenario(scenario("  - say: hi\n  - restart: crash\n  - restart: deploy"));
   assert.ok(isBusiness(restarts));
   assert.deepEqual(restarts.opening.map((s) => s.restart ?? null), [null, "crash", "deploy"]);
@@ -205,6 +205,14 @@ test("the format: a business run's steps parse (expect.sent may ask for a carous
   assert.throws(() => parseScenario(scenario("  - wait: soon")), /a length of time/);
   assert.throws(() => parseScenario(scenario("  - say: hi\n    answer: 202")), /belong to an event step/);
   assert.throws(() => parseScenario(scenario("  - say: hi", "expect:\n  sent: [{ carousel: true, template: outbid }]")), /a carousel is not a template/);
+  // Records: what a records send showed, and a row the person picks; only a cloud that checks records plays them.
+  const picks = parseScenario(scenario("  - say: my orders\n  - pick: BL-1040", "expect:\n  sent: [{ records: orders, ids: [BL-1040, BL-1041], count: 2, page: 1, text: ready }]"));
+  assert.deepEqual(picks.opening[1], { pick: "BL-1040" });
+  assert.deepEqual(picks.expect.sent?.[0], { records: "orders", ids: ["BL-1040", "BL-1041"], count: 2, page: 1, text: "ready" });
+  assert.ok(usesRecords(picks) && !usesRecords(ok));
+  assert.throws(() => parseScenario(scenario("  - say: hi", "expect:\n  sent: [{ ids: [BL-1040] }]")), /give records too/);
+  assert.throws(() => parseScenario(scenario("  - say: hi", "expect:\n  sent: [{ records: true, template: outbid }]")), /records are not a template or a carousel/);
+  assert.throws(() => parseScenario(scenario("  - say: hi\n    pick: BL-1040")), /not say and pick/);
 });
 
 test("a crash mid-turn: the dead agent sends nothing more, and its turn runs once on the next one after its lease", async () => {

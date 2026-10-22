@@ -117,3 +117,25 @@ func TestToolLoopHistoryAndEmptyReply(t *testing.T) {
 		t.Fatalf("person's message %q, want %q", got, want)
 	}
 }
+
+// The model asks to show two items; the reply carries them as records, made from the menu by code.
+func TestShowMenuIsARecordsReply(t *testing.T) {
+	step := 0
+	scripted := func(_ context.Context, _ []chatMessage) (chatMessage, error) {
+		step++
+		if step == 1 {
+			call := toolCall{ID: "c1", Type: "function"}
+			call.Function.Name = "show_menu"
+			call.Function.Arguments = `{"items":["latte","Chai"]}`
+			return chatMessage{Role: "assistant", ToolCalls: []toolCall{call}}, nil
+		}
+		return chatMessage{Role: "assistant", Content: "Anything catch your eye?"}, nil
+	}
+	server := httptest.NewServer(newAgent(scripted, "system", ""))
+	defer server.Close()
+	_, body := post(t, server.URL, "", `{"conversationId":"whatsapp:s.menu.whatsapp.1","channel":"whatsapp","messageId":"m1","message":{"text":"menu?"}}`)
+	want := `{"replies":[{"type":"records","text":"Our menu","kind":"menu","rows":[{"id":"latte","title":"Latte","detail":"large $4.80, small $4.00"},{"id":"chai","title":"Chai","detail":"large $4.60, small $4.00"}],"pick":{"label":"Choose"}},{"type":"message","text":"Anything catch your eye?"}]}`
+	if body != want {
+		t.Fatalf("got %s\nwant %s", body, want)
+	}
+}

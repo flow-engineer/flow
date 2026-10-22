@@ -11,7 +11,7 @@ import { toSpec, type Agent, type Incoming, type EventSink, type Outbound, type 
 import { PROFILE_TOOL, profileTool } from "../../src/conversation.ts";
 import { STAND_IN } from "../../src/tools.ts";
 import type { Command, Opened, WireIncoming, OpenSession, Receipt, RunKey, RunSummary, SessionLimits, SessionSummary, ToolCallRequest, ToolCallResult } from "./protocol.ts";
-import { mimeOf, parseScenario, parseToolFile, suiteHash, type SuiteFile } from "./suite.ts";
+import { mimeOf, parseScenario, parseToolFile, suiteHash, usesRecords, type SuiteFile } from "./suite.ts";
 import { businessRuns, type BusinessAgent, type BusinessBuild } from "./business.ts";
 
 export interface ConnectOptions {
@@ -323,7 +323,8 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
           mode: idempotent ? "idempotent" : "never", key: `tool:${randomUUID()}`, budgetMs: retryBudgetMs, what: "tool call",
         });
         if (!result.ok) throw new ToolFailed(result.error);
-        return result.output;
+        // A simulated list of rows is the tool's records, as its own run would return them.
+        return t.records && Array.isArray(result.output) ? t.records.of(result.output) : result.output;
       })();
       // The agent's own code may start a tool and never wait for it (an intercept's hand-off). A call
       // the cloud failed is then that run's error, never an unhandled rejection that ends the session;
@@ -408,6 +409,14 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
   // A restart starts the run's next agent and resumes it on the run's store.
   const canRestart = canBusiness && typeof (agent as Partial<BusinessAgent>).resume === "function";
 
+  // Scenarios that check records or pick a row: a cloud that cannot check them must not pass them silently.
+  const recordsIn = options.files.filter((f) => f.path.startsWith("scenarios/") && (() => {
+    try {
+      return usesRecords(parseScenario(f));
+    } catch {
+      return false;
+    }
+  })()).map((f) => f.path);
   const open: OpenSession = {
     agent: { name: options.name, title: options.title, tools: [...options.tools, ...(agent.hasProfile?.() ? standIn : [])].map(toSpec), channels: agent.channels() },
     files: options.files.map(({ path, hash }) => ({ path, hash })),
@@ -421,8 +430,12 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     flaky: true,
     ...(options.fresh ? { fresh: true } : {}),
     ...(only ? { only } : {}),
+    ...(recordsIn.length ? { records: true } : {}),
   };
   const opened = await openOnce(`${base}/api/sessions`, open, options.openHeaders, controller.signal, postTimeoutMs, openRetryCapMs, log);
+  if (recordsIn.length && opened.records !== true) {
+    throw new Error(`this test cloud does not check records yet (records, ids, count or page in expect.sent, or a pick step), so ${recordsIn.join(", ")} cannot be played: take those keys out, or run them on a cloud that checks records.`);
+  }
   idempotent = opened.idempotency === true;
   openedId = opened.sessionId;
   reopenable = opened.reopen === true;

@@ -22,6 +22,20 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   Messaging's WhatsApp).
 - Store migration 10: a `records` table (handles per conversation, the newest 20 for 7 days,
   erased with the person).
+- HTTP agents may answer with a `records` reply (`spec/response.schema.json`: `{ type: "records",
+  text, kind, rows: [{ id, title, detail?, image? }], pick?, page? }`), rendered for the run's
+  platform like a Flow Framework agent's; the Python and Go examples show their menu this way.
+- Tests check records: an `expect.sent` item takes `records` (the kind, or `true`), `ids` (the
+  page's rows, exactly, in order), `count` and `page`, and a `pick: <row id or title>` step picks a
+  row of the latest records shown (a tap, or its number typed where the channel has no list or
+  buttons). Only a test cloud that answers `records` plays such a suite; the CLI refuses it on an
+  older one rather than pass it. A tool's new `records` option (`records: orders`) makes a
+  simulated list of rows the same records under `flow test`. `flow show` and `flow chat` mark
+  records sends (`[orders r1, page 1/4 of 37]`) and picks; the playground's trace says them too.
+- `message.out`'s `records` also carries the page's `rows` (id, number, title, detail). Trace spans
+  of records sends have `chinwag.records.kind`, `.count`, `.page`, `.pages`, `.delivered_as` and
+  `.shown` (ids), and `.rows` only with content; a pick puts `chinwag.records.picked` on its turn.
+- Docs: [docs/records.md](docs/records.md); the café shows a person's orders with `my_orders`.
 
 ### Migration notes
 

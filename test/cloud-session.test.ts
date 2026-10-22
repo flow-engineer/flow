@@ -1,4 +1,4 @@
-// covers: testing/src/client.ts testing/src/protocol.ts
+// covers: testing/src/client.ts testing/src/protocol.ts testing/src/suite.ts
 // The CLI against a hosted cloud: the open carries the CI key and the synthetic attestation, and the
 // session is played at the tunnel the open answers, which never sees the key; the agent's posts reach
 // the cloud while the stream is open, also over HTTPS with HTTP/2 as a hosted cloud speaks it, and a
@@ -15,7 +15,7 @@ import { test } from "node:test";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { z } from "zod";
 import { cloudHeaders, runInCloud, tunnelBase } from "../testing/src/client.ts";
-import type { Agent, Incoming } from "../src/index.ts";
+import { isRecords, records, z as flowZ, type Agent, type Incoming, type Tool } from "../src/index.ts";
 
 test("a hosted cloud needs the CI key and --synthetic; a local one needs neither", () => {
   const hosted = "https://tests.example.com";
@@ -115,6 +115,51 @@ test("a file a scenario attaches is read from the tests folder on this machine, 
   assert.deepEqual({ kind: photo.kind, mime: photo.mime, name: photo.name }, { kind: "image", mime: "image/png", name: "receipt.png" });
   assert.deepEqual(await photo.data(), new Uint8Array([1, 2, 3]));
   await assert.rejects(outside.data(), /not a file in the tests folder/);
+});
+
+test("a suite that checks records is refused by a cloud that does not check them; a simulated list of rows is the tool's records", async () => {
+  const scenario = `id: r\nchannels: [whatsapp]\nperson: { persona: p, goal: g }\nopening:\n  - say: my orders\n  - pick: BL-1040\n`;
+  const opens: Array<Record<string, unknown>> = [];
+  const serve = (answersRecords: boolean) => createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => (raw += c));
+    req.on("end", () => {
+      if (req.url === "/api/sessions") opens.push(JSON.parse(raw));
+      if (req.url!.endsWith("/tool-calls")) return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, output: [{ id: "BL-1040", status: "ready" }] }));
+      if (!req.url!.endsWith("/stream")) return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ sessionId: "s", token: "t", missing: [], dashboard: "d", ...(answersRecords ? { records: true } : {}) }));
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(`data: ${JSON.stringify({ type: "message", conversationId: "c", messageId: "m1", channel: { reactions: false, status: false }, incoming: { text: "my orders" } })}\n\ndata: ${JSON.stringify({ type: "finished", summary: { runs: [] } })}\n\n`);
+    });
+  });
+  const orders = records<{ id: string; status: string }>({ kind: "orders", id: (o) => o.id, title: (o) => `${o.id} · ${o.status}`, pick: "View order" });
+  const tool: Tool = { name: "my_orders", description: "Their orders", input: flowZ.object({}), records: orders, run: () => [] };
+  const outputs: unknown[] = [];
+  let ran!: () => void;
+  const called = new Promise<void>((done) => (ran = done));
+  const play = async (answersRecords: boolean) => {
+    const server = serve(answersRecords);
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    try {
+      return await runInCloud({
+        cloud: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+        name: "cafe",
+        tools: [tool],
+        build: ({ tools }) => ({ channels: () => [], receive: () => (void Promise.resolve(tools[0].run({}, { conversationId: "c" } as never)).then((o) => (outputs.push(o), ran())), "m1") }) as unknown as Agent,
+        files: [{ path: "scenarios/r.yaml", hash: "h", content: scenario }],
+        log: () => {},
+      });
+    } finally {
+      server.close();
+    }
+  };
+  await assert.rejects(play(false), /this test cloud does not check records yet .* scenarios\/r\.yaml cannot be played/);
+  assert.equal(opens[0].records, true);
+  assert.deepEqual(outputs, []);
+  await play(true);
+  await called;
+  assert.equal(outputs.length, 1);
+  assert.ok(isRecords(outputs[0]));
+  assert.deepEqual((outputs[0] as ReturnType<typeof orders.of>).rows, [{ id: "BL-1040", title: "BL-1040 · ready" }]);
 });
 
 test("a late session_closed drops the leftover events instead of failing the run", async () => {

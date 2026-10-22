@@ -5,7 +5,8 @@ dependencies (Python 3.11+, standard library only). It implements Flow Framework
 ([`spec/agent-endpoint.openapi.yaml`](../../spec/agent-endpoint.openapi.yaml)) so `flow test` can
 talk to it: one POST per message from the person, answered with the replies to send. It reads the
 café's instructions from `../cafe/agent/AGENTS.md`, runs the café's `get_menu` and `place_order`
-tools itself, and calls any OpenAI-compatible model.
+tools itself, and calls any OpenAI-compatible model. Its `show_menu` tool shows the menu as a `records`
+reply ([docs/records.md](../../docs/records.md)): rows made by its own code, laid out by Flow Framework for the person's platform.
 
 ## Run it
 

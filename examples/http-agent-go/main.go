@@ -161,13 +161,16 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: expected a Flow Framework message as JSON", http.StatusBadRequest)
 		return
 	}
-	text, err := a.turn(r.Context(), req)
+	text, shown, err := a.turn(r.Context(), req)
 	if err != nil {
 		// Flow Framework fails this turn and shows the reason.
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	replies := []reply{} // [] when there is nothing to say, never null
+	replies := []any{} // [] when there is nothing to say, never null
+	for _, s := range shown {
+		replies = append(replies, s)
+	}
 	if text != "" {
 		replies = append(replies, reply{Type: "message", Text: text})
 	}
@@ -178,18 +181,19 @@ func (a *agent) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // turn adds the person's message to the conversation, runs the model and its tools (up to 5
-// steps), and returns the reply. A conversation's messages come one at a time, so only the map
-// needs the lock.
-func (a *agent) turn(ctx context.Context, req request) (string, error) {
+// steps), and returns the reply and any menu it showed. A conversation's messages come one at a
+// time, so only the map needs the lock.
+func (a *agent) turn(ctx context.Context, req request) (string, []*recordsReply, error) {
 	a.mu.Lock()
 	history := append(a.histories[req.ConversationID], chatMessage{Role: "user", Content: personText(req)})
 	a.histories[req.ConversationID] = history
 	a.mu.Unlock()
 
+	var shown []*recordsReply
 	for step := 0; step < 5; step++ {
 		msg, err := a.model(ctx, append([]chatMessage{{Role: "system", Content: a.system}}, history...))
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if msg.Content != "" || len(msg.ToolCalls) > 0 {
 			history = append(history, msg)
@@ -197,15 +201,20 @@ func (a *agent) turn(ctx context.Context, req request) (string, error) {
 		for _, call := range msg.ToolCalls {
 			result, _ := json.Marshal(runTool(call.Function.Name, call.Function.Arguments))
 			history = append(history, chatMessage{Role: "tool", ToolCallID: call.ID, Content: string(result)})
+			if call.Function.Name == "show_menu" {
+				if menu := menuRecords(call.Function.Arguments); menu != nil {
+					shown = append(shown, menu)
+				}
+			}
 		}
 		a.mu.Lock()
 		a.histories[req.ConversationID] = history
 		a.mu.Unlock()
 		if len(msg.ToolCalls) == 0 {
-			return strings.TrimSpace(msg.Content), nil
+			return strings.TrimSpace(msg.Content), shown, nil
 		}
 	}
-	return "", errors.New("the model was still calling tools after 5 steps")
+	return "", nil, errors.New("the model was still calling tools after 5 steps")
 }
 
 // personText is the person's message as the model reads it: its id, then what they wrote, with a

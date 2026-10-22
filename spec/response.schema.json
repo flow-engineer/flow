@@ -17,6 +17,9 @@
             "$ref": "#/$defs/message"
           },
           {
+            "$ref": "#/$defs/records"
+          },
+          {
             "$ref": "#/$defs/read"
           },
           {
@@ -163,6 +166,109 @@
         "fields": {
           "type": "object",
           "description": "The channel's own parameters, passed on as they are."
+        }
+      }
+    },
+    "records": {
+      "description": "Rows your own code made from your backend's data (orders, bookings), shown under `text` the way the run's platform shows them best: a WhatsApp list, Telegram numbered lines with a button per row, numbered text on iMessage and SMS, cards when every row has an image and the platform has carousels. A page at a time (10 a page, 5 on SMS); the page's last row or button is \"More\" (its id `chinwag:more`) when there are more. A tap on a row comes back as the person's message with `choice.id` the row's id; a number or MORE they type comes back as their text. Only the keys below.",
+      "type": "object",
+      "required": [
+        "type",
+        "text",
+        "kind",
+        "rows"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "records"
+        },
+        "text": {
+          "type": "string",
+          "description": "Your intro above the rows (may be empty)."
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "description": "What the rows are, such as orders or bookings: in events and in tests (expect.sent's records)."
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "description": "In order. Titles and details are cut to fit the platform; ids never are.",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "title"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "description": "1 to 64 bytes, unique among the rows: a tap comes back with it."
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1
+              },
+              "detail": {
+                "type": "string",
+                "description": "One more line about the row (items, total, date)."
+              },
+              "image": {
+                "type": "object",
+                "required": [
+                  "url"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "pattern": "^https://[^\\s/?#]+"
+                  }
+                },
+                "description": "Used only when every row has one and the platform has carousels."
+              }
+            }
+          }
+        },
+        "pick": {
+          "type": "object",
+          "required": [
+            "label"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "label": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "description": "The label of the button that picks one (View order). Without it the rows are read-only: numbered text, no list or buttons."
+        },
+        "page": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "number": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Which page to send, from 1 (default 1): answer a More with the next one."
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Rows a page holds, within the platform's (default: the platform's)."
+            }
+          }
+        },
+        "replyTo": {
+          "type": "string",
+          "description": "Quote one of the person's messages, by its messageId."
         }
       }
     },

@@ -98,7 +98,9 @@ test("the agent shows a tool's records by handle; the channel gets them rendered
   const sent = h.out.filter((o): o is Extract<Outbound, { type: "message" }> => o.type === "message");
   assert.deepEqual(sent.at(-1)?.list?.rows.map((r) => r.id), ["ORD-3", "ORD-1"]);
   const out = h.events.filter((e) => e.type === "message.out").at(-1) as unknown as { records: Record<string, unknown> };
-  assert.deepEqual(out.records, { kind: "orders", handle: "r1", count: 2, shown: ["ORD-3", "ORD-1"], page: 1, pages: 1, deliveredAs: "list" });
+  const { rows, ...shown } = out.records as { rows: Array<{ id: string; number: number }> };
+  assert.deepEqual(shown, { kind: "orders", handle: "r1", count: 2, shown: ["ORD-3", "ORD-1"], page: 1, pages: 1, deliveredAs: "list" });
+  assert.deepEqual(rows.map((r) => [r.number, r.id]), [[1, "ORD-3"], [2, "ORD-1"]], "the page's rows with their numbers, for tests and the playground");
 });
 
 test("a tap on a row or its number typed is a pick with the row's data; MORE sends the next page with no model call", async () => {

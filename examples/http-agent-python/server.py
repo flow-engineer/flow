@@ -54,7 +54,25 @@ def place_order(name, items):
     return {"order_id": f"BL-{next(order_numbers)}", "ready_by": ready_by.isoformat(timespec="seconds").replace("+00:00", "Z"), "pay_at_pickup": True}
 
 
-TOOLS = {"get_menu": lambda args: get_menu(), "place_order": lambda args: place_order(**args)}
+def menu_records(names=None):
+    """The menu as a records reply: rows made here from MENU, never retyped by the model. Flow Framework
+    lays them out for the person's platform (a WhatsApp list, numbered text on SMS) and a tap comes
+    back as message.choice with the row's id."""
+    wanted = {str(n).lower() for n in names or []}
+    rows = [
+        {"id": m["item"].lower().replace(" ", "-"), "title": m["item"], "detail": ", ".join(f"{size} ${price:.2f}" for size, price in m["sizes"].items())}
+        for m in MENU
+        if not wanted or m["item"].lower() in wanted
+    ]
+    return {"type": "records", "text": "Our menu", "kind": "menu", "rows": rows, "pick": {"label": "Choose"}} if rows else None
+
+
+TOOLS = {
+    "get_menu": lambda args: get_menu(),
+    "place_order": lambda args: place_order(**args),
+    # The rows go to the person as a records reply (turn); the model is told how many.
+    "show_menu": lambda args: {"shown": len((menu_records(args.get("items")) or {"rows": []})["rows"])},
+}
 TOOL_DEFS = [
     {"type": "function", "function": {"name": "get_menu", "description": "The full menu: items, sizes with prices in USD, milk options and allergens.", "parameters": {"type": "object", "properties": {}}}},
     {"type": "function", "function": {
@@ -69,6 +87,11 @@ TOOL_DEFS = [
                 "quantity": {"type": "integer", "minimum": 1, "maximum": 20, "default": 1},
             }}},
         }},
+    }},
+    {"type": "function", "function": {
+        "name": "show_menu",
+        "description": "Show the person the menu, or some items of it, as a list they pick from (laid out for their chat app). Use it instead of writing the menu out.",
+        "parameters": {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "string"}, "description": "Only these items, by name; the whole menu when left out"}}},
     }},
 ]
 
@@ -124,16 +147,23 @@ histories = {}
 
 
 def turn(conversation_id, text):
-    """The model and its tools, up to 5 steps; the last text is the reply."""
+    """The model and its tools, up to 5 steps: the replies, any menu it showed, then its last text."""
     history = histories.setdefault(conversation_id, [])
     history.append({"role": "user", "content": text})
+    replies = []
     for _ in range(5):
         message = complete(history)
         history.append(message)
         if not message.get("tool_calls"):
             break
-        history.extend(run_tool(call) for call in message["tool_calls"])
-    return (message.get("content") or "").strip()
+        for call in message["tool_calls"]:
+            history.append(run_tool(call))
+            if call["function"]["name"] == "show_menu":
+                shown = menu_records(json.loads(call["function"].get("arguments") or "{}").get("items"))
+                if shown:
+                    replies.append(shown)
+    reply = (message.get("content") or "").strip()
+    return replies + ([{"type": "message", "text": reply}] if reply else [])
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -150,10 +180,10 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, KeyError, TypeError, AttributeError) as error:
             return self.answer(400, f"Bad request: {error}")
         try:
-            reply = turn(conversation_id, text)
+            replies = turn(conversation_id, text)
         except ModelError as error:  # Flow Framework fails this turn and shows the reason
             return self.answer(502, str(error))
-        self.answer(200, json.dumps({"replies": [{"type": "message", "text": reply}] if reply else []}), "application/json")
+        self.answer(200, json.dumps({"replies": replies}), "application/json")
 
     def do_GET(self):
         self.answer(404)

@@ -145,6 +145,15 @@ expect:
   (its name), `phrased: true` (the agent's own words, not a template), `carousel: true` (a carousel,
   not a message or template), `text` (in the message, the template's values, or the carousel's text
   and cards). Checked by code, like `calls`.
+- Records (rows a tool returned with `records(...).of(rows)`, shown with the send tool's `show`):
+  an `expect.sent` item with `records: orders` (the kind, or `true` for any) matches a records send,
+  and may add `ids: [BL-1041, BL-1040]` (the rows on that message's page, exactly, in order),
+  `count` (rows in all), `page` (2 is the one "More" sent) and `text` (the intro or any row's title
+  or detail). Records items are matched in order among records sends. A `pick: BL-1041` step (a row
+  id or title) picks a row of the latest records the agent showed: a tap where the channel shows a
+  list or buttons, else the row's number typed (`say: "2"` tests the typed number yourself). Give
+  the tool `records: orders` in its definition, so a simulated list of rows comes back as records.
+  A cloud that does not check records yet refuses such a suite before it plays.
 - A business run where the agent sent nothing is not a failure by itself: `expect` decides.
 - `restart: crash` or `restart: deploy` restarts the agent mid-conversation, on the same store, to
   catch double replies and lost turns across a crash or a deploy. Put it right after a `say` and it

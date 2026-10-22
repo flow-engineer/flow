@@ -18,6 +18,7 @@ import type { Agent, FlowEvent, Outbound, Photo } from "../../src/index.ts";
 import { replyButton } from "../../src/channels.ts";
 import { NO_MODEL_KEY } from "../../src/model.ts";
 import { loadEnv } from "./report.ts";
+import { recordsMark } from "./show.ts";
 
 export const CHAT_LINE = `  flow chat [--channel <name>] [--person <phone>] [--json]
                             Talk to the agent in this folder from the terminal: one message per line
@@ -69,6 +70,8 @@ export async function chatCli(args: string[], input: NodeJS.ReadableStream = pro
   agent.attachPlayground(({ outbound }) => print(outbound, channel.name, json));
   turns.push((event) => {
     if (event.type === "model.error") console.error(`flow chat: the model failed: ${String(event.error ?? event.message ?? "error")}`);
+    // A records send went as the messages above it: say which records and which page.
+    if (event.type === "message.out" && event.records && !json) process.stdout.write(`       ${recordsMark(event.records as Parameters<typeof recordsMark>[0])}\n`);
   });
   const prompt = (process.stdin as NodeJS.ReadStream).isTTY && input === process.stdin;
   if (!json) console.error(`Talking to the agent on ${channel.name} as ${person.name} (${person.phone}). Ctrl-D ends.`);
