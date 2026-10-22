@@ -114,6 +114,9 @@ const MIGRATIONS: Array<((t: Types) => string) | null> = [
      PRIMARY KEY (agent_id, send_key));
    CREATE INDEX sends_call ON sends (agent_id, conversation_id, call_id);
    CREATE INDEX sends_created ON sends (agent_id, created_at)`,
+  // flowEvents' snapshot is saved over the version a runner read, so the old and the new runner of
+  // a deploy do not save over each other's held sends.
+  () => `ALTER TABLE event_state ADD COLUMN version INTEGER NOT NULL DEFAULT 0`,
 ];
 
 /** Quiet hours, "HH:MM" to "HH:MM" in the person's own time; they may wrap midnight. */
@@ -298,12 +301,13 @@ export class Store {
 
   // flowEvents' send state (business events).
 
-  /** The saved snapshot (null: none yet), the event ids taken, and the taken events not yet processed, oldest first. */
-  async loadEventState(): Promise<{ state: string | null; seen: string[]; pending: string[] }> {
-    const [row] = await this.db.query("SELECT state FROM event_state WHERE agent_id = ?", [this.agentId]);
+  /** The saved snapshot (null: none yet) and its version, the event ids taken, and the taken events not yet processed, oldest first. */
+  async loadEventState(): Promise<{ state: string | null; version: number; seen: string[]; pending: string[] }> {
+    const [row] = await this.db.query("SELECT state, version FROM event_state WHERE agent_id = ?", [this.agentId]);
     const seen = await this.db.query("SELECT id, body FROM event_seen WHERE agent_id = ? ORDER BY at, id", [this.agentId]);
     return {
       state: typeof row?.state === "string" ? row.state : null,
+      version: Number(row?.version ?? 0),
       seen: seen.map((r) => String(r.id)),
       pending: seen.filter((r) => typeof r.body === "string").map((r) => r.body as string),
     };
@@ -318,13 +322,24 @@ export class Store {
 
   /**
    * Saves the snapshot (null: unchanged) and marks `done` events processed, in one transaction; forgets
-   * processed ids taken before `forgetBefore`.
+   * processed ids taken before `forgetBefore`. With `expectedVersion`, only over that version: null
+   * when another runner saved since (nothing is written then). Returns the snapshot's version.
    */
-  async saveEventState(state: string | null, done: string[], at: number, forgetBefore: number): Promise<void> {
-    await this.db.transaction(async (tx) => {
-      if (state !== null) await tx.run("INSERT INTO event_state (agent_id, state, saved_at) VALUES (?, ?, ?) ON CONFLICT (agent_id) DO UPDATE SET state = excluded.state, saved_at = excluded.saved_at", [this.agentId, state, at]);
+  async saveEventState(state: string | null, done: string[], at: number, forgetBefore: number, expectedVersion?: number): Promise<number | null> {
+    return this.db.transaction(async (tx) => {
+      let version = expectedVersion ?? null;
+      if (state !== null) {
+        const fenced = expectedVersion === undefined ? "" : " WHERE event_state.version = ?";
+        const [row] = await tx.query(
+          `INSERT INTO event_state (agent_id, state, saved_at, version) VALUES (?, ?, ?, 1) ON CONFLICT (agent_id) DO UPDATE SET state = excluded.state, saved_at = excluded.saved_at, version = event_state.version + 1${fenced} RETURNING version`,
+          [this.agentId, state, at, ...(expectedVersion === undefined ? [] : [expectedVersion])],
+        );
+        if (!row) return null;
+        version = Number(row.version);
+      }
       for (const id of done) await tx.run("UPDATE event_seen SET body = NULL WHERE agent_id = ? AND id = ?", [this.agentId, id]);
       await tx.run("DELETE FROM event_seen WHERE agent_id = ? AND at < ? AND body IS NULL", [this.agentId, forgetBefore]);
+      return version;
     });
   }
 

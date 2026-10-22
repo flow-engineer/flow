@@ -779,6 +779,27 @@ test("mounted on an agent with a durable database: after a restart a taken event
   assert.deepEqual(after.sent, ["template:order_delayed"], "the held send went; the second restock waits its day");
 });
 
+test("mounted on an agent with a durable database: the old and the new runner of a deploy each hold a send, and neither saves over the other's", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "flow-events-")), "agent.db");
+  const clock = { now: NOON };
+  const exact = { user: { phone: PERSON }, wording: "exact" };
+  const old = await durable(path, clock);
+  await old.hello();
+  const next = await durable(path, clock); // read the same saved state as the old one
+  clock.now = NIGHT;
+  assert.equal(await old.post(envelope("order.delayed", exact)), "accepted");
+  await old.events.idle();
+  assert.equal(await next.post(envelope("order.delayed", { ...exact, order: "B-2" })), "accepted");
+  await next.events.idle();
+  assert.deepEqual([...old.sent, ...next.sent], [], "both are held for quiet hours");
+
+  clock.now = MORNING;
+  const after = await durable(path, clock);
+  await after.agent.runDue();
+  await after.events.idle();
+  assert.deepEqual(after.sent, ["template:order_delayed", "template:order_delayed"], "both held sends were kept");
+});
+
 test("mounted on an agent with a durable database: an event answered accepted but not yet processed when the agent stopped is processed after the restart, once", async () => {
   const path = join(mkdtempSync(join(tmpdir(), "flow-events-")), "agent.db");
   const clock = { now: NOON };
