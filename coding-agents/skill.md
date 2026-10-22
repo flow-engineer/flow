@@ -192,6 +192,13 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   playground and the test cloud never call it, and what you change there is not what the
   transcript and the judge see. What `beforeSend` returns is what is checked, sent and recorded
   (`message.out`, the history, the transcript); a refusal is a `message.refused` event.
+- Common checks are ready-made: `beforeSend: guards(oncePerChat("I'm an AI assistant."), noRepeats(),
+  linkAllowlist(["example.com"]), noWriteButtons(["pay", "confirm order"]))`. Write your own beside
+  them as plain functions; `context.sent` is what was already sent, read from the stored history.
+- When a conversation starts over for the business (a new order, a new case), call
+  `agent.resetHistory({ to, note })`: the model then sees only what comes after, with your note.
+  Nothing is deleted. A long chat is also cut to `history.maxTokens` (default 24,000, or 60% of the
+  model's `contextTokens` when less).
 - `instructions` (on `customUI`, and in `whatsapp()`'s and `sms()`'s options) is your guidance for
   the agent on that channel, in its prompt only while the person uses it. Data a param carries,
   such as a link, comes from your tools' results: a tool that has a screen returns its link

@@ -160,7 +160,8 @@ export interface AgentOptions {
    * recorded, so the events, the history, the transcript and the test cloud's judge see what went. A
    * refused send of the agent's goes back to it, with your reason, to fix; a scheduled message or
    * nudge it refuses is settled refused. Use it rather than wrapping a channel's send, which the
-   * playground and the test cloud never call.
+   * playground and the test cloud never call. `guards(...)` composes ready-made checks (oncePerChat,
+   * noRepeats, linkAllowlist, noWriteButtons) with your own.
    */
   beforeSend?: BeforeSend;
   /**
