@@ -160,7 +160,7 @@ export function wirePayload(p: Platform, m: WireMessage, person: { name: string;
   const file = (a: NonNullable<WireMessage["attachments"]>[number]) => ({ mime_type: a.mime ?? "application/octet-stream", sha256: hex(`${m.at}:${a.name}`, 44), id: digits(`${m.at}:${a.name}`, 16) });
 
   if (p.id === "whatsapp") {
-    const wamid = (id: string | null) => `wamid.${Buffer.from(`${phone}:${id ?? m.at}`).toString("base64").replace(/=+$/, "")}`;
+    const wamid = (id: string | null) => `wamid.${Buffer.from(`${phone}:${id ?? m.at}`).toString("base64").replace(/=/g, "")}`;
     if (m.kind === "in") {
       const context = quoted ? { context: { from: BUSINESS_NUMBER, id: wamid(quoted.id) } } : {};
       const messages = m.attachments?.length
