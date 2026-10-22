@@ -476,7 +476,7 @@ async function diesAfterSend(info: ChannelInfo, at: "settle" | "result") {
   return { path, channel, dir: dying.dir, id, callId: sent.id, key: `send:${id}:1:${sent.id}` };
 }
 
-const toolResult = (messages: Array<{ role: string }>, callId: string) => (messages.find((m) => m.role === "tool" && (m as { toolCallId: string }).toolCallId === callId) as { content: string } | undefined)?.content;
+const toolResult = (messages: Array<{ role: string; toolCallId?: string; content?: unknown }>, callId: string) => messages.find((m) => m.role === "tool" && m.toolCallId === callId)?.content as string | undefined;
 
 test("a runner stopped while it writes a step down sent nothing of it: after a restart the step runs again and its message goes once", async () => {
   const path = file();
