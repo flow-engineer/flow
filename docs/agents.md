@@ -25,7 +25,7 @@ When the owner has a product (a codebase), the agent is built from it:
 4. Read the skills as files, `.claude/skills/<skill>/SKILL.md` in that folder: `flow-framework`,
    `flow-framework-context`, `flow-framework-tools`, `flow-framework-auth`, `flow-framework-tests`.
 5. Replace the café with the product: context, tools, `agent/AGENTS.md`, sign-in, then check it
-   (`npx @flow-engineer/flow check`, `npm run mcp`, `npm run cli -- --help`, and the phone below).
+   (`npx @flow-engineer/flow check`, `npm run mcp` with `flow inspect`, and the phone below).
 
 ## The flow
 

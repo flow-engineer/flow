@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { Client, InsufficientScopeError, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider } from "@modelcontextprotocol/client";
-import { buildApplication, buildCommand, buildRouteMap, numberParser, run as runStricli, type Command as StricliCommand, type RouteMap } from "@stricli/core";
+import { buildApplication, buildCommand, buildRouteMap, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
 import { isSignedIn, signIn, signOut, storedProvider } from "./auth.ts";
 import {
   BUILT_IN,
@@ -161,6 +161,8 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
     const app = buildApplication(routes(config, server, tools, client, io), {
       name,
       scanner: { caseStyle: "original" },
+      // A CliExit is a message for the person (sign in, --yes, the tool's own error): one line, no stack.
+      localization: { text: { ...text_en, exceptionWhileRunningCommand(exc, ansiColor) { return exc instanceof CliExit ? exc.message : text_en.exceptionWhileRunningCommand.call(this, exc, ansiColor); } } },
       determineExitCode: (error) => (error instanceof CliExit ? error.code : needsSignIn(error) ? EXIT.signIn : EXIT.failed),
     });
     await runStricli(app, rest, { ...context, process: stricliProcess });
