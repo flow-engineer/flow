@@ -10,7 +10,7 @@
 //   customUI("app", new MyApp())                         your own web or mobile UI, with your params
 
 import type { z } from "zod";
-import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, ReplyButton, Template, TemplateDefinition } from "./types.ts";
+import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, ReplyButton, SendReceipt, Template, TemplateDefinition } from "./types.ts";
 
 export type ChannelKind = "sms" | "whatsapp" | "custom";
 
@@ -30,7 +30,8 @@ export interface Channel {
   instructions?: string;
   /** Opt-out keywords this channel honours (SMS and WhatsApp have them by default). */
   keywords?: Keywords;
-  send(address: string, outbound: Outbound): Promise<void> | void;
+  /** Resolves once the channel has the outbound (the platform accepted it), optionally with a receipt; see Deliver. */
+  send(address: string, outbound: Outbound): Promise<void | SendReceipt> | void | SendReceipt;
 }
 
 /**
@@ -117,19 +118,21 @@ export interface Carousel {
 }
 
 export interface WhatsAppProvider {
-  sendMessage(to: string, message: Message): Promise<void>;
+  /** Resolves once the platform accepted the message (optionally saying how far it got, SendReceipt); rejects when it refused it. */
+  sendMessage(to: string, message: Message): Promise<void | SendReceipt>;
   /** A media carousel; without it the agent is never offered one. */
-  sendCarousel?(to: string, carousel: Carousel): Promise<void>;
+  sendCarousel?(to: string, carousel: Carousel): Promise<void | SendReceipt>;
   /** Which parts of a message this provider can send. Default: all. */
   features?: { buttons?: boolean; lists?: boolean; replies?: boolean; links?: boolean; images?: boolean };
   react?(to: string, messageId: string, emoji: string): Promise<void>;
   typing?(to: string, on: boolean): Promise<void>;
   markRead?(to: string, messageIds: string[]): Promise<void>;
-  sendTemplate?(to: string, template: Template, idempotencyKey?: string): Promise<void>;
+  sendTemplate?(to: string, template: Template, idempotencyKey?: string): Promise<void | SendReceipt>;
 }
 
 export interface SmsProvider {
-  sendMessage(to: string, message: Pick<Message, "text" | "idempotencyKey">): Promise<void>;
+  /** Resolves once the provider accepted the text; rejects when it refused it. */
+  sendMessage(to: string, message: Pick<Message, "text" | "idempotencyKey">): Promise<void | SendReceipt>;
 }
 
 /** Your own UI. `message` carries the text, any buttons, and your params by name. */
@@ -139,9 +142,10 @@ export interface CustomUIProvider {
   params?: Record<string, z.ZodType>;
   /** Your own guidance for the agent on this channel, such as how to use your params. */
   instructions?: string;
-  sendMessage(to: string, message: Message & Record<string, unknown>): Promise<void>;
+  /** Resolves once your UI has the message (stored or shown); rejects when it could not take it. */
+  sendMessage(to: string, message: Message & Record<string, unknown>): Promise<void | SendReceipt>;
   /** A carousel, on a UI whose info declares carousels; without it the cards go one by one through sendMessage. */
-  sendCarousel?(to: string, carousel: Carousel): Promise<void>;
+  sendCarousel?(to: string, carousel: Carousel): Promise<void | SendReceipt>;
   react?(to: string, messageId: string, emoji: string): Promise<void>;
   typing?(to: string, on: boolean): Promise<void>;
   markRead?(to: string, messageIds: string[]): Promise<void>;
@@ -171,7 +175,7 @@ export const WHATSAPP: ChannelInfo = {
 export const WHATSAPP_CAROUSELS: NonNullable<ChannelInfo["carousels"]> = { maxCards: 10, textMax: 1024, cardTextMax: 160, buttons: 2, labelMax: 20 };
 
 /** SMS: plain text; providers join up to 10 segments into one text (1,530 GSM-7 characters). */
-export const SMS: ChannelInfo = { platform: "sms", reactions: false, status: false, formatting: "plain", maxLength: 1530 };
+export const SMS: ChannelInfo = { platform: "sms", reactions: false, status: false, formatting: "plain", maxLength: 1530, templates: false, typing: false };
 
 export type WhatsAppFeature = "buttons" | "lists" | "links" | "images" | "carousels" | "replies" | "reactions" | "typing" | "readReceipts" | "templates";
 
@@ -189,6 +193,10 @@ export function whatsapp(provider: WhatsAppProvider, options: { name?: string; d
     linkButton: has("links", f.links !== false) ? WHATSAPP.linkButton : undefined,
     images: has("images", f.images !== false) ? WHATSAPP.images : undefined,
     carousels: has("carousels", Boolean(provider.sendCarousel)) ? WHATSAPP_CAROUSELS : undefined,
+    // Only ever true: a provider without sendTemplate keeps 0.4's behaviour (its send says so), and a
+    // business run's copy of the channel, whose send goes to the test cloud, still sends templates.
+    templates: has("templates", Boolean(provider.sendTemplate)) || undefined,
+    typing: has("typing", Boolean(provider.typing)),
   };
   return {
     name: options.name ?? "whatsapp",
@@ -314,9 +322,20 @@ export function carouselMessages(info: ChannelInfo, carousel: Carousel): Message
   return [first, ...cards.filter((m) => m.text || m.image)];
 }
 
-/** Sends a carousel's messages one by one, in order, each after the last went. */
-async function sendCards(info: ChannelInfo, carousel: Carousel, send: (message: Message) => Promise<void>): Promise<void> {
-  for (const m of carouselMessages(info, carousel)) await send(m);
+/** Sends a carousel's messages one by one, in order, each after the last went; its receipt is the least far of theirs. */
+async function sendCards(info: ChannelInfo, carousel: Carousel, send: (message: Message) => Promise<void | SendReceipt>): Promise<SendReceipt | undefined> {
+  const receipts: Array<void | SendReceipt> = [];
+  for (const m of carouselMessages(info, carousel)) receipts.push(await send(m));
+  return leastOf(receipts);
+}
+
+const RECEIPT_RANK: Record<SendReceipt["status"], number> = { unconfirmed: 0, queued: 1, sent: 2, delivered: 3 };
+
+/** The least far of several sends' receipts (none when no send gave one). */
+function leastOf(receipts: Array<void | SendReceipt>): SendReceipt | undefined {
+  let least: SendReceipt | undefined;
+  for (const r of receipts) if (r && (!least || RECEIPT_RANK[r.status] < RECEIPT_RANK[least.status])) least = r;
+  return least;
 }
 
 /**
@@ -385,6 +404,8 @@ export interface ContentRefusal {
  * media types (Flow converts WebP, GIF, BMP and TIFF; the rest is known only from the file's bytes).
  */
 export function contentRefusal(info: ChannelInfo, outbound: Outbound): ContentRefusal | null {
+  // Flow Messaging's own refusal of a template where the channel has none.
+  if (outbound.type === "template" && info.templates === false) return refuse("content.type", `${info.platform ? CONTENT_LIMITS[info.platform].name : "This channel"} has no templates; send a message instead.`);
   const limits = info.platform ? CONTENT_LIMITS[info.platform] : undefined;
   if (!limits) return null;
   if (outbound.type === "message") return messageRefusal(limits, outbound);

@@ -129,7 +129,9 @@ is a definition in its own file; Flow Framework knows the platform (WhatsApp's l
 provider only says how to send:
 
 ```ts
-// src/channels/whatsapp.ts: one sendMessage, plus whatever else your provider can do
+// src/channels/whatsapp.ts: one sendMessage, plus whatever else your provider can do.
+// sendMessage resolves only once your API accepted the message, and throws when it refused it
+// (never earlier: the next message waits for it). docs/guarantees.md
 export const wa = whatsapp({
   sendMessage: (to, m) => api.send(to, m),        // m: { text, replyTo?, buttons?: (label | { id, label })[], list?, link?, image? }
   react: (to, id, emoji) => api.react(to, id, emoji),

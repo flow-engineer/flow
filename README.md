@@ -107,6 +107,11 @@ for people and coding agents; see [AGENTS.md](AGENTS.md).
 
 In this repository: [channel options](docs/channels.md) · [patterns that worked](docs/patterns.md) (enforce what matters in `beforeSend`, keep prompts for judgement, render in code, refuse with a reason the model can act on, test a long chat).
 
+A channel's `sendMessage` resolves when your platform accepted the message and rejects when it
+refused it: the agent's next message waits for it, and a rejection reaches the agent as Not
+delivered. What is ordered, what is sent once and what `send()` resolving means:
+[docs/guarantees.md](docs/guarantees.md).
+
 ## Stability
 
 Flow Framework is 0.x: until 1.0 its API (exports, options, file formats, the CLI's commands,

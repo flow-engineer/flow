@@ -37,7 +37,7 @@ test("with no webhook secret the agent takes events from the stream: the key as 
   assert.deepEqual(first.protocols, ["flow", "flow.key.fk_test_key"]);
   assert.equal(first.url.pathname, "/v1/stream");
   assert.equal(first.url.searchParams.get("after"), null);
-  assert.deepEqual(first.url.searchParams.getAll("type"), ["message.received", "message.failed", "reaction.added", "contact.deleted"]);
+  assert.deepEqual(first.url.searchParams.getAll("type"), ["message.received", "message.failed", "reaction.added", "contact.deleted", "message.sent"]);
 
   const hello = received(TG, "msg_1", { type: "text", text: "hi from my phone" });
   first.send({ type: "event", event: hello });
