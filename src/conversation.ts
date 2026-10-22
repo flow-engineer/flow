@@ -49,7 +49,7 @@ import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type Conten
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { scheduleTools } from "./schedules.ts";
-import type { ConversationRow, Fence, InboxRow, NoContactRow, QuietHours, SendRow, StoreApi, TimeZoneSource } from "./store.ts";
+import { transient, type ConversationRow, type Fence, type InboxRow, type NoContactRow, type QuietHours, type SendRow, type StoreApi, type TimeZoneSource } from "./store.ts";
 import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
@@ -83,6 +83,8 @@ export interface ConversationSettings {
   maxRestarts: number;
   talk: TalkSettings;
   emit: Emit;
+  /** Whether the latest conversation write was stored, for `status().store`. */
+  storeHealth?: (ok: boolean) => void;
   store: StoreApi;
   /** Resolves once the store's tables exist. */
   ready: Promise<void>;
@@ -138,6 +140,8 @@ export const RESEND_WITHIN_MS = 24 * 60 * 60 * 1000;
 let sendsWarned = false;
 /** A fenced write refused: another runner took the conversation (by name, so it also holds for a store elsewhere that answers with it). */
 const isStale = (error: unknown) => error instanceof Error && error.name === "StaleRunner";
+/** What a store.write_failed event says of the error: its name and code only, since a message may hold a person's text. */
+const failure = (error: unknown) => ({ error: error instanceof Error ? error.name : "unknown", ...(typeof (error as { code?: unknown })?.code === "string" ? { code: (error as { code: string }).code } : {}) });
 const EARLIER = "[Chinwag] Older messages of this conversation are no longer shown to you.";
 const RESET = "[Chinwag] The conversation starts again here: earlier messages are no longer shown to you.";
 
@@ -753,9 +757,15 @@ export class Conversation {
   persist(work: () => Promise<unknown>): Promise<void> {
     if (this.closed) return this.writes;
     const next = this.writes.then(work).then(
-      () => undefined,
+      () => this.settings.storeHealth?.(true),
       (error) => {
-        if (!isStale(error)) return void console.warn("flow: could not save conversation %s:", this.id, error);
+        if (!isStale(error)) {
+          // Tried again already (a passing failure): the chat goes on, and what this write held may be missing after a restart.
+          console.warn("flow: could not save conversation %s:", this.id, error);
+          this.settings.storeHealth?.(false);
+          this.settings.emit(this.id, "store.write_failed", failure(error));
+          return;
+        }
         // A runner that stalled past its lease: another has the conversation, so this copy stops here.
         if (this.closed) return;
         console.warn("flow: runner %s lost conversation %s to another runner; its write was refused and it stops working on it", this.settings.runner, this.id);
@@ -1145,6 +1155,8 @@ export class Conversation {
         await store.beginSends!(this.id, seq, entries, sends, at, this.fence());
       } catch (error) {
         if (isStale(error)) throw error;
+        // A store service that has no sends written ahead (an older one) is not a failure.
+        if (transient(error)) this.settings.emit(this.id, "store.write_failed", { ...failure(error), sends: sends.length });
         // An older store service, or a write that failed: the step is stored as before and its
         // sends still go, keyed, but a restart cannot tell how they ended.
         if (!sendsWarned) console.warn("flow: could not write conversation %s's sends ahead; they go anyway (later failures are not logged):", this.id, error);
