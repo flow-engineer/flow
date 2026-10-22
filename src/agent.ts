@@ -1010,11 +1010,15 @@ export class Agent {
    */
   eventStateStore(): EventStateStore | null {
     const store = this.store;
-    if (!store.durable || !store.loadEventState || !store.saveEventState) return null;
+    if (!store.durable || !store.loadEventState || !store.takeEvents || !store.saveEventState) return null;
     return {
       loadEventState: async () => {
         await this.settings.ready;
         return store.loadEventState!();
+      },
+      takeEvents: async (...args) => {
+        await this.settings.ready;
+        return store.takeEvents!(...args);
       },
       saveEventState: async (...args) => {
         await this.settings.ready;

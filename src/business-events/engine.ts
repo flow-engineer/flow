@@ -13,9 +13,12 @@
 //
 // The state (event ids taken, held sends, caps, watches, what was told) is kept in the attached
 // agent's database when it survives a restart: loaded on attach (the route waits for it), saved after
-// each change in the same order as the work. Only what a rule still reads is saved (told and optional
-// sends a day, nudges a week, copies their days); event ids are kept 30 days. One events side per
-// agent, on one runner at a time, as the state is held in memory between saves.
+// each change in the same order as the work. An event is recorded before the route answers 202 and
+// marked done with the save that holds what it changed, so one taken but not processed when the
+// agent stopped is processed after the restart (its sends keep their idempotency keys). Only what a
+// rule still reads is saved (told and optional sends a day, nudges a week, copies their days); event
+// ids are kept 30 days. One events side per agent, on one runner at a time, as the state is held in
+// memory between saves.
 //
 // What an app's events mean (its catalog, its templates and wording, its own rules) stays in the
 // app: `catalog` names every type it accepts, `rules` and `onEvent` decide the rest.
@@ -332,9 +335,10 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
   let loaded: Promise<unknown> = Promise.resolve();
   let lastSaved: string | null = null;
   let saveQueued = false;
-  /** Event ids (and idempotency keys) taken since the last save. */
-  const freshSeen: string[] = [];
-  /** Taken before the load, and found among the saved ones: already processed before the restart. */
+  let lastTaken = 0;
+  /** Events processed since the last save: marked done with the snapshot that holds what they changed. */
+  const done: string[] = [];
+  /** Taken before the load, and found among the saved ones: taken before the restart, processed from there. */
   const takenBefore = new Set<string>();
 
   async function load(kept: EventStateStore) {
@@ -353,7 +357,44 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     if (saved.state) restore(JSON.parse(saved.state));
     lastSaved = saved.state;
     store = kept;
-    if (freshSeen.length) changed();
+    // Taken before the restart and not processed then: processed now, in the order they came.
+    for (const body of saved.pending) {
+      const e = JSON.parse(body) as BusinessEvent;
+      later(() => processed(e));
+    }
+  }
+
+  /** Processes a taken event; with a store it is marked done in the next save, with what it changed. */
+  async function processed(e: BusinessEvent) {
+    await process(e);
+    if (!store) return;
+    done.push(e.id);
+    changed();
+  }
+
+  /**
+   * Records an event (false: a duplicate id, already taken) and processes it in order, in the
+   * background. `written` settles once it is in the agent's database (at once without one); `key`
+   * is the request's idempotency key, recorded with it. `strict`: not recorded, it is not processed
+   * either (the route answers 503 and forgets it, so the business's retry is taken).
+   */
+  function take(e: BusinessEvent, key?: string, strict = false): { fresh: boolean; written: Promise<void> } {
+    if (state.seen.has(e.id)) return { fresh: false, written: Promise.resolve() };
+    state.seen.add(e.id);
+    if (key) state.seen.add(`key:${key}`);
+    // After the load: an id the saved state already had was taken before the restart.
+    const written = loaded.then(async () => {
+      if (!store || takenBefore.has(e.id)) return;
+      lastTaken = Math.max(now(), lastTaken + 1); // a strict order, for the restart
+      await store.takeEvents([{ id: e.id, body: JSON.stringify(e) }, ...(key ? [{ id: `key:${key}`, body: null }] : [])], lastTaken);
+    });
+    later(async () => {
+      const recorded = await written.then(() => true, () => false);
+      if (strict && !recorded) return;
+      if (takenBefore.delete(e.id)) return;
+      await processed(e);
+    });
+    return { fresh: true, written };
   }
 
   /** What a rule still reads, as JSON: told and optional sends a day, nudges a week, copies their days. */
@@ -396,13 +437,13 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
       saveQueued = false;
       const t = now();
       const snap = snapshot(t);
-      const seen = freshSeen.splice(0);
-      if (snap === lastSaved && !seen.length) return;
+      const finished = done.splice(0);
+      if (snap === lastSaved && !finished.length) return;
       try {
-        await store!.saveEventState(snap === lastSaved ? null : snap, seen, t, t - SEEN_MS);
+        await store!.saveEventState(snap === lastSaved ? null : snap, finished, t, t - SEEN_MS);
         lastSaved = snap;
       } catch (error) {
-        freshSeen.push(...seen);
+        done.push(...finished);
         throw error;
       }
     });
@@ -682,28 +723,27 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     const problem = invalid(body);
     if (problem) return json(400, problem);
     await loaded;
-    const key = req.headers.get("idempotency-key");
-    if (key && key !== (body as BusinessEvent).id && state.seen.has(`key:${key}`)) return json(202, { status: "duplicate" });
-    const fresh = accept(body as BusinessEvent);
-    if (key && key !== (body as BusinessEvent).id && !state.seen.has(`key:${key}`)) {
-      state.seen.add(`key:${key}`);
-      freshSeen.push(`key:${key}`);
-      changed();
+    const header = req.headers.get("idempotency-key");
+    const key = header && header !== (body as BusinessEvent).id ? header : undefined;
+    if (key && state.seen.has(`key:${key}`)) return json(202, { status: "duplicate" });
+    const { fresh, written } = take(body as BusinessEvent, key, true);
+    try {
+      await written;
+    } catch (error) {
+      // Not recorded: forgotten, so the business's retry is taken (with a database that works again).
+      state.seen.delete((body as BusinessEvent).id);
+      if (key) state.seen.delete(`key:${key}`);
+      console.error(`${logName}: the event could not be recorded:`, error);
+      return json(503, { error: "the event could not be recorded; try again" });
     }
     return json(202, { status: fresh ? "accepted" : "duplicate" });
   }
 
   /** Records an event (false: a duplicate id, already taken) and processes it in order, in the background. */
   function accept(e: BusinessEvent): boolean {
-    if (state.seen.has(e.id)) return false;
-    state.seen.add(e.id);
-    freshSeen.push(e.id);
-    later(async () => {
-      if (takenBefore.delete(e.id)) return; // taken before the restart's state loaded: done then
-      await process(e);
-    });
-    changed();
-    return true;
+    const { fresh, written } = take(e);
+    written.catch((error) => console.error(`${logName}: the event could not be recorded; processed in memory only:`, error));
+    return fresh;
   }
 
   /** Held sends that came due, one by one, then the app's onTick. */
@@ -736,8 +776,13 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     invalid,
     accept,
     tick,
-    /** Resolves once everything accepted so far is processed. */
-    idle: () => chain.then(() => undefined),
+    /** Resolves once everything accepted so far is processed (also work queued meanwhile, as a restart's events). */
+    async idle() {
+      for (let c = chain; ; c = chain) {
+        await c;
+        if (c === chain) return;
+      }
+    },
     report: (fields: Record<string, unknown>) => report(fields),
     schedule,
     drop,
