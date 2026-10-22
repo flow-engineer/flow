@@ -81,6 +81,8 @@ export interface OpenSession {
   flaky?: boolean;
   /** Play every simulator afresh: the cloud replays no stored person, tool or judge answers. */
   fresh?: boolean;
+  /** The suite checks records sends (expect.sent's records, ids, count, page) or picks rows (a `pick` step). */
+  records?: boolean;
   /** Play only these runs, numbered as given: a re-open after session_gone. Sent only to a cloud whose Opened said reopen,
    * and only when some run finished: the cloud checks it against the suite's files it already stores. */
   only?: RunKey[];
@@ -124,6 +126,8 @@ export interface Opened {
   flaky?: boolean;
   /** This cloud replays stored simulator answers for the same scenario version (absent with `fresh`, or on an older cloud). */
   replay?: boolean;
+  /** This cloud checks records sends and plays `pick` steps. Absent on an older cloud: a suite that uses them is not played. */
+  records?: boolean;
   /** What this workspace may do, printed when the session opens. Absent on an older cloud. */
   limits?: SessionLimits;
 }

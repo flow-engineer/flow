@@ -42,7 +42,7 @@ test("the café's tools are served as spec-valid MCP tools, every annotation sen
   const c = await client(url);
   const listed = await c.listTools();
   assert.ok(isSpecType.ListToolsResult(listed));
-  assert.deepEqual(listed.tools.map((t) => t.name), ["get_menu", "place_order", "order_status"]);
+  assert.deepEqual(listed.tools.map((t) => t.name), ["get_menu", "place_order", "order_status", "my_orders"]);
   for (const t of listed.tools) assert.ok(isSpecType.Tool(t), `${t.name} is a spec Tool`);
   const place = listed.tools.find((t) => t.name === "place_order")!;
   assert.deepEqual(place.annotations, { title: "Place an order", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });

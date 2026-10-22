@@ -79,6 +79,8 @@ interface Inbound {
   channel: string;
   /** The channel's own id for the message (Flow Framework's own ids are not sent: they restart). */
   messageId?: string;
+  /** The row they picked from records they were shown (a tap or its number): its id and kind. */
+  picked?: { id: string; kind?: string };
 }
 
 interface Turn {
@@ -170,21 +172,26 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
       attributes.push(attr("chinwag.messages", turn.inbound.length));
       if (turn.inbound[0].messageId) attributes.push(attr("chinwag.message_id", turn.inbound[0].messageId));
       if (content) attributes.push(attr("chinwag.user_message", clip(turn.inbound.map((m) => m.text).join("\n"))));
+      const picked = turn.inbound.findLast((m) => m.picked)?.picked;
+      if (picked) {
+        attributes.push(attr("chinwag.records.picked", picked.id));
+        if (picked.kind) attributes.push(attr("chinwag.records.kind", picked.kind));
+      }
     }
     const root: Span = { ...span(turn.traceId, `invoke_agent ${agent.service}`, turn.start, at, attributes, undefined, failed), spanId: turn.rootId };
     enqueue([root, ...turn.spans]);
   }
 
   /** A message sent outside any turn (one the business wrote, or a rule's answer, sent as is): a trace of its own. */
-  function alone(conversationId: string, at: number, channel: string, text: unknown) {
+  function alone(conversationId: string, at: number, channel: string, text: unknown, records?: unknown) {
     const turn: Turn = { traceId: hex(16), rootId: hex(8), start: at, inbound: [], spans: [], tools: new Map(), replyChannel: channel };
-    turn.spans.push(reply(turn, at, channel, text));
+    turn.spans.push(reply(turn, at, channel, text, records));
     record(conversationId, turn, false, at);
   }
 
-  function reply(turn: Turn, at: number, channel: string, text: unknown): Span {
+  function reply(turn: Turn, at: number, channel: string, text: unknown, records?: unknown): Span {
     turn.replyChannel ??= channel;
-    const attributes = [attr("chinwag.channel", channel)];
+    const attributes = [attr("chinwag.channel", channel), ...recordsAttributes(records, content)];
     if (content && typeof text === "string") attributes.push(attr("chinwag.agent_reply", clip(text)));
     return child(turn, `send ${channel}`, at, at, attributes);
   }
@@ -253,7 +260,9 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
       case "message.in": {
         // A voice note's text is its transcript (and any caption).
         const text = [e.transcript, e.text].filter(Boolean).join(" ");
-        const m: Inbound = { at: e.at, text, channel: String(e.channel ?? ""), messageId: e.ownId ? String(e.messageId) : undefined };
+        const choice = e.choice as { id?: unknown; records?: unknown; kind?: unknown } | undefined;
+        const picked = choice && typeof choice.records === "string" && typeof choice.id === "string" ? { id: choice.id, ...(typeof choice.kind === "string" ? { kind: choice.kind } : {}) } : undefined;
+        const m: Inbound = { at: e.at, text, channel: String(e.channel ?? ""), messageId: e.ownId ? String(e.messageId) : undefined, ...(picked ? { picked } : {}) };
         // Answered with no model call (intercept, a keyword): a trace of its own, never part of a turn.
         if (e.answered) return record(id, { traceId: hex(16), rootId: hex(8), start: e.at, inbound: [m], spans: [], tools: new Map() }, false, e.at);
         (turn ?? waitingFor(id)).inbound.push(m);
@@ -266,8 +275,8 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
       case "model.error":
         return finish(id, true, e.at);
       case "message.out":
-        if (!turn || e.answered) return alone(id, e.at, String(e.channel), e.text);
-        turn.spans.push(reply(turn, e.at, String(e.channel), e.text));
+        if (!turn || e.answered) return alone(id, e.at, String(e.channel), e.text, e.records);
+        turn.spans.push(reply(turn, e.at, String(e.channel), e.text, e.records));
         return;
       case "model.call": {
         if (!turn) return;
@@ -340,6 +349,23 @@ function span(traceId: string, name: string, start: number, end: number, attribu
     attributes,
     ...(failed ? { status: { code: 2 } } : {}),
   };
+}
+
+/**
+ * A records send's span attributes (message.out's `records`): what kind, how many in all, the page
+ * and how it reached them, and the ids on the page (ids, not what the rows say); the rows' titles
+ * and details only with content.
+ */
+function recordsAttributes(records: unknown, content: boolean): Attr[] {
+  if (!records || typeof records !== "object") return [];
+  const r = records as { kind?: unknown; count?: unknown; page?: unknown; pages?: unknown; deliveredAs?: unknown; shown?: unknown; rows?: unknown };
+  const out: Attr[] = [];
+  if (typeof r.kind === "string") out.push(attr("chinwag.records.kind", r.kind));
+  for (const [field, key] of [["count", "count"], ["page", "page"], ["pages", "pages"]] as const) if (typeof r[field] === "number") out.push(attr(`chinwag.records.${key}`, r[field] as number));
+  if (typeof r.deliveredAs === "string") out.push(attr("chinwag.records.delivered_as", r.deliveredAs));
+  if (Array.isArray(r.shown)) out.push(attr("chinwag.records.shown", r.shown.map(String).join(",")));
+  if (content && Array.isArray(r.rows)) out.push(attr("chinwag.records.rows", clip(JSON.stringify(r.rows))));
+  return out;
 }
 
 function attr(key: string, value: string | number | boolean): Attr {

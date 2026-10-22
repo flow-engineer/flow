@@ -93,9 +93,24 @@ interface RunRecord {
 }
 
 type Line =
-  | { kind: "in"; id?: string; text?: string; at?: number; attachments?: unknown[] }
-  | { kind: "out"; id?: string; text?: string; at?: number; buttons?: unknown; list?: unknown; link?: unknown; image?: unknown; template?: unknown }
+  | { kind: "in"; id?: string; text?: string; at?: number; attachments?: unknown[]; picked?: { id?: string; records?: string } }
+  | { kind: "out"; id?: string; text?: string; at?: number; buttons?: unknown; list?: unknown; link?: unknown; image?: unknown; template?: unknown; records?: RecordsMark }
   | { kind: "reaction"; messageId?: string; emoji?: string; at?: number; by?: string };
+
+/** A records send, as the cloud marks the message it went as: its kind, handle and page. */
+interface RecordsMark {
+  kind?: string;
+  handle?: string;
+  page?: number;
+  pages?: number;
+  count?: number;
+}
+
+/** "[orders r1, page 1/4 of 37]": what a records send was. */
+export function recordsMark(r: RecordsMark): string {
+  const page = r.pages && r.pages > 1 ? `, page ${r.page ?? 1}/${r.pages}` : "";
+  return `[${[r.kind ?? "records", r.handle].filter(Boolean).join(" ")}${page}${r.count !== undefined ? ` of ${r.count}` : ""}]`;
+}
 
 /** `flow show`: returns the exit status. */
 export async function showCli(args: string[]): Promise<number> {
@@ -271,9 +286,10 @@ function render(record: RunRecord, runId: string): string[] {
         const f = a as { kind?: string; file?: string; name?: string };
         return `[${f.kind ?? "file"}: ${f.file ?? f.name ?? "attached"}]`;
       });
-      lines = indent([line.text ?? "", ...files].filter(Boolean).join(" "), `${t} person: `, " ".repeat(t.length + 9));
+      const picked = line.picked?.id ? [`[picked ${line.picked.id}${line.picked.records ? ` from ${line.picked.records}` : ""}]`] : [];
+      lines = indent([line.text ?? "", ...files, ...picked].filter(Boolean).join(" "), `${t} person: `, " ".repeat(t.length + 9));
     } else if (line.kind === "out") {
-      const extra: string[] = [];
+      const extra: string[] = line.records ? [recordsMark(line.records)] : [];
       const buttons = labels(line.buttons);
       if (buttons.length) extra.push(`[buttons: ${buttons.join(" | ")}]`);
       const list = labels(line.list);

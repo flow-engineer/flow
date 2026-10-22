@@ -27,6 +27,15 @@ class Tools(unittest.TestCase):
         ready = datetime.fromisoformat(first["ready_by"].replace("Z", "+00:00")) - datetime.now(timezone.utc)
         self.assertLess(abs(ready - timedelta(minutes=10)), timedelta(minutes=1))
 
+    def test_show_menu_sends_the_menu_as_records(self):
+        shown = server.menu_records(["latte", "Chai"])
+        self.assertEqual(shown, {"type": "records", "text": "Our menu", "kind": "menu", "pick": {"label": "Choose"}, "rows": [
+            {"id": "latte", "title": "Latte", "detail": "small $4.00, large $4.80"},
+            {"id": "chai", "title": "Chai", "detail": "small $4.00, large $4.60"},
+        ]})
+        self.assertEqual(len(server.menu_records()["rows"]), len(server.MENU))
+        self.assertIsNone(server.menu_records(["matcha"]))
+
     def test_place_order_refuses_what_is_not_on_the_menu(self):
         self.assertEqual(server.place_order("Sam", [{"item": "Matcha latte", "size": "large"}]), {"error": "Unknown item: Matcha latte"})
         self.assertEqual(server.place_order("Sam", [{"item": "Flat white", "size": "large"}]), {"error": "Unknown size: large"})

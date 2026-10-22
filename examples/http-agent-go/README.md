@@ -1,6 +1,6 @@
 # Café agent in Go
 
-Pip, the café's ordering assistant from [`../cafe`](../cafe), written in Go with only the standard library and tested by Flow Framework through its HTTP endpoint ([`spec/agent-endpoint.openapi.yaml`](../../spec/agent-endpoint.openapi.yaml)). Its instructions are `../cafe/agent/AGENTS.md`; its tools (`get_menu`, `place_order`) are in `tools.go`; its model is any OpenAI-compatible API.
+Pip, the café's ordering assistant from [`../cafe`](../cafe), written in Go with only the standard library and tested by Flow Framework through its HTTP endpoint ([`spec/agent-endpoint.openapi.yaml`](../../spec/agent-endpoint.openapi.yaml)). Its instructions are `../cafe/agent/AGENTS.md`; its tools (`get_menu`, `place_order`, and `show_menu`, which shows the menu as a `records` reply laid out by Flow Framework for the person's platform: [docs/records.md](../../docs/records.md)) are in `tools.go`; its model is any OpenAI-compatible API.
 
 ## Run it
 

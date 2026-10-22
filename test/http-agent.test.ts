@@ -112,3 +112,13 @@ test("a tapped button quoting the agent's message goes as message.choice and mes
   const r = await turn(replies({ replies: [] }), { text: "Oat", choice: { title: "Oat" }, replyTo: { text: "Which milk?", fromAgent: true } });
   assert.deepEqual(r.seen[0].body.message, { text: "Oat", replyTo: { text: "Which milk?", fromAgent: true }, choice: { title: "Oat" } });
 });
+
+test("a records reply goes as the platform shows records, and its message.out says which", async () => {
+  const records = { type: "records", text: "Your orders", kind: "orders", rows: [{ id: "BL-1040", title: "BL-1040 · ready", detail: "1 latte" }, { id: "BL-1041", title: "BL-1041 · being made" }], pick: { label: "View order" } };
+  const wa = await turn(replies({ replies: [records] }), { text: "my orders" });
+  assert.deepEqual(wa.delivered, [{ type: "message", text: "Your orders", list: { button: "View order", rows: [{ id: "BL-1040", title: "BL-1040 · ready", description: "1 latte" }, { id: "BL-1041", title: "BL-1041 · being made" }] } }]);
+  const out = wa.events.find((e) => e.type === "message.out")!;
+  assert.deepEqual(out.records, { kind: "orders", handle: undefined, count: 2, shown: ["BL-1040", "BL-1041"], page: 1, pages: 1, deliveredAs: "list", rows: [{ id: "BL-1040", number: 1, title: "BL-1040 · ready", detail: "1 latte" }, { id: "BL-1041", number: 2, title: "BL-1041 · being made" }] });
+  const sms = await turn(replies({ replies: [records] }), { text: "my orders" }, { info: SMS, conversationId: "sms:ses_1.a.sms.1" });
+  assert.deepEqual(sms.delivered, [{ type: "message", text: "Your orders\n\n1. BL-1040 · ready\n1 latte\n2. BL-1041 · being made\n\nReply with a number to pick one." }]);
+});

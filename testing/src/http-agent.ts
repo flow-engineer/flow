@@ -13,7 +13,10 @@
 
 import { Buffer } from "node:buffer";
 import { emitter } from "../../src/events.ts";
-import { contentRefusal, fitMessage, z, type ChannelInfo, type ChannelSummary, type Deliver, type EventSink, type Incoming, type Outbound, type ReceiveOptions } from "../../src/index.ts";
+import { contentRefusal, fitMessage, z, type ChannelInfo, type ChannelSummary, type Deliver, type EventSink, type Incoming, type Outbound, type ReceiveOptions, type RecordsOutbound } from "../../src/index.ts";
+import { recordsMessages } from "../../src/channels.ts";
+import { outDetail } from "../../src/conversation.ts";
+import { MAX_RECORDS } from "../../src/records.ts";
 import { contentRefusalText, sendInput, sendRefusal } from "../../src/talk.ts";
 
 export interface HttpAgentOptions {
@@ -50,6 +53,28 @@ const otherReply = z.discriminatedUnion("type", [
   z.object({ type: z.literal("status"), text: z.string().nullable() }),
   z.object({ type: z.literal("typing"), on: z.boolean() }),
 ]);
+
+/** A records reply: rows the agent's own code made (never the model's retyping), rendered per platform here as by a Flow Framework agent. */
+const recordsReply = z.strictObject({
+  type: z.literal("records"),
+  text: z.string(),
+  kind: z.string().min(1),
+  rows: z
+    .array(
+      z.strictObject({
+        id: z.string().refine((id) => { const n = new TextEncoder().encode(id).length; return n >= 1 && n <= 64; }, "an id is 1 to 64 bytes"),
+        title: z.string().min(1),
+        detail: z.string().optional(),
+        image: z.strictObject({ url: z.string().regex(/^https:\/\/[^\s/?#]+/) }).optional(),
+      }),
+    )
+    .min(1)
+    .max(MAX_RECORDS)
+    .refine((rows) => new Set(rows.map((r) => r.id)).size === rows.length, "each row's id is unique"),
+  pick: z.strictObject({ label: z.string().min(1) }).optional(),
+  page: z.strictObject({ number: z.number().int().min(1).optional(), size: z.number().int().min(1).optional() }).optional(),
+  replyTo: z.string().optional(),
+});
 
 export class TurnError extends Error {}
 
@@ -88,6 +113,14 @@ export async function postMessage(options: Pick<HttpAgentOptions, "url" | "token
 /** The reply as the platform takes it, or why it cannot go: the checks a Flow Framework agent's send gets. */
 export function checkReply(reply: unknown, info: ChannelInfo): { outbound: Outbound } | { refused: string } {
   const type = (reply as { type?: unknown } | null)?.type;
+  if (type === "records") {
+    const parsed = recordsReply.safeParse(reply);
+    if (!parsed.success) return { refused: problems(parsed.error) };
+    const outbound = parsed.data as RecordsOutbound;
+    // Each message it goes as must fit the platform, as a Flow Framework agent's records do.
+    const refused = contentRefusal(info, outbound);
+    return refused ? { refused: contentRefusalText(info, refused) } : { outbound };
+  }
   if (type !== "message") {
     const other = otherReply.safeParse(reply);
     return other.success ? { outbound: other.data as Outbound } : { refused: problems(other.error) };
@@ -140,12 +173,15 @@ export function httpAgent(options: HttpAgentOptions) {
         }
         const outbound = checked.outbound;
         try {
-          await deliver(outbound);
+          if (outbound.type === "records") for (const part of recordsMessages(info, outbound)) await deliver(part);
+          else await deliver(outbound);
         } catch (error) {
           emit(conversationId, "message.undelivered", { text: shown, reason: (error as Error).message });
           continue;
         }
-        if (outbound.type === "message") {
+        if (outbound.type === "records") {
+          emit(conversationId, "message.out", { ...outDetail(outbound, info), channel: request.channel });
+        } else if (outbound.type === "message") {
           const { type: _, ...sent } = outbound;
           emit(conversationId, "message.out", { ...sent, channel: request.channel });
         } else if (outbound.type === "reaction") {

@@ -1,7 +1,7 @@
 // The agent's tools, over a tiny in-memory café. Placing an order is slow on purpose (a real point-of-sale
 // takes seconds), so it shows a tool moving to the background.
 
-import { tool, z } from "../../../src/index.ts";
+import { records, tool, z } from "../../../src/index.ts";
 
 const MENU = [
   { item: "Latte", sizes: { small: 4.0, large: 4.8 }, milks: ["whole", "oat", "almond"], allergens: ["dairy (unless plant milk)"] },
@@ -13,8 +13,20 @@ const MENU = [
 ];
 
 let nextOrder = 1040;
-const orders = new Map<string, { items: unknown; readyBy: string }>();
+type Item = { item: string; size: string; milk?: string; quantity: number };
+type Order = { id: string; person: string; items: Item[]; readyBy: string };
+const orders = new Map<string, Order>();
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const statusOf = (order: Pick<Order, "readyBy">) => (Date.now() > Date.parse(order.readyBy) ? "ready" : "being made");
+
+/** How one order reads wherever the agent shows it: the framework lays the rows out per channel. */
+const myOrders = records<{ order_id: string; status: string; items: string; ready_by: string }>({
+  kind: "orders",
+  id: (o) => o.order_id,
+  title: (o) => `${o.order_id} · ${o.status}`,
+  detail: (o) => `${o.items} · ready by ${new Date(o.ready_by).toISOString().slice(11, 16)} UTC`,
+  pick: "View order",
+});
 
 export const tools = [
   tool({
@@ -51,11 +63,11 @@ export const tools = [
     output: z.object({ order_id: z.string(), ready_by: z.string(), pay_at_pickup: z.boolean() }),
     status: { running: "Placing your order…", done: "Order placed" },
     hints: { destructive: false, openWorld: false },
-    run: async ({ items }) => {
+    run: async ({ items }, ctx) => {
       await wait(5_000);
       const id = `BL-${nextOrder++}`;
       const readyBy = new Date(Date.now() + 10 * 60_000).toISOString();
-      orders.set(id, { items, readyBy });
+      orders.set(id, { id, person: ctx.person, items, readyBy });
       return { order_id: id, ready_by: readyBy, pay_at_pickup: true };
     },
   }),
@@ -69,7 +81,20 @@ export const tools = [
       await wait(200);
       const order = orders.get(order_id);
       if (!order) return { found: false };
-      return { found: true, status: Date.now() > Date.parse(order.readyBy) ? "ready" : "being made", ready_by: order.readyBy };
+      return { found: true, status: statusOf(order), ready_by: order.readyBy };
+    },
+  }),
+  tool({
+    name: "my_orders",
+    description: "This person's orders today, newest first, to show them (\"my orders\", \"where's my order\").",
+    input: z.object({}),
+    hints: { readOnly: true, openWorld: false },
+    // Under flow test the simulated list of orders comes back as these records too.
+    records: myOrders,
+    run: async (_input, ctx) => {
+      await wait(200);
+      const mine = [...orders.values()].filter((o) => o.person === ctx.person).reverse();
+      return myOrders.of(mine.map((o) => ({ order_id: o.id, status: statusOf(o), items: o.items.map((i) => `${i.quantity} ${i.size} ${i.item}`).join(", "), ready_by: o.readyBy })));
     },
   }),
 ];

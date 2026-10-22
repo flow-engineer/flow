@@ -2123,11 +2123,13 @@ function recordsShown(info: ChannelInfo, sent: RecordsOutbound): RecordsShown {
 }
 
 /** A sent message, carousel or records as its `message.out` event tells it. */
-function outDetail(sent: OutboundMessage | RecordsOutbound, info?: ChannelInfo): Record<string, unknown> {
+export function outDetail(sent: OutboundMessage | RecordsOutbound, info?: ChannelInfo): Record<string, unknown> {
   if (sent.type === "template") return { text: sent.name, template: true };
   if (sent.type === "records") {
     const shown = info ? recordsShown(info, sent) : undefined;
-    return { text: sent.text, replyTo: sent.replyTo, records: { kind: sent.kind, handle: sent.handle, count: sent.rows.length, ...(shown ? { shown: shown.rows.map((r) => r.id), page: shown.page, pages: shown.pages, deliveredAs: shown.as } : {}) } };
+    // The page's rows with their numbers, for tests and the playground; traces send them only with content.
+    const rows = info ? recordsPage(info, sent).rows.map((r) => ({ id: r.id, number: r.number, title: r.title, ...(r.detail ? { detail: r.detail } : {}) })) : undefined;
+    return { text: sent.text, replyTo: sent.replyTo, records: { kind: sent.kind, handle: sent.handle, count: sent.rows.length, ...(shown ? { shown: shown.rows.map((r) => r.id), page: shown.page, pages: shown.pages, deliveredAs: shown.as, rows } : {}) } };
   }
   if (sent.type === "carousel") return { text: sent.text, carousel: sent.cards, replyTo: sent.replyTo };
   return { text: sent.text, buttons: sent.buttons, list: sent.list, link: sent.link, image: sent.image, replyTo: sent.replyTo, ...(sent.fields ? { fields: sent.fields } : {}), ...(sent.authentication ? { authentication: true } : {}) };

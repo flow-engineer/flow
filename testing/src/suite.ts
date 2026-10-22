@@ -163,9 +163,20 @@ const sentItem = z.strictObject({
   phrased: z.literal(true).optional(),
   /** A carousel (cards they swipe through), not a message or a template. */
   carousel: z.literal(true).optional(),
-  /** Text the message (or the template's values, or the carousel's text and cards) holds. */
+  /** Text the message (or the template's values, the carousel's text and cards, the records' intro and rows) holds. */
   text: withClock(z.string().min(1)).optional(),
-}).refine((item) => !(item.carousel && item.template !== undefined), "a carousel is not a template: give carousel or template, not both");
+  /** Records a tool returned, shown with the send tool's `show`: of this kind (orders), or `true` for any kind. */
+  records: z.union([z.literal(true), z.string().min(1)]).optional(),
+  /** The ids of the rows on that message's page, exactly, in order. */
+  ids: z.array(z.string().min(1)).min(1).optional(),
+  /** How many rows the records held in all (every page). */
+  count: z.number().int().min(0).optional(),
+  /** Which page it was, from 1 (page 2 is the one "More" sent). */
+  page: z.number().int().min(1).optional(),
+})
+  .refine((item) => !(item.carousel && item.template !== undefined), "a carousel is not a template: give carousel or template, not both")
+  .refine((item) => item.records !== undefined || (item.ids === undefined && item.count === undefined && item.page === undefined), "ids, count and page are a records send's: give records too (records: true for any kind)")
+  .refine((item) => item.records === undefined || (item.template === undefined && !item.carousel), "records are not a template or a carousel: give records alone, with text, ids, count, page or at");
 
 const openingStep = z
   .object({
@@ -191,14 +202,17 @@ const openingStep = z
     restart: z.enum(["crash", "deploy"], { error: "crash or deploy" }).optional(),
     /** Move the test's clock to this time before the step. */
     at: moment.optional(),
+    /** The person picks a row of the latest records the agent showed, by its id or title: a tap where the
+     * channel shows them a list or buttons, else the row's number typed. */
+    pick: withClock(z.string().min(1)).optional(),
   })
   .superRefine((step, ctx) => {
-    const kinds = [step.say !== undefined || step.attach ? "say" : null, step.event ? "event" : null, step.nudge ? "nudge" : null, step.wait !== undefined ? "wait" : null, step.restart ? "restart" : null].filter(Boolean);
-    if (kinds.length !== 1) ctx.addIssue({ code: "custom", message: kinds.length ? `one of say, event, nudge, wait or restart per step, not ${kinds.join(" and ")}` : "say something, attach a file, send an event, nudge, wait, or restart" });
+    const kinds = [step.say !== undefined || step.attach ? "say" : null, step.event ? "event" : null, step.nudge ? "nudge" : null, step.wait !== undefined ? "wait" : null, step.restart ? "restart" : null, step.pick !== undefined ? "pick" : null].filter(Boolean);
+    if (kinds.length !== 1) ctx.addIssue({ code: "custom", message: kinds.length ? `one of say, event, nudge, wait, restart or pick per step, not ${kinds.join(" and ")}` : "say something, attach a file, send an event, nudge, wait, restart, or pick a row" });
     if (!step.event && (step.path || step.signature || step.answer !== undefined)) ctx.addIssue({ code: "custom", message: "path, signature and answer belong to an event step" });
     if (kinds[0] === "say" && !step.say && !step.attach) ctx.addIssue({ code: "custom", message: "say something, attach a file, or both" });
   })
-  .transform((step) => (step.event || step.nudge || step.wait !== undefined || step.restart ? step : { ...step, say: step.say ?? "" }));
+  .transform((step) => (step.event || step.nudge || step.wait !== undefined || step.restart || step.pick !== undefined ? step : { ...step, say: step.say ?? "" }));
 
 const scenarioSchema = z.object({
   id: z.string().min(1),
@@ -276,6 +290,12 @@ export function isBusiness(scenario: Scenario): boolean {
   return scenario.opening.some((s) => s.event || s.nudge || s.wait !== undefined || s.at !== undefined || s.restart) || !!scenario.expect.sent || !!scenario.expect.not_sent || !!scenario.tools;
 }
 export type ToolFile = z.infer<typeof toolFileSchema>;
+
+/** It checks records sends (`records`, `ids`, `count`, `page` in expect.sent or not_sent) or picks a row: only a cloud that said `records` plays it. */
+export function usesRecords(scenario: Scenario): boolean {
+  const items = [...(scenario.expect.sent ?? []), ...(scenario.expect.not_sent ?? [])];
+  return scenario.opening.some((s) => s.pick !== undefined) || items.some((i) => i.records !== undefined);
+}
 export type ExpectedCall = z.infer<typeof expectedCall>;
 
 /** Parse and check a scenario. The error has one line per problem: `file:line: field: what is wrong`. */

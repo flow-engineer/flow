@@ -2,6 +2,7 @@
 // in the reply or carries on in the background; tool authors mark nothing.
 
 import { z } from "zod";
+import type { Records } from "./records.ts";
 import type { ToolSpec } from "./types.ts";
 
 export interface ToolContext {
@@ -93,6 +94,11 @@ export interface Tool<Input = any> {
   signIn?: SignIn;
   /** How the tool behaves, for hosts to decide what to ask the person first. Nothing enforces them. */
   hints?: ToolHints;
+  /**
+   * The records it returns (`orders`, when its run returns `orders.of(rows)`): `flow test` makes a
+   * simulated result that is a list of rows into the same records, so a test can show and pick them.
+   */
+  records?: Records<any>;
 }
 
 export type SignIn = "required" | "optional" | "none";

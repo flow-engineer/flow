@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { createAgent, tool, z, type AgentOptions, type Outbound } from "../src/index.ts";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { mcpServer } from "../mcp/src/index.ts";
-import { tracesFromEnv } from "../src/traces.ts";
+import { traces, tracesFromEnv } from "../src/traces.ts";
 import { SMS, call, respond, scriptedModel } from "./helpers.ts";
 
 const KEY = "trace_key_do-not-log-me";
@@ -220,5 +220,31 @@ test("explicit trace channels keep terminal and custom chat sources distinct", a
       const root = request.body.resourceSpans[0].scopeSpans[0].spans.find((s: any) => !s.parentSpanId);
       assert.equal(attrs(root)["chinwag.channel"], channel);
     } finally { endpoint.close(); }
+  }
+});
+
+test("a records send's span says what was shown (kind, count, page, how, ids) and the rows only with content; a pick is on its turn", async () => {
+  const endpoint = await fakeEndpoint();
+  const records = { kind: "orders", handle: "r1", count: 12, shown: ["BL-1", "BL-2"], page: 2, pages: 6, deliveredAs: "list", rows: [{ id: "BL-1", number: 3, title: "BL-1 · ready" }] };
+  const spans = [];
+  for (const content of [false, true]) {
+    const t = traces({ url: endpoint.url, key: KEY, content }, { service: "cafe", kindOf: () => "whatsapp" });
+    const at = 1_000;
+    t.sink({ type: "message.in", conversationId: "c", at, text: "BL-1 · ready", channel: "whatsapp", choice: { id: "BL-1", title: "BL-1 · ready", records: "r1", kind: "orders" } });
+    t.sink({ type: "turn.start", conversationId: "c", at });
+    t.sink({ type: "message.out", conversationId: "c", at, text: "Your orders", channel: "whatsapp", records });
+    t.sink({ type: "turn.end", conversationId: "c", at });
+    await t.flush();
+    spans.push(endpoint.requests.at(-1)!.body.resourceSpans[0].scopeSpans[0].spans);
+  }
+  endpoint.close();
+  for (const [i, sent] of spans.entries()) {
+    const root = attrs(sent.find((s: any) => s.name.startsWith("invoke_agent")));
+    assert.equal(root["chinwag.records.picked"], "BL-1");
+    const send = attrs(sent.find((s: any) => s.name === "send whatsapp"));
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(send).filter(([k]) => k.startsWith("chinwag.records."))),
+      { "chinwag.records.kind": "orders", "chinwag.records.count": "12", "chinwag.records.page": "2", "chinwag.records.pages": "6", "chinwag.records.delivered_as": "list", "chinwag.records.shown": "BL-1,BL-2", ...(i ? { "chinwag.records.rows": JSON.stringify(records.rows) } : {}) },
+    );
   }
 });

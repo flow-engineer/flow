@@ -1,0 +1,26 @@
+# Records: the agent shows the person's orders as the tool returned them (never retyped), and
+# the person picks one. expect.sent checks the rows that went out; the pick taps a row where the
+# channel shows a list or buttons, else types its number.
+id: my-orders
+title: Asks for their orders and picks the one still being made
+channels: [whatsapp, imessage]
+
+person:
+  persona: Sam, a regular; short messages.
+  goal: Find out when the latte they ordered will be ready.
+
+opening:
+  - say: "my orders?"
+  - pick: BL-1041
+
+world: |
+  Sam ordered twice today: BL-1040, a small cold brew, is ready; BL-1041, a large latte, is being
+  made and is ready in about 6 minutes.
+
+max_turns: 4
+
+expect:
+  sent:
+    - { records: orders, ids: [BL-1041, BL-1040], count: 2 }
+  judge:
+    - After Sam picks BL-1041, the agent says it is a large latte that is still being made and about when it will be ready.

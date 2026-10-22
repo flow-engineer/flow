@@ -1,0 +1,16 @@
+# my_orders returns records (records(...).of(rows) in src/tools.ts): under flow test the simulated
+# list of rows below comes back as those records, so the agent shows them with its send tool's
+# `show` and a scenario can check which rows went out (expect.sent's records) and pick one.
+tool: my_orders
+behaviour: |
+  The person's orders today, newest first. status is "being made" until ready_by, then "ready".
+  An empty list when they have none.
+responses:
+  - when: They have orders today (usual)
+    latency_ms: 200
+    output:
+      - { order_id: BL-1041, status: being made, items: 1 large Latte, ready_by: "{{now + 6m}}" }
+      - { order_id: BL-1040, status: ready, items: 1 small Cold brew, ready_by: "{{now - 20m}}" }
+  - when: They have no orders today
+    latency_ms: 150
+    output: []

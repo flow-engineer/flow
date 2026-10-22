@@ -56,7 +56,9 @@ export const findSlots = tool({
   and maps a tap or a typed number back to the row:
   `const orders = records({ kind: "orders", id: (o) => o.id, title: (o) => ..., detail: (o) => ..., pick: "View order" })`,
   then `run: async (_in, ctx) => orders.of(rows, { total })`. Ids are 1 to 64 bytes and unique;
-  at most 100 rows are kept. Over MCP and the CLI the result is the rows as given.
+  at most 100 rows are kept. Over MCP and the CLI the result is the rows as given. Also give the
+  tool `records: orders`, so under `flow test` a simulated list of rows (its tool file's `output`)
+  comes back as the same records.
 
 ## Tools from the context pack
 
