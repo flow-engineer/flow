@@ -197,8 +197,12 @@ export interface SetupAnswer {
   telegram_link?: string;
   /** The try page per channel with a sender: {telegram: ".../try/<code>?c=telegram", ...}. */
   try_urls?: Record<string, string>;
-  /** The account's free-trial counts per channel; limit null is unlimited. iMessage also counts the people it may reach. */
-  trial?: Record<string, { limit: number | null; used: number; contacts?: { limit: number; used: number } }>;
+  /**
+   * The account's free-trial counts per channel; limit null is unlimited. With `held` (Flow Messaging
+   * since Oct 2026) they count people, `held` those past the limit waiting for a place; without it
+   * (an older answer) messages, and iMessage's `contacts` the people it may reach.
+   */
+  trial?: Record<string, { limit: number | null; used: number; held?: number; contacts?: { limit: number; used: number } }>;
   /** The agent's one Flow key (FLOW_KEY), only when made in this call: its value is shown once. */
   flow_key?: FlowKey;
   /** The account's Flow trial model credit, when the agent has no provider key; absent: none (warnings say why). */
