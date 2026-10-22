@@ -106,12 +106,13 @@ async function play(script: Command[], build: ConnectOptions["build"], hooks: { 
     });
   });
   await new Promise<void>((done) => cloud.listen(0, "127.0.0.1", done));
+  let summary: Awaited<ReturnType<typeof runInCloud>>;
   try {
-    await runInCloud({ cloud: `http://127.0.0.1:${(cloud.address() as AddressInfo).port}`, name: "test-agent", tools: [], files: [], log: () => {}, build });
+    summary = await runInCloud({ cloud: `http://127.0.0.1:${(cloud.address() as AddressInfo).port}`, name: "test-agent", tools: [], files: [], log: () => {}, build });
   } finally {
     cloud.close();
   }
-  return { opened, answers, outbound, receipts, events };
+  return { opened, answers, outbound, receipts, events, summary };
 }
 
 /** Each message the agent sent, with the runner that sent it (runner-1, runner-2, ...). */
@@ -271,4 +272,43 @@ test("a deploy mid-turn: the old agent finishes its turn and a message the new o
   assert.deepEqual(answers.map((a) => [a.step, a.error ?? null]), [[0, null], [2, null]]);
   assert.deepEqual(sentBy(events), [["Thursday at 10.", "runner-1"], ["At the studio.", "runner-1"], ["Any time.", "runner-2"]]);
   assert.equal(scripted.calls.length, 3, "no turn ran twice");
+});
+
+test("a run that starts from an earlier conversation: the open says the client seeds it, the history on a business open or a run's first message is in the store before the message, and the model reads it as said", async () => {
+  const history = [{ from: "person" as const, text: "Book a table for Friday" }, { from: "agent" as const, text: "Done: Friday, 8 pm." }, { from: "person" as const, text: "Thanks" }];
+  const scripted = scriptedModel();
+  const played = play([
+    { type: "open", conversationId: "whatsapp:h1", channelName: "whatsapp", channel: WHATSAPP, address: PERSON, now: START, history },
+    { type: "message", conversationId: "whatsapp:h1", messageId: "m1", incoming: { text: "Can we move it to 9?" }, channel: WHATSAPP, channelName: "whatsapp" },
+    // A run that is not the business's: the history comes with its first message, on the session's agent.
+    { type: "message", conversationId: "c2", messageId: "m2", incoming: { text: "And for two?" }, channel: WHATSAPP, history: history.slice(0, 2) },
+  ], (options) => buildAgent(options, [], scripted.model));
+  const said = (request: { messages: Array<{ role: string; content?: string | null; toolCalls?: Array<{ arguments: string }> }> }) =>
+    request.messages.flatMap((m) => (m.role === "user" && m.content ? [`person: ${m.content}`] : m.role === "assistant" ? (m.toolCalls ?? []).map((c) => `agent: ${JSON.parse(c.arguments).text}`) : []));
+  const business = await scripted.nextCall(0);
+  assert.match(said(business.request).join("\n"), /Book a table for Friday[\s\S]*agent: Done: Friday, 8 pm\.[\s\S]*Thanks[\s\S]*Can we move it to 9\?/);
+  business.answer(respond(call("send_whatsapp", { text: "Moved to 9." })));
+  const plain = await scripted.nextCall(1);
+  assert.match(said(plain.request).join("\n"), /Book a table for Friday[\s\S]*agent: Done: Friday, 8 pm\.[\s\S]*And for two\?/);
+  plain.answer(respond(call("send_chat", { text: "Yes." })));
+  const { opened, answers, summary } = await played;
+  assert.equal((opened as { history?: boolean }).history, true);
+  assert.deepEqual(answers.map((a) => [a.step, a.error ?? null]), [[0, null]]);
+  assert.equal(summary.sendPath, undefined, "every message went through the agent's send");
+});
+
+test("a message that reaches the cloud without the agent's send is a second path: the session's summary names the conversation", async () => {
+  const scripted = scriptedModel();
+  const conversationId = "whatsapp:s1";
+  const played = play([
+    { type: "open", conversationId, channelName: "whatsapp", channel: WHATSAPP, address: PERSON, now: START },
+    { type: "message", conversationId, messageId: "m1", incoming: { text: "hi" }, channel: WHATSAPP, channelName: "whatsapp" },
+  ], (options) => {
+    // The app's channel wrapper sends one more message of its own, which the agent never announces.
+    const channels = options.channels?.map((c): Channel => ({ ...c, send: async (address, outbound) => { await c.send(address, outbound); if (outbound.type === "message") await c.send(address, { type: "message", text: "PS: rate us!" }); } }));
+    return buildAgent({ ...options, ...(channels ? { channels } : {}) }, [], scripted.model);
+  });
+  (await scripted.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Hello!" })));
+  const { summary } = await played;
+  assert.deepEqual(summary.sendPath, [{ conversationId, delivered: 2, announced: 1 }]);
 });

@@ -716,9 +716,11 @@ export class Conversation {
       this.history.push({ role: "user", content: group.map((m) => `[${tag ? `${channel} · ` : ""}${m.id}] ${m.text}`).join("\n"), messages: group });
       group = [];
     };
+    let n = 0;
     for (const m of messages) {
       if (m.from === "person") {
-        const id = `m${++this.messageCount}`;
+        // Ids of their own: a provider's (or the test cloud's) message ids, m1 among them, never meet these.
+        const id = `h${++n}`;
         this.messageIds.set(id, channel);
         group.push({ id, channel, text: m.text });
         continue;
@@ -730,7 +732,7 @@ export class Conversation {
     }
     read();
     this.recentChannels = [...this.recentChannels, channel].slice(-5);
-    const fields = { messageCount: this.messageCount, recentChannels: this.recentChannels };
+    const fields = { recentChannels: this.recentChannels };
     this.persist(() => this.settings.store.updateConversation(this.id, fields));
     this.flush();
     await this.writes;
