@@ -663,6 +663,11 @@ export class Conversation {
     this.note(`[They reacted ${emoji} to your message: "${clip(toText)}"]`, true);
   }
 
+  /** agent.resetHistory: the model is sent only what comes after this, from the next turn on. */
+  async resetHistory(note?: string): Promise<void> {
+    await this.note(resetLine(note), true, true);
+  }
+
   /** The channel reports, now or later, that a message did not reach the person. */
   undelivered(text: string, reason: string): void {
     this.settings.emit(this.id, "message.undelivered", { text, reason });
@@ -886,14 +891,15 @@ export class Conversation {
     return this.pending.length > 0 || this.notes.some((n) => !n.wait) || this.direct.length > 0;
   }
 
-  private note(text: string, wait = false): void {
-    const item: Note = { text, wait };
+  private note(text: string, wait = false, reset = false): Promise<void> {
+    const item: Note = { text, wait, ...(reset ? { reset } : {}) };
     this.notes.push(item);
-    this.persist(async () => {
-      item.inbox = await this.settings.store.addInbox(this.id, "note", { text, wait });
+    const stored = this.persist(async () => {
+      item.inbox = await this.settings.store.addInbox(this.id, "note", { text, wait, ...(reset ? { reset } : {}) });
       this.knownInbox.add(item.inbox);
     });
     if (!wait && !this.running) this.schedule(0);
+    return stored;
   }
 
   private schedule(delayMs: number): void {
@@ -1560,13 +1566,14 @@ export class Conversation {
     if (marker < 0) return 0;
     if (marker >= this.turnFrom) return Math.min(marker, this.turnFrom);
     const only = [...this.channels.keys()][0] ?? "chat";
+    let from = marker;
     for (let i = marker - 1; i >= 0; i--) {
       const e = this.history[i];
-      if (e.role === "assistant" && e.toolCalls?.some((c) => c.name.startsWith("send_"))) return marker;
-      if (e.role === "user" && e.reset) return marker;
-      if (e.role === "user" && personMessages(e, only).length) return i;
+      if (e.role === "assistant" && e.toolCalls?.some((c) => c.name.startsWith("send_"))) break;
+      if (e.role === "user" && e.reset) break;
+      if (e.role === "user" && personMessages(e, only).length) from = i;
     }
-    return marker;
+    return from;
   }
 
   /** A tool result as the history keeps it: cut at toolResultChars, saying so. */

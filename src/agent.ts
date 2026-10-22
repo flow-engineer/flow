@@ -16,7 +16,7 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
-import { Conversation, PROFILE_TOOL, profileTool, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
+import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
 import { businessSchedule, claimDue, summary } from "./schedules.ts";
@@ -113,9 +113,9 @@ export interface AgentOptions {
   maxSteps?: number;
   /**
    * How much of a long conversation each model call carries. The latest messages are kept, older
-   * ones are left out (the agent is told so). `maxTokens` is the whole call's budget, roughly: default 60% of the model's
-   * `contextTokens` when it gives one, else 50,000. A tool result is cut to `toolResultChars`
-   * characters (default 12,000).
+   * ones are left out (the agent is told so). `maxTokens` is the whole call's budget, roughly: default
+   * 24,000, or 60% of the model's `contextTokens` when that is less. A tool result is cut to
+   * `toolResultChars` characters (default 12,000). `agent.resetHistory` starts it again from a point.
    */
   history?: { maxTokens?: number; toolResultChars?: number };
   events?: EventSink[];
@@ -419,7 +419,7 @@ export class Agent {
       partialAfterMs: options.partialAfterMs ?? 5_000,
       debounceMs: options.debounceMs ?? 300,
       maxSteps: options.maxSteps ?? 8,
-      historyTokens: options.history?.maxTokens ?? (options.model.contextTokens ? Math.floor(options.model.contextTokens * 0.6) : 50_000),
+      historyTokens: options.history?.maxTokens ?? defaultHistoryTokens(options.model.contextTokens),
       toolResultChars: options.history?.toolResultChars ?? 12_000,
       maxRestarts: Number.POSITIVE_INFINITY,
       talk: {
@@ -902,6 +902,24 @@ export class Agent {
   }
 
   /**
+   * Starts the history the model is sent again from now, for someone by a channel identity they have
+   * written from (a new order, a new case, a day later): later calls carry only what comes after,
+   * with `note`, the app's short summary of what came before, if given. Nothing is deleted: the
+   * transcript, the events and the guards' record of what was sent keep all of it. The person's
+   * messages that are not answered yet stay. It does not start a turn; it is a `history.reset` event
+   * when the next one reads it. Refused (unknown_person) for someone who never wrote.
+   */
+  async resetHistory(input: { to: { channel: string; address: string }; note?: string }): Promise<{ status: "reset" } | { status: "refused"; reason: "unknown_person" }> {
+    await this.settings.ready;
+    const identity = await this.store.identity(input.to.channel, input.to.address);
+    if (!identity) return { status: "refused", reason: "unknown_person" };
+    const resident = this.conversations.get(identity.conversationId);
+    if (resident) await resident.resetHistory(input.note);
+    else await this.store.addInbox(identity.conversationId, "note", { text: resetLine(input.note), wait: true, reset: true });
+    return { status: "reset" };
+  }
+
+  /**
    * Their own quiet hours, as the business knows them: `{ from, to }`, "off" for none, or null to go
    * back to the agent's. Refused (unknown_person) for someone who never wrote.
    */
@@ -1330,6 +1348,11 @@ export function createAgent(options: AgentOptions): Agent {
 
 const DAY_MS = 24 * 60 * 60_000;
 export const DEFAULT_QUIET_HOURS: QuietHours = { from: "22:00", to: "07:00" };
+
+/** The history budget when the agent gives none: 24,000 tokens, or 60% of the model's window when that is less. */
+export function defaultHistoryTokens(contextTokens?: number): number {
+  return contextTokens ? Math.min(24_000, Math.floor(contextTokens * 0.6)) : 24_000;
+}
 
 function validQuietHours(q: unknown): q is QuietHours {
   const v = q as QuietHours;

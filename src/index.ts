@@ -30,6 +30,7 @@ export {
   type WhatsAppFeature,
   type WhatsAppProvider,
 } from "./channels.ts";
+export { guards, linkAllowlist, noRepeats, noWriteButtons, oncePerChat, type GuardOptions, type Match } from "./guards.ts";
 export { Conversation, type Profile, type TranscriptEntry } from "./conversation.ts";
 export { nudgeHandler, peopleHandler, type NudgeHandlerOptions, type PeopleHandlerOptions } from "./http.ts";
 export { sqlite, type Database } from "./db.ts";
