@@ -21,7 +21,7 @@ import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
 import { businessSchedule, claimDue, summary } from "./schedules.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
-import { Store, type ConversationRow, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
+import { Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
 import { clock, quietUntil, validZone } from "./time.ts";
 import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } from "./tools.ts";
 import { traces, tracesFromEnv, type Traces, type TracesOptions } from "./traces.ts";
@@ -1002,6 +1002,29 @@ export class Agent {
     const conversation = this.open(identity.conversationId);
     conversation.link({ name: to.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: to.address, deliver: this.deliverer(adapter, to.address, identity.conversationId), lastMessageAt: identity.lastMessageAt });
     return { conversationId: identity.conversationId };
+  }
+
+  /**
+   * Where flowEvents (business events) keeps its send state, so a restart does not forget it; its
+   * attach() asks. null when the database does not survive a restart or the store cannot hold it.
+   */
+  eventStateStore(): EventStateStore | null {
+    const store = this.store;
+    if (!store.durable || !store.loadEventState || !store.takeEvents || !store.saveEventState) return null;
+    return {
+      loadEventState: async () => {
+        await this.settings.ready;
+        return store.loadEventState!();
+      },
+      takeEvents: async (...args) => {
+        await this.settings.ready;
+        return store.takeEvents!(...args);
+      },
+      saveEventState: async (...args) => {
+        await this.settings.ready;
+        return store.saveEventState!(...args);
+      },
+    };
   }
 
   /** A channel the agent was given, by name, as it was given (the test cloud plays a copy of it). */
