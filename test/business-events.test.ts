@@ -718,10 +718,12 @@ test("mounted on an agent with a durable database: after a restart a taken event
   const clock = { now: NOON };
   const start = async () => {
     const sent: string[] = [];
+    const scripted = scriptedModel();
     const events = flowEvents({ secret: SECRET, catalog, now: () => clock.now, log: () => {} });
     const agent = createAgent({
       files: { "AGENTS.md": "A shop's agent." },
-      model: scriptedModel().model,
+      model: scripted.model,
+      debounceMs: 0,
       now: () => clock.now,
       scheduleCheckMs: 0,
       database: sqlite(path),
@@ -737,12 +739,16 @@ test("mounted on an agent with a durable database: after a restart a taken event
       await events.idle();
       return ((await r.json()) as { status: string }).status;
     };
-    return { agent, events, sent, post };
+    return { agent, events, scripted, sent, post };
   };
   const exact = { user: { phone: PERSON }, wording: "exact" };
   const shipped = envelope("order.shipped", exact);
 
   const before = await start();
+  const hi = await before.agent.message({ channel: "whatsapp", from: PERSON, message: "hi" });
+  (await before.scripted.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Hi! How can I help?" })));
+  await before.agent.conversation(hi!.conversationId)!.whenIdle();
+  before.sent.length = 0;
   assert.equal(await before.post(shipped), "accepted");
   assert.equal(await before.post(envelope("restock", { ...exact, collapseKey: "mug" })), "accepted");
   clock.now = NIGHT;
