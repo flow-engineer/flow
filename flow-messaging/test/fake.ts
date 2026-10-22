@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgent, type Database, type FlowEvent } from "../../src/index.ts";
 import { scriptedModel } from "./helpers.ts";
-import { flowMessaging } from "../src/index.ts";
+import { flowMessaging, type FlowMessagingOptions } from "../src/index.ts";
 
 export const SECRET = "whsec_test";
 export const SENDERS = { whatsapp: "snd_WA", telegram: "snd_TG", sms: "snd_SMS" };
@@ -45,7 +45,7 @@ export async function fakeFlow() {
     if (r.method === "GET" && r.path.startsWith("/v1/templates")) return { status: 200, body: { data: templates, has_more: false } };
     const into = r.path.match(/^\/v1\/conversations\/([^/]+)\/messages$/)?.[1];
     if (r.method === "POST" && (into || r.path === "/v1/messages")) {
-      // The channel took it by the time Flow answered (a send that waits for message.sent queues a "queued" answer).
+      // The channel took it by the time Flow answered; a test of the wait for message.sent queues a "queued" answer.
       return { status: 202, body: { id: `msg_out${++sent}`, conversation: into ?? "conv_started", direction: "out", status: "sent", content: r.body.content } };
     }
     if (r.method === "POST" && /\/(typing|read)$/.test(r.path)) return { status: 202, body: { conversation: r.path.split("/")[3], action: "read" } };
@@ -136,12 +136,12 @@ function gateOf() {
 }
 
 /** An agent on the three Flow channels, with its webhook served, driven by a scripted model. */
-export async function liveAgent(flow: { url: string }, options: { database?: Database } = {}) {
+export async function liveAgent(flow: { url: string }, options: { database?: Database; messaging?: Pick<FlowMessagingOptions, "waitFor" | "waitTimeoutMs"> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "flow-fm-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const events: FlowEvent[] = [];
-  const fm = flowMessaging({ apiKey: "fk_test_key", webhookSecret: SECRET, baseUrl: flow.url });
+  const fm = flowMessaging({ apiKey: "fk_test_key", webhookSecret: SECRET, baseUrl: flow.url, ...options.messaging });
   const agent = createAgent({
     dir,
     model: scripted.model,
