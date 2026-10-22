@@ -94,6 +94,23 @@ test("each turn is one trace: the person's ids and channel, its model calls, too
   assert.ok(children.filter((s: any) => attrs(s)["gen_ai.operation.name"] === "chat").length >= 2, "a span per model call");
 });
 
+test("a model call's span carries the cost and cached tokens its provider reported, as a double and an int, and neither when it reported none", async () => {
+  const endpoint = await fakeEndpoint();
+  const h = agentFor(endpoint.url, false);
+  await h.agent.message({ channel: "sms", from: "+15550100123", message: "Thursday?", messageId: "SM-0" });
+  (await h.nextCall(0)).answer({ ...respond(call("send_sms", { text: "One sec" }), call("lookup", { day: "thursday" })), usage: { inputTokens: 900, outputTokens: 20, costUsd: 2, cacheReadTokens: 600 } });
+  (await h.nextCall(1)).answer({ ...respond(call("send_sms", { text: "Done." })), usage: { inputTokens: 950, outputTokens: 10 } });
+  const request = await endpoint.next(1);
+  endpoint.close();
+  const chats = request.body.resourceSpans[0].scopeSpans[0].spans.filter((s: any) => attrs(s)["gen_ai.operation.name"] === "chat");
+  const first = chats[0].attributes;
+  assert.deepEqual(first.find((a: any) => a.key === "flow.usage.cost_usd").value, { doubleValue: 2 });
+  assert.deepEqual(first.find((a: any) => a.key === "gen_ai.usage.cache_read.input_tokens").value, { intValue: "600" });
+  const second = attrs(chats[1]);
+  assert.equal(second["gen_ai.usage.input_tokens"], "950");
+  assert.equal("flow.usage.cost_usd" in second || "gen_ai.usage.cache_read.input_tokens" in second, false);
+});
+
 test("a message intercept answers, and its reply, are traces of their own, also while a turn is open", async () => {
   const endpoint = await fakeEndpoint();
   const h = agentFor(endpoint.url, true, (_id, text) => (/chest pain/.test(text) ? "Call 911 now." : null));

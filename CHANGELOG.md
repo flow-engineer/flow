@@ -2,6 +2,30 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.6.0 (unreleased)
+
+### Changes
+
+- **Cost and latency per run.** The model's `usage` carries `cacheReadTokens` (prompt tokens read
+  from the provider's cache, `prompt_tokens_details.cached_tokens`), and a model on OpenRouter is
+  asked for each call's cost (`usage: { include: true }`). Trace chat spans carry
+  `flow.usage.cost_usd` and `gen_ai.usage.cache_read.input_tokens` when the provider reported them.
+- **`flow test` prints latency and warnings** from a cloud that sends them: per run first reply
+  p50/p95, turn p95 and the agent's tokens; per session a `Latency:` line, `Warnings:` (budgets, then
+  regressions against the last unchanged session) and `Improvements:`. An agent cost the provider did
+  not report reads "not reported", never $0. Warnings never change a verdict or the exit status. An
+  older cloud prints exactly as before.
+- A scenario may set `budget: { cost_usd, first_reply_ms, turn_ms }`; an unknown key or a negative
+  number fails the file locally.
+- `flow test --json` adds `usage`, `latency`, `warnings`, `improvements`, and per run `timing` and
+  `costKnown` (`version` stays 1). `flow show` prints a per-turn table when the cloud sends
+  `turnTiming`.
+
+### Migration notes
+
+- None: every change adds fields or lines. Code that builds `ModelResponse.usage` itself may add
+  `cacheReadTokens`.
+
 ## 0.5.0 (unreleased)
 
 ### Changes

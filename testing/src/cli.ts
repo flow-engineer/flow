@@ -31,7 +31,7 @@ import { PLUGIN_LINE, pluginCli } from "./plugin.ts";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions } from "./client.ts";
 import type { SessionLimits } from "./protocol.ts";
-import { runPrinter } from "./print-run.ts";
+import { costKnownOver, runPrinter, sessionLines } from "./print-run.ts";
 import { checkEndpointCli } from "./check-endpoint.ts";
 import { CHECK_LINE as TOOLS_CHECK_LINE, checkCli, mcpUpdateCli } from "./check.ts";
 import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
@@ -43,7 +43,7 @@ import { displayNameOf, folderName, initHere, newStandalone, packageRoot } from 
 import { EXIT, finishedOutcome, invalidLines, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
-import type { RunSummary } from "./protocol.ts";
+import type { RunSummary, SessionSummary } from "./protocol.ts";
 
 const NEW_LINE = `  flow new <name> [--display-name <name>]
                             Make ./<name>/, a new agent started from the café example
@@ -365,7 +365,6 @@ function only(files: ReturnType<typeof loadSuite>, ids: Set<string> | undefined)
   return kept;
 }
 
-const usd = (n: number) => `$${n.toFixed(4)}`;
 const printRun = runPrinter(say);
 const suite = loadSuite(join(dir, "tests"));
 picked = values.failed ? failedLastTime(suite) : values.only ? new Set(values.only.split(",").map((s) => s.trim())) : undefined;
@@ -429,14 +428,11 @@ for (const r of summary.runs) printRun(r);
 const played = summary.runs.filter((r) => !r.rerunOf);
 const passed = played.filter((r) => runVerdict(r) === "passed").length;
 const errored = played.filter((r) => runVerdict(r) === "errored").length;
-// Cost counts every play, second plays included: the cloud spent it.
-const total = (pick: (r: (typeof summary.runs)[number]) => number) => summary.runs.reduce((n, r) => n + pick(r), 0);
 const agentModels = [...new Set(summary.runs.flatMap((r) => r.agentModels))].join(", ") || "unknown";
 const noModel = played.filter((r) => r.agentModels.length === 0 && r.agentUsage.input + r.agentUsage.output === 0).length;
 const modelCalls = noModel ? `${noModel} ${noModel === 1 ? "run never called" : "runs never called"} the agent's model.` : "Every run called the agent's model.";
 const checkFails = played.filter((r) => runVerdict(r) === "failed" && r.checks.some((c) => !c.pass)).length;
 const erroredLine = errored ? ` ${errored} errored (the cloud could not play or judge ${errored === 1 ? "it" : "them"}).` : "";
-const tokens = (n: number) => n.toLocaleString("en-US");
 say(`\n${passed} of ${played.length} runs passed.${erroredLine} ${modelCalls} ${checkFails} failed a check. Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
 for (const channel of [...new Set(played.map((r) => r.channel))]) {
   const runs = played.filter((r) => r.channel === channel);
@@ -449,12 +445,12 @@ if (flaky.length) {
 }
 for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m) => ({ scenario: m.scenario, invalid: m.summary?.invalid }))))) say(line);
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
-say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
+say(`${sessionLines(summary).join("\n")}\n${summary.dashboard}`);
 if (mergedRuns(summary.runs).some((m) => m.verdict === "not_played")) endedEarly(summary.runs, "the cloud finished the session without playing every run", say);
 sessionId = summary.sessionId || sessionId;
 dashboard = summary.dashboard || dashboard;
 saveSession("finished", summary.runs, dashboard, say);
-end(finishedOutcome(mergedRuns(summary.runs), values.strict), { received: summary.runs });
+end(finishedOutcome(mergedRuns(summary.runs), values.strict), { received: summary.runs, summary });
 
 /** The one line that says the session ended before every run played: how many finished, how many did not, and why. */
 function endedEarly(received: RunSummary[], reason: string, print: (line: string) => void): void {
@@ -552,7 +548,7 @@ function saveSession(ended: Ended, received: RunSummary[], link: string, print: 
 }
 
 /** Exits with the outcome's status, printing the JSON report on stdout first with --json. */
-function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonReport["error"] } = {}): never {
+function end(outcome: Outcome, options: { received?: RunSummary[]; summary?: SessionSummary; error?: JsonReport["error"] } = {}): never {
   const exitCode = EXIT[outcome];
   if (values.json) {
     const received = options.received ?? [];
@@ -571,9 +567,12 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       rerun: m.summary?.rerun ?? null,
       label: m.summary?.label ?? null,
       replayed: m.summary?.replayed ?? null,
+      timing: m.summary?.timing ?? null,
+      costKnown: m.summary?.agentUsage.costKnown ?? null,
     })) : [];
     const count = (verdict: Verdict) => runs.filter((r) => r.verdict === verdict).length;
-    const cost = (pick: (r: RunSummary) => number) => received.reduce((n, r) => n + pick(r), 0);
+    const sum = (pick: (r: RunSummary) => number) => received.reduce((n, r) => n + pick(r), 0);
+    const latency = options.summary?.latency;
     const report: JsonReport = {
       version: 1,
       outcome,
@@ -585,7 +584,21 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       error: options.error ?? null,
       counts: { runs: runs.length, passed: count("passed"), failed: count("failed") + (values.strict ? count("flaky") : 0), flaky: count("flaky"), errored: count("errored"), notPlayed: count("not_played") },
       strict: values.strict,
-      costUsd: { agent: cost((r) => r.agentUsage.costUsd), test: cost((r) => r.testUsage.costUsd) },
+      costUsd: { agent: sum((r) => r.agentUsage.costUsd), test: sum((r) => r.testUsage.costUsd) },
+      usage: {
+        agent: {
+          input: sum((r) => r.agentUsage.input),
+          output: sum((r) => r.agentUsage.output),
+          cacheRead: sum((r) => r.agentUsage.cacheRead ?? 0),
+          costUsd: sum((r) => r.agentUsage.costUsd),
+          // An older cloud says nothing about it: null, not a guess.
+          costKnown: received.some((r) => r.agentUsage.costKnown) ? costKnownOver(received) : null,
+        },
+        test: { costUsd: sum((r) => r.testUsage.costUsd) },
+      },
+      latency: latency ? { firstReply: { p50: latency.firstReply.p50, p95: latency.firstReply.p95, max: latency.firstReply.max }, turn: { p50: latency.turn.p50, p95: latency.turn.p95 } } : null,
+      warnings: options.summary?.warnings ?? [],
+      improvements: options.summary?.improvements ?? [],
       runs,
       invalid: invalidScenarios(runs),
       sessionInvalid: endedInvalid,

@@ -63,8 +63,9 @@ export interface ModelResponse {
   /** Text outside any tool call. Never shown to the person; kept in history as the agent's note. */
   text: string | null;
   toolCalls: ToolCall[];
-  /** costUsd when the provider reports it (OpenRouter does). */
-  usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
+  /** costUsd when the provider reports it (OpenRouter does); cacheReadTokens, the input tokens read from
+   * the provider's prompt cache, when it says. */
+  usage?: { inputTokens: number; outputTokens: number; costUsd?: number; cacheReadTokens?: number };
   /** The model that answered, as the provider names it. */
   model?: string;
 }

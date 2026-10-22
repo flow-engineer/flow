@@ -71,6 +71,10 @@ expect:
     that must not be called. Checked by code from the recorded tool calls, not by a model. Each
     entry is a tool name, or `{ tool, args }`: the call matches when every field in `args` equals
     the call's input (nested objects match in part; arrays and strings must be equal).
+- `budget` (optional): limits per run, `cost_usd` (the agent's model cost), `first_reply_ms` (p95
+  first reply) and `turn_ms` (p95 agent turn), e.g. `budget: { cost_usd: 0.02, first_reply_ms: 4000 }`.
+  Over one is a warning in the summary and `--json`, never a failure; an unknown key or a negative
+  number is a mistake in the file.
 - `timezone` (default UTC) and `now`: the test's clock. `now` is when each run starts,
   `YYYY-MM-DDTHH:MM[:SS]`, local to `timezone` unless it ends in `Z` or an offset (`-04:00`); left
   out, it is the real time. Placeholders are filled from it, and the simulated tools and the judge
@@ -217,6 +221,17 @@ connects out to the cloud, which plays the person and the tools and judges.
    agent, or `not_played`: the session ended first), `failedChecks` (with reasons) and `invalid`
    when the cloud could not play the scenario, plus `sessionInvalid` as in `--json`.
    Read these instead of parsing the printed lines.
+   Cost and latency (from a cloud that sends them; an older one leaves them `null` or `[]`): `usage`
+   (`agent`: `input`, `output`, `cacheRead`, `costUsd`, `costKnown`: `all`, `some`, so `costUsd` is
+   at least the cost, or `none`, so the provider reported no cost, never read it as $0; `test`:
+   `costUsd`), `latency` (`firstReply` and `turn`, `p50`/`p95` in ms), per run `timing` (first reply,
+   turns, model, tools, which the simulator times, and the agent's own ms) and `costKnown`, and
+   `warnings` and `improvements` (`scenario`, `path`, `channel`, `kind`: `budget` or `regression`,
+   `metric`: `cost_usd`, `first_reply_ms` or `turn_ms`, `value`, `limit` or `baseline`, `runs`).
+   A regression is the median over this session's runs of a scenario and channel against its last
+   unchanged earlier session, worse by both a ratio and a floor (cost +25% and +$0.002, p95 first
+   reply +30% and +500 ms, p95 turn +30% and +1000 ms); with 1 run each it is noisy, so confirm
+   with `--runs 3`. Warnings never change a verdict or the exit status.
    Flaky runs: the cloud plays a failed run once more. When that passes the run is `flaky` (its line
    reads `FLAKY` with `played again: passed <watch>`, and the summary lists it in its own section with
    both watch links); `label` is `flaky` or `failing` (failed twice) and `rerun` is the second play
@@ -249,8 +264,9 @@ Work in this loop, and never finish on a partial run:
    `passed` (`jq '.runs[] | select(.verdict != "passed")' report.json`).
 2. `npx @flow-engineer/flow show last` (the first run that did not pass; it names the others) or
    `npx @flow-engineer/flow show <runId>`: the checks with the judge's reasons, then the conversation in time
-   order with every tool call the simulator played, its input, output and what it changed.
-   `--json` gives the whole record.
+   order with every tool call the simulator played, its input, output and what it changed, then
+   (from a cloud that sends it) each turn's first reply, model ms (calls), tools, own ms, tokens and cost.
+   `--json` gives the whole record (`turnTiming`).
 3. Decide which is wrong, and say which:
    - the agent: it said or did the wrong thing; fix its prompt, tools or code;
    - the test: a check asks for the wrong thing, or the scenario cannot reach its goal; fix the YAML;

@@ -78,7 +78,7 @@ Exit status:
   3    The cloud refused the key (401, 403) or is busy (429)`;
 
 /** A run's record as the cloud answers it; only what the text view reads. */
-interface RunRecord {
+export interface RunRecord {
   runId?: string;
   scenario?: { id?: string; path?: string; title?: string };
   run?: number;
@@ -89,7 +89,26 @@ interface RunRecord {
   checks?: Array<{ kind?: string; text?: string; pass?: boolean; reason?: string }>;
   error?: unknown;
   detail?: unknown;
-  summary?: { passed?: boolean; ended?: string; turns?: number; watch?: string; error?: string; label?: string; rerun?: { passed?: boolean; watch?: string } };
+  summary?: { passed?: boolean; ended?: string; turns?: number; watch?: string; error?: string; label?: string; rerun?: { passed?: boolean; watch?: string }; timing?: unknown };
+  /** Each agent turn's times, tokens and cost, rebuilt from the record's events (a newer cloud, while the record is kept). */
+  turnTiming?: TurnRow[];
+}
+
+/** One agent turn of a run, as the cloud's run read gives it. */
+export interface TurnRow {
+  turn: number;
+  /** The first 40 characters of the person's latest message before the turn. */
+  person: string | null;
+  firstReplyMs: number | null;
+  turnMs: number;
+  modelMs: number;
+  modelCalls: number;
+  toolsMs: number;
+  ownMs: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  costUsd: number | null;
 }
 
 type Line =
@@ -297,12 +316,36 @@ function render(record: RunRecord, runId: string): string[] {
   }
   items.sort((a, b) => a.at - b.at || a.order - b.order);
   if (items.length) out.push("", "Conversation:", ...items.flatMap((i) => i.lines));
+  out.push(...turnLines(record));
   if (record.detail !== undefined && record.detail !== null && record.detail !== "") {
     out.push("", ...indent(typeof record.detail === "string" ? record.detail : JSON.stringify(record.detail, null, 2), "Detail: ", "  "));
   }
   if (s.watch) out.push("", `Watch: ${s.watch}`);
   if (s.rerun?.watch) out.push(`Played again: ${s.rerun.passed ? "passed" : "failed"} ${s.rerun.watch}`);
   return out;
+}
+
+/** The per-turn table; from an older cloud nothing, and once the record has expired only that it has. */
+export function turnLines(record: Pick<RunRecord, "summary" | "turnTiming">): string[] {
+  const rows = record.turnTiming;
+  if (!Array.isArray(rows)) return record.summary?.timing ? ["", "Turns: per-turn detail expired, totals kept"] : [];
+  if (!rows.length) return [];
+  const ms = (n: number | null) => (n === null ? "-" : `${n} ms`);
+  const table = [["turn", "person", "first reply", "model (calls)", "tools", "own", "tokens in/out (cached)", "cost"]];
+  for (const r of rows) {
+    table.push([
+      `#${r.turn}`,
+      r.person === null ? "-" : JSON.stringify(r.person),
+      ms(r.firstReplyMs),
+      `${r.modelMs} ms (${r.modelCalls})`,
+      ms(r.toolsMs),
+      ms(r.ownMs),
+      `${r.input}/${r.output}${r.cacheRead ? ` (${r.cacheRead})` : ""}`,
+      r.costUsd === null ? "not reported" : `$${r.costUsd.toFixed(4)}`,
+    ]);
+  }
+  const widths = table[0]!.map((_, i) => Math.max(...table.map((row) => row[i]!.length)));
+  return ["", "Turns (tools simulated):", ...table.map((row) => `  ${row.map((cell, i) => cell.padEnd(widths[i]!)).join("  ").trimEnd()}`)];
 }
 
 /** Text over several lines: the first after `first`, the rest after `rest`. */
