@@ -67,11 +67,26 @@ export class Client {
 
   /** A file's bytes: GET /v1/files/{id} answers them or redirects to a signed URL, which fetch follows without the key. */
   async download(fileId: string): Promise<Uint8Array> {
+    return (await this.file(fileId)).data;
+  }
+
+  /** A file's bytes, with its type and name as the answer gives them. */
+  async file(fileId: string): Promise<{ data: Uint8Array; mime?: string; name?: string }> {
     const path = `/v1/files/${idSegment("file", fileId)}`;
     if (!this.apiKey) throw new Error("set FLOW_MESSAGING_KEY (or pass apiKey) to reach Flow Messaging");
     const response = await fetch(this.baseUrl + path, { headers: { authorization: `Bearer ${this.apiKey}`, "flow-version": API_VERSION }, signal: AbortSignal.timeout(60_000) });
     if (!response.ok) throw await errorOf(response);
-    return new Uint8Array(await response.arrayBuffer());
+    const mime = response.headers.get("content-type")?.split(";")[0]?.trim() || undefined;
+    const name = /filename="([^"]+)"/.exec(response.headers.get("content-disposition") ?? "")?.[1];
+    return { data: new Uint8Array(await response.arrayBuffer()), ...(mime ? { mime } : {}), ...(name ? { name } : {}) };
+  }
+
+  /** POST /v1/files, as multipart form data: the file's bytes and its name; tried again with the same Idempotency-Key like any POST. */
+  upload<T>(file: { data: Uint8Array; mime: string; name?: string }, idempotencyKey: string = randomUUID()): Promise<T> {
+    const form = new FormData();
+    form.set("file", new Blob([file.data as BlobPart], { type: file.mime }), file.name ?? "file");
+    if (file.name) form.set("filename", file.name);
+    return this.request<T>("POST", "/v1/files", form, idempotencyKey, TRIES, 60_000);
   }
 
   /** A POST with its own Idempotency-Key (the caller's, else a new one), kept across the retries of this one call; `tries: 1` for courtesies. */
@@ -79,16 +94,18 @@ export class Client {
     return this.request<T>("POST", path, body, idempotencyKey, tries);
   }
 
-  private async request<T>(method: string, path: string, body?: unknown, idempotencyKey?: string, tries = TRIES): Promise<T> {
+  /** A FormData body goes as multipart (fetch sets its boundary); any other body as JSON. */
+  private async request<T>(method: string, path: string, body?: unknown, idempotencyKey?: string, tries = TRIES, timeoutMs = TIMEOUT_MS): Promise<T> {
     if (!this.apiKey) throw new Error("set FLOW_MESSAGING_KEY (or pass apiKey) to reach Flow Messaging");
     const headers: Record<string, string> = { authorization: `Bearer ${this.apiKey}`, "flow-version": API_VERSION };
-    if (body !== undefined) headers["content-type"] = "application/json";
+    const form = body instanceof FormData;
+    if (body !== undefined && !form) headers["content-type"] = "application/json";
     if (idempotencyKey) headers["idempotency-key"] = idempotencyKey;
     let last: FlowMessagingError | undefined;
     for (let attempt = 1; attempt <= tries; attempt++) {
       let response: Response;
       try {
-        response = await fetch(this.baseUrl + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(TIMEOUT_MS) });
+        response = await fetch(this.baseUrl + path, { method, headers, body: body === undefined ? undefined : form ? body : JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
       } catch (error) {
         last = new FlowMessagingError(0, "network", `no answer from Flow Messaging (${error instanceof Error ? error.name : "error"})`);
         if (attempt < tries) await wait(2 ** (attempt - 1));

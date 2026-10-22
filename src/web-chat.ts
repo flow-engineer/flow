@@ -22,7 +22,7 @@ import type { Agent } from "./agent.ts";
 import { sniff, type MediaKind } from "./media.ts";
 import { replyButton, type Channel } from "./channels.ts";
 import { requireToken, sameSecret, withoutTrailingSlashes } from "./http.ts";
-import type { Attachment, CarouselCard, ChannelInfo, ListRow, Outbound, Photo, SendReceipt } from "./types.ts";
+import type { Attachment, CarouselCard, ChannelInfo, ListRow, Outbound, OutboundFile, Photo, SendReceipt } from "./types.ts";
 
 /** A file a visitor sent, as their browser is shown it: `src` (on the way out) is where its bytes are, signed for an hour. */
 export interface WebChatFile {
@@ -46,6 +46,7 @@ export const WEB_CHAT: ChannelInfo = {
   lists: { maxRows: 10, titleMax: 72, buttonMax: 40 },
   linkButton: { labelMax: 40 },
   images: { captionMax: 4096 },
+  files: { kinds: ["document", "audio", "voice", "video"], captionMax: 4096 },
   carousels: { maxCards: 10, textMax: 4096, cardTextMax: 300, buttons: 3, labelMax: 40 },
   readReceipts: true,
   templates: false,
@@ -54,7 +55,7 @@ export const WEB_CHAT: ChannelInfo = {
 
 /** One thing the visitor's browser is told, as the mailbox keeps it. */
 export type WebChatEventBody =
-  | { type: "message"; from: "agent"; text: string; replyTo?: string; buttons?: Array<{ id: string; label: string }>; list?: { button: string; rows: ListRow[] }; link?: { label: string; url: string }; image?: Photo; fields?: Record<string, unknown> }
+  | { type: "message"; from: "agent"; text: string; replyTo?: string; buttons?: Array<{ id: string; label: string }>; list?: { button: string; rows: ListRow[] }; link?: { label: string; url: string }; image?: Photo; file?: OutboundFile; fields?: Record<string, unknown> }
   | { type: "message"; from: "person"; id: string; text: string; choice?: { id?: string; title: string }; attachments?: WebChatFile[] }
   | { type: "carousel"; text: string; cards: CarouselCard[]; replyTo?: string }
   | { type: "typing"; on: boolean }
@@ -249,11 +250,11 @@ export function webChat(options: WebChatOptions): WebChat {
     const exp = Math.floor((now() + FILE_LINK_MS) / 1000);
     return `${base}/file?id=${encodeURIComponent(id)}&exp=${exp}&sig=${mac(`file:${id}:${exp}`)}`;
   };
-  const showPhoto = (p: Photo) => ("fileId" in p ? { ...p, src: srcOf(p.fileId) } : p);
+  const showPhoto = <P extends Photo | OutboundFile>(p: P): P => ("fileId" in p ? { ...p, src: srcOf(p.fileId) } : p);
   /** An event as the browser gets it: files kept by the store get a signed `src`. */
   const present = <E extends WebChatEventBody>(event: E): E => {
     if (event.type === "message" && event.from === "person" && event.attachments) return { ...event, attachments: event.attachments.map((f) => ({ ...f, src: srcOf(f.id) })) };
-    if (event.type === "message" && event.from === "agent" && event.image) return { ...event, image: showPhoto(event.image) };
+    if (event.type === "message" && event.from === "agent" && (event.image || event.file)) return { ...event, ...(event.image ? { image: showPhoto(event.image) } : {}), ...(event.file ? { file: showPhoto(event.file) } : {}) };
     if (event.type === "carousel") return { ...event, cards: event.cards.map((c) => ({ ...c, image: showPhoto(c.image) })) };
     return event;
   };
@@ -278,6 +279,7 @@ export function webChat(options: WebChatOptions): WebChat {
           ...(outbound.list ? { list: outbound.list } : {}),
           ...(outbound.link ? { link: outbound.link } : {}),
           ...(outbound.image ? { image: outbound.image } : {}),
+          ...(outbound.file ? { file: outbound.file } : {}),
           ...(outbound.fields && Object.keys(outbound.fields).length ? { fields: outbound.fields } : {}),
         }, outbound.idempotencyKey);
       case "carousel":
@@ -338,7 +340,7 @@ export function webChat(options: WebChatOptions): WebChat {
       if ((e.kind !== "in" && e.kind !== "out") || e.channel !== name || e.at >= since) return [];
       if (e.kind === "in") return [{ type: "message", from: "person", id: e.id, text: e.text, ...(e.choice ? { choice: { ...(e.choiceId ? { id: e.choiceId } : {}), title: e.text } } : {}), at: e.at }];
       if (e.carousel) return [{ type: "carousel", text: e.text, cards: e.carousel, at: e.at }];
-      return [{ type: "message", from: "agent", text: e.text, ...(e.buttons?.length ? { buttons: e.buttons.map(replyButton) } : {}), ...(e.list ? { list: e.list } : {}), ...(e.link ? { link: e.link } : {}), ...(e.image ? { image: e.image } : {}), ...(e.fields ? { fields: e.fields } : {}), at: e.at }];
+      return [{ type: "message", from: "agent", text: e.text, ...(e.buttons?.length ? { buttons: e.buttons.map(replyButton) } : {}), ...(e.list ? { list: e.list } : {}), ...(e.link ? { link: e.link } : {}), ...(e.image ? { image: e.image } : {}), ...(e.file ? { file: e.file } : {}), ...(e.fields ? { fields: e.fields } : {}), at: e.at }];
     });
     return json(200, { messages: shown.map(present), cursor }, headers);
   }
@@ -363,7 +365,7 @@ export function webChat(options: WebChatOptions): WebChat {
     for (const { ref } of m.attachments ?? []) {
       const id = idOfRef(visitor.address, ref);
       const kept = id && agent!.media ? await agent!.media.get(id) : null;
-      if (!id || !kept || kept.owner !== `${name}:${visitor.address}`) return json(400, { error: "attachments: each { ref } is one POST " + base + "/files gave this visitor" }, headers);
+      if (!id || !kept || (kept.owner !== undefined && kept.owner !== `${name}:${visitor.address}`)) return json(400, { error: "attachments: each { ref } is one POST " + base + "/files gave this visitor" }, headers);
       const kind = sniff(kept.data)?.kind ?? "document";
       files.push({ id, kind, mime: kept.mime, size: kept.size, ...(kept.name ? { name: kept.name } : {}) });
       const store = agent!.media!;

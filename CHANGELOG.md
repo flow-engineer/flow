@@ -20,14 +20,28 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   With one, the web chat takes photos, PDFs and voice notes (`POST {base}/files`, then
   `attachments: [{ ref }]` on a message; `client.upload(blob)`), told by their first bytes, at most
   10 MB and 3 a message, shown back by signed links (`src`) that expire after an hour; without one
-  it answers 501. `agent.forgetPerson` erases the person's files (`forget(owner)`). Flow's own
-  storage and sending documents, audio and voice are next.
+  it answers 501. `agent.forgetPerson` erases the person's files (`forget(owner)`). A store's `get`
+  may leave out `owner` (the web chat's signed refs already bind a file to its visitor).
+- **Sending documents, audio, voice notes and videos.** A message takes `file: { kind, url | fileId,
+  name? }`, alone, its text the caption; `ChannelInfo.files` (`{ kinds, captionMax }`) says which
+  kinds a channel sends, and only those are offered on the send tool (`file`). Where a channel lacks
+  the kind, `fitMessage` sends a voice note as audio, a file by URL as its URL after the text, and
+  leaves one by id out with an `attachment.failed` event. Flow Messaging's channels send all four
+  (media of that kind; a voice note as `voice` with `fallback: "auto"`; audio's and voice's text
+  as a message right after), as does the web chat; `whatsapp()` only with `features.files: true`.
+  The content checks refuse a document's or video's caption past 1,024 characters and a non-https
+  URL. The conformance suite gains a document send for channels that declare one.
+- **Flow's storage, opt in by code: `flowMedia()`** (`@flow-engineer/flow/flow-messaging`) is a
+  `MediaStore` over Flow Messaging's files API: uploads by `POST /v1/files` (multipart), downloads
+  by `file_...` id. Flow has no delete call yet, so it has no `forget`: files stay until the plan's
+  retention (30 days by default), also after `agent.forgetPerson`.
 - `agent.message({ ..., key })` takes a person's key your server verified; `agent.conversationOf({ channel, address })`
   gives the conversation an address belongs to.
 
 ### Migration notes
 
-- None: nothing an agent uses changed.
+- None: nothing an agent uses changed. A hand-written `whatsapp()` provider is offered files only once
+  it sets `features.files: true` and sends `Message.file`.
 
 ## 0.5.0 (unreleased)
 

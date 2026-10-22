@@ -15,6 +15,8 @@ import { respond, scriptedModel } from "../test/helpers.ts";
 export interface Arrival {
   text: string;
   idempotencyKey?: string;
+  /** The kind of file it carries, if any (document, audio, voice, video). */
+  file?: string;
   /** The platform takes it (Flow Messaging: message.sent). */
   accept(): Promise<void> | void;
   /** The platform refuses it, with this reason. */
@@ -54,11 +56,11 @@ const CAROUSEL: Carousel = {
 
 /** Runs every guarantee against the adapter a fresh rig from `make` puts in front of its platform. */
 export function conformance(name: string, make: () => Promise<Rig>): void {
-  const withRig = (title: string, check: (rig: Rig) => Promise<void>) =>
-    test(`${name}: ${title}`, async () => {
+  const withRig = (title: string, check: (rig: Rig, skip: (why: string) => void) => Promise<void>) =>
+    test(`${name}: ${title}`, async (t) => {
       const rig = await make();
       try {
-        await check(rig);
+        await check(rig, (why) => t.skip(why));
       } finally {
         await rig.close();
       }
@@ -88,6 +90,19 @@ export function conformance(name: string, make: () => Promise<Rig>): void {
     const sending = Promise.resolve(rig.channel.send(rig.to, { type: "message", text: "Your table is ready", idempotencyKey: "nudge:conformance-1" }));
     const arrival = await rig.arrival(0);
     assert.equal(arrival.idempotencyKey, "nudge:conformance-1");
+    await arrival.accept();
+    await sending;
+  });
+
+  withRig("a channel that declares document files delivers a document, its text the caption", async (rig, skip) => {
+    if (!rig.channel.info.files?.kinds.includes("document")) return skip("this channel declares no document files");
+    const sending = Promise.resolve(rig.channel.send(rig.to, { type: "message", text: "Your invoice", file: { kind: "document", url: "https://example.com/invoice.pdf", name: "invoice.pdf" } }));
+    const state = tracked(sending);
+    const arrival = await rig.arrival(0);
+    assert.equal(arrival.text, "Your invoice");
+    assert.equal(arrival.file, "document");
+    await settle();
+    assert.equal(state.settled, false, "resolved before the platform had it");
     await arrival.accept();
     await sending;
   });

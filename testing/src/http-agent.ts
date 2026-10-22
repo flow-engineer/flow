@@ -93,7 +93,7 @@ export function checkReply(reply: unknown, info: ChannelInfo): { outbound: Outbo
     return other.success ? { outbound: other.data as Outbound } : { refused: problems(other.error) };
   }
   const { type: _, replyTo, fields, ...rest } = reply as Extract<Outbound, { type: "message" }>;
-  const input = { ...rest, ...(rest.image !== undefined ? { image: toolPhoto(rest.image) } : {}), ...(replyTo !== undefined ? { reply_to: replyTo } : {}) };
+  const input = { ...rest, ...(rest.image !== undefined ? { image: toolPhoto(rest.image) } : {}), ...(rest.file !== undefined ? { file: toolPhoto(rest.file) } : {}), ...(replyTo !== undefined ? { reply_to: replyTo } : {}) };
   const sent = sendInput(info).strict().safeParse(input);
   if (!sent.success) return { refused: problems(sent.error).replaceAll("reply_to", "replyTo").replaceAll("file_id", "fileId") };
   if (fields !== undefined && (typeof fields !== "object" || fields === null || Array.isArray(fields))) return { refused: "fields: must be an object" };
@@ -105,7 +105,7 @@ export function checkReply(reply: unknown, info: ChannelInfo): { outbound: Outbo
   return refused ? { refused: contentRefusalText(info, refused) } : { outbound };
 }
 
-/** A reply's photo ({ url } or { fileId }) as the send tool takes it ({ url } or { file_id }). */
+/** A reply's photo or file ({ url } or { fileId }) as the send tool takes it ({ url } or { file_id }). */
 function toolPhoto(image: unknown): unknown {
   if (!image || typeof image !== "object" || !("fileId" in image)) return image;
   const { fileId, ...rest } = image as { fileId: unknown };

@@ -23,7 +23,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
-import { carouselMessages, replyButton, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type SendReceipt, type Template, type WhatsAppFeature } from "../../src/index.ts";
+import { carouselMessages, replyButton, sniff, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type MediaStore, type Message, type Photo, type SendReceipt, type Template, type WhatsAppFeature } from "../../src/index.ts";
 import { Client, FlowMessagingError, idSegment, verifySignature } from "./client.ts";
 
 export { API_VERSION, FlowMessagingError, verifySignature } from "./client.ts";
@@ -102,6 +102,7 @@ export const TELEGRAM: ChannelInfo = {
   buttonIds: true,
   linkButton: { labelMax: 20 },
   images: { captionMax: 1024 },
+  files: { kinds: ["document", "audio", "voice", "video"], captionMax: 1024 },
   carousels: WHATSAPP_CAROUSELS,
   readReceipts: false,
   templates: false,
@@ -121,6 +122,7 @@ export const IMESSAGE: ChannelInfo = {
   maxLength: 9999,
   replies: true,
   images: { captionMax: 1024 },
+  files: { kinds: ["document", "audio", "voice", "video"], captionMax: 1024 },
   readReceipts: true,
   templates: false,
 };
@@ -210,7 +212,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   async function send(route: Route, to: string, content: Record<string, unknown>, replyTo?: string, about = replyTo, idempotencyKey?: string, channelOptions?: Record<string, unknown>): Promise<SendReceipt> {
     try {
       const conversation = await conversationFor(route.name, to, about);
-      const options = channelOptions ? { channel_options: channelOptions } : {};
+      // A voice note goes as an audio file where the channel has no voice notes (Flow's own fallback).
+      const options = { ...(channelOptions ? { channel_options: channelOptions } : {}), ...(content.type === "voice" ? { fallback: "auto" } : {}) };
       let sent: FlowMessage;
       if (conversation) sent = await client.post(`/v1/conversations/${idSegment("conv", conversation)}/messages`, { content, ...(replyTo ? { reply_to: replyTo } : {}), ...options }, undefined, idempotencyKey);
       else {
@@ -295,9 +298,17 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   /**
    * A message as Flow content. A link is a url button (WhatsApp's cta_url), a photo a media message
-   * with the text as its caption; a photo with buttons or a link is their message's image header.
+   * with the text as its caption; a photo with buttons or a link is their message's image header. A
+   * document, audio file or video is a media message of that kind, a voice note voice content; only
+   * a document's and a video's text is their caption (an audio file's or voice note's goes after it, sendMessage).
    */
   function content(kind: Kind, message: Message): Record<string, unknown> {
+    if (message.file) {
+      const f = message.file;
+      const by = "url" in f ? { url: f.url } : { file_id: f.fileId };
+      if (f.kind === "voice") return { type: "voice", ...by };
+      return { type: "media", kind: f.kind, ...by, ...(f.name ? { filename: f.name } : {}), ...(message.text && f.kind !== "audio" ? { caption: message.text } : {}) };
+    }
     const buttons = message.link
       ? [{ url: message.link.url, label: message.link.label }]
       : message.buttons?.length
@@ -345,11 +356,18 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   function provider(route: Route) {
     return {
+      // Flow sends documents, audio, voice notes and videos (Message.file).
+      features: { files: true },
       sendMessage: async (to: string, message: Message) => {
         // A message the business started: on WhatsApp, no link preview (its card's title would be the phone's notification).
         const sent = content(route.kind, message);
         const options = message.preview === false && route.kind === "whatsapp" && sent.type === "text" ? { preview_url: false } : undefined;
-        return send(route, to, sent, message.replyTo, message.replyTo, message.idempotencyKey, options);
+        const receipt = await send(route, to, sent, message.replyTo, message.replyTo, message.idempotencyKey, options);
+        // Audio and voice notes take no caption: their text goes as a message right after, once the file went.
+        if (!message.text || (message.file?.kind !== "audio" && message.file?.kind !== "voice")) return receipt;
+        const text = await send(route, to, content(route.kind, { text: message.text }), undefined, undefined, message.idempotencyKey && `${message.idempotencyKey}:1`);
+        const rank = (r: SendReceipt) => ({ unconfirmed: 0, queued: 1, sent: 2, delivered: 3 })[r.status];
+        return rank(text) < rank(receipt) ? text : receipt; // as far as the less far of the two
       },
       sendCarousel: (to: string, carousel: Carousel) => send(route, to, carouselContent(carousel), carousel.replyTo, carousel.replyTo, carousel.idempotencyKey),
       react: async (to: string, messageId: string, emoji: string) => void (await send(route, to, { type: "reaction", message_id: messageId, emoji }, undefined, messageId)),
@@ -424,6 +442,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
               ...(outbound.buttons && info.buttons ? { buttons: outbound.buttons } : {}),
               ...(outbound.link && info.linkButton ? { link: outbound.link } : {}),
               ...(outbound.image && info.images ? { image: outbound.image } : {}),
+              ...(outbound.file && info.files ? { file: outbound.file } : {}),
               ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}),
             });
           case "carousel": {
@@ -750,6 +769,39 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   return { whatsapp, telegram, imessage, sms, channels, webhook, receive, stream, start };
+}
+
+/**
+ * Flow's storage for an agent's files (`createAgent({ media: flowMedia() })`), the switch being that
+ * line of code: no setting turns it on, so no person's file leaves the team's process for Flow unless
+ * the code says so. `put` uploads to Flow Messaging (POST /v1/files), `get` downloads by the
+ * `file_...` id it gave, which Flow's channels send as they are. Flow keeps a file for the plan's
+ * retention (30 days by default) and has no call to delete one yet, so there is no `forget`: a
+ * forgotten person's uploads stay until then (a file of a Flow contact also goes when the contact is
+ * deleted). Flow keeps no owner, so `get` gives none.
+ */
+export function flowMedia(options: Pick<FlowMessagingOptions, "apiKey" | "baseUrl"> = {}): MediaStore {
+  const env = (...names: string[]) => names.map((n) => process.env[n]).find(Boolean);
+  const client = new Client({ apiKey: options.apiKey ?? env("FLOW_MESSAGING_KEY", "FLOW_MESSAGING_API_KEY") ?? "", baseUrl: options.baseUrl ?? env("FLOW_MESSAGING_BASE_URL", "FLOW_MESSAGING_API_URL") ?? "https://api.flow.engineer" });
+  return {
+    async put(file) {
+      const kept = await client.upload<{ id: string; mime_type: string; size_bytes: number; filename?: string }>(file);
+      return { id: kept.id, mime: kept.mime_type, size: kept.size_bytes, ...(kept.filename ? { name: kept.filename } : {}) };
+    },
+    async get(id) {
+      // Only Flow's own ids: anything else was never one of its files (and never reaches a URL).
+      if (!/^file_[A-Za-z0-9_-]+$/.test(id)) return null;
+      try {
+        const got = await client.file(id);
+        // A file domain that answers octet-stream: the type its first bytes say.
+        const mime = got.mime && got.mime !== "application/octet-stream" ? got.mime : (sniff(got.data)?.mime ?? "application/octet-stream");
+        return { id, mime, size: got.data.length, ...(got.name ? { name: got.name } : {}), data: got.data };
+      } catch (error) {
+        if (error instanceof FlowMessagingError && error.status === 404) return null;
+        throw error;
+      }
+    },
+  };
 }
 
 function readCursor(file: string): string | undefined {

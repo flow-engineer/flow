@@ -211,6 +211,26 @@ test("a visitor sends a photo: the agent's store keeps it, the model is shown it
   tab.client.close();
 });
 
+test("the agent sends a document its store keeps (a tool put it there): the browser gets it by a signed link", async () => {
+  const media = memoryMedia();
+  const t = rig({ media });
+  const tab = browser(t.fetch as typeof fetch);
+  await tab.client.start();
+  const pdf = new TextEncoder().encode("%PDF-1.7 invoice");
+  const kept = await media.put({ data: pdf, mime: "application/pdf", name: "invoice.pdf", owner: "web:tool" });
+  await tab.client.send("my invoice?");
+  (await t.nextCall(0)).answer(respond(call("send_web", { text: "Your invoice", file: { kind: "document", file_id: kept.id, name: "invoice.pdf" } })));
+  await tab.until(() => tab.agentTexts().includes("Your invoice"));
+  const sent = tab.got.find((e) => e.type === "message" && e.from === "agent");
+  const file = sent && sent.type === "message" && sent.from === "agent" ? (sent.file as { kind: string; fileId: string; src?: string } | undefined) : undefined;
+  assert.equal(file?.kind, "document");
+  assert.ok(file?.src?.startsWith(`${URL_}/v1/web-chat/file?`));
+  const got = await t.fetch(file!.src!);
+  assert.equal(got.headers.get("content-disposition"), "attachment");
+  assert.deepEqual(new Uint8Array(await got.arrayBuffer()), pdf);
+  tab.client.close();
+});
+
 test("files are refused without a store, when the bytes are not a photo, PDF or voice note, and by a visitor the file is not theirs", async () => {
   const upload = async (t: ReturnType<typeof rig>, session: string, body: Uint8Array, type: string) =>
     (await t.fetch(`${URL_}/v1/web-chat/files`, { method: "POST", headers: { authorization: `Bearer ${session}`, "content-type": type }, body: body as BodyInit })).status;

@@ -135,6 +135,10 @@ Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret
 - A photo (by URL, or a Flow file ID from `POST /v1/files`): a media message with the text as its
   caption; with buttons or a link, the image header of that same message (on Telegram, one photo
   with its keyboard).
+- A document, audio file or video (by URL, or a Flow file ID): a media message of that kind with its
+  name; a document's or video's text is its caption. An audio file or a voice note (Flow `voice`
+  content, sent with `fallback: "auto"`, so a channel without voice notes gets an audio file) takes
+  no caption: its text goes as a message right after it. SMS sends no files.
 - A carousel (WhatsApp and Telegram): Flow `carousel` content, 2 to 10 cards, each a photo, up to 160
   characters and 1 or 2 reply buttons or one link, the same on every card. WhatsApp shows the cards
   side by side; Telegram gets them one by one, in order. On iMessage the agent is not offered one.

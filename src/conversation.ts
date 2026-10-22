@@ -40,15 +40,15 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type ContentRefusal } from "./channels.ts";
+import { contentRefusal, declaredTemplate, fileDropped, fillTemplate, fitMessage, type ContentRefusal } from "./channels.ts";
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { scheduleTools } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
-import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
+import { REACT, UPDATE, cardsOf, contentRefusalText, fileOf, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
-import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
+import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundFile, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 
 export interface ConversationSettings {
   model: Model;
@@ -1335,6 +1335,7 @@ export class Conversation {
             ...(input.list ? { list: input.list } : {}),
             ...(input.link ? { link: input.link } : {}),
             ...(input.image ? { image: photoOf(input.image) } : {}),
+            ...(input.file ? { file: fileOf(input.file) } : {}),
             ...(hasFields ? { fields } : {}),
             ...preview,
           });
@@ -1444,6 +1445,9 @@ export class Conversation {
         if (kinds(result) !== kinds(draft)) return refuse(draft, "beforeSend", `Not sent: beforeSend returned a ${result.type ?? "value"} for a ${draft.type}.`);
         // A message it changed is fitted to the channel again, as the agent's are (a link without link buttons goes in the text).
         outbound = result.type === "message" ? fitMessage(link.info, result) : result;
+        // A file by id the channel cannot send is left out, never silently: the text goes, and this says why.
+        const dropped = result.type === "message" ? fileDropped(link.info, result.file) : null;
+        if (dropped && result.type === "message") this.settings.emit(this.id, "attachment.failed", { kind: result.file!.kind, error: dropped, channel, out: true });
       }
     }
     const refusal = contentRefusal(link.info, outbound);
@@ -1795,6 +1799,7 @@ export type TranscriptEntry =
       /** As the agent sent them: fitMessage shows them as a channel can. */
       link?: { label: string; url: string };
       image?: Photo;
+      file?: OutboundFile;
       /** A carousel's cards; its text is `text`. */
       carousel?: CarouselCard[];
       /** The channel's own params the agent filled in. */
@@ -1805,7 +1810,7 @@ export type TranscriptEntry =
   | { kind: "reaction"; channel: string; messageId: string; emoji: string; at: number }
   | { kind: "tool"; callId: string; tool: string; input: unknown; output: string; ok: boolean; at: number };
 
-const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "carousel", "confirm"]);
+const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "file", "carousel", "confirm"]);
 
 /**
  * The history as the person saw it: their messages (with their ids and channels), what the agent
@@ -1858,6 +1863,7 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
           ...(args.list ? { list: args.list as never } : {}),
           ...(args.link ? { link: args.link as never } : {}),
           ...(args.image ? { image: photoOf(args.image as never) } : {}),
+          ...(args.file ? { file: fileOf(args.file as never) } : {}),
           ...(Array.isArray(args.carousel) ? { carousel: cardsOf(args.carousel as never) } : {}),
           ...(Object.keys(fields).length ? { fields } : {}),
         });
@@ -1957,7 +1963,7 @@ function clipOutput(text: string): string {
 function outDetail(sent: OutboundMessage): Record<string, unknown> {
   if (sent.type === "template") return { text: sent.name, template: true };
   if (sent.type === "carousel") return { text: sent.text, carousel: sent.cards, replyTo: sent.replyTo };
-  return { text: sent.text, buttons: sent.buttons, list: sent.list, link: sent.link, image: sent.image, replyTo: sent.replyTo, ...(sent.fields ? { fields: sent.fields } : {}), ...(sent.authentication ? { authentication: true } : {}) };
+  return { text: sent.text, buttons: sent.buttons, list: sent.list, link: sent.link, image: sent.image, file: sent.file, replyTo: sent.replyTo, ...(sent.fields ? { fields: sent.fields } : {}), ...(sent.authentication ? { authentication: true } : {}) };
 }
 
 function errorText(error: unknown): string {

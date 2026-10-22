@@ -11,7 +11,7 @@
 import { z } from "zod";
 import { toSpec, tool } from "./tools.ts";
 import { CONTENT_LIMITS, type ContentRefusal } from "./channels.ts";
-import type { CarouselCard, ChannelInfo, Outbound, Photo, ReplyButton, ToolSpec } from "./types.ts";
+import type { CarouselCard, ChannelInfo, FileKind, Outbound, OutboundFile, Photo, ReplyButton, ToolSpec } from "./types.ts";
 
 export const REACT = "react";
 export const UPDATE = "share_updates";
@@ -89,6 +89,15 @@ export function sendInput(channel: ChannelInfo, several = false, params: Record<
       .optional()
       .describe(`A photo, by a URL or file id you were given; your text is its caption, up to ${channel.images.captionMax} characters${channel.lists ? "; not with a list" : ""}`);
   }
+  if (channel.files?.kinds.length) {
+    const f = channel.files;
+    const kinds = f.kinds as [FileKind, ...FileKind[]];
+    const about = { kind: z.enum(kinds), name: z.string().min(1).max(255).optional().describe("The name shown for a document, such as invoice.pdf") };
+    shape.file = z
+      .union([z.object({ ...about, url: https }), z.object({ ...about, file_id: z.string().min(1) })])
+      .optional()
+      .describe(`A ${kinds.join(", ")} file, by a URL or file id you were given; your text is its caption, up to ${f.captionMax} characters (with audio or a voice note it goes right after it); alone: not with buttons, a list, a link, an image or a carousel`);
+  }
   if (channel.carousels) {
     const c = channel.carousels;
     shape.carousel = z
@@ -116,6 +125,7 @@ export type SendInput = {
   list?: { button: string; rows: Array<{ id: string; title: string; description?: string }> };
   link?: { label: string; url: string };
   image?: { url: string } | { file_id: string };
+  file?: { kind: FileKind; name?: string } & ({ url: string } | { file_id: string });
   carousel?: Array<{ image: { url: string } | { file_id: string }; text?: string; buttons?: ReplyButton[]; link?: { label: string; url: string } }>;
   confirm?: boolean;
 };
@@ -123,6 +133,12 @@ export type SendInput = {
 /** A photo as the send tool took it, as channels take it. */
 export function photoOf(image: { url: string } | { file_id: string }): Photo {
   return "url" in image ? { url: image.url } : { fileId: image.file_id };
+}
+
+/** A file as the send tool took it, as channels take it. */
+export function fileOf(file: NonNullable<SendInput["file"]>): OutboundFile {
+  const by = "url" in file ? { url: file.url } : { fileId: file.file_id };
+  return { kind: file.kind, ...(file.name ? { name: file.name } : {}), ...by };
 }
 
 /** A carousel's cards as the send tool took them, as channels take them. */
@@ -148,6 +164,14 @@ export function sendRefusal(channel: ChannelInfo, input: SendInput): string | nu
     if (input.text.length > max) return `Not sent: a carousel's text is at most ${max} characters. Shorten it, or send the rest in another message.`;
     return null;
   }
+  if (input.file) {
+    if (input.buttons?.length || input.list || input.link || input.image) return "Not sent: a file goes alone, with your text as its caption: no buttons, list, link or image. Send them in separate messages.";
+    const captioned = input.file.kind === "document" || input.file.kind === "video";
+    if (captioned && channel.files && input.text.length > channel.files.captionMax) {
+      return `Not sent: with a ${input.file.kind}, your text is its caption, at most ${channel.files.captionMax} characters. Shorten it, or send the rest in another message.`;
+    }
+    return null;
+  }
   if (input.image && input.list) return "Not sent: a message with an image cannot also have a list. Send them in separate messages.";
   if (input.image && channel.images && input.text.length > channel.images.captionMax) {
     return `Not sent: with an image, your text is its caption, at most ${channel.images.captionMax} characters. Shorten it, or send the rest in another message.`;
@@ -169,6 +193,7 @@ export function contentRefusalText(channel: ChannelInfo, refusal: ContentRefusal
 /** A message or carousel as it was sent, in the send tool's words: what the history and the transcript keep. */
 export function sentArgs(outbound: Extract<Outbound, { type: "message" | "carousel" }>): SendInput & Record<string, unknown> {
   const tool = (p: Photo) => ("url" in p ? { url: p.url } : { file_id: p.fileId });
+  const toolFile = (f: OutboundFile) => ({ kind: f.kind, ...(f.name ? { name: f.name } : {}), ...("url" in f ? { url: f.url } : { file_id: f.fileId }) });
   if (outbound.type === "carousel") {
     return {
       text: outbound.text,
@@ -183,6 +208,7 @@ export function sentArgs(outbound: Extract<Outbound, { type: "message" | "carous
     ...(outbound.list ? { list: outbound.list } : {}),
     ...(outbound.link ? { link: outbound.link } : {}),
     ...(outbound.image ? { image: tool(outbound.image) } : {}),
+    ...(outbound.file ? { file: toolFile(outbound.file) } : {}),
     ...outbound.fields,
   };
 }

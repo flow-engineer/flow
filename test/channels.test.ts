@@ -1,8 +1,9 @@
 // covers: src/conversation.ts src/talk.ts src/channels.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SMS_KEYWORDS, US_CARRIER_KEYWORDS, keywordOf, sms } from "../src/channels.ts";
-import { SMS, WHATSAPP, call, harness, respond, say, users } from "./helpers.ts";
+import { SMS_KEYWORDS, US_CARRIER_KEYWORDS, WHATSAPP as WHATSAPP_INFO, contentRefusal, fileDropped, fitMessage, keywordOf, sms } from "../src/channels.ts";
+import type { ChannelInfo, OutboundFile } from "../src/types.ts";
+import { SMS, WEB_APP, WHATSAPP, call, harness, respond, say, users } from "./helpers.ts";
 
 test("a channel without reactions or status offers only its send tool", async () => {
   const h = harness([], 50, { reactions: false, status: false });
@@ -56,4 +57,40 @@ test("SMS takes only STOP to opt out by default; the fuller US carrier list is o
   for (const text of ["STOP", "unsubscribe", "Cancel.", "quit", "end", "stopall"]) assert.equal(keywordOf(carrier.keywords, text), "stop", text);
   assert.equal(keywordOf(carrier.keywords, "unstop"), "start");
   for (const text of ["cancel my order", "end of the day"]) assert.equal(keywordOf(carrier.keywords, text), null, text);
+});
+
+test("a channel with files offers a file of its kinds on the send tool; it goes alone, its text the caption, and the transcript keeps it", async () => {
+  const h = harness([], 50, { ...WEB_APP, files: { kinds: ["document", "audio"], captionMax: 40 } });
+  h.send("f1", "the menu please");
+  const first = await h.nextCall(0);
+  const file = (first.request.tools.find((t) => t.name === "send_chat")!.parameters as { properties: { file: { anyOf: Array<{ properties: { kind: { enum: string[] } } }> } } }).properties.file;
+  assert.deepEqual(file.anyOf.map((o) => o.properties.kind.enum), [["document", "audio"], ["document", "audio"]]);
+  const menu = { kind: "document", url: "https://example.com/menu.pdf", name: "menu.pdf" };
+  first.answer(respond(call("send_chat", { text: "Here", file: menu, buttons: ["Thanks"] })));
+  const again = await h.nextCall(1);
+  assert.match(again.request.messages.at(-1)!.content, /a file goes alone/);
+  again.answer(respond(call("send_chat", { text: "Today's menu", file: menu })));
+  await h.agent.conversation("f1")!.whenIdle();
+  assert.deepEqual(h.out.filter((o) => o.type === "message"), [{ type: "message", text: "Today's menu", file: { kind: "document", name: "menu.pdf", url: "https://example.com/menu.pdf" } }]);
+  const out = (await h.agent.transcript("f1")).filter((l) => l.kind === "out");
+  assert.deepEqual(out.map((l) => l.kind === "out" && l.file), [{ kind: "document", name: "menu.pdf", url: "https://example.com/menu.pdf" }]);
+});
+
+test("fitMessage: a voice note goes as audio where only audio goes; elsewhere a file by URL goes as its URL after the text, one by id is left out and fileDropped says why", () => {
+  const audioOnly: ChannelInfo = { reactions: false, status: false, files: { kinds: ["audio"], captionMax: 100 } };
+  const none: ChannelInfo = { reactions: false, status: false };
+  assert.deepEqual(fitMessage(audioOnly, { text: "Listen", file: { kind: "voice", fileId: "f1" } }), { text: "Listen", file: { kind: "audio", fileId: "f1" } });
+  assert.deepEqual(fitMessage(none, { text: "Menu", file: { kind: "document", url: "https://example.com/m.pdf" } }), { text: "Menu\nhttps://example.com/m.pdf" });
+  assert.deepEqual(fitMessage(none, { text: "Menu", file: { kind: "document", fileId: "f1" } }), { text: "Menu" });
+  assert.equal(fileDropped(none, { kind: "document", fileId: "f1" }), "this channel sends no files");
+  assert.equal(fileDropped(audioOnly, { kind: "video", fileId: "f1" }), "this channel sends no video files");
+  assert.equal(fileDropped(audioOnly, { kind: "voice", fileId: "f1" }), null);
+});
+
+test("Flow Messaging's content rules for files: a document's caption is at most 1,024 characters, an audio file's text is a text of its own, and a URL must be https", () => {
+  const long = "a".repeat(1100);
+  const msg = (file: OutboundFile, text = "Here") => ({ type: "message" as const, text, file });
+  assert.equal(contentRefusal(WHATSAPP_INFO, msg({ kind: "document", url: "https://example.com/a.pdf" }, long))?.param, "content.caption");
+  assert.equal(contentRefusal(WHATSAPP_INFO, msg({ kind: "audio", fileId: "file_1" }, long)), null);
+  assert.equal(contentRefusal(WHATSAPP_INFO, msg({ kind: "video", url: "http://example.com/v.mp4" }))?.param, "content.url");
 });

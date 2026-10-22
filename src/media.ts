@@ -22,8 +22,8 @@ export interface MediaFile {
 export interface MediaStore {
   /** Keeps a file; resolves once it is kept. Reject what you will not keep (its type, its size). */
   put(file: { data: Uint8Array; mime: string; name?: string; owner: string }): Promise<MediaFile>;
-  /** A file it keeps, or null. */
-  get(id: string): Promise<(MediaFile & { data: Uint8Array; owner: string }) | null>;
+  /** A file it keeps, or null; `owner` when the store knows it (Flow's, flowMedia(), does not). */
+  get(id: string): Promise<(MediaFile & { data: Uint8Array; owner?: string }) | null>;
   /** Erases every file of this owner (the person was forgotten). */
   forget?(owner: string): Promise<void>;
 }

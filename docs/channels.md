@@ -14,7 +14,7 @@ characters as `_`), and `message({ channel })` names it. `key` and `phone` are r
 | Option | What it does |
 |---|---|
 | `name` | The channel's name. Default `whatsapp` |
-| `disable` | Features never offered to the agent, even if the provider has them: any of `buttons`, `lists`, `links`, `images`, `carousels`, `replies`, `reactions`, `typing`, `readReceipts`, `templates` |
+| `disable` | Features never offered to the agent, even if the provider has them: any of `buttons`, `lists`, `links`, `images`, `files`, `carousels`, `replies`, `reactions`, `typing`, `readReceipts`, `templates` |
 | `instructions` | Your guidance for the agent, added to its prompt while the person is on this channel |
 | `keywords` | STOP, START and HELP words and replies (default `WHATSAPP_KEYWORDS`: STOP, UNSUBSCRIBE; START): changes to the default, or `false` for none ([README](../README.md#reminders-and-nudges)) |
 
@@ -25,7 +25,7 @@ agent is never offered.
 |---|---|
 | `sendMessage(to, message)` | Sends one message (see [Message](#message)) |
 | `sendCarousel?(to, carousel)` | A media carousel: `{ text, cards, replyTo?, preview?, idempotencyKey? }`, each card `{ image, text?, buttons? \| link? }`. Without it the agent is never offered one |
-| `features?` | Which parts of a message the provider can send: `{ buttons?, lists?, replies?, links?, images? }`, each `true` unless set to `false` |
+| `features?` | Which parts of a message the provider can send: `{ buttons?, lists?, replies?, links?, images?, files? }`, each `true` unless set to `false`, but `files`, which is off unless `true` (then `sendMessage` gets `file`) |
 | `react?(to, messageId, emoji)` | Reactions |
 | `typing?(to, on)` | The typing indicator |
 | `markRead?(to, messageIds)` | Read receipts (blue ticks) |
@@ -93,7 +93,15 @@ for the visitor who sent the file. Files the store keeps (theirs, and photos the
 store's id) come back with `src`, a link signed for an hour (`GET {base}/file?id&exp&sig`, no session);
 the history signs them again. Without a store, `POST {base}/files` answers 501. `agent.forgetPerson`
 erases the person's files from the store. In the client: `const file = await client.upload(blob, name)`,
-then `client.send(text, { attachments: [file] })`.
+then `client.send(text, { attachments: [file] })`. Documents, audio, voice notes and videos the agent
+sends come to the browser as `file: { kind, url | fileId, name?, src? }` on its message.
+
+**Flow's storage.** `createAgent({ media: flowMedia() })` (from `@flow-engineer/flow/flow-messaging`,
+key and base URL as `flowMessaging()`'s) keeps files in Flow Messaging (`POST /v1/files`), and its
+`file_...` ids are sent as they are on Flow's channels. Nothing else turns it on: without that line
+no person's file leaves your process. Flow keeps a file for your plan's retention (30 days by
+default) and has no call to delete one yet, so `agent.forgetPerson` cannot erase files kept there:
+a person's web chat uploads stay until retention. Use your own store if you must erase them sooner.
 
 **Signed-in visitors.** Your server, once it knows who the visitor is, signs a short-lived token:
 `webChatSignIn(secret, key)` (or any HS256 JWT library: `{ sub: key, aud: "flow-web-chat", exp }`,
@@ -157,6 +165,7 @@ offers are ever set.
 | `list` | `{ button, rows: [{ id, title, description? }] }`: a list the person picks one row from |
 | `link` | `{ label, url }`: one button that opens a page. Never with buttons or a list |
 | `image` | `{ url }` or `{ fileId }`: a photo, the text its caption. Never with a list |
+| `file` | `{ kind, url \| fileId, name? }`: a `document`, `audio`, `voice` note or `video`, alone (no buttons, list, link or image). A document's or video's text is its caption; audio takes none on WhatsApp, so a provider sends its text after it. Only on providers with `features.files` |
 | `preview` | `false`: send with link previews off (a message the business started) |
 | `idempotencyKey` | Set on a send the business starts (a nudge, a scheduled text), the same in every process: a provider that takes one sends it once |
 
@@ -174,6 +183,7 @@ What a channel can show; Flow Framework offers the agent only what is set, and f
 | `lists` | `{ maxRows, titleMax, buttonMax }` |
 | `linkButton` | `{ labelMax }`: one button that opens a page |
 | `images` | `{ captionMax }`: photos, the text as caption |
+| `files` | `{ kinds, captionMax }`: documents, audio, voice notes and videos the agent may send, by URL or file id. Where a kind is missing, a voice note goes as audio, a file by URL as its URL after the text, and one by id is left out (an `attachment.failed` event says so) |
 | `carousels` | `{ maxCards, textMax, cardTextMax, buttons, labelMax }` |
 | `platform` | `whatsapp`, `telegram`, `imessage` or `sms`: whose content rules (`CONTENT_LIMITS`) every send is checked against |
 | `replyWindowHours` | The business may write first only this long after the person's last message |

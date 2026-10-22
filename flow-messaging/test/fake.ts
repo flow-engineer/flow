@@ -1,5 +1,5 @@
 // A fake Flow Messaging for the tests: answers the calls the channels make as the spec shapes them
-// (files by their bytes),
+// (files by their bytes, uploads as multipart form data),
 // records every request, and signs events the way Flow does before posting them to a webhook. Its
 // /v1/stream is a minimal WebSocket server (text and close frames) the tests drive frame by frame.
 
@@ -36,7 +36,10 @@ export async function fakeFlow() {
   const messages: Record<string, unknown> = {};
   const templates: unknown[] = [];
   const files: Record<string, Buffer> = {};
+  /** The type an uploaded file is served with (others go as application/octet-stream). */
+  const mimes: Record<string, string> = {};
   let sent = 0;
+  let uploaded = 0;
 
   function defaults(r: Recorded): { status: number; body: unknown } {
     const id = r.path.split("/")[3]?.split("?")[0];
@@ -48,18 +51,25 @@ export async function fakeFlow() {
       // The channel took it by the time Flow answered; a test of the wait for message.sent queues a "queued" answer.
       return { status: 202, body: { id: `msg_out${++sent}`, conversation: into ?? "conv_started", direction: "out", status: "sent", content: r.body.content } };
     }
+    if (r.method === "POST" && r.path === "/v1/files") {
+      const id = `file_up${++uploaded}`;
+      files[id] = r.body.file.bytes;
+      mimes[id] = r.body.file.type;
+      return { status: 201, body: { id, mime_type: r.body.file.type, size_bytes: r.body.file.bytes.length, ...(r.body.filename ? { filename: r.body.filename } : {}), url: `https://api.flow.engineer/v1/files/${id}`, livemode: false, created_at: "2026-10-23T00:00:00Z", expires_at: "2026-11-22T00:00:00Z" } };
+    }
     if (r.method === "POST" && /\/(typing|read)$/.test(r.path)) return { status: 202, body: { conversation: r.path.split("/")[3], action: "read" } };
     return notFound();
   }
   const notFound = () => ({ status: 404, body: { error: { type: "not_found", message: "No such object.", hint: "", doc_url: "" } } });
 
   const server: Server = createServer(async (req, res) => {
-    let raw = "";
-    for await (const chunk of req) raw += chunk;
-    const r: Recorded = { method: req.method!, path: req.url!, headers: req.headers, body: raw ? JSON.parse(raw) : undefined };
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    const raw = Buffer.concat(chunks);
+    const r: Recorded = { method: req.method!, path: req.url!, headers: req.headers, body: raw.length ? (String(req.headers["content-type"]).startsWith("multipart/form-data") ? await formOf(raw, String(req.headers["content-type"])) : JSON.parse(raw.toString())) : undefined };
     requests.push(r);
     const file = r.method === "GET" && r.path.match(/^\/v1\/files\/([^/]+)$/)?.[1];
-    if (file && files[file]) return void res.writeHead(200, { "content-type": "application/octet-stream" }).end(files[file]);
+    if (file && files[file]) return void res.writeHead(200, { "content-type": mimes[file] ?? "application/octet-stream" }).end(files[file]);
     const i = queued.findIndex((q) => q.match(r));
     const answer = i >= 0 ? queued.splice(i, 1)[0] : defaults(r);
     res.writeHead(answer.status, { "content-type": "application/json" }).end(JSON.stringify(answer.body));
@@ -127,6 +137,14 @@ export interface FakeStream {
   drop(): void;
   /** Resolves when the connection is gone. */
   ended: Promise<void>;
+}
+
+/** A multipart body as its fields: a file part as { name, type, bytes }. */
+async function formOf(raw: Buffer, type: string): Promise<Record<string, unknown>> {
+  const form = await new Response(raw, { headers: { "content-type": type } }).formData();
+  const fields: Record<string, unknown> = {};
+  for (const [key, value] of form) fields[key] = typeof value === "string" ? value : { name: value.name, type: value.type, bytes: Buffer.from(await value.arrayBuffer()) };
+  return fields;
 }
 
 function gateOf() {

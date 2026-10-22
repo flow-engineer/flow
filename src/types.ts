@@ -87,6 +87,15 @@ export interface ListRow {
 /** A photo by https URL, or by the provider's own id for a file it holds (Flow Messaging's file_..., WhatsApp's media id). */
 export type Photo = { url: string } | { fileId: string };
 
+/** A file the agent sends that is not a photo: a document, an audio file, a voice note or a video. */
+export type FileKind = "document" | "audio" | "voice" | "video";
+
+/**
+ * A file to send, by https URL or by a file id (the provider's own, such as Flow Messaging's
+ * file_..., or the agent's media store's), with the name shown for a document.
+ */
+export type OutboundFile = { kind: FileKind; name?: string } & ({ url: string } | { fileId: string });
+
 /**
  * A reply button: its label (the id a tap carries back is then the label), or an id and a label.
  * Ids are 1 to 64 bytes and unique within a message and across a carousel; labels may repeat.
@@ -120,6 +129,12 @@ export type Outbound =
       link?: { label: string; url: string };
       /** A photo, the text its caption (with buttons or a link, the photo heads the same message); only on channels with images (elsewhere the text goes alone). */
       image?: Photo;
+      /**
+       * A document, audio file, voice note or video, the text its caption (an audio file's or voice
+       * note's goes as a message right after it where the platform takes no caption); only on channels
+       * whose `files` has its kind, and alone: no buttons, list, link, image or carousel with it.
+       */
+      file?: OutboundFile;
       /** The channel's own params (see Channel.params), as the agent filled them in. */
       fields?: Record<string, unknown>;
       /**
@@ -260,6 +275,11 @@ export interface ChannelInfo {
   linkButton?: { labelMax: number };
   /** Photos sent by URL, with the message's text as their caption. */
   images?: { captionMax: number };
+  /**
+   * Files sent by URL or file id: the kinds the channel takes, and the most characters of a
+   * document's or video's caption. Without it the agent is offered no files.
+   */
+  files?: { kinds: FileKind[]; captionMax: number };
   /**
    * The platform whose content rules (Flow Messaging's, CONTENT_LIMITS) every send on this channel is
    * checked against, after beforeSend and before it goes: what the platform would refuse is refused

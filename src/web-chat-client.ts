@@ -60,7 +60,10 @@ export function webChatClient(options: WebChatClientOptions): WebChatClient {
   const full = (src?: string) => (src?.startsWith("/") ? origin + src : src);
   const located = <E extends WebChatEventBody>(e: E): E => {
     if (e.type === "message" && e.from === "person" && e.attachments) return { ...e, attachments: e.attachments.map((f) => ({ ...f, src: full(f.src) })) };
-    if (e.type === "message" && e.from === "agent" && e.image && "src" in e.image) return { ...e, image: { ...e.image, src: full(e.image.src as string) } };
+    if (e.type === "message" && e.from === "agent" && (e.image || e.file)) {
+      const at = <P extends object>(p: P): P => ("src" in p ? { ...p, src: full(p.src as string) } : p);
+      return { ...e, ...(e.image ? { image: at(e.image) } : {}), ...(e.file ? { file: at(e.file) } : {}) };
+    }
     if (e.type === "carousel") return { ...e, cards: e.cards.map((c) => ("src" in c.image ? { ...c, image: { ...c.image, src: full(c.image.src as string) } } : c)) };
     return e;
   };

@@ -15,9 +15,9 @@ import { conformance, type Arrival, type Rig } from "./checks.ts";
 function heldProvider() {
   const arrivals: Arrival[] = [];
   const waiters: Array<() => void> = [];
-  const take = (message: Pick<Message, "text" | "idempotencyKey">) =>
+  const take = (message: Pick<Message, "text" | "idempotencyKey" | "file">) =>
     new Promise<void>((resolve, reject) => {
-      arrivals.push({ text: message.text, idempotencyKey: message.idempotencyKey, accept: () => resolve(), refuse: (reason) => reject(new Error(reason)) });
+      arrivals.push({ text: message.text, idempotencyKey: message.idempotencyKey, file: message.file?.kind, accept: () => resolve(), refuse: (reason) => reject(new Error(reason)) });
       waiters.splice(0).forEach((w) => w());
     });
   async function arrival(n: number): Promise<Arrival> {
@@ -34,7 +34,7 @@ function builtIn(make: (take: ReturnType<typeof heldProvider>["take"]) => Channe
   };
 }
 
-conformance("whatsapp()", builtIn((take) => whatsapp({ sendMessage: (_to, m) => take(m), typing: async () => {}, markRead: async () => {} }), "+15550100199"));
+conformance("whatsapp()", builtIn((take) => whatsapp({ sendMessage: (_to, m) => take(m), typing: async () => {}, markRead: async () => {}, features: { files: true } }), "+15550100199"));
 conformance("sms()", builtIn((take) => sms({ sendMessage: (_to, m) => take(m) }), "+15550100199"));
 conformance("customUI()", builtIn((take) => customUI("app", { sendMessage: (_to, m) => take(m) }), "user-1"));
 
@@ -44,7 +44,7 @@ function heldMailbox(take: ReturnType<typeof heldProvider>["take"]): WebChatMail
   return {
     ...inner,
     async append(address, event, idempotencyKey) {
-      if (event.type === "message" || event.type === "carousel") await take({ text: event.text, idempotencyKey });
+      if (event.type === "message" || event.type === "carousel") await take({ text: event.text, idempotencyKey, ...(event.type === "message" && event.from === "agent" && event.file ? { file: event.file } : {}) });
       return inner.append(address, event, idempotencyKey);
     },
   };
@@ -97,9 +97,10 @@ function flowRig(kind: Kind, signal: Signal): () => Promise<Rig> {
       await flow.request(() => sends().length > n);
       const r = sends()[n]!;
       const id = `msg_c${n + 1}`;
-      const content = r.body.content as { text?: string; caption?: string };
+      const content = r.body.content as { type: string; kind?: string; text?: string; caption?: string };
       const key = r.headers["idempotency-key"];
-      return { text: content.text ?? content.caption ?? "", idempotencyKey: typeof key === "string" ? key : undefined, accept: () => status(id, "sent"), refuse: (reason) => status(id, "failed", reason) };
+      const file = content.type === "voice" ? "voice" : content.type === "media" && content.kind !== "image" ? content.kind : undefined;
+      return { text: content.text ?? content.caption ?? "", idempotencyKey: typeof key === "string" ? key : undefined, ...(file ? { file } : {}), accept: () => status(id, "sent"), refuse: (reason) => status(id, "failed", reason) };
     }
     return {
       channel,

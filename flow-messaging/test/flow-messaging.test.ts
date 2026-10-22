@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { sqlite } from "../../src/index.ts";
 import { call, respond, users } from "./helpers.ts";
 import { fakeFlow, liveAgent, received, event, sign, SECRET, type Recorded } from "./fake.ts";
-import { flowMessaging } from "../src/index.ts";
+import { flowMedia, flowMessaging } from "../src/index.ts";
 
 const WA = { id: "conv_wa", channel: "whatsapp", contact: "ct_maya" } as const;
 const SMS = { id: "conv_sms", channel: "sms", contact: "ct_sam" } as const;
@@ -65,6 +65,53 @@ test("a link goes as a url button and a photo as media with its caption; a photo
       { type: "buttons", text: "Or this one", buttons: [{ url: "https://example.com/book", label: "Book" }], header: { type: "image", file_id: "file_7" } },
     ],
   );
+});
+
+test("a document or video goes as media of its kind with its text as caption; audio and a voice note (fallback auto) take none, their text going right after", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_maya = { address: { phone: "+15550100100" } };
+  await live.deliver(received(WA, "msg_1", { type: "text", text: "send the invoice" }));
+  (await live.nextCall(0)).answer(
+    respond(
+      call("send_whatsapp", { text: "Your invoice", file: { kind: "document", url: "https://example.com/inv.pdf", name: "invoice.pdf" } }),
+      call("send_whatsapp", { text: "How to get here", file: { kind: "video", file_id: "file_8" } }),
+      call("send_whatsapp", { text: "A note from the chef", file: { kind: "voice", file_id: "file_9" } }),
+    ),
+  );
+  const path = "/v1/conversations/conv_wa/messages";
+  await flow.request((r) => post(path)(r) && r.body.content.text === "A note from the chef");
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+  assert.deepEqual(
+    flow.sends(path).map((r) => [r.body.content, r.body.fallback]),
+    [
+      [{ type: "media", kind: "document", url: "https://example.com/inv.pdf", filename: "invoice.pdf", caption: "Your invoice" }, undefined],
+      [{ type: "media", kind: "video", file_id: "file_8", caption: "How to get here" }, undefined],
+      [{ type: "voice", file_id: "file_9" }, "auto"],
+      [{ type: "text", text: "A note from the chef", format: "plain" }, undefined],
+    ],
+  );
+});
+
+test("flowMedia() uploads a file to Flow as multipart form data and downloads it by the file_ id Flow gave; other ids are none of its files", async (t) => {
+  const flow = await fakeFlow();
+  t.after(() => flow.close());
+  const media = flowMedia({ apiKey: "fk_test_key", baseUrl: flow.url });
+  const pdf = new TextEncoder().encode("%PDF-1.7 invoice");
+  const kept = await media.put({ data: pdf, mime: "application/pdf", name: "invoice.pdf", owner: "web:visitor:1" });
+  assert.deepEqual(kept, { id: "file_up1", mime: "application/pdf", size: pdf.length, name: "invoice.pdf" });
+  const upload = await flow.request((r) => r.method === "POST" && r.path === "/v1/files");
+  assert.equal(upload.headers.authorization, "Bearer fk_test_key");
+  assert.ok(upload.headers["idempotency-key"], "an upload carries an Idempotency-Key, so a retry stores it once");
+  assert.equal(upload.body.filename, "invoice.pdf");
+  assert.equal(upload.body.file.type, "application/pdf");
+  assert.deepEqual(new Uint8Array(upload.body.file.bytes), pdf);
+  const got = await media.get(kept.id);
+  assert.deepEqual({ ...got, data: [...got!.data] }, { id: "file_up1", mime: "application/pdf", size: pdf.length, data: [...pdf] });
+  assert.equal(await media.get("file_gone"), null, "a file Flow no longer keeps");
+  assert.equal(await media.get("med_123"), null, "not a Flow id: never asked for");
+  assert.equal(media.forget, undefined, "Flow has no call to delete a file yet");
 });
 
 test("a carousel goes as one Flow carousel, each card's photo its header and each button its own id, labels repeating across cards", async (t) => {

@@ -10,7 +10,7 @@
 //   customUI("app", new MyApp())                         your own web or mobile UI, with your params
 
 import type { z } from "zod";
-import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, ReplyButton, SendReceipt, Template, TemplateDefinition } from "./types.ts";
+import type { CarouselCard, ChannelInfo, FileKind, ListRow, Outbound, OutboundFile, Photo, ReplyButton, SendReceipt, Template, TemplateDefinition } from "./types.ts";
 
 export type ChannelKind = "sms" | "whatsapp" | "custom";
 
@@ -102,6 +102,8 @@ export interface Message {
   link?: { label: string; url: string };
   /** A photo, the text its caption; with buttons or a link it heads the same message. Never with a list. */
   image?: Photo;
+  /** A document, audio file, voice note or video, the text its caption; alone, with no buttons, list, link or image. */
+  file?: OutboundFile;
   /** false: send it with link previews off (a message the business started). */
   preview?: false;
   /** Given for a send the business starts (a nudge, a scheduled text): the same in every process, so a provider that takes one sends it once. */
@@ -122,8 +124,8 @@ export interface WhatsAppProvider {
   sendMessage(to: string, message: Message): Promise<void | SendReceipt>;
   /** A media carousel; without it the agent is never offered one. */
   sendCarousel?(to: string, carousel: Carousel): Promise<void | SendReceipt>;
-  /** Which parts of a message this provider can send. Default: all. */
-  features?: { buttons?: boolean; lists?: boolean; replies?: boolean; links?: boolean; images?: boolean };
+  /** Which parts of a message this provider can send. Default: all but files, which a provider sends only when it says so (`files: true`, `Message.file`). */
+  features?: { buttons?: boolean; lists?: boolean; replies?: boolean; links?: boolean; images?: boolean; files?: boolean };
   react?(to: string, messageId: string, emoji: string): Promise<void>;
   typing?(to: string, on: boolean): Promise<void>;
   markRead?(to: string, messageIds: string[]): Promise<void>;
@@ -167,6 +169,8 @@ export const WHATSAPP: ChannelInfo = {
   linkButton: { labelMax: 20 },
   // An image's caption is at most 1,024 characters (as is an interactive message's body).
   images: { captionMax: 1024 },
+  // Documents and videos take a 1,024-character caption; audio and voice notes take none.
+  files: { kinds: ["document", "audio", "voice", "video"], captionMax: 1024 },
   readReceipts: true,
   replyWindowHours: 24,
 };
@@ -177,7 +181,7 @@ export const WHATSAPP_CAROUSELS: NonNullable<ChannelInfo["carousels"]> = { maxCa
 /** SMS: plain text; providers join up to 10 segments into one text (1,530 GSM-7 characters). */
 export const SMS: ChannelInfo = { platform: "sms", reactions: false, status: false, formatting: "plain", maxLength: 1530, templates: false, typing: false };
 
-export type WhatsAppFeature = "buttons" | "lists" | "links" | "images" | "carousels" | "replies" | "reactions" | "typing" | "readReceipts" | "templates";
+export type WhatsAppFeature = "buttons" | "lists" | "links" | "images" | "files" | "carousels" | "replies" | "reactions" | "typing" | "readReceipts" | "templates";
 
 export function whatsapp(provider: WhatsAppProvider, options: { name?: string; disable?: WhatsAppFeature[]; instructions?: string; keywords?: false | Partial<Keywords> } = {}): Channel {
   const off = new Set(options.disable ?? []);
@@ -192,6 +196,7 @@ export function whatsapp(provider: WhatsAppProvider, options: { name?: string; d
     lists: has("lists", f.lists !== false) ? WHATSAPP.lists : undefined,
     linkButton: has("links", f.links !== false) ? WHATSAPP.linkButton : undefined,
     images: has("images", f.images !== false) ? WHATSAPP.images : undefined,
+    files: has("files", f.files === true) ? WHATSAPP.files : undefined,
     carousels: has("carousels", Boolean(provider.sendCarousel)) ? WHATSAPP_CAROUSELS : undefined,
     // Only ever true: a provider without sendTemplate keeps 0.4's behaviour (its send says so), and a
     // business run's copy of the channel, whose send goes to the test cloud, still sends templates.
@@ -289,6 +294,7 @@ function message(outbound: Extract<Outbound, { type: "message" }>): Message {
     ...(outbound.list ? { list: outbound.list } : {}),
     ...(outbound.link ? { link: outbound.link } : {}),
     ...(outbound.image ? { image: outbound.image } : {}),
+    ...(outbound.file ? { file: outbound.file } : {}),
     ...(outbound.preview === false ? { preview: false as const } : {}),
     ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}),
   };
@@ -340,16 +346,37 @@ function leastOf(receipts: Array<void | SendReceipt>): SendReceipt | undefined {
 
 /**
  * A message as this channel can show it: without a link button the link's URL goes on a line after
- * the text, and without images the text goes alone. So a provider only gets what it declared.
+ * the text, and without images the text goes alone. A file goes as its kind where the channel takes
+ * it, a voice note as an audio file where it takes audio but no voice notes; else a file by URL goes
+ * as that URL on a line after the text, and one by id is left out (`fileDropped` says so). So a
+ * provider only gets what it declared.
  */
-export function fitMessage<M extends { text: string; link?: { label: string; url: string }; image?: Photo }>(info: ChannelInfo, message: M): M {
-  const { link, image, ...rest } = message;
+export function fitMessage<M extends { text: string; link?: { label: string; url: string }; image?: Photo; file?: OutboundFile }>(info: ChannelInfo, message: M): M {
+  const { link, image, file, ...rest } = message;
+  let text = message.text;
+  if (link && !info.linkButton) text = `${text}\n${link.url}`;
+  const kind = file ? fileKindOn(info, file.kind) : undefined;
+  if (file && !kind && "url" in file) text = `${text}\n${file.url}`;
   return {
     ...rest,
-    ...(link && !info.linkButton ? { text: `${message.text}\n${link.url}` } : {}),
+    ...(text !== message.text ? { text } : {}),
     ...(link && info.linkButton ? { link } : {}),
     ...(image && info.images ? { image } : {}),
+    ...(file && kind ? { file: kind === file.kind ? file : { ...file, kind } } : {}),
   } as M;
+}
+
+/** The kind a file goes as on this channel: its own, audio for a voice note where only audio goes, or none. */
+function fileKindOn(info: ChannelInfo, kind: FileKind): FileKind | undefined {
+  const kinds = info.files?.kinds ?? [];
+  if (kinds.includes(kind)) return kind;
+  return kind === "voice" && kinds.includes("audio") ? "audio" : undefined;
+}
+
+/** Why a file by id was left out of a message on this channel (fitMessage), or null when it goes. */
+export function fileDropped(info: ChannelInfo, file: OutboundFile | undefined): string | null {
+  if (!file || "url" in file || fileKindOn(info, file.kind)) return null;
+  return info.files ? `this channel sends no ${file.kind} files` : "this channel sends no files";
 }
 
 /**
@@ -385,7 +412,7 @@ export interface ContentLimits {
 }
 
 /** Limits of every platform (the spec's). */
-const SPEC = { buttonsText: 4096, caption: 1024, buttons: 10, label: 20, buttonId: 64, carouselText: 1024, minCards: 2, maxCards: 10, cardText: 160, cardLineBreaks: 2, cardButtons: 2 };
+const SPEC = { buttonsText: 4096, caption: 1024, filename: 255, buttons: 10, label: 20, buttonId: 64, carouselText: 1024, minCards: 2, maxCards: 10, cardText: 160, cardLineBreaks: 2, cardButtons: 2 };
 
 /** A send Flow Messaging refuses, as it refuses it: its error type, the field (`param`) and its message. */
 export interface ContentRefusal {
@@ -400,7 +427,8 @@ export interface ContentRefusal {
  * carousels are checked, on channels whose info names a platform. A link is a link button, a photo
  * with buttons or a link their header (else a photo with the text as its caption), a button's id is
  * its own or its label (a list row's, its id), and a carousel on a channel without carousels is checked as the
- * messages it is sent as. Photos by file id are the provider's own and not checked here; nor are
+ * messages it is sent as. A document's or video's text is its caption, an audio file's or voice note's
+ * a text of its own. Photos and files by id are the provider's own and not checked here; nor are
  * media types (Flow converts WebP, GIF, BMP and TIFF; the rest is known only from the file's bytes).
  */
 export function contentRefusal(info: ChannelInfo, outbound: Outbound): ContentRefusal | null {
@@ -452,7 +480,7 @@ function buttonsRefusal(buttons: FlowButton[], param: string, seen: Set<string>,
   return null;
 }
 
-function messageRefusal(limits: ContentLimits, m: Pick<Message, "text" | "buttons" | "list" | "link" | "image">): ContentRefusal | null {
+function messageRefusal(limits: ContentLimits, m: Pick<Message, "text" | "buttons" | "list" | "link" | "image" | "file">): ContentRefusal | null {
   const length = (s: string) => (limits.utf16 ? s.length : codePoints(s));
   const on = limits.name;
   const buttons: FlowButton[] | undefined = m.link
@@ -472,6 +500,15 @@ function messageRefusal(limits: ContentLimits, m: Pick<Message, "text" | "button
     if (m.image && length(m.text) > limits.caption) return refuse("content.text", `caption must be at most ${limits.caption} characters on ${on}.`);
     const replies = buttons.filter((b) => !("url" in b)).length;
     if (m.image && limits.mediaHeaderReplies && replies > limits.mediaHeaderReplies) return refuse("content.header", `A media header goes with at most ${limits.mediaHeaderReplies} reply buttons on ${on}.`);
+    return null;
+  }
+  if (m.file) {
+    if ("url" in m.file && !isHttps(m.file.url)) return refuse("content.url", "url must be an https URL Flow can fetch.");
+    if (m.file.name !== undefined && (m.file.name === "" || codePoints(m.file.name) > SPEC.filename)) return refuse("content.filename", `filename must be 1 to ${SPEC.filename} characters.`);
+    // An audio file's or voice note's text goes as its own message after it: a text's limits.
+    if (m.file.kind === "audio" || m.file.kind === "voice") return m.text ? messageRefusal(limits, { text: m.text }) : null;
+    if (m.text && codePoints(m.text) > SPEC.caption) return refuse("content.caption", `caption must be at most ${SPEC.caption} characters.`);
+    if (m.text && length(m.text) > limits.caption) return refuse("content.caption", `caption must be at most ${limits.caption} characters on ${on}.`);
     return null;
   }
   if (m.image) {
