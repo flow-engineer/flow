@@ -97,7 +97,7 @@ export const WEB_APP: ChannelInfo = { reactions: true, status: true, formatting:
 /** An agent with real channels (by name), for one person across several of them. */
 export function multi(options: {
   /** Each channel is custom unless it names its kind. */
-  channels: Record<string, { info: ChannelInfo; phone?: boolean; kind?: ChannelKind; keywords?: Keywords }>;
+  channels: Record<string, { info: ChannelInfo; phone?: boolean; kind?: ChannelKind; keywords?: Keywords; send?: (address: string, outbound: Outbound) => unknown }>;
   tools?: ReturnType<typeof tool>[];
   database?: Database;
   /** Instead of `database`: the agent's store. */
@@ -130,6 +130,7 @@ export function multi(options: {
     send: (address: string, outbound: Outbound) => {
       out.push({ channel: name, address, outbound });
       for (const w of waiting.splice(0)) (w.test() ? w.resolve() : waiting.push(w));
+      return c.send?.(address, outbound);
     },
   }));
   const waiting: Array<{ test: () => boolean; resolve: () => void }> = [];

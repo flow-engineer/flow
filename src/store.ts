@@ -18,7 +18,8 @@ const TYPES = {
 };
 type Types = (typeof TYPES)["sqlite"];
 
-const MIGRATIONS: Array<(t: Types) => string> = [
+/** null: a number another branch has taken but not merged yet; skipped and not recorded, so it runs once filled in. */
+const MIGRATIONS: Array<((t: Types) => string) | null> = [
   (t) => `CREATE TABLE conversations (
      agent_id TEXT NOT NULL, id TEXT NOT NULL, person_key TEXT NOT NULL, time_zone TEXT,
      turn_open INTEGER NOT NULL DEFAULT 0, message_count INTEGER NOT NULL DEFAULT 0,
@@ -102,6 +103,17 @@ const MIGRATIONS: Array<(t: Types) => string> = [
   (t) => `CREATE TABLE event_state (agent_id TEXT NOT NULL, state TEXT NOT NULL, saved_at ${t.int} NOT NULL, PRIMARY KEY (agent_id));
    CREATE TABLE event_seen (agent_id TEXT NOT NULL, id TEXT NOT NULL, at ${t.int} NOT NULL, body TEXT, PRIMARY KEY (agent_id, id));
    CREATE INDEX event_seen_at ON event_seen (agent_id, at)`,
+  // 10: taken by records (flow#99).
+  null,
+  // The agent's sends written ahead: one row per send call, stored with the step that makes it and
+  // before it goes, with its idempotency key; settled once the channel answered. A restart sends a
+  // pending one again with the same key, or tells the model how it ended. Deleted after a day.
+  (t) => `CREATE TABLE sends (
+     agent_id TEXT NOT NULL, conversation_id TEXT NOT NULL, send_key TEXT NOT NULL, call_id TEXT NOT NULL, channel TEXT NOT NULL,
+     status TEXT NOT NULL, result TEXT, created_at ${t.int} NOT NULL, settled_at ${t.int},
+     PRIMARY KEY (agent_id, send_key));
+   CREATE INDEX sends_call ON sends (agent_id, conversation_id, call_id);
+   CREATE INDEX sends_created ON sends (agent_id, created_at)`,
 ];
 
 /** Quiet hours, "HH:MM" to "HH:MM" in the person's own time; they may wrap midnight. */
@@ -202,7 +214,20 @@ const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
  * elsewhere (a store service that holds the database, so the agent never holds its credentials).
  * flowEvents' state methods are optional: without them that state stays in memory.
  */
-export type StoreApi = Omit<Store, "db" | "agentId" | keyof EventStateStore> & Partial<EventStateStore>;
+export type StoreApi = Omit<Store, "db" | "agentId" | keyof EventStateStore | keyof SendsStore> & Partial<EventStateStore> & Partial<SendsStore>;
+
+/** Where the agent's sends are written ahead; a store without it sends them as before (cut off by a restart, the model is told it may not have gone). */
+export type SendsStore = Pick<Store, "beginSends" | "settleSend" | "sendsFor" | "pruneSends">;
+
+/** An agent send written ahead: pending until the channel answered, then how it ended and the result the model got. */
+export interface SendRow {
+  key: string;
+  callId: string;
+  channel: string;
+  status: "pending" | "sent" | "failed" | "refused";
+  result: string | null;
+  createdAt: number;
+}
 
 /** Where flowEvents keeps its send state. */
 export type EventStateStore = Pick<Store, "loadEventState" | "takeEvents" | "saveEventState">;
@@ -229,7 +254,7 @@ export class Store {
       await this.db.run(`CREATE TABLE IF NOT EXISTS parley_migrations (version INTEGER PRIMARY KEY, applied_at ${types.int} NOT NULL)`);
       const done = new Set((await this.db.query("SELECT version FROM parley_migrations")).map((r) => Number(r.version)));
       for (const [i, migration] of MIGRATIONS.entries()) {
-        if (done.has(i + 1)) continue;
+        if (!migration || done.has(i + 1)) continue;
         await this.db.transaction(async (tx) => {
           for (const statement of migration(types).split(";").map((s) => s.trim()).filter(Boolean)) await tx.run(statement);
           await tx.run("INSERT INTO parley_migrations (version, applied_at) VALUES (?, ?)", [i + 1, Date.now()]);
@@ -339,13 +364,13 @@ export class Store {
 
   /**
    * Deletes everything kept about one person: their conversation, identities, history, inbox,
-   * background tools, schedules and their runs, nudges and no-contact rules.
+   * background tools, schedules and their runs, nudges, no-contact rules and sends written ahead.
    */
   async forgetPerson(conversationId: string): Promise<void> {
     const scope = [this.agentId, conversationId];
     await this.db.transaction(async (tx) => {
       await tx.run("DELETE FROM schedule_runs WHERE agent_id = ? AND schedule_id IN (SELECT id FROM schedules WHERE agent_id = ? AND conversation_id = ?)", [this.agentId, ...scope]);
-      for (const table of ["schedules", "nudges", "no_contact", "background_tools", "inbox", "messages", "inbound", "identities"]) {
+      for (const table of ["schedules", "nudges", "no_contact", "background_tools", "inbox", "messages", "inbound", "identities", "sends"]) {
         await tx.run(`DELETE FROM ${table} WHERE agent_id = ? AND conversation_id = ?`, scope);
       }
       await tx.run("DELETE FROM conversations WHERE agent_id = ? AND id = ?", scope);
@@ -387,6 +412,38 @@ export class Store {
       }
       for (const id of doneInbox) await tx.run("UPDATE inbox SET done = 1 WHERE agent_id = ? AND id = ?", [this.agentId, id]);
     });
+  }
+
+  /**
+   * Appends history entries from `seq` on (a step whose last entry makes send calls) and writes
+   * those sends ahead, `pending`, in one transaction: a send goes only once this is stored.
+   */
+  async beginSends(conversationId: string, seq: number, entries: ChatMessage[], sends: Array<{ key: string; callId: string; channel: string }>, at: number): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      for (const [i, entry] of entries.entries()) {
+        await tx.run("INSERT INTO messages (agent_id, conversation_id, seq, entry, at) VALUES (?, ?, ?, ?, ?)", [this.agentId, conversationId, seq + i, json(entry), Date.now()]);
+      }
+      for (const s of sends) {
+        await tx.run("INSERT INTO sends (agent_id, conversation_id, send_key, call_id, channel, status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?) ON CONFLICT DO NOTHING", [this.agentId, conversationId, s.key, s.callId, s.channel, at]);
+      }
+    });
+  }
+
+  /** How a send written ahead ended, with the result the model got for it. */
+  async settleSend(key: string, status: "sent" | "failed" | "refused", result: string, at: number): Promise<void> {
+    await this.db.run("UPDATE sends SET status = ?, result = ?, settled_at = ? WHERE agent_id = ? AND send_key = ?", [status, result, at, this.agentId, key]);
+  }
+
+  /** The sends written ahead for these calls of a conversation. */
+  async sendsFor(conversationId: string, callIds: string[]): Promise<SendRow[]> {
+    if (!callIds.length) return [];
+    const rows = await this.db.query(`SELECT * FROM sends WHERE agent_id = ? AND conversation_id = ? AND call_id IN (${callIds.map(() => "?").join(", ")})`, [this.agentId, conversationId, ...callIds]);
+    return rows.map((r) => ({ key: String(r.send_key), callId: String(r.call_id), channel: String(r.channel), status: r.status as SendRow["status"], result: (r.result as string | null) ?? null, createdAt: Number(r.created_at) }));
+  }
+
+  /** Deletes up to `limit` sends written ahead before `before`, settled or not; returns how many it deleted. */
+  async pruneSends(before: number, limit: number): Promise<number> {
+    return this.db.run("DELETE FROM sends WHERE agent_id = ? AND send_key IN (SELECT send_key FROM sends WHERE agent_id = ? AND created_at < ? LIMIT ?)", [this.agentId, this.agentId, before, limit]);
   }
 
   /** A provider's message id already taken in this conversation on this channel (a webhook sent again). */

@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { z } from "zod";
-import { createAgent, sqlite, SMS_KEYWORDS, Store, tool, type Database, type Outbound } from "../src/index.ts";
-import { LEASE_MS } from "../src/conversation.ts";
+import { createAgent, sqlite, SMS_KEYWORDS, Store, tool, type ChannelInfo, type Database, type Outbound } from "../src/index.ts";
+import { LEASE_MS, RESEND_WITHIN_MS } from "../src/conversation.ts";
 import { SMS, WHATSAPP, call, gate, last, multi, respond, scriptedModel, users } from "./helpers.ts";
 
 const CHANNELS = { sms: { info: SMS, phone: true } };
@@ -256,7 +256,9 @@ test("with the provider's own message ids, the transcript keeps the person's sid
   await after.agent.message({ channel: "whatsapp", from: "15550100100", message: "?", messageId: "wamid.HBgL2" });
   (await after.nextCall(0)).answer(respond(call("react", { message_id: "wamid.HBgL1", emoji: "👍" }), call("send_whatsapp", { text: "Yes, it's free.", reply_to: "wamid.HBgL1" })));
   await after.agent.conversation(a!.conversationId)!.whenIdle();
-  assert.deepEqual(after.out.map((o) => o.outbound).filter((o) => o.type === "reaction" || o.type === "message"), [
+  // Without the idempotency key every send written ahead carries (covered below).
+  const unkeyed = (o: Outbound) => (o.type === "message" ? (({ idempotencyKey: _, ...rest }) => rest)(o) : o);
+  assert.deepEqual(after.out.map((o) => unkeyed(o.outbound)).filter((o) => o.type === "reaction" || o.type === "message"), [
     { type: "reaction", emoji: "👍", messageId: "wamid.HBgL1" },
     { type: "message", text: "Yes, it's free.", replyTo: "wamid.HBgL1" },
   ]);
@@ -409,4 +411,139 @@ test("a reply and a text nudge leave nothing unfinished in the store", async () 
   assert.equal((await h.agent.nudge({ to: { channel: "sms", address: "+15550100100" }, text: "Your order is ready." })).status, "sent");
   await h.agent.conversation(a!.conversationId)!.whenIdle();
   assert.deepEqual(await new Store(h.database, "default").unfinished(), []);
+});
+
+/**
+ * A database that stops dead, as a frozen process: once frozen, every statement waits forever and
+ * nothing it holds is locked. `freezeAtNextTransaction` freezes it as the next transaction starts;
+ * `frozen` resolves once it is frozen and a statement waits.
+ */
+function freezable(db: Database) {
+  let mode: "live" | "armed" | "frozen" = "live";
+  const reached = gate();
+  const stop = () => ((mode = "frozen"), reached.open(), new Promise<never>(() => {}));
+  const on = (inner: Omit<Database, "transaction">): Omit<Database, "transaction"> => ({
+    durable: inner.durable,
+    dialect: inner.dialect,
+    query: (sql, params) => (mode === "frozen" ? stop() : inner.query(sql, params)),
+    run: (sql, params) => (mode === "frozen" ? stop() : inner.run(sql, params)),
+  });
+  return {
+    ...on(db),
+    transaction: <T>(work: (tx: Omit<Database, "transaction">) => Promise<T>): Promise<T> => (mode !== "live" ? stop() : db.transaction((tx) => work(on(tx)))),
+    freeze: () => ((mode = "frozen"), reached.open()),
+    freezeAtNextTransaction: () => void (mode = "armed"),
+    frozen: reached.promise,
+  };
+}
+
+/** Flow Messaging as a channel sees it: a message whose idempotency key it already has does not reach the person again. */
+function deduping() {
+  const keys: Array<string | undefined> = [];
+  const delivered: string[] = [];
+  const send = (o: Outbound) => {
+    if (o.type !== "message") return;
+    if (!o.idempotencyKey || !keys.includes(o.idempotencyKey)) delivered.push(o.text);
+    keys.push(o.idempotencyKey);
+  };
+  return { keys, delivered, send };
+}
+
+const DEDUPING_SMS: ChannelInfo = { ...SMS, idempotentSends: true };
+
+/**
+ * A runner that stops dead just after its message reached the channel: before the send was settled
+ * ("settle"), or settled but before its result joined the history ("result").
+ */
+async function diesAfterSend(info: ChannelInfo, at: "settle" | "result") {
+  const path = file();
+  const database = freezable(sqlite(path));
+  const channel = deduping();
+  const send = (_: string, o: Outbound) => {
+    channel.send(o);
+    if (o.type !== "message") return;
+    if (at === "result") return database.freezeAtNextTransaction();
+    database.freeze();
+    return new Promise<never>(() => {});
+  };
+  const dying = multi({ channels: { sms: { info, phone: true, send } }, database });
+  await dying.agent.resume();
+  const a = await dying.message("sms", "+15550100100", "when is my session?");
+  const sent = call("send_sms", { text: "Thursday at 10." });
+  (await dying.nextCall(0)).answer(respond(sent));
+  await database.frozen;
+  const id = a!.conversationId;
+  return { path, channel, dir: dying.dir, id, callId: sent.id, key: `send:${id}:1:${sent.id}` };
+}
+
+const toolResult = (messages: Array<{ role: string }>, callId: string) => (messages.find((m) => m.role === "tool" && (m as { toolCallId: string }).toolCallId === callId) as { content: string } | undefined)?.content;
+
+test("a runner stopped while it writes a step down sent nothing of it: after a restart the step runs again and its message goes once", async () => {
+  const path = file();
+  const database = freezable(sqlite(path));
+  const dying = multi({ channels: { sms: { info: DEDUPING_SMS, phone: true } }, database });
+  await dying.agent.resume();
+  const a = await dying.message("sms", "+15550100100", "when is my session?");
+  const first = await dying.nextCall(0);
+  await dying.agent.conversation(a!.conversationId)!.stored();
+  database.freezeAtNextTransaction();
+  first.answer(respond(call("send_sms", { text: "Thursday at 10." })));
+  await database.frozen;
+
+  const after = multi({ channels: { sms: { info: DEDUPING_SMS, phone: true } }, database: sqlite(path), dir: dying.dir, now: leaseOver });
+  await after.agent.resume();
+  const again = await after.nextCall(0);
+  assert.deepEqual(users(again.request.messages), ["[m1] when is my session?"]);
+  assert.ok(!again.request.messages.some((m) => m.role === "assistant"), "the step was not stored");
+  again.answer(respond(call("send_sms", { text: "Thursday at 10." })));
+  await after.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.deepEqual(dying.texts("sms"), [], "nothing went before its step was stored");
+  assert.deepEqual(after.texts("sms"), ["Thursday at 10."]);
+});
+
+test("a send that reached a deduping channel before the runner stopped goes again with its key after a restart, before the turn carries on, and reaches the person once", async () => {
+  const run = await diesAfterSend(DEDUPING_SMS, "settle");
+  const after = multi({ channels: { sms: { info: DEDUPING_SMS, phone: true, send: (_, o) => run.channel.send(o) } }, database: sqlite(run.path), dir: run.dir, now: leaseOver });
+  await after.agent.resume();
+  await after.agent.conversation(run.id)!.stored();
+  await after.agent.conversation(run.id)!.whenIdle();
+  assert.deepEqual(run.channel.keys, [run.key, run.key], "sent again with the same key");
+  assert.deepEqual(run.channel.delivered, ["Thursday at 10."]);
+  const types = after.events.map((e) => e.type);
+  assert.ok(types.indexOf("send.resumed") < types.indexOf("turn.start"), "the send went again before the turn carried on");
+  assert.equal(after.events.find((e) => e.type === "send.resumed")?.outcome, "sent");
+  assert.match(toolResult(after.followUps[0].messages, run.callId) ?? "", /^\{"delivered":true/, "the model is told it was delivered");
+
+  await after.message("sms", "+15550100100", "thanks");
+  (await after.nextCall(0)).answer(respond(call("send_sms", { text: "You're welcome." })));
+  await after.agent.conversation(run.id)!.whenIdle();
+  assert.deepEqual(run.channel.delivered, ["Thursday at 10.", "You're welcome."]);
+});
+
+test("a pending send is not sent again on a channel that does not dedupe, nor past a day: the model is told it may not have gone", async () => {
+  for (const [info, now] of [[SMS, leaseOver], [DEDUPING_SMS, () => Date.now() + RESEND_WITHIN_MS]] as const) {
+    const run = await diesAfterSend(info, "settle");
+    const after = multi({ channels: { sms: { info, phone: true, send: (_, o) => run.channel.send(o) } }, database: sqlite(run.path), dir: run.dir, now });
+    await after.agent.resume();
+    const turn = await after.nextCall(0);
+    assert.match(toolResult(turn.request.messages, run.callId) ?? "", /may or may not have happened/);
+    assert.deepEqual(run.channel.keys, [run.key], "not sent again");
+  }
+});
+
+test("a send settled before the runner stopped gives the model its result after a restart, and a day later it is deleted", async () => {
+  const run = await diesAfterSend(SMS, "result");
+  const clock = { now: leaseOver() };
+  const after = multi({ channels: { sms: { info: SMS, phone: true, send: (_, o) => run.channel.send(o) } }, database: sqlite(run.path), dir: run.dir, now: () => clock.now });
+  await after.agent.resume();
+  await after.agent.conversation(run.id)!.stored();
+  await after.agent.conversation(run.id)!.whenIdle();
+  assert.equal(toolResult(after.followUps[0].messages, run.callId), '{"delivered":true,"channel":"sms"}');
+  assert.deepEqual(run.channel.keys, [run.key], "not sent again");
+
+  const sends = async () => Number((await sqlite(run.path).query("SELECT count(*) AS n FROM sends"))[0].n);
+  assert.equal(await sends(), 1);
+  clock.now += RESEND_WITHIN_MS;
+  await after.agent.runDue();
+  assert.equal(await sends(), 0);
 });

@@ -283,6 +283,12 @@ export interface ChannelInfo {
    * (WhatsApp: 24); after that, only templates.
    */
   replyWindowHours?: number;
+  /**
+   * The channel's send honours `idempotencyKey` for at least 24 hours: a second send with the same
+   * key does not reach the person again. A send a restart cut off is then sent again with its key
+   * instead of the agent being told it may not have gone. Flow Messaging's channels set it.
+   */
+  idempotentSends?: boolean;
 }
 
 /** A message from the person, with what the channel knows about it. */
