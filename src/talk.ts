@@ -44,8 +44,11 @@ const photo = z.union([z.object({ url: https }), z.object({ file_id: z.string().
 /** A reply button: its label, or an id its tap comes back with and a label. */
 const replyButton = (labelMax: number) => z.union([z.string().min(1).max(labelMax), z.object({ id: z.string().min(1).max(64), label: z.string().min(1).max(labelMax) })]);
 
-/** A send tool's input on this channel: only the features it has, with its limits, and its own params. */
-export function sendInput(channel: ChannelInfo, several = false, params: Record<string, z.ZodType> = {}) {
+/**
+ * A send tool's input on this channel: only the features it has, with its limits, and its own
+ * params; `show` once the conversation holds records a tool returned.
+ */
+export function sendInput(channel: ChannelInfo, several = false, params: Record<string, z.ZodType> = {}, records = false) {
   const shape: Record<string, z.ZodType> = {
     text: z.string().min(1).max(channel.maxLength ?? 4_000),
   };
@@ -106,7 +109,7 @@ export function sendInput(channel: ChannelInfo, several = false, params: Record<
       .optional()
       .describe(`Up to ${c.maxCards} cards they swipe through under your text: each a photo, up to ${c.cardTextMax} characters, and 1 to ${c.buttons} reply buttons ({id, label} tells cards apart) or one link, the same on every card; not with buttons, a list, a link or an image`);
   }
-  shape.show = z
+  if (records) shape.show = z
     .object({
       records: z.string().regex(/^r\d+$/).describe("The records a tool's result named, such as r1"),
       ids: z.array(z.string().min(1).max(64)).min(1).max(100).optional().describe("Only these rows, in this order"),
@@ -241,14 +244,14 @@ export interface TalkSettings {
   shareUpdatesInstructions?: string;
 }
 
-export function talkSpecs(channels: ChannelView[], settings: TalkSettings): ToolSpec[] {
+export function talkSpecs(channels: ChannelView[], settings: TalkSettings, records = false): ToolSpec[] {
   const several = channels.length > 1;
   const specs = channels.map((c) =>
     toSpec(
       tool({
         name: sendToolName(c.name),
         description: `Send a message to the person on ${c.name}. Call it several times to send several messages; they go out in the order you call them.`,
-        input: sendInput(c.info, several, c.params),
+        input: sendInput(c.info, several, c.params, records),
         run: () => "",
       }),
     ),

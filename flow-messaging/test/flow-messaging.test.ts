@@ -4,7 +4,8 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { sqlite } from "../../src/index.ts";
+import { records, sqlite, tool } from "../../src/index.ts";
+import { z } from "zod";
 import { call, respond, users } from "./helpers.ts";
 import { fakeFlow, liveAgent, received, event, sign, SECRET, type Recorded } from "./fake.ts";
 import { flowMessaging } from "../src/index.ts";
@@ -35,6 +36,32 @@ test("a WhatsApp message reaches the agent with its quote, and the reply, read r
   assert.ok(sent.headers["idempotency-key"]);
   assert.deepEqual((await flow.request(post("/v1/conversations/conv_wa/read"))).body, { up_to: "msg_1" });
   assert.deepEqual((await flow.request(post("/v1/conversations/conv_wa/typing"))).body, { state: "on" });
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+});
+
+test("records on WhatsApp go as buttons with titles only and the details numbered in the text; a tap is a pick with the row's data", async (t) => {
+  const bookings = records<{ ref: string; day: string; room: string }>({ kind: "bookings", id: (b) => b.ref, title: (b) => `${b.day} · ${b.room}`, detail: (b) => `Ref ${b.ref}, 2 guests, breakfast included every morning`, pick: "Change" });
+  const list = tool({ name: "list_bookings", description: "", input: z.object({}), run: () => bookings.of([{ ref: "BK-1", day: "Tue 4 Nov", room: "Sea view double" }, { ref: "BK-2", day: "Fri 7 Nov", room: "Garden" }]) });
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow, { tools: [list] });
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_maya = { id: "ct_maya", channel: "whatsapp", address: { phone: "+15550100100" } };
+  await live.deliver(received(WA, "msg_1", { type: "text", text: "my bookings" }));
+  (await live.nextCall(0)).answer(respond(call("send_whatsapp", { text: "One moment." }), call("list_bookings")));
+  (await live.nextCall(1)).answer(respond(call("send_whatsapp", { text: "Your bookings:", show: { records: "r1" } })));
+  const sent = await flow.request((r) => post("/v1/conversations/conv_wa/messages")(r) && JSON.stringify(r.body).includes("Your bookings"));
+  assert.deepEqual(sent.body, {
+    content: {
+      type: "buttons",
+      text: "Your bookings:\n\n1. *Tue 4 Nov · Sea view double*\nRef BK-1, 2 guests, breakfast included every morning\n2. *Fri 7 Nov · Garden*\nRef BK-2, 2 guests, breakfast included every morning",
+      buttons: [{ id: "BK-1", label: "Tue 4 Nov · Sea vie…" }, { id: "BK-2", label: "Fri 7 Nov · Garden" }],
+    },
+  });
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+  await live.deliver(received(WA, "msg_2", { type: "button_reply", button_id: "BK-2", label: "Fri 7 Nov · Garden" }));
+  const pick = await live.nextCall(2);
+  assert.match(lastUser(pick.request.messages), /\[Chinwag\] They picked BK-2 from bookings r1: \{"ref":"BK-2"/);
+  pick.answer(respond(call("send_whatsapp", { text: "What would you like to change?" })));
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 

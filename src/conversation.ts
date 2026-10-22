@@ -482,7 +482,9 @@ export class Conversation {
     // A file or voice note is read before message.in. Say the message arrived first, so a test
     // run is not settled as silence while the transcript is still being made.
     if (incoming.attachments?.length) this.settings.emit(this.id, "message.arrived", { messageId: id, channel });
-    if (!incoming.attachments?.length && !this.preparing && this.loadedNow) {
+    // Only a tap, a number or MORE can answer records: only those wait for the store's copy.
+    const couldPick = Boolean(incoming.choice) || /^\s*(#?\d{1,3}\.?|more[.!]?)\s*$/i.test(incoming.text);
+    if (!incoming.attachments?.length && !this.preparing && (this.loadedNow || !couldPick)) {
       if (!answeredHere()) this.arrive(incoming, id, channel, options.messageId !== undefined, { marks: [], media: [] });
       return id;
     }
@@ -1200,7 +1202,7 @@ export class Conversation {
       this.sendTools = new Map(views.map((v) => [sendToolName(v.name), v.name]));
       const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), context].filter(Boolean).join("\n\n");
       const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
-      const specs = [...ownSpecs, ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk)];
+      const specs = [...ownSpecs, ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk, this.handles.size > 0)];
       const abort = new AbortController();
       if (restarts < this.settings.maxRestarts) this.stepAbort = abort;
       const callStarted = Date.now();
@@ -1362,7 +1364,7 @@ export class Conversation {
       // Some models fill every optional field, with "" or null when they have nothing: that is not sent.
       const given = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
       for (const k of Object.keys(link.params ?? {})) if (given[k] === "" || given[k] === null) delete given[k];
-      const parsed = sendInput(link.info, several, link.params).safeParse(raw);
+      const parsed = sendInput(link.info, several, link.params, this.handles.size > 0).safeParse(raw);
       if (!parsed.success) return refused(`Not sent, fix and send again: ${parsed.error.message}`);
       const input = parsed.data as SendInput;
       const fields = Object.fromEntries(Object.keys(link.params ?? {}).flatMap((k) => ((input as Record<string, unknown>)[k] === undefined ? [] : [[k, (input as Record<string, unknown>)[k]]])));

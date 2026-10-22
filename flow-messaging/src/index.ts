@@ -369,7 +369,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     const route = register("whatsapp", o);
     const channel = whatsappChannel(provider(route), { name: route.name, disable: o.disable, instructions: o.instructions });
     // Flow Messaging sends every reply button's own id and gives it back on the tap.
-    return { ...channel, info: { ...channel.info, ...(channel.info.buttons ? { buttonIds: true } : {}), ...(channel.info.lists ? { lists: { ...channel.info.lists, titleMax: LIST_TITLE_MAX } } : {}) } };
+    return { ...channel, info: { ...channel.info, ...(channel.info.buttons ? { buttonIds: true } : {}), ...(channel.info.lists ? { lists: { ...channel.info.lists, titleMax: LIST_TITLE_MAX, descriptions: false } } : {}) } };
   }
 
   /** US SMS from a Flow number: plain text; STOP, START and HELP are Flow's. */
