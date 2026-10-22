@@ -18,9 +18,12 @@ import {
   sqlite,
   verifyEventSignature,
   whatsapp,
+  Store,
+  type AgentOptions,
   type BusinessEvent,
   type EventCatalog,
   type EventMessage,
+  type FlowEvent,
   type FlowEventsOptions,
   type NudgeInput,
   type NudgeResult,
@@ -714,7 +717,7 @@ test("mounted on createAgent: a held exact send goes as the template on the agen
 });
 
 /** An agent on a sqlite file with flowEvents mounted, as after each (re)start; `rules` for flowEvents. */
-async function durable(path: string, clock: { now: number }, rules?: FlowEventsOptions["rules"]) {
+async function durable(path: string, clock: { now: number }, rules?: FlowEventsOptions["rules"], extra: Partial<AgentOptions> = {}) {
   const sent: string[] = [];
   const scripted = scriptedModel();
   const events = flowEvents({ secret: SECRET, catalog, now: () => clock.now, log: () => {}, rules });
@@ -728,6 +731,7 @@ async function durable(path: string, clock: { now: number }, rules?: FlowEventsO
     channels: [whatsapp({ sendMessage: async (_to, m) => void sent.push(`text:${m.text}`), sendTemplate: async (_to, t) => void sent.push(`template:${t.name}`) })],
     routes: events.routes,
     onTick: events.onTick,
+    ...extra,
   });
   events.attach(agent);
   await agent.resume();
@@ -822,4 +826,49 @@ test("mounted on an agent with a durable database: an event answered accepted bu
   const again = await durable(path, clock);
   await again.events.idle();
   assert.deepEqual(again.sent, [], "processed once: done is saved");
+});
+
+/** The tables of the database, from its catalogue, whose rows mention any of `needles`. */
+async function mentioning(db: ReturnType<typeof sqlite>, needles: string[]): Promise<string[]> {
+  const tables = (await db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")).map((r) => String(r.name));
+  const found: string[] = [];
+  for (const table of tables) if ((await db.query(`SELECT * FROM ${table}`)).some((row) => needles.some((n) => JSON.stringify(row).includes(n)))) found.push(table);
+  return found;
+}
+
+test("forgetPerson leaves nothing about the person in any table, also after another runner that held them saves; exportPerson had every row first", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "flow-events-")), "agent.db");
+  const clock = { now: NOON };
+  const seen: FlowEvent[] = [];
+  const told: unknown[] = [];
+  const old = await durable(path, clock, undefined, { events: [(e) => void seen.push(e)], onForget: (person) => void told.push(person) });
+  await old.hello();
+  const { conversationId } = (await old.agent.message({ channel: "whatsapp", from: PERSON, message: "and remind me tomorrow", messageId: "wamid.P1" }))!;
+  (await old.scripted.nextCall(1)).answer(respond(call("send_whatsapp", { text: "Sure." })));
+  await old.agent.conversation(conversationId)!.whenIdle();
+  const to = { channel: "whatsapp", address: PERSON };
+  await old.agent.setValue(to, "plan", "pro");
+  await old.agent.nudge({ to, text: "See you tomorrow.", at: NOON + DAY, idempotencyKey: `reminder:${PERSON}` });
+  const store = new Store(sqlite(path), "default");
+  await store.addNoContact(conversationId, "nc_1", "no sales calls", null);
+  clock.now = NIGHT;
+  assert.equal(await old.post(envelope("order.delayed", { user: { phone: PERSON }, wording: "exact" })), "accepted"); // held for quiet hours
+  await old.events.idle();
+  const next = await durable(path, clock); // another runner, holding the same saved state (their held send)
+  await store.addTask(conversationId, "task_9", "call_9", "report", NOON);
+
+  const needles = [conversationId, PERSON.slice(1)];
+  const db = sqlite(path);
+  const before = await mentioning(db, needles);
+  for (const table of ["conversations", "identities", "messages", "inbound", "sends", "person_values", "nudges", "schedules", "no_contact", "background_tools", "conversation_leases", "event_state"]) assert.ok(before.includes(table), `${table} held them`);
+  const exported = await old.agent.exportPerson(conversationId);
+  for (const table of before.filter((t) => !t.startsWith("event_"))) assert.ok(exported!.tables[table]?.length, `the export has their ${table} rows`);
+
+  await old.agent.forgetPerson(conversationId);
+  assert.equal(await next.post(envelope("order.delayed", { user: { phone: AMA }, wording: "exact", order: "B-2" })), "accepted"); // the other runner saves its state, merging the old one's
+  await next.events.idle();
+  assert.deepEqual(await mentioning(db, needles), [], "no table mentions them");
+  assert.deepEqual(seen.filter((e) => e.type === "person.forgotten").map((e) => e.channels), [["whatsapp"]]);
+  assert.deepEqual(told, [{ conversationId, identities: [to] }]);
+  assert.equal(await old.agent.exportPerson(conversationId), null);
 });

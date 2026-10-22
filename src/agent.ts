@@ -16,7 +16,7 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
-import { Conversation, PROFILE_TOOL, RESEND_WITHIN_MS, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
+import { Conversation, LEASE_MS, PROFILE_TOOL, RESEND_WITHIN_MS, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
 import { businessSchedule, claimDue, summary } from "./schedules.ts";
@@ -184,6 +184,22 @@ export interface AgentOptions {
    * Older ones are deleted, hourly, by one runner, on the scheduled messages' timer. Default 7.
    */
   keepMessageIdsDays?: number;
+  /**
+   * How long what is kept about people is kept; older rows are deleted hourly, by one runner, on
+   * the scheduled messages' timer. `historyDays`: the conversation's history (default null: kept),
+   * deleted at a turn's start, and the agent is told earlier messages are no longer shown.
+   * `handledDays`: inbox rows handled, nudges settled, schedules ended and schedule runs (default
+   * 30). `messageIdsDays`: provider message ids (default 7; `keepMessageIdsDays` is its older name).
+   * `idleConversationDays`: a person who has not written for this long is forgotten, as
+   * `forgetPerson` does (default null: never). A STOP, active schedules and held nudges stay until then.
+   */
+  retention?: { historyDays?: number | null; handledDays?: number; messageIdsDays?: number; idleConversationDays?: number | null };
+  /**
+   * Called once a person is forgotten (`forgetPerson`, or `retention.idleConversationDays`), with
+   * the channels and addresses they wrote from, so the business deletes what its own systems keep
+   * about them. What Flow Framework keeps is gone by then.
+   */
+  onForget?: (person: ForgottenPerson) => Promise<void> | void;
   /** The clock (tests move it). */
   now?: () => number;
   /**
@@ -342,6 +358,12 @@ export interface NudgeState {
   reason?: string;
 }
 
+/** A person forgotten: their conversation's id and every channel identity they had. */
+export interface ForgottenPerson {
+  conversationId: string;
+  identities: Array<{ channel: string; address: string }>;
+}
+
 const NO_EXTRAS: ChannelInfo = { reactions: false, status: false };
 const HOUR_MS = 3_600_000;
 /** Provider ids deleted per statement, so each one holds its locks briefly. */
@@ -373,6 +395,10 @@ export class Agent {
   private readonly playgroundVisitors = new Map<string, { key?: string; visitor?: string }>();
   /** Before this, this runner does not ask for the pruning claim again (it, or another runner, had it). */
   private pruneAfter = 0;
+  /** The same, for retention. */
+  private retainAfter = 0;
+  /** flowEvents engines attached to this agent: each drops a forgotten person's address from its state. */
+  private readonly forgetters: Array<(identity: { channel: string; address: string }) => Promise<void>> = [];
   /** `defaultCountryCode`'s digits. */
   private readonly countryCode: string | undefined;
   private readonly traces: Traces | null;
@@ -661,8 +687,10 @@ export class Agent {
 
   /**
    * Forgets a person: a turn in progress stops, and everything kept about them goes (history,
-   * inbox, background tools, schedules and their runs, nudges, no-contact rules, identities and
-   * the conversation). Their next message starts from nothing.
+   * inbox, background tools, schedules and their runs, nudges, no-contact rules, values, sends
+   * written ahead, identities, the conversation and its lease, and their address in flowEvents'
+   * state). Then a `person.forgotten` event (the channels only) and `onForget` with their
+   * identities. Their next message starts from nothing.
    */
   async forgetPerson(conversationId: string): Promise<void> {
     await this.settings.ready;
@@ -672,9 +700,34 @@ export class Agent {
       this.conversations.delete(conversationId);
       await resident.stored();
     }
-    for (const i of await this.store.identities(conversationId)) this.via.delete(viaKey(i.channel, i.address));
+    const known = (await this.store.conversation(conversationId)) !== null;
+    const identities = (await this.store.identities(conversationId)).map((i) => ({ channel: i.channel, address: i.address }));
+    for (const i of identities) {
+      this.via.delete(viaKey(i.channel, i.address));
+      for (const forget of this.forgetters) await forget(i);
+    }
     this.rows.delete(conversationId);
     await this.store.forgetPerson(conversationId);
+    if (!known) return;
+    this.settings.emit(conversationId, "person.forgotten", { channels: [...new Set(identities.map((i) => i.channel))] });
+    await this.options.onForget?.({ conversationId, identities });
+  }
+
+  /**
+   * Everything kept about one person, by table, for a data-access request: their conversation,
+   * identities, history, inbox, schedules and runs, nudges, no-contact rules, values and the rest.
+   * Null when there is no such conversation.
+   */
+  async exportPerson(conversationId: string): Promise<{ conversationId: string; tables: Record<string, Array<Record<string, unknown>>> } | null> {
+    await this.settings.ready;
+    if (!this.store.exportPerson) throw new Error("flow: this agent's store cannot export a person (a store service older than 0.6)");
+    await this.conversations.get(conversationId)?.stored();
+    return this.store.exportPerson(conversationId);
+  }
+
+  /** flowEvents' attach: `forget` drops one identity's address from its state when the person is forgotten. */
+  whenForgotten(forget: (identity: { channel: string; address: string }) => Promise<void>): void {
+    this.forgetters.push(forget);
   }
 
   private channelOf(name: string): Channel {
@@ -1206,6 +1259,7 @@ export class Agent {
     await this.releaseHeld(now);
     if (this.options.onTick) await Promise.resolve().then(() => this.options.onTick!(now)).catch((error) => console.warn("flow: onTick:", error));
     await this.pruneMessageIds(now).catch((error) => console.warn("flow: pruning message ids:", error));
+    await this.retain(now).catch((error) => console.warn("flow: retention:", error));
     return queued.length;
   }
 
@@ -1214,10 +1268,55 @@ export class Agent {
     if (now < this.pruneAfter) return;
     this.pruneAfter = now + HOUR_MS;
     if (!(await this.store.claimUpkeep("prune_message_ids", now, now + HOUR_MS))) return;
-    const before = now - (this.options.keepMessageIdsDays ?? 7) * 24 * HOUR_MS;
+    const before = now - (this.options.retention?.messageIdsDays ?? this.options.keepMessageIdsDays ?? 7) * 24 * HOUR_MS;
     while ((await this.store.pruneInbound(before, PRUNE_BATCH)) === PRUNE_BATCH);
     // Sends written ahead are no use once they can no longer be sent again (a day), settled or not.
     if (this.store.pruneSends) while ((await this.store.pruneSends(now - RESEND_WITHIN_MS, PRUNE_BATCH)) === PRUNE_BATCH);
+  }
+
+  /**
+   * Deletes what is past `retention`, when this runner claims it (at most hourly): handled rows,
+   * history (each conversation under its lease, between turns, so no turn sees it change), and
+   * people silent past `idleConversationDays`.
+   */
+  private async retain(now: number): Promise<void> {
+    const { pruneHandled, historyToPrune, pruneHistory, idleConversations } = this.store;
+    if (now < this.retainAfter || !pruneHandled || !historyToPrune || !pruneHistory || !idleConversations) return;
+    this.retainAfter = now + HOUR_MS;
+    if (!(await this.store.claimUpkeep("retention", now, now + HOUR_MS))) return;
+    const { historyDays = null, handledDays = 30, idleConversationDays = null } = this.options.retention ?? {};
+    const days = (n: number) => now - n * 24 * HOUR_MS;
+    while ((await this.store.pruneHandled!(days(handledDays), PRUNE_BATCH)) === PRUNE_BATCH);
+    if (historyDays !== null) {
+      // Its own name on the lease: a copy of the conversation this runner holds is then read again.
+      const runner = `${this.runner}:retention`;
+      for (const id of await this.store.historyToPrune!(days(historyDays), PRUNE_BATCH)) {
+        const resident = this.conversations.get(id);
+        if (resident?.busy) continue;
+        const epoch = await this.store.claimConversation(id, runner, now, now + LEASE_MS);
+        if (epoch === null) continue;
+        // An idle copy here is read again from the store when next needed (one elsewhere finds its lease moved on).
+        if (resident && this.conversations.get(id) === resident) {
+          await resident.stored();
+          const row = await this.store.conversation(id);
+          if (row) this.rows.set(id, row);
+          this.conversations.delete(id);
+          resident.close();
+        }
+        try {
+          const deleted = await this.store.pruneHistory!(id, days(historyDays), { role: "user", content: resetLine(), reset: true }, { runner, epoch });
+          if (deleted) this.settings.emit(id, "history.pruned", { entries: deleted, days: historyDays });
+        } finally {
+          await this.store.releaseConversation(id, runner);
+        }
+      }
+    }
+    if (idleConversationDays !== null) {
+      for (const id of await this.store.idleConversations!(days(idleConversationDays), PRUNE_BATCH)) {
+        if (this.conversations.get(id)?.busy) continue;
+        await this.forgetPerson(id).catch((error) => console.warn("flow: forgetting idle conversation %s:", id, error));
+      }
+    }
   }
 
   /** The agent's channels without their sends: what the simulators and the test cloud play. */

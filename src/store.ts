@@ -126,7 +126,23 @@ const MIGRATIONS: Array<((t: Types) => string) | null> = [
   () => `ALTER TABLE background_tools ADD COLUMN input TEXT;
    ALTER TABLE background_tools ADD COLUMN idempotency_key TEXT;
    ALTER TABLE background_tools ADD COLUMN on_restart TEXT NOT NULL DEFAULT 'report'`,
+  // What retention deletes, found by age: history entries, and inbox rows handled.
+  () => `CREATE INDEX messages_at ON messages (agent_id, at);
+   CREATE INDEX inbox_handled ON inbox (agent_id, done, at)`,
 ];
+
+/**
+ * Every table that keeps rows about one person by `conversation_id`: forgetPerson deletes them and
+ * exportPerson reads them (with `conversations` by id and `schedule_runs` by their schedule). A
+ * test lists the database's tables and fails on one missing here.
+ */
+const PERSON_TABLES = ["identities", "messages", "inbox", "inbound", "background_tools", "schedules", "nudges", "no_contact", "sends", "person_values", "conversation_leases"];
+
+/** JSON a person's export shows parsed, by column. */
+const JSON_COLUMNS = new Set(["entry", "payload", "body", "rule", "value", "recent_channels", "quiet_hours"]);
+
+/** A LIKE pattern matching `text` anywhere, with `!` as the escape character. */
+const containing = (text: string) => `%${text.replace(/[!%_]/g, (c) => `!${c}`)}%`;
 
 /** At most this many values per person, each at most VALUE_BYTES as JSON, named like `onboarding.step`. */
 export const VALUES_PER_PERSON = 64;
@@ -253,9 +269,14 @@ const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
  * What an agent needs of its store: a Store, or something that forwards each call to a Store
  * elsewhere (a store service that holds the database, so the agent never holds its credentials).
  * flowEvents' state methods are optional: without them that state stays in memory; without
- * rerunTask, a background tool cut off by a restart is reported, never run again.
+ * rerunTask, a background tool cut off by a restart is reported, never run again; without the
+ * retention methods, nothing is deleted by age.
  */
-export type StoreApi = Omit<Store, "db" | "agentId" | keyof EventStateStore | keyof SendsStore | "rerunTask"> & Partial<EventStateStore> & Partial<SendsStore> & Partial<Pick<Store, "rerunTask">>;
+export type StoreApi = Omit<Store, "db" | "agentId" | keyof EventStateStore | keyof SendsStore | keyof RetentionStore | "rerunTask" | "exportPerson"> &
+  Partial<EventStateStore> & Partial<SendsStore> & Partial<RetentionStore> & Partial<Pick<Store, "rerunTask" | "exportPerson">>;
+
+/** What `retention` deletes with; a store without it keeps everything, as before. */
+export type RetentionStore = Pick<Store, "pruneHandled" | "historyToPrune" | "pruneHistory" | "idleConversations">;
 
 /** Where the agent's sends are written ahead; a store without it sends them as before (cut off by a restart, the model is told it may not have gone). */
 export type SendsStore = Pick<Store, "beginSends" | "settleSend" | "sendsFor" | "pruneSends">;
@@ -491,18 +512,126 @@ export class Store {
   }
 
   /**
-   * Deletes everything kept about one person: their conversation, identities, history, inbox,
-   * background tools, schedules and their runs, nudges, no-contact rules and sends written ahead.
+   * Deletes everything kept about one person, in one transaction: their conversation, identities,
+   * history, inbox, provider message ids, background tools, schedules and their runs, nudges,
+   * no-contact rules, sends written ahead, values and lease, and the flowEvents event ids and
+   * events still to process that name one of their addresses. (flowEvents' snapshot is its own:
+   * `forget` on it.)
    */
   async forgetPerson(conversationId: string): Promise<void> {
     const scope = [this.agentId, conversationId];
     await this.db.transaction(async (tx) => {
-      await tx.run("DELETE FROM schedule_runs WHERE agent_id = ? AND schedule_id IN (SELECT id FROM schedules WHERE agent_id = ? AND conversation_id = ?)", [this.agentId, ...scope]);
-      for (const table of ["schedules", "nudges", "no_contact", "background_tools", "inbox", "messages", "inbound", "identities", "sends", "person_values"]) {
-        await tx.run(`DELETE FROM ${table} WHERE agent_id = ? AND conversation_id = ?`, scope);
+      const addresses = (await tx.query("SELECT address FROM identities WHERE agent_id = ? AND conversation_id = ?", scope)).map((r) => String(r.address));
+      for (const address of addresses) {
+        await tx.run("DELETE FROM event_seen WHERE agent_id = ? AND (id LIKE ? ESCAPE '!' OR body LIKE ? ESCAPE '!')", [this.agentId, containing(address), containing(address)]);
       }
+      await tx.run("DELETE FROM schedule_runs WHERE agent_id = ? AND schedule_id IN (SELECT id FROM schedules WHERE agent_id = ? AND conversation_id = ?)", [this.agentId, ...scope]);
+      for (const table of PERSON_TABLES) await tx.run(`DELETE FROM ${table} WHERE agent_id = ? AND conversation_id = ?`, scope);
       await tx.run("DELETE FROM conversations WHERE agent_id = ? AND id = ?", scope);
     });
+  }
+
+  /**
+   * Every row kept about one person, by table (as forgetPerson would delete them), JSON columns
+   * parsed: for a data-access request. Null when there is no such conversation.
+   */
+  async exportPerson(conversationId: string): Promise<{ conversationId: string; tables: Record<string, Row[]> } | null> {
+    const scope = [this.agentId, conversationId];
+    const shown = (rows: Row[]) => rows.map(({ agent_id: _agent, ...row }) => Object.fromEntries(Object.entries(row).map(([k, v]) => [k, JSON_COLUMNS.has(k) && typeof v === "string" ? parse<unknown>(v, v) : v])));
+    return this.db.transaction(async (tx) => {
+      const conversation = await tx.query("SELECT * FROM conversations WHERE agent_id = ? AND id = ?", scope);
+      if (!conversation.length) return null;
+      const tables: Record<string, Row[]> = { conversations: shown(conversation) };
+      for (const table of PERSON_TABLES) tables[table] = shown(await tx.query(`SELECT * FROM ${table} WHERE agent_id = ? AND conversation_id = ?`, scope));
+      tables.schedule_runs = shown(await tx.query("SELECT * FROM schedule_runs WHERE agent_id = ? AND schedule_id IN (SELECT id FROM schedules WHERE agent_id = ? AND conversation_id = ?) ORDER BY due_at", [this.agentId, ...scope]));
+      return { conversationId, tables };
+    });
+  }
+
+  // Retention.
+
+  /**
+   * Deletes up to `limit` rows of each kind handled before `before`: inbox rows done, nudges
+   * settled, schedules done or cancelled (with their runs), and schedule runs. Active schedules and
+   * held, queued or scheduled nudges stay. Returns the most it deleted of one kind.
+   */
+  async pruneHandled(before: number, limit: number): Promise<number> {
+    const a = this.agentId;
+    return this.db.transaction(async (tx) => {
+      const counts = [
+        await tx.run("DELETE FROM inbox WHERE agent_id = ? AND id IN (SELECT id FROM inbox WHERE agent_id = ? AND done = 1 AND at < ? LIMIT ?)", [a, a, before, limit]),
+        await tx.run("DELETE FROM nudges WHERE agent_id = ? AND id IN (SELECT id FROM nudges WHERE agent_id = ? AND status NOT IN ('queued', 'held', 'scheduled') AND created_at < ? LIMIT ?)", [a, a, before, limit]),
+        await tx.run("DELETE FROM schedule_runs WHERE agent_id = ? AND id IN (SELECT id FROM schedule_runs WHERE agent_id = ? AND ran_at < ? LIMIT ?)", [a, a, before, limit]),
+      ];
+      const ended = (await tx.query("SELECT id FROM schedules WHERE agent_id = ? AND status <> 'active' AND created_at < ? LIMIT ?", [a, before, limit])).map((r) => String(r.id));
+      for (const id of ended) {
+        await tx.run("DELETE FROM schedule_runs WHERE agent_id = ? AND schedule_id = ?", [a, id]);
+        await tx.run("DELETE FROM schedules WHERE agent_id = ? AND id = ?", [a, id]);
+      }
+      return Math.max(...counts, ended.length);
+    });
+  }
+
+  /**
+   * Up to `limit` conversations with history from before `before` to delete, between turns (none
+   * whose turn is open). A conversation's first entry when it is a reset marker (the mark of an
+   * earlier pruning) does not count.
+   */
+  async historyToPrune(before: number, limit: number): Promise<string[]> {
+    const rows = await this.db.query(
+      `SELECT DISTINCT m.conversation_id FROM messages m JOIN conversations c ON c.agent_id = m.agent_id AND c.id = m.conversation_id
+       WHERE m.agent_id = ? AND m.at < ? AND c.turn_open = 0 AND NOT (m.seq = 0 AND m.entry LIKE ? ESCAPE '!') LIMIT ?`,
+      [this.agentId, before, containing(',"reset":true}').slice(0, -1), limit],
+    );
+    return rows.map((r) => String(r.conversation_id));
+  }
+
+  /**
+   * Deletes a conversation's history from before `before`, at a turn's start: every entry before
+   * its first message from the person at or after `before`, so no tool result is left without its
+   * call (all of it, when there is none). The entries kept are numbered from 1 after `marker` (a
+   * reset marker), unless the first kept one is already one. Returns how many entries it deleted.
+   */
+  async pruneHistory(conversationId: string, before: number, marker: ChatMessage, fence?: Fence): Promise<number> {
+    const scope = [this.agentId, conversationId];
+    return this.db.transaction(async (tx) => {
+      await this.fenced(tx, conversationId, fence);
+      const [open] = await tx.query("SELECT turn_open FROM conversations WHERE agent_id = ? AND id = ?", scope);
+      if (!open || Number(open.turn_open) === 1) return 0;
+      const rows = (await tx.query("SELECT seq, entry, at FROM messages WHERE agent_id = ? AND conversation_id = ? ORDER BY seq", scope)).map((r) => ({ seq: Number(r.seq), at: Number(r.at), entry: parse<ChatMessage>(r.entry, { role: "user", content: "" }) }));
+      const reset = (e: ChatMessage) => e.role === "user" && e.reset === true;
+      let cut = rows.length;
+      for (let i = 0; i < rows.length; i++) {
+        const { entry, at } = rows[i];
+        if (entry.role !== "user" || reset(entry) || at < before) continue;
+        const calls = new Set(rows.slice(0, i).flatMap((r) => (r.entry.role === "assistant" ? (r.entry.toolCalls ?? []).map((c) => c.id) : [])));
+        if (rows.slice(i).some((r) => r.entry.role === "tool" && calls.has(r.entry.toolCallId))) continue;
+        cut = i;
+        break;
+      }
+      const deleted = rows.slice(0, cut);
+      if (!deleted.length || (deleted.length === 1 && deleted[0].seq === 0 && reset(deleted[0].entry) && cut === rows.length)) return 0;
+      await tx.run("DELETE FROM messages WHERE agent_id = ? AND conversation_id = ? AND seq < ?", [...scope, rows[cut]?.seq ?? Number.MAX_SAFE_INTEGER]);
+      const marked = cut < rows.length && reset(rows[cut].entry);
+      // Numbered again from 0 (the history's seq is its place), through negatives so no two rows share one meanwhile.
+      const shift = (rows[cut]?.seq ?? 0) - (marked ? 0 : 1);
+      if (cut < rows.length) {
+        await tx.run("UPDATE messages SET seq = -seq - 1 WHERE agent_id = ? AND conversation_id = ?", scope);
+        await tx.run("UPDATE messages SET seq = -seq - 1 - ? WHERE agent_id = ? AND conversation_id = ?", [shift, ...scope]);
+      }
+      if (!marked) await tx.run("INSERT INTO messages (agent_id, conversation_id, seq, entry, at) VALUES (?, ?, 0, ?, ?)", [...scope, json(marker), Math.max(before, rows[cut]?.at ?? before)]);
+      return deleted.length;
+    });
+  }
+
+  /** Up to `limit` conversations started before `before` whose person has not written since (none whose turn is open). */
+  async idleConversations(before: number, limit: number): Promise<string[]> {
+    const rows = await this.db.query(
+      `SELECT id FROM conversations c WHERE agent_id = ? AND created_at < ? AND turn_open = 0
+       AND NOT EXISTS (SELECT 1 FROM identities i WHERE i.agent_id = c.agent_id AND i.conversation_id = c.id AND i.last_message_at >= ?) LIMIT ?`,
+      [this.agentId, before, before, limit],
+    );
+    return rows.map((r) => String(r.id));
   }
 
   async updateConversation(id: string, fields: { turnOpen?: boolean; turns?: number; messageCount?: number; recentChannels?: string[]; timeZone?: string; timeZoneSource?: TimeZoneSource; quietHours?: QuietHours | "off" | null }, fence?: Fence): Promise<void> {

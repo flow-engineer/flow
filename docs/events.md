@@ -243,4 +243,6 @@ events.attach(agent);
 ```
 
 The agent then answers `POST /v1/events` through `agent.fetch(request)`, and held sends go out on
-its tick.
+its tick. Attached, it also forgets a person with the agent: `agent.forgetPerson` drops their
+address from its state (held sends, watches, nudges, caps, copies) and saves it; `events.forget(address)`
+does the same on its own.
