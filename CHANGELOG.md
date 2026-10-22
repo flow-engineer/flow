@@ -2,6 +2,36 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.6.0 (unreleased)
+
+### Changes
+
+- **The agent's sends are written ahead, and resumed after a restart.** With a database, the step
+  that makes a send is stored with the send, `pending`, before it goes, and each send carries its
+  own idempotency key, `send:<conversation>:<turn>:<call>` (a carousel's later parts add `:1`, `:2`).
+  A restart that cut a send off after it went sends it again with the same key on a channel whose
+  info says `idempotentSends`, before the turn carries on, so the person gets it once (new event
+  `send.resumed`, with `key`, `channel`, `outcome`); a send already settled gives the agent its
+  result; anything else (another channel, or a send over 24 hours old) is "may or may not", as
+  before. A restart before the step was stored sent nothing of it, and the step runs again.
+- `ChannelInfo.idempotentSends`: the channel's send honours `idempotencyKey` for at least 24 hours.
+  Flow Messaging's channels (WhatsApp, SMS, Telegram, iMessage) set it.
+- Sends written ahead are deleted a day after they were made, by the hourly clean-up that deletes
+  old provider message ids.
+
+### Migration notes
+
+- Store migration 11 adds the `sends` table; it runs by itself at start, like the others (10 is
+  reserved for a change not released yet). A store service in front of the database (Flow's
+  hosting) must run it, and answer the new store methods `beginSends`, `settleSend`, `sendsFor`
+  and `pruneSends`. Until it does, sends go as before, and a restart tells the agent a cut-off send
+  may or may not have gone; one warning is logged.
+- An agent's replies now carry `idempotencyKey` when the agent has a database. A channel written
+  by hand that passes it on to its platform gets it; one that compares outbounds exactly in its
+  tests sees the new field.
+- Each step that sends waits for its write to the store before the send goes: one write per such
+  step (about a millisecond on a local database, one round trip to a store service).
+
 ## 0.5.0 (unreleased)
 
 ### Changes

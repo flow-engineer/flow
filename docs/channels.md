@@ -110,4 +110,5 @@ What a channel can show; Flow Framework offers the agent only what is set, and f
 | `carousels` | `{ maxCards, textMax, cardTextMax, buttons, labelMax }` |
 | `platform` | `whatsapp`, `telegram`, `imessage` or `sms`: whose content rules (`CONTENT_LIMITS`) every send is checked against |
 | `replyWindowHours` | The business may write first only this long after the person's last message |
+| `idempotentSends` | The send honours `idempotencyKey` for at least 24 hours: a reply a restart cut off goes again with its key ([guarantees](guarantees.md)) |
 | `reactions`, `status`, `readReceipts` | Set from the provider's methods |
