@@ -211,7 +211,8 @@ customers' data: connect your own number for that.
 Flow Framework is 0.x: until 1.0, the commands, `--json` fields and exit codes in this guide (and the
 rest of its API) may change between releases. Every release's notes call out each breaking change
 with a migration note saying what to change. The API freezes at 1.0. Pin the exact version in
-`package.json` for production, and read the notes before you move it.
+`package.json` for production, and read the notes before you move it. What freezes at 1.0:
+[stability.md](stability.md).
 
 ## Host it
 
