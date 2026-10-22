@@ -71,7 +71,7 @@ set for themselves are not part of the API.
 - Event types an `EventSink` gets: `turn.start`, `turn.context`, `turn.end`, `message.arrived`,
   `message.in`, `message.out`, `message.duplicate`, `message.refused`, `message.undelivered`,
   `reaction.in`, `model.call`, `model.error`, `model.restarted`, `tool.start`, `tool.end`,
-  `tool.detached`, `tool.repeated`, `tool.rerun`, `task.done`, `skill.loaded`, `history.trimmed`, `ack.required`,
+  `tool.detached`, `tool.repeated`, `tool.rerun`, `task.done`, `skill.loaded`, `history.trimmed`, `history.pruned`, `person.forgotten`, `ack.required`,
   `auth.required`, `attachment.failed`, `template.missing`, `text.hidden`, and their fields.
 - Codes an agent or a coding agent acts on: `outside_window`, `no_model_key`, `trial_credit_used`,
   the Flow error codes the CLI prints (`timeout`, `slow_down`, `server_unsupported`,

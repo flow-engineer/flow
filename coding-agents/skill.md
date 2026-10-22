@@ -217,6 +217,11 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
 - Run exactly one copy of the agent per database (one instance, kept warm, CPU always on). A
   conversation lives in one process at a time (its lease in the database), so the old and new
   copy beside each other during a deploy never answer one message twice; events name their `runner`.
+- What is kept about people, and for how long: `retention: { historyDays, handledDays,
+  messageIdsDays, idleConversationDays }` (history kept by default; handled rows 30 days). A
+  data-access request is `agent.exportPerson(conversationId)`; an erasure request is
+  `agent.forgetPerson(conversationId)`, which also drops them from flowEvents' state, then calls
+  `onForget(person)` so your own systems delete theirs.
 - After a restart, `resume()` carries on: cut-off turns run again, background tools that were
   running are reported as interrupted (rerun once only with `onRestart: "rerun"`).
 - `agent.receive(conversationId, message, deliver)` still works for one channel at a time (the

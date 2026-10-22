@@ -37,6 +37,8 @@ export interface FlowEvent {
     | "message.duplicate"
     | "history.trimmed"
     | "history.reset"
+    | "history.pruned"
+    | "person.forgotten"
     | "template.missing";
   conversationId: string;
   at: number;

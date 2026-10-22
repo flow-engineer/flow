@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { z } from "zod";
-import { createAgent, sqlite, SMS_KEYWORDS, Store, tool, type ChannelInfo, type Database, type Outbound } from "../src/index.ts";
+import { createAgent, sqlite, SMS_KEYWORDS, Store, tool, type ChannelInfo, type ChatMessage, type Database, type Outbound } from "../src/index.ts";
 import { LEASE_MS, RESEND_WITHIN_MS } from "../src/conversation.ts";
 import { STORE_RETRY_MS } from "../src/store.ts";
 import { SMS, WHATSAPP, call, gate, last, multi, respond, scriptedModel, users } from "./helpers.ts";
@@ -216,6 +216,103 @@ test("a background tool cut off again while it runs again is reported, not run a
   first.answer(respond(call("send_sms", { text: "Let me check on that report." })));
   await third.agent.conversation(a!.conversationId)!.whenIdle();
   assert.equal(runs, 2, "not run a third time");
+});
+
+const DAY_MS = 24 * 3_600_000;
+
+test("retention deletes history past historyDays from a turn's start, the agent is told, and of two runners one deletes it", async () => {
+  const path = file();
+  const first = multi({ channels: CHANNELS, database: sqlite(path), retention: { historyDays: 30 } });
+  await first.agent.resume();
+  const a = await first.message("sms", "+15550100100", "book me in for Friday");
+  (await first.nextCall(0)).answer(respond(call("send_sms", { text: "Done: Friday." })));
+  await first.agent.conversation(a!.conversationId)!.whenIdle();
+  await first.message("sms", "+15550100100", "my name is Sam");
+  (await first.nextCall(1)).answer(respond(call("send_sms", { text: "Noted, Sam." })));
+  await first.agent.conversation(a!.conversationId)!.whenIdle();
+  const db = sqlite(path);
+  const [second] = await db.query("SELECT seq FROM messages WHERE entry LIKE '%my name is Sam%'");
+  await db.run("UPDATE messages SET at = at - ? WHERE seq < ?", [40 * DAY_MS, second.seq]); // the first turn was 40 days ago
+
+  const other = multi({ channels: CHANNELS, database: sqlite(path), dir: first.dir, retention: { historyDays: 30 } });
+  await other.agent.resume();
+  await Promise.all([first.agent.runDue(), other.agent.runDue()]);
+  assert.equal([...first.events, ...other.events].filter((e) => e.type === "history.pruned").length, 1);
+
+  await first.message("sms", "+15550100100", "what's my name?");
+  const turn = await first.nextCall(2);
+  assert.deepEqual(users(turn.request.messages), ["[Chinwag] The conversation starts again here: earlier messages are no longer shown to you.", "[m2] my name is Sam", "[m3] what's my name?"]);
+  turn.answer(respond(call("send_sms", { text: "Sam." })));
+  await first.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.equal(first.events.filter((e) => e.type === "store.write_failed").length, 0, "the history kept its order");
+  const kept = await new Store(sqlite(path), "default").history(a!.conversationId);
+  assert.equal(kept.length, 9, "the marker, then turns two and three");
+  assert.ok(!JSON.stringify(kept).includes("Friday"));
+});
+
+test("retention never keeps a tool result without the call it answers", async () => {
+  const db = sqlite(file());
+  const store = new Store(db, "default");
+  await store.migrate();
+  await store.createConversation("c1", "sms:+15550100100");
+  const old = Date.now() - 40 * DAY_MS;
+  const entries: Array<[ChatMessage, number]> = [
+    [{ role: "user", content: "[m1] book Friday" }, old],
+    [{ role: "assistant", content: null, toolCalls: [{ id: "c_book", name: "book", arguments: "{}" }] }, old],
+    [{ role: "user", content: "[m2] and Saturday?" }, Date.now()], // came while the tool ran
+    [{ role: "tool", toolCallId: "c_book", content: "booked" }, Date.now()],
+    [{ role: "user", content: "[m3] thanks" }, Date.now()],
+  ];
+  for (const [i, [entry, at]] of entries.entries()) await db.run("INSERT INTO messages (agent_id, conversation_id, seq, entry, at) VALUES ('default', 'c1', ?, ?, ?)", [i, JSON.stringify(entry), at]);
+  const marker: ChatMessage = { role: "user", content: "reset", reset: true };
+  assert.equal(await store.pruneHistory("c1", Date.now() - 30 * DAY_MS, marker), 4);
+  assert.deepEqual(await store.history("c1"), [marker, { role: "user", content: "[m3] thanks" }]);
+});
+
+test("retention deletes handled rows past handledDays and keeps a STOP and active schedules", async () => {
+  const path = file();
+  const h = multi({ channels: CHANNELS, database: sqlite(path), retention: { historyDays: 1 } });
+  await h.agent.resume();
+  const a = await h.message("sms", "+15550100100", "remind me daily");
+  (await h.nextCall(0)).answer(respond(call("send_sms", { text: "Will do." })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  const id = a!.conversationId;
+  const store = new Store(sqlite(path), "default");
+  const schedule = (s: string) => ({ id: s, conversationId: id, channel: "sms", instruction: "remind them", fixedText: false, mode: "message" as const, rule: {}, timeZone: "UTC", nextRunAt: Date.now() + DAY_MS, maxRuns: null, endsOn: null, origin: "person" as const });
+  await store.addSchedule(schedule("s_active"));
+  await store.addSchedule(schedule("s_cancelled"));
+  await store.cancelSchedule(id, "s_cancelled");
+  await store.setStop(id, { id: "stop_1", rule: "STOP" });
+  const db = sqlite(path);
+  for (const [table, column] of [["messages", "at"], ["inbox", "at"], ["schedules", "created_at"], ["no_contact", "created_at"]]) await db.run(`UPDATE ${table} SET ${column} = ${column} - ?`, [40 * DAY_MS]);
+
+  await h.agent.runDue();
+  const count = async (sql: string) => Number((await db.query(sql))[0].n);
+  assert.equal(await count("SELECT count(*) AS n FROM inbox"), 0, "handled inbox rows went");
+  assert.deepEqual((await db.query("SELECT id FROM schedules")).map((r) => r.id), ["s_active"]);
+  assert.equal(await count("SELECT count(*) AS n FROM no_contact WHERE kind = 'stop'"), 1, "the STOP stays");
+  assert.equal(h.events.filter((e) => e.type === "history.pruned").length, 1);
+});
+
+test("retention forgets a person silent past idleConversationDays, and onForget hears of it", async () => {
+  const path = file();
+  const forgotten: unknown[] = [];
+  const h = multi({ channels: CHANNELS, database: sqlite(path), retention: { idleConversationDays: 30 }, onForget: (person) => void forgotten.push(person) });
+  await h.agent.resume();
+  const a = await h.message("sms", "+15550100100", "hi");
+  (await h.nextCall(0)).answer(respond(call("send_sms", { text: "Hi!" })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  const b = await h.message("sms", "+15550100200", "hello");
+  (await h.nextCall(1)).answer(respond(call("send_sms", { text: "Hello!" })));
+  await h.agent.conversation(b!.conversationId)!.whenIdle();
+  const db = sqlite(path);
+  await db.run("UPDATE conversations SET created_at = created_at - ? WHERE id = ?", [40 * DAY_MS, a!.conversationId]);
+  await db.run("UPDATE identities SET last_message_at = last_message_at - ? WHERE conversation_id = ?", [40 * DAY_MS, a!.conversationId]);
+
+  await h.agent.runDue();
+  assert.deepEqual(forgotten, [{ conversationId: a!.conversationId, identities: [{ channel: "sms", address: "+15550100100" }] }]);
+  assert.deepEqual((await db.query("SELECT id FROM conversations")).map((r) => r.id), [b!.conversationId]);
+  assert.deepEqual(h.events.filter((e) => e.type === "person.forgotten").map((e) => [e.conversationId, e.channels]), [[a!.conversationId, ["sms"]]]);
 });
 
 test("receive() keeps a one-channel conversation across a restart too", async () => {

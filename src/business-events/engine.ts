@@ -23,6 +23,7 @@
 // What an app's events mean (its catalog, its templates and wording, its own rules) stays in the
 // app: `catalog` names every type it accepts, `rules` and `onEvent` decide the rest.
 
+import { createHash } from "node:crypto";
 import type { NudgeInput, NudgeResult } from "../agent.ts";
 import type { EventStateStore } from "../store.ts";
 import type { Template } from "../types.ts";
@@ -187,6 +188,8 @@ export interface EventSender {
   reach?(to: { channel: string; address: string }): Promise<{ conversationId: string }>;
   /** Where the state is kept across restarts (the agent's database); null: in memory only. */
   eventStateStore?(): EventStateStore | null;
+  /** Calls `forget` for each identity of a person the agent forgets (forgetPerson). */
+  whenForgotten?(forget: (identity: { channel: string; address: string }) => Promise<void>): void;
 }
 
 export interface FlowEventsOptions<W extends Watch = Watch> {
@@ -342,6 +345,44 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
   const done: string[] = [];
   /** Taken before the load, and found among the saved ones: taken before the restart, processed from there. */
   const takenBefore = new Set<string>();
+  /**
+   * People forgotten, by a hash of their address, and when: saved with the state for SEEN_MS, so
+   * another runner that still holds them drops them too when it merges this runner's save.
+   */
+  const forgotten = new Map<string, number>();
+  const hashed = (address: string) => createHash("sha256").update(address).digest("hex").slice(0, 32);
+
+  /** Drops everything the state holds for one address, in place. */
+  function scrub(address: string) {
+    const keep = <T>(list: T[], stays: (item: T) => boolean) => {
+      for (let i = list.length - 1; i >= 0; i--) if (!stays(list[i])) list.splice(i, 1);
+    };
+    keep(state.outbox, (p) => p.address !== address);
+    keep(state.watches, (w) => w.address !== address);
+    keep(state.nudges, (n) => n.address !== address);
+    for (const key of [...state.muted]) if (key.startsWith(`${address} `)) state.muted.delete(key);
+    for (const key of [...state.optionalLast.keys()]) if (key.startsWith(`${address} `)) state.optionalLast.delete(key);
+    for (const key of [...state.told.keys()]) if (key.startsWith(`${address}\n`)) state.told.delete(key);
+    state.lastNudged.delete(address);
+    state.copies.delete(address);
+    for (const [conversation, a] of [...state.addresses]) if (a === address) state.addresses.delete(conversation);
+  }
+
+  /** Every address the state holds something for. */
+  function addressesHeld(): Set<string> {
+    const before = (key: string, sep: string) => key.slice(0, Math.max(0, key.indexOf(sep)));
+    return new Set([
+      ...state.outbox.map((p) => p.address),
+      ...state.watches.map((w) => w.address),
+      ...state.nudges.map((n) => n.address),
+      ...[...state.muted].map((k) => before(k, " ")),
+      ...[...state.optionalLast.keys()].map((k) => before(k, " ")),
+      ...[...state.told.keys()].map((k) => before(k, "\n")),
+      ...state.lastNudged.keys(),
+      ...state.copies.keys(),
+      ...state.addresses.values(),
+    ]);
+  }
 
   async function load(kept: EventStateStore) {
     let saved: Awaited<ReturnType<EventStateStore["loadEventState"]>>;
@@ -416,6 +457,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
       copies: [...state.copies].map(([a, list]) => [a, list.filter((c) => t - c.at < copyMs)] as const).filter(([, list]) => list.length),
       told: [...state.told].filter(within(DAY)),
       addresses: [...state.addresses],
+      forgotten: [...forgotten].filter(([, at]) => t - at < SEEN_MS),
     });
   }
 
@@ -437,6 +479,18 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     for (const [name, map] of [["optionalLast", state.optionalLast], ["lastNudged", state.lastNudged], ["copies", state.copies], ["told", state.told], ["addresses", state.addresses]] as const) {
       for (const [k, v] of saved[name] ?? []) if (!(map as Map<string, unknown>).has(k)) (map as Map<string, unknown>).set(k, v);
     }
+    // Someone another runner forgot since: what this one still holds of them goes too (once).
+    const learnt = ((saved.forgotten ?? []) as Array<[string, number]>).filter(([h]) => !forgotten.has(h));
+    for (const [h, at] of learnt) forgotten.set(h, at);
+    if (learnt.length) for (const address of addressesHeld()) if (learnt.some(([h]) => h === hashed(address))) scrub(address);
+  }
+
+  /** Drops a person from the state (their sends, watches, nudges, caps, copies) and saves it; for forgetPerson. */
+  async function forget(address: string) {
+    forgotten.set(hashed(address), now());
+    scrub(address);
+    changed();
+    await later(async () => {});
   }
 
   /** The state changed: saved once the work queued before it is done. */
@@ -795,7 +849,10 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
       sender = s;
       const kept = first && persist ? (s.eventStateStore?.() ?? null) : null;
       if (kept) loaded = later(() => load(kept));
+      if (first) s.whenForgotten?.(async (identity) => void (identity.channel === channel && (await forget(identity.address))));
     },
+    /** Drops a person's address from the state (and the saved state), as forgetPerson does for an attached agent. */
+    forget,
     invalid,
     accept,
     tick,

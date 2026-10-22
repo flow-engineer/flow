@@ -47,6 +47,23 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `tool.rerun`). A second restart during that run reports it, as every background tool is reported
   today (`onRestart: "report"`, the default). Use it only for a tool that is safe to run twice with
   that key; jobs longer than a deploy belong in the business's own queue.
+- **Retention.** `createAgent({ retention: { historyDays, handledDays, messageIdsDays,
+  idleConversationDays } })`, applied hourly by one runner on the scheduled messages' timer.
+  History is kept unless `historyDays` is set; then entries older than that are deleted from a
+  turn's start (a tool result is never kept without its call), between turns, and the agent is told
+  earlier messages are no longer shown (the reset marker `agent.resetHistory` writes; new event
+  `history.pruned`). Handled rows (inbox rows done, nudges settled, schedules ended, schedule runs)
+  are deleted after `handledDays`, **30 by default**. `messageIdsDays` is `keepMessageIdsDays`'s new
+  name (the old one still works). `idleConversationDays` forgets a person who has not written for
+  that long. A STOP, active schedules and held nudges are kept until then.
+- **Forgetting is complete, and a person can be exported.** `forgetPerson` also deletes the
+  conversation's lease and the flowEvents event ids and pending events that name the person's
+  addresses, and an attached flowEvents drops their address from its state (sends, watches, nudges,
+  caps, copies; new `forget(address)`), saved so another runner that held them drops them too. Then
+  a `person.forgotten` event (with the channels only) and the new `createAgent({ onForget })` hook,
+  called with the conversation id and every channel identity, so the business deletes what its own
+  systems keep. `agent.exportPerson(conversationId)` returns every row kept about the person, by
+  table, for a data-access request.
 
 ### Migration notes
 
@@ -80,6 +97,16 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `tasks` returns `callId`, `input`, `idempotencyKey` and `onRestart` too, and the new store method
   `rerunTask(conversationId, taskId, fence?)` marks a task as run again (true for the one caller
   that may). A store service without `rerunTask` keeps today's behaviour: the tool is reported.
+- Store migration 15 adds two indexes, `messages (agent_id, at)` and `inbox (agent_id, done, at)`
+  (plain `CREATE INDEX` inside the migration's transaction: on a large Postgres table it locks
+  writes while it builds). New store methods `exportPerson(conversationId)`, `pruneHandled(before,
+  limit)`, `historyToPrune(before, limit)`, `pruneHistory(conversationId, before, marker, fence?)`
+  and `idleConversations(before, limit)`. A store service without the retention methods deletes
+  nothing by age (as in 0.5); without `exportPerson`, `agent.exportPerson` throws.
+- **Done inbox rows, settled nudges, ended schedules and schedule runs older than 30 days are now
+  deleted.** Keep them longer with `retention: { handledDays }`. A nudge's idempotency key is
+  forgotten with its row, so the same key sent again after that sends again.
+- `onForget` also runs for the playground's Clear history (its test people).
 
 ## 0.5.0 (unreleased)
 
