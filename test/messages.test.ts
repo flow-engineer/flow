@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { z } from "zod";
+import { defaultHistoryTokens } from "../src/agent.ts";
 import { tool } from "../src/index.ts";
 import { SMS, WEB, WHATSAPP, call, harness, last, multi, respond, say, users } from "./helpers.ts";
 
@@ -159,4 +160,57 @@ test("a long conversation sends the model only its latest messages that fit", as
   assert.match(last(result.request.messages).content, /^x{1000}\n\[Chinwag\] Cut: the result was 5000 characters; only the first 1000 are shown\.$/);
   result.answer(respond(call("send_sms", { text: "Anything without nuts." })));
   await h.agent.conversation(a!.conversationId)!.whenIdle();
+});
+
+test("after resetHistory the model is sent only what comes after it, with the app's note; the transcript keeps everything", async () => {
+  const h = multi({ channels: { sms: { info: SMS, phone: true } } });
+  const to = { channel: "sms", address: "+15550100100" };
+  assert.deepEqual(await h.agent.resetHistory({ to }), { status: "refused", reason: "unknown_person" });
+  const a = await h.message("sms", to.address, "I'm Sam, order 1042 is late");
+  (await h.nextCall(0)).answer(respond(call("send_sms", { text: "Sorry Sam, it ships today." })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+
+  assert.deepEqual(await h.agent.resetHistory({ to, note: "Order 1042 was late; it shipped." }), { status: "reset" });
+  assert.equal(h.calls.length, 1, "a reset starts no turn");
+  await h.message("sms", to.address, "new order please");
+  const next = await h.nextCall(1);
+  assert.deepEqual(users(next.request.messages).map((u) => u.replace(/^\[m\d+\] /, "")), [
+    "[Chinwag] The conversation starts again here: earlier messages are no longer shown to you.\nBefore this: Order 1042 was late; it shipped.",
+    "new order please",
+  ]);
+  assert.ok(!next.request.messages.some((m) => m.role === "assistant" && JSON.stringify(m.toolCalls).includes("ships today")));
+  assert.ok(h.events.some((e) => e.type === "history.reset"));
+  next.answer(respond(call("send_sms", { text: "What would you like?" })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  const transcript = await h.agent.transcript(a!.conversationId);
+  assert.deepEqual(transcript.filter((e) => e.kind === "in").map((e) => e.text), ["I'm Sam, order 1042 is late", "new order please"]);
+});
+
+test("a reset kept in the store holds after a restart, and the person's messages not yet answered stay", async () => {
+  const h = multi({ channels: { sms: { info: SMS, phone: true } } });
+  const to = { channel: "sms", address: "+15550100100" };
+  const a = await h.message("sms", to.address, "my old booking");
+  (await h.nextCall(0)).answer(respond(call("send_sms", { text: "Booked for Friday." })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  await h.message("sms", to.address, "can I change it?");
+  (await h.nextCall(1)).answer(respond());
+  (await h.nextCall(2)).answer(respond()); // asked once more, it still says nothing
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  await h.agent.conversation(a!.conversationId)!.stored();
+
+  const restarted = multi({ channels: { sms: { info: SMS, phone: true } }, database: h.database });
+  await restarted.agent.resume();
+  assert.deepEqual(await restarted.agent.resetHistory({ to }), { status: "reset" });
+  await restarted.message("sms", to.address, "hello?");
+  const next = await restarted.nextCall(0);
+  const shown = users(next.request.messages);
+  assert.ok(!shown.some((u) => u.includes("old booking")), "what was answered before the reset is left out");
+  assert.ok(shown.some((u) => u.includes("can I change it?")), "the unanswered message stays");
+  assert.match(shown.at(-1)!, /hello\?$/);
+  next.answer(respond(call("send_sms", { text: "Yes, to which day?" })));
+  await restarted.agent.conversation(a!.conversationId)!.whenIdle();
+});
+
+test("the default history budget is 24,000 tokens, or 60% of the model's window when that is less", () => {
+  assert.deepEqual([defaultHistoryTokens(), defaultHistoryTokens(200_000), defaultHistoryTokens(32_000)], [24_000, 24_000, 19_200]);
 });

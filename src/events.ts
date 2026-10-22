@@ -33,6 +33,7 @@ export interface FlowEvent {
     | "keyword"
     | "message.duplicate"
     | "history.trimmed"
+    | "history.reset"
     | "template.missing";
   conversationId: string;
   at: number;

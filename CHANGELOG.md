@@ -28,6 +28,12 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - `POST /v1/events` answers 202 once the event is recorded in the database, and 503 when it could
   not be recorded (retry with the same id).
 - `events.idle()` also waits for work queued while it waited (a restart's unprocessed events).
+- `guards(...)`, `oncePerChat`, `noRepeats`, `linkAllowlist`, `noWriteButtons`: ready-made checks
+  for `beforeSend`, composed in order, the first refusal winning.
+- `beforeSend`'s context has `sent`: the texts already sent in the conversation, read from the
+  stored history, so guards hold after a restart.
+- `agent.resetHistory({ to, note })`: the model's history starts again from a point (nothing is
+  deleted); a new event, `history.reset`, when a turn reads it.
 
 ### Migration notes
 
@@ -48,3 +54,10 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - **flowEvents state is now one per agent in the database.** Two flowEvents mounted on the same agent
   and database, or one agent's events side on two runners at once, overwrite each other's state: run
   one. To keep the old in-memory behaviour, pass `persist: false`.
+- **The default history budget is smaller.** An agent without `history.maxTokens` now sends each
+  model call at most 24,000 tokens of history, or 60% of the model's `contextTokens` when that is
+  less (before: 60% of `contextTokens`, else 50,000). Long chats leave older messages out sooner
+  (`history.trimmed`). To keep the old behaviour: `createAgent({ history: { maxTokens: 50_000 } })`
+  (or `Math.floor(contextTokens * 0.6)`).
+- **A new event type, `history.reset`.** An event sink that switches on event types sees it. A
+  custom `StoreApi` passes inbox payloads through unchanged; nothing to do.

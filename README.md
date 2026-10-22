@@ -112,6 +112,14 @@ refused it: the agent's next message waits for it, and a rejection reaches the a
 delivered. What is ordered, what is sent once and what `send()` resolving means:
 [docs/guarantees.md](docs/guarantees.md).
 
+Ready-made `beforeSend` checks compose with `guards(...)`, the first refusal winning:
+`oncePerChat(line)` (a disclaimer at most once per conversation), `noRepeats()`,
+`linkAllowlist(hosts)` and `noWriteButtons(actions)`; they read what was sent from the stored
+history (`context.sent`), so they hold after a restart. `agent.resetHistory({ to, note })` starts
+the history the model is sent again from now (nothing is deleted). Each model call carries at most
+24,000 tokens of history, or 60% of the model's `contextTokens` when that is less
+(`createAgent({ history: { maxTokens } })` to change it).
+
 ## Stability
 
 Flow Framework is 0.x: until 1.0 its API (exports, options, file formats, the CLI's commands,

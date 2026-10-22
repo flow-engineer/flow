@@ -8,7 +8,14 @@ export interface ToolCall {
 }
 
 export type ChatMessage =
-  | { role: "user"; content: string; media?: Media[]; messages?: PersonMessage[] }
+  | {
+      role: "user";
+      content: string;
+      media?: Media[];
+      messages?: PersonMessage[];
+      /** A reset marker (`agent.resetHistory`): the model is sent only what comes after it. */
+      reset?: true;
+    }
   | { role: "assistant"; content: string | null; toolCalls?: ToolCall[] }
   | { role: "tool"; toolCallId: string; content: string };
 
@@ -156,6 +163,11 @@ export interface SendContext {
    * prompt, the apology after a failed turn).
    */
   origin: "agent" | "direct" | "framework";
+  /**
+   * The texts already sent to the person in this conversation, oldest first, read from its stored
+   * history (so they hold across restarts): what guards such as `oncePerChat` and `noRepeats` check against.
+   */
+  sent?: readonly string[];
 }
 
 /**

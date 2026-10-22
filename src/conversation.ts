@@ -129,6 +129,12 @@ export const LEASE_MS = 15_000;
 const RENEW_MS = 5_000;
 let leaseWarned = false;
 const EARLIER = "[Chinwag] Older messages of this conversation are no longer shown to you.";
+const RESET = "[Chinwag] The conversation starts again here: earlier messages are no longer shown to you.";
+
+/** A reset marker's line for the model, with the app's short note on what came before. */
+export function resetLine(note?: string): string {
+  return note?.trim() ? `${RESET}\nBefore this: ${note.trim()}` : RESET;
+}
 const NOT_SHOWN = "[Chinwag] You are no longer shown the photos or documents in these messages; ask them to send one again if you need it.";
 
 /** A server-verified auth change: an internal prompt, never a prewritten chat response. */
@@ -215,6 +221,8 @@ interface Note {
   owed?: Owed;
   /** Learned at the next turn, but does not start one (the person's reaction). */
   wait?: boolean;
+  /** A reset marker (agent.resetHistory): the model is sent only what comes after it. */
+  reset?: boolean;
 }
 
 /** Sent without the model: a fixed-text scheduled message, or a text or template nudge. */
@@ -247,6 +255,10 @@ export class Conversation {
   private resultUnsent: false | "background" | "returned" = false;
   /** What the agent has sent in this turn, to tell its own text repeated from something new. */
   private sentThisTurn = new Set<string>();
+  /** The texts sent to the person so far, oldest first: read from the history at the first send, then kept up to date (SendContext.sent). */
+  private sentTexts: string[] | null = null;
+  /** Where this turn's entries start in the history: a reset placed during the turn keeps them. */
+  private turnFrom = 0;
   private direct: Direct[] = [];
   private owed: Owed[] = [];
   /** The person's message ids, and the channel each came on. */
@@ -621,7 +633,7 @@ export class Conversation {
         this.wakeTools?.();
       }
     } else if (row.kind === "note") {
-      this.notes.push({ text: p.text, inbox: row.id, wait: p.wait === true });
+      this.notes.push({ text: p.text, inbox: row.id, wait: p.wait === true, ...(p.reset === true ? { reset: true } : {}) });
     } else if (row.kind === "schedule") {
       if (p.fixed) this.direct.push({ inbox: row.id, channel: p.channel, text: p.text, run: p.run, schedule: p.schedule });
       else this.notes.push({ text: p.text, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel } });
@@ -650,6 +662,11 @@ export class Conversation {
   reacted(emoji: string, toText: string): void {
     this.settings.emit(this.id, "reaction.in", { emoji, toText });
     this.note(`[They reacted ${emoji} to your message: "${clip(toText)}"]`, true);
+  }
+
+  /** agent.resetHistory: the model is sent only what comes after this, from the next turn on. */
+  async resetHistory(note?: string): Promise<void> {
+    await this.note(resetLine(note), true, true);
   }
 
   /** The channel reports, now or later, that a message did not reach the person. */
@@ -839,6 +856,7 @@ export class Conversation {
     const history = await store.history(this.id);
     this.saved = history.length;
     this.history.push(...history);
+    this.sentTexts = null;
     const only = [...this.channels.keys()][0] ?? "chat";
     for (const entry of history) {
       if (entry.role !== "user") continue;
@@ -874,14 +892,15 @@ export class Conversation {
     return this.pending.length > 0 || this.notes.some((n) => !n.wait) || this.direct.length > 0;
   }
 
-  private note(text: string, wait = false): void {
-    const item: Note = { text, wait };
+  private note(text: string, wait = false, reset = false): Promise<void> {
+    const item: Note = { text, wait, ...(reset ? { reset } : {}) };
     this.notes.push(item);
-    this.persist(async () => {
-      item.inbox = await this.settings.store.addInbox(this.id, "note", { text, wait });
+    const stored = this.persist(async () => {
+      item.inbox = await this.settings.store.addInbox(this.id, "note", { text, wait, ...(reset ? { reset } : {}) });
       this.knownInbox.add(item.inbox);
     });
     if (!wait && !this.running) this.schedule(0);
+    return stored;
   }
 
   private schedule(delayMs: number): void {
@@ -986,7 +1005,8 @@ export class Conversation {
         items.push(note);
         continue;
       }
-      this.history.push({ role: "user", content: note.text });
+      this.history.push({ role: "user", content: note.text, ...(note.reset ? { reset: true as const } : {}) });
+      if (note.reset) this.settings.emit(this.id, "history.reset", { text: note.text });
       if (note.text.startsWith("[Background result:")) this.resultUnsent = "background";
       if (note.owed) this.owed.push(note.owed);
       items.push(note);
@@ -1076,6 +1096,7 @@ export class Conversation {
     this.authBlocked.clear();
     this.authPromptsSent.clear();
     this.persist(() => store.updateConversation(this.id, { turnOpen: true, turns }));
+    this.turnFrom = this.history.length;
     this.absorb();
     // A turn the person started (as against a background result, a scheduled message or a nudge).
     const theirs = this.unanswered.size > 0;
@@ -1413,7 +1434,7 @@ export class Conversation {
     if (this.settings.beforeSend) {
       let result: Awaited<ReturnType<BeforeSend>>;
       try {
-        result = await this.settings.beforeSend(draft, { conversationId: this.id, channel, info: link.info, address: link.address, origin });
+        result = await this.settings.beforeSend(draft, { conversationId: this.id, channel, info: link.info, address: link.address, origin, sent: [...this.sentSoFar()] });
       } catch (error) {
         return refuse(draft, "beforeSend", `Not sent: beforeSend failed: ${errorText(error)}`);
       }
@@ -1433,11 +1454,18 @@ export class Conversation {
     } catch (error) {
       return { failure: error instanceof Error ? error.message : String(error) };
     }
+    if (outbound.type !== "template") this.sentSoFar().push(outbound.text);
     // The channel's wait for its signal ran out: it may still arrive, and is never sent again.
     if (receipt?.status === "unconfirmed") {
       this.settings.emit(this.id, "message.slow", { channel, origin, text: outbound.type === "template" ? outbound.name : outbound.text, ...(receipt.waitedMs !== undefined ? { waitedMs: receipt.waitedMs } : {}) });
     }
     return { sent: outbound };
+  }
+
+  private sentSoFar(): string[] {
+    const only = [...this.channels.keys()][0] ?? "chat";
+    this.sentTexts ??= transcriptOf(this.history.map((entry) => ({ entry, at: 0 })), only).flatMap((e) => (e.kind === "out" && !e.template ? [e.text] : []));
+    return this.sentTexts;
   }
 
   /** A fixed-text scheduled message or a text or template nudge, sent with no model turn. */
@@ -1510,26 +1538,47 @@ export class Conversation {
   }
 
   /**
-   * The history the model is sent: all of it while it fits the budget, else the latest entries
-   * that do, from the start of one (never between a call and its result), after a line that says
-   * older ones are left out. The latest turn always goes, however long.
+   * The history the model is sent: what comes after the latest reset marker (agent.resetHistory),
+   * all of it while it fits the budget, else the latest entries that do, from the start of one
+   * (never between a call and its result), after a line that says older ones are left out. The
+   * latest turn always goes, however long, and so do the person's messages a reset came after
+   * before anything was sent back.
    */
   private window(system: string, specs: ToolSpec[]): ChatMessage[] {
     const all = this.history.map(forModel);
+    const from = this.resetFrom();
     let room = this.settings.historyTokens - tokens(system) - tokens(JSON.stringify(specs)) - tokens(EARLIER);
     let start = all.length;
-    for (let i = all.length - 1; i >= 0; i--) {
+    for (let i = all.length - 1; i >= from; i--) {
       room -= size(all[i]);
       if (room < 0) break;
       if (all[i].role === "user") start = i;
     }
-    if (room >= 0) start = 0;
-    else if (start === all.length) start = Math.max(0, all.findLastIndex((m) => m.role === "user"));
+    if (room >= 0) start = from;
+    else if (start === all.length) start = Math.max(from, all.findLastIndex((m) => m.role === "user"));
     if (start !== this.leftOut) {
       this.leftOut = start;
-      if (start) this.settings.emit(this.id, "history.trimmed", { leftOut: start, kept: all.length - start });
+      if (start > from) this.settings.emit(this.id, "history.trimmed", { leftOut: start - from, kept: all.length - start });
     }
-    return start ? [{ role: "user", content: EARLIER }, ...all.slice(start)] : all;
+    return start > from ? [{ role: "user", content: EARLIER }, ...all.slice(start)] : all.slice(from);
+  }
+
+  /**
+   * Where the model's history starts: the latest reset marker, or before it the person's messages
+   * it came after with nothing sent back, or this turn's start when the marker came during it.
+   */
+  private resetFrom(): number {
+    const marker = this.history.findLastIndex((e) => e.role === "user" && e.reset === true);
+    if (marker < 0) return 0;
+    const only = [...this.channels.keys()][0] ?? "chat";
+    let from = marker;
+    for (let i = marker - 1; i >= 0; i--) {
+      const e = this.history[i];
+      if (e.role === "assistant" && e.toolCalls?.some((c) => c.name.startsWith("send_"))) break;
+      if (e.role === "user" && e.reset) break;
+      if (e.role === "user" && personMessages(e, only).length) from = i;
+    }
+    return marker >= this.turnFrom ? Math.min(from, this.turnFrom) : from;
   }
 
   /** A tool result as the history keeps it: cut at toolResultChars, saying so. */
