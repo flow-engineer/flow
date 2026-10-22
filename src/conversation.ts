@@ -1558,13 +1558,12 @@ export class Conversation {
   }
 
   /**
-   * Where the model's history starts: the latest reset marker; this turn's start when the marker
-   * came during it; else the person's messages it came after with nothing sent back.
+   * Where the model's history starts: the latest reset marker, or before it the person's messages
+   * it came after with nothing sent back, or this turn's start when the marker came during it.
    */
   private resetFrom(): number {
     const marker = this.history.findLastIndex((e) => e.role === "user" && e.reset === true);
     if (marker < 0) return 0;
-    if (marker >= this.turnFrom) return Math.min(marker, this.turnFrom);
     const only = [...this.channels.keys()][0] ?? "chat";
     let from = marker;
     for (let i = marker - 1; i >= 0; i--) {
@@ -1573,7 +1572,7 @@ export class Conversation {
       if (e.role === "user" && e.reset) break;
       if (e.role === "user" && personMessages(e, only).length) from = i;
     }
-    return from;
+    return marker >= this.turnFrom ? Math.min(from, this.turnFrom) : from;
   }
 
   /** A tool result as the history keeps it: cut at toolResultChars, saying so. */
