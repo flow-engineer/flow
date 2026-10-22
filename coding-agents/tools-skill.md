@@ -42,6 +42,10 @@ export const findSlots = tool({
   it is the same for the same input in the same turn, also when the turn runs again after a
   restart, so the booking happens once. `context.callId` is the model's id for the call;
   `context.signal` aborts when the person is forgotten.
+- Small per-person conversation state (an onboarding step, a chosen plan) goes in `context.values`
+  (`get`, `set`, null deletes, `all`; JSON, 64 per person, 4 KB each), not a database of your own;
+  business records (orders, bookings) stay in the owner's systems. The model never sees values
+  unless a tool's result or the instructions show them.
 - Don't decide what runs in the background. The reply waits for every call; one moves to the
   background only if the person writes again meanwhile or it passes its limit (the agent's
   `deadlineMs`, 60 s by default), and its result comes back into the chat by itself. Set
