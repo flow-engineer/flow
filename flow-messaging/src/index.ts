@@ -527,7 +527,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       if (!m?.id) return;
       const status = event.type.slice("message.".length);
       const settle = waiting.get(m.id);
-      if (settle) {
+      if (typeof settle === "function") {
         // A failure its send is waiting on is told through that send, not again as Not delivered.
         if (settle(status, m.error) && status === "failed") return;
       } else if (status !== "failed" && waitFor !== "queued") {

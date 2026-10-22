@@ -78,8 +78,10 @@ export function conformance(name: string, make: () => Promise<Rig>): void {
 
   withRig("send() rejects, with the platform's reason, when the platform refuses the message", async (rig) => {
     const sending = Promise.resolve(rig.channel.send(rig.to, { type: "message", text: "Hello" }));
+    // Watched before the refusal: a webhook rig's refuse() resolves only after the send has rejected.
+    const rejected = assert.rejects(sending, /conformance refusal/);
     await (await rig.arrival(0)).refuse("conformance refusal");
-    await assert.rejects(sending, /conformance refusal/);
+    await rejected;
   });
 
   withRig("a message the business started carries its idempotency key to the platform", async (rig) => {

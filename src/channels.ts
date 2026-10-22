@@ -193,7 +193,9 @@ export function whatsapp(provider: WhatsAppProvider, options: { name?: string; d
     linkButton: has("links", f.links !== false) ? WHATSAPP.linkButton : undefined,
     images: has("images", f.images !== false) ? WHATSAPP.images : undefined,
     carousels: has("carousels", Boolean(provider.sendCarousel)) ? WHATSAPP_CAROUSELS : undefined,
-    templates: has("templates", Boolean(provider.sendTemplate)),
+    // Only ever true: a provider without sendTemplate keeps 0.4's behaviour (its send says so), and a
+    // business run's copy of the channel, whose send goes to the test cloud, still sends templates.
+    templates: has("templates", Boolean(provider.sendTemplate)) || undefined,
     typing: has("typing", Boolean(provider.typing)),
   };
   return {
