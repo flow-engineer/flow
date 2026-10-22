@@ -13,6 +13,18 @@ the agent's skills, the sign-in (the `flow-framework-auth` skill), the tests and
 Work from the organization's own code and documents. Never invent: anything you cannot find goes
 in `context/README.md` under "Questions for the team", phrased so someone can answer it in a line.
 
+Reading a codebase takes a while. Before you start, tell the owner in one line what you will read
+and that it takes a few minutes, so a quiet chat does not look stuck. When the frontend calls a
+backend that is not in this folder, ask the owner for the backend's path (or repository) once, and
+read it too: its handlers and models are the API.
+
+When a task or the sign-in needs something the backend does not offer (an endpoint, a check, a way
+to revoke), the change belongs in the backend, not in a workaround in the agent. List the changes
+in one message, with why each is needed, and once the owner says yes make them on a new branch of
+the backend's repository. Call every endpoint a tool or the sign-in depends on with a real test
+account before building on it: what it requires (a team, a plan, a verified email) shows only when
+it runs.
+
 ## What goes in it
 
 | File | Format | What it holds |

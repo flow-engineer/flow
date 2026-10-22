@@ -208,7 +208,7 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
     type: "module",
     bin: { [name]: "src/cli.ts" },
     engines: own.engines,
-    scripts: { start: "node --env-file-if-exists=.env src/main.ts", mcp: "node src/mcp.ts", cli: "node src/cli.ts", test: "flow test", typecheck: "tsc --noEmit" },
+    scripts: { start: "node --env-file-if-exists=.env src/main.ts", mcp: "node --env-file-if-exists=.env src/mcp.ts", cli: "node --env-file-if-exists=.env src/cli.ts", test: "flow test", typecheck: "tsc --noEmit" },
     // The café serves its tools over MCP (src/mcp.ts) and as a CLI (src/cli.ts): their SDKs, pinned as Flow Framework pins them.
     dependencies: { "@flow-engineer/flow": `^${own.version}`, ...own.peerDependencies },
     devDependencies: { "@types/node": own.devDependencies["@types/node"], typescript: own.devDependencies.typescript },

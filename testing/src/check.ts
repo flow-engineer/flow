@@ -14,6 +14,17 @@ import type { Tool } from "../../src/tools.ts";
 
 export const CHECK_LINE = `  flow check [--json] [--plugin <dir>]    Check the agent's tools, CLI file and skills for MCP and the CLI`;
 
+/** A file of the agent's, imported; TypeScript Node cannot run is one line saying what to change, not a stack. */
+async function load(file: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    return await import(pathToFileURL(file).href);
+  } catch (error) {
+    if ((error as { code?: string }).code !== "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX") throw error;
+    console.error(`${(error as Error).message.split("\n")[0]}\nNode runs .ts files by stripping types only: no parameter properties (constructor(readonly x)), enums or namespaces. Write them as plain fields and objects.`);
+    return undefined;
+  }
+}
+
 export async function checkCli(argv: string[], dir = process.cwd()): Promise<number> {
   const json = argv.includes("--json");
   const errors: string[] = [];
@@ -27,7 +38,8 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
     console.error(`No src/agent.ts in ${dir}. Run flow check from the agent's folder.`);
     return 1;
   }
-  const agent = await import(pathToFileURL(agentFile).href);
+  const agent = await load(agentFile);
+  if (!agent) return 1;
   const tools: Tool[] = Array.isArray(agent.tools) ? agent.tools : [];
   if (!Array.isArray(agent.tools)) errors.push("src/agent.ts exports no tools array");
   errors.push(...toolsProblems(tools));
@@ -41,7 +53,9 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
 
   const cliFile = join(dir, "src/cli.ts");
   if (existsSync(cliFile)) {
-    const cli = (await import(pathToFileURL(cliFile).href)).cli as CliConfig | undefined;
+    const loaded = await load(cliFile);
+    if (!loaded) return 1;
+    const cli = loaded.cli as CliConfig | undefined;
     if (!cli) errors.push("src/cli.ts exports no cli (export const cli = defineCli({ ... }))");
     else {
       const described = tools.flatMap((t) => {
