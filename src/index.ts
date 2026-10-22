@@ -32,6 +32,7 @@ export {
 } from "./channels.ts";
 export { guards, linkAllowlist, noRepeats, noWriteButtons, oncePerChat, type GuardOptions, type Match } from "./guards.ts";
 export { Conversation, type Profile, type TranscriptEntry } from "./conversation.ts";
+export { memoryMailbox, WEB_CHAT, webChat, webChatSignIn, type WebChat, type WebChatAgent, type WebChatEvent, type WebChatEventBody, type WebChatMailbox, type WebChatOptions, type WebChatPage } from "./web-chat.ts";
 export { nudgeHandler, peopleHandler, type NudgeHandlerOptions, type PeopleHandlerOptions } from "./http.ts";
 export { sqlite, type Database } from "./db.ts";
 export { postgres, type PostgresPool } from "./postgres.ts";

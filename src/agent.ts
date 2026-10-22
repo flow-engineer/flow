@@ -462,10 +462,13 @@ export class Agent {
   /**
    * A message from a person on a channel set up in `channels`. Returns the conversation and the id
    * the agent knows the message by, or null when `intercept` or a keyword answered it. Give the
-   * provider's own `messageId`: the same one again (a webhook retried) is not taken twice.
+   * provider's own `messageId`: the same one again (a webhook retried) is not taken twice. `key` is
+   * the person's own key as your server verified it (a signed-in web visitor), never from a browser
+   * body: the person is then `resolve`'s same key on every channel.
    */
-  async message(input: { channel: string; from: string; message: string | Incoming; messageId?: string }): Promise<{ conversationId: string; messageId: string } | null> {
-    return this.released(await this.take(this.channelOf(input.channel), { ...input, via: "provider" }));
+  async message(input: { channel: string; from: string; message: string | Incoming; messageId?: string; key?: string }): Promise<{ conversationId: string; messageId: string } | null> {
+    const { key, ...rest } = input;
+    return this.released(await this.take(this.channelOf(input.channel), { ...rest, via: "provider", ...(key ? { verifiedKey: key } : {}) }));
   }
 
   /**
@@ -937,6 +940,12 @@ export class Agent {
   }
 
   /** What the business and the person set for someone, by a channel identity they wrote from; null for someone who never wrote. */
+  /** The conversation a channel identity belongs to, or null when that address never wrote. */
+  async conversationOf(identity: { channel: string; address: string }): Promise<string | null> {
+    await this.settings.ready;
+    return (await this.store.identity(identity.channel, identity.address))?.conversationId ?? null;
+  }
+
   async contact(to: { channel: string; address: string }): Promise<Contact | null> {
     await this.settings.ready;
     const identity = await this.store.identity(to.channel, to.address);
