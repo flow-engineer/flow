@@ -218,7 +218,7 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   conversation lives in one process at a time (its lease in the database), so the old and new
   copy beside each other during a deploy never answer one message twice; events name their `runner`.
 - After a restart, `resume()` carries on: cut-off turns run again, background tools that were
-  running are reported as interrupted (never rerun).
+  running are reported as interrupted (rerun once only with `onRestart: "rerun"`).
 - `agent.receive(conversationId, message, deliver)` still works for one channel at a time (the
   test cloud uses it).
 - Photos, voice notes and documents: hand them in on the message, `message: { text: caption, attachments: [{ kind: "image" | "audio" | "document", mime, name?, data: () => provider.download(id) }] }`.
