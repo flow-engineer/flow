@@ -41,6 +41,7 @@ export { choosePort, markRunning } from "./local.ts";
 export { flowModel, flowModelURL, flowTranscribe, openAICompatible, type FlowTranscribeOptions, type OpenAICompatibleOptions } from "./model.ts";
 export { Store, type StoreApi } from "./store.ts";
 export type { AgentFiles } from "./skills.ts";
+export { memoryMedia, sniff, type MediaFile, type MediaKind, type MediaStore } from "./media.ts";
 export type { TracesOptions } from "./traces.ts";
 export { tool, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Credentials, type SignIn, type Tool, type ToolContext, type ToolHints } from "./tools.ts";
 export type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, ListRow, Media, Model, ModelRequest, ModelResponse, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateButton, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";

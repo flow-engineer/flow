@@ -8,7 +8,7 @@
 //   await chat.start();
 //   await chat.send("Is the blue one in stock?", { page: { url: location.href, title: document.title } });
 
-import type { WebChatEvent, WebChatEventBody, WebChatPage } from "./web-chat.ts";
+import type { WebChatEvent, WebChatEventBody, WebChatFile, WebChatPage } from "./web-chat.ts";
 
 /** What the client emits: the history (again after the agent restarted), then each event as it comes. */
 export type WebChatClientEvent = { type: "history"; messages: Array<WebChatEventBody & { at: number }> } | WebChatEvent;
@@ -35,7 +35,9 @@ export interface WebChatClient {
   /** Starts the session, emits the history, then keeps polling until close(). */
   start(): Promise<void>;
   /** Sends the visitor's message (or a tap: `choice`); resolves with its id once the agent took it. */
-  send(text: string, options?: { choice?: { id?: string; title: string }; page?: WebChatPage }): Promise<string>;
+  send(text: string, options?: { choice?: { id?: string; title: string }; page?: WebChatPage; attachments?: Array<{ ref: string } | (WebChatFile & { ref: string })> }): Promise<string>;
+  /** Sends the agent a file (a photo, a PDF, a recorded voice note) to attach to a message: pass what it resolves with in `send`'s `attachments`. */
+  upload(file: Blob, name?: string): Promise<WebChatFile & { ref: string }>;
   close(): void;
 }
 
@@ -53,7 +55,18 @@ export function webChatClient(options: WebChatClientOptions): WebChatClient {
   let polling: AbortController | null = null;
   let sent = 0;
 
+  // A file's `src` is a path on the agent: it is made a full URL here, for an <img> or a link.
+  const origin = options.url.replace(/\/+$/, "");
+  const full = (src?: string) => (src?.startsWith("/") ? origin + src : src);
+  const located = <E extends WebChatEventBody>(e: E): E => {
+    if (e.type === "message" && e.from === "person" && e.attachments) return { ...e, attachments: e.attachments.map((f) => ({ ...f, src: full(f.src) })) };
+    if (e.type === "message" && e.from === "agent" && e.image && "src" in e.image) return { ...e, image: { ...e.image, src: full(e.image.src as string) } };
+    if (e.type === "carousel") return { ...e, cards: e.cards.map((c) => ("src" in c.image ? { ...c, image: { ...c.image, src: full(c.image.src as string) } } : c)) };
+    return e;
+  };
+
   const emit = (event: WebChatClientEvent) => {
+    if (event.type !== "history") event = located(event);
     // The person's own messages are echoed, and a retried one twice: each id is shown once.
     if (event.type === "message" && event.from === "person") {
       if (seen.has(event.id)) return;
@@ -91,7 +104,7 @@ export function webChatClient(options: WebChatClientOptions): WebChatClient {
     const { messages, cursor: from } = (await answer.json()) as { messages: Array<WebChatEventBody & { at: number }>; cursor: string };
     for (const m of messages) if (m.type === "message" && m.from === "person") seen.add(m.id);
     cursor = from;
-    for (const listener of listeners) listener({ type: "history", messages });
+    for (const listener of listeners) listener({ type: "history", messages: messages.map(located) });
   }
 
   async function poll(): Promise<void> {
@@ -127,9 +140,10 @@ export function webChatClient(options: WebChatClientOptions): WebChatClient {
     },
     async send(text, extra = {}) {
       const id = `w${Date.now().toString(36)}${(++sent).toString(36)}${Math.random().toString(36).slice(2, 6)}`;
-      const body = JSON.stringify({ id, text, ...(extra.choice ? { choice: extra.choice } : {}), ...(extra.page ? { page: extra.page } : {}) });
+      const body = JSON.stringify({ id, text, ...(extra.choice ? { choice: extra.choice } : {}), ...(extra.page ? { page: extra.page } : {}), ...(extra.attachments?.length ? { attachments: extra.attachments.map((a) => ({ ref: a.ref })) } : {}) });
       // Shown at once; the echo with the same id is not shown again.
-      emit({ type: "message", from: "person", id, text, ...(extra.choice ? { choice: extra.choice } : {}), cursor: "", at: Date.now() });
+      const shown = (extra.attachments ?? []).filter((a): a is WebChatFile & { ref: string } => "id" in a).map(({ ref: _ref, ...f }) => f);
+      emit({ type: "message", from: "person", id, text, ...(extra.choice ? { choice: extra.choice } : {}), ...(shown.length ? { attachments: shown } : {}), cursor: "", at: Date.now() });
       for (let attempt = 0; ; attempt++) {
         let problem: Error;
         try {
@@ -145,6 +159,12 @@ export function webChatClient(options: WebChatClientOptions): WebChatClient {
         // The same id again: the agent takes it once however often it arrives.
         await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt));
       }
+    },
+    async upload(file, name) {
+      const answer = await call("/files", { method: "POST", headers: { "content-type": file.type || "application/octet-stream", ...(name ? { "x-file-name": encodeURIComponent(name) } : {}) }, body: file });
+      if (answer.status !== 201) throw new Error(`flow web chat: file not taken (${answer.status}): ${await answer.text()}`);
+      const { file: kept } = (await answer.json()) as { file: WebChatFile & { ref: string } };
+      return { ...kept, src: full(kept.src) };
     },
     close() {
       closed = true;

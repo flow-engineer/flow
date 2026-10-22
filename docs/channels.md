@@ -78,11 +78,22 @@ web.attach(agent);
 | `info` | What your chat box shows, over `WEB_CHAT` (Markdown, 10 reply buttons with ids, lists, a link button, photos, carousels, replies, reactions, typing, status lines, read receipts, 8,000 characters, no templates) |
 | `instructions` | Your guidance for the agent while the person is on the web chat |
 | `mailbox` | Where each visitor's events wait for their browser. Default `memoryMailbox()`, in this process: with several runners, give one on a shared store (`WebChatMailbox`: `append`, `read`, `start`) |
-| `limits` | `{ messagesPerMinute: 20, sessionsPerMinute: 30, messageChars: 4000 }` |
+| `limits` | `{ messagesPerMinute: 20, sessionsPerMinute: 30, messageChars: 4000, fileBytes: 10 MB, filesPerMinute: 10 }` |
 
 `web.page(conversationId)` is the page the person last wrote from (`{ url, title? }`), for your
 `context` in your own words. Accepted, for its `send()`, means the visitor's mailbox kept the message
 ([guarantees](guarantees.md)).
+
+**Files.** With `createAgent({ media })` (your `MediaStore`: `put`, `get`, `forget`; `memoryMedia()`
+for development), visitors send photos (JPEG, PNG, WebP, GIF), PDFs and voice notes (Ogg, WebM, MP3,
+MP4, WAV), told by their first bytes: `POST {base}/files` with the bytes as the body (its
+`Content-Type`, `X-File-Name` URL-encoded) answers `201 { file: { id, ref, kind, mime, size, name, src } }`,
+then the message carries `attachments: [{ ref }]` (up to 3; the text may be empty). A `ref` works only
+for the visitor who sent the file. Files the store keeps (theirs, and photos the agent sends by the
+store's id) come back with `src`, a link signed for an hour (`GET {base}/file?id&exp&sig`, no session);
+the history signs them again. Without a store, `POST {base}/files` answers 501. `agent.forgetPerson`
+erases the person's files from the store. In the client: `const file = await client.upload(blob, name)`,
+then `client.send(text, { attachments: [file] })`.
 
 **Signed-in visitors.** Your server, once it knows who the visitor is, signs a short-lived token:
 `webChatSignIn(secret, key)` (or any HS256 JWT library: `{ sub: key, aud: "flow-web-chat", exp }`,

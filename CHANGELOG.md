@@ -15,6 +15,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   client is `webChatClient` from the new entry point `@flow-engineer/flow/web-chat`. The playground
   and the test cloud play it in the web simulator; the conformance suite runs it through every
   delivery check. [docs/channels.md](docs/channels.md#webchatoptions)
+- **Media stores.** `createAgent({ media })` takes a `MediaStore` (`put`, `get`, `forget`), your own
+  storage for the files people send; `memoryMedia()` keeps them in memory for development and tests.
+  With one, the web chat takes photos, PDFs and voice notes (`POST {base}/files`, then
+  `attachments: [{ ref }]` on a message; `client.upload(blob)`), told by their first bytes, at most
+  10 MB and 3 a message, shown back by signed links (`src`) that expire after an hour; without one
+  it answers 501. `agent.forgetPerson` erases the person's files (`forget(owner)`). Flow's own
+  storage and sending documents, audio and voice are next.
 - `agent.message({ ..., key })` takes a person's key your server verified; `agent.conversationOf({ channel, address })`
   gives the conversation an address belongs to.
 

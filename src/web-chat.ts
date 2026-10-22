@@ -10,16 +10,29 @@
 //   POST {base}/session   { token? }                       → 200 { session, expires_at, signed_in }
 //   GET  {base}/history                                    → 200 { messages, cursor }
 //   GET  {base}/events?after=<cursor>&wait=<seconds ≤ 25>  → 200 { events, cursor } | { reset: true }
-//   POST {base}/messages  { id, text, choice?, page? }     → 202 { id }
+//   POST {base}/messages  { id, text, choice?, page?, attachments? } → 202 { id }
+//   POST {base}/files     the file's bytes (Content-Type, X-File-Name?) → 201 { file } (needs createAgent's `media`)
+//   GET  {base}/file?id&exp&sig                            → the file's bytes, by the signed `src` events carry
 // `token` is the business's own sign-in token (an HS256 JWT signed with `secret`: { sub, aud:
 // "flow-web-chat", exp }); without it the visitor is anonymous. Accepted, for `send()`, means the
 // visitor's mailbox kept the message; the browser reads it from there (docs/guarantees.md).
 
 import { createHmac, randomUUID } from "node:crypto";
 import type { Agent } from "./agent.ts";
+import { sniff, type MediaKind } from "./media.ts";
 import { replyButton, type Channel } from "./channels.ts";
 import { requireToken, sameSecret, withoutTrailingSlashes } from "./http.ts";
-import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, SendReceipt } from "./types.ts";
+import type { Attachment, CarouselCard, ChannelInfo, ListRow, Outbound, Photo, SendReceipt } from "./types.ts";
+
+/** A file a visitor sent, as their browser is shown it: `src` (on the way out) is where its bytes are, signed for an hour. */
+export interface WebChatFile {
+  id: string;
+  kind: MediaKind;
+  mime: string;
+  size: number;
+  name?: string;
+  src?: string;
+}
 
 /** What the web chat box can show (decided for Flow Framework's own client; narrow it with `info` for yours). */
 export const WEB_CHAT: ChannelInfo = {
@@ -42,7 +55,7 @@ export const WEB_CHAT: ChannelInfo = {
 /** One thing the visitor's browser is told, as the mailbox keeps it. */
 export type WebChatEventBody =
   | { type: "message"; from: "agent"; text: string; replyTo?: string; buttons?: Array<{ id: string; label: string }>; list?: { button: string; rows: ListRow[] }; link?: { label: string; url: string }; image?: Photo; fields?: Record<string, unknown> }
-  | { type: "message"; from: "person"; id: string; text: string; choice?: { id?: string; title: string } }
+  | { type: "message"; from: "person"; id: string; text: string; choice?: { id?: string; title: string }; attachments?: WebChatFile[] }
   | { type: "carousel"; text: string; cards: CarouselCard[]; replyTo?: string }
   | { type: "typing"; on: boolean }
   | { type: "status"; text: string | null }
@@ -170,13 +183,17 @@ export interface WebChatOptions {
     sessionsPerMinute?: number;
     /** The longest message, in characters. Default 4,000. */
     messageChars?: number;
+    /** The largest file a visitor may send, in bytes. Default 10 MB. */
+    fileBytes?: number;
+    /** Files one visitor may send a minute. Default 10. */
+    filesPerMinute?: number;
   };
   /** The clock (tests move it). */
   now?: () => number;
 }
 
 /** What the routes need from the agent; Flow Framework's Agent is one. */
-export type WebChatAgent = Pick<Agent, "message" | "transcript" | "conversationOf">;
+export type WebChatAgent = Pick<Agent, "message" | "transcript" | "conversationOf"> & Partial<Pick<Agent, "media">>;
 
 /** The page a visitor wrote from, as their browser said. */
 export interface WebChatPage {
@@ -202,6 +219,9 @@ const SIGN_IN_TOKEN_MAX_MS = 24 * 3_600_000;
 const MAX_BODY = 16_384;
 const MAX_WAIT_SECONDS = 25;
 const MAX_PAGES = 10_000;
+const MAX_ATTACHMENTS = 3;
+/** How long a file's signed `src` works. */
+const FILE_LINK_MS = 3_600_000;
 
 export function webChat(options: WebChatOptions): WebChat {
   requireToken(options?.secret, "flow web chat");
@@ -211,10 +231,32 @@ export function webChat(options: WebChatOptions): WebChat {
   const mailbox = options.mailbox ?? memoryMailbox();
   const now = options.now ?? Date.now;
   const origins = options.origins ? new Set(options.origins.map((o) => withoutTrailingSlashes(o))) : null;
-  const limits = { messagesPerMinute: 20, sessionsPerMinute: 30, messageChars: 4000, ...options.limits };
+  const limits = { messagesPerMinute: 20, sessionsPerMinute: 30, messageChars: 4000, fileBytes: 10 * 1_048_576, filesPerMinute: 10, ...options.limits };
   const info: ChannelInfo = { ...WEB_CHAT, ...options.info };
   const messages = counter(now);
   const sessions = counter(now);
+  const uploads = counter(now);
+  const mac = (text: string) => createHmac("sha256", secret).update(text).digest("base64url");
+  /** A visitor's handle on a file they sent: its id, signed for them, so no one else can send it. */
+  const refOf = (address: string, id: string) => `${id}.${mac(`ref:${address}:${id}`).slice(0, 32)}`;
+  const idOfRef = (address: string, ref: string): string | null => {
+    const at = ref.lastIndexOf(".");
+    const id = ref.slice(0, at);
+    return at > 0 && sameSecret(ref, refOf(address, id)) ? id : null;
+  };
+  /** Where a browser fetches a file the store keeps: no session in the URL, a signature valid an hour. */
+  const srcOf = (id: string) => {
+    const exp = Math.floor((now() + FILE_LINK_MS) / 1000);
+    return `${base}/file?id=${encodeURIComponent(id)}&exp=${exp}&sig=${mac(`file:${id}:${exp}`)}`;
+  };
+  const showPhoto = (p: Photo) => ("fileId" in p ? { ...p, src: srcOf(p.fileId) } : p);
+  /** An event as the browser gets it: files kept by the store get a signed `src`. */
+  const present = <E extends WebChatEventBody>(event: E): E => {
+    if (event.type === "message" && event.from === "person" && event.attachments) return { ...event, attachments: event.attachments.map((f) => ({ ...f, src: srcOf(f.id) })) };
+    if (event.type === "message" && event.from === "agent" && event.image) return { ...event, image: showPhoto(event.image) };
+    if (event.type === "carousel") return { ...event, cards: event.cards.map((c) => ({ ...c, image: showPhoto(c.image) })) };
+    return event;
+  };
   const pages = new Map<string, WebChatPage>();
   let agent: WebChatAgent | null = null;
 
@@ -298,7 +340,7 @@ export function webChat(options: WebChatOptions): WebChat {
       if (e.carousel) return [{ type: "carousel", text: e.text, cards: e.carousel, at: e.at }];
       return [{ type: "message", from: "agent", text: e.text, ...(e.buttons?.length ? { buttons: e.buttons.map(replyButton) } : {}), ...(e.list ? { list: e.list } : {}), ...(e.link ? { link: e.link } : {}), ...(e.image ? { image: e.image } : {}), ...(e.fields ? { fields: e.fields } : {}), at: e.at }];
     });
-    return json(200, { messages: shown, cursor }, headers);
+    return json(200, { messages: shown.map(present), cursor }, headers);
   }
 
   async function events(request: Request, visitor: { address: string }, headers: Record<string, string>): Promise<Response> {
@@ -306,20 +348,33 @@ export function webChat(options: WebChatOptions): WebChat {
     const after = url.searchParams.get("after");
     if (!after) return json(400, { error: "give after=<cursor>, from history or the last events" }, headers);
     const wait = Math.min(MAX_WAIT_SECONDS, Math.max(0, Number(url.searchParams.get("wait") ?? MAX_WAIT_SECONDS) || 0));
-    return json(200, await mailbox.read(visitor.address, after, wait * 1000, request.signal), headers);
+    const got = await mailbox.read(visitor.address, after, wait * 1000, request.signal);
+    return json(200, "reset" in got ? got : { ...got, events: got.events.map(present) }, headers);
   }
 
   async function message(request: Request, visitor: { address: string; key?: string }, headers: Record<string, string>): Promise<Response> {
     const body = await readJson(request);
     const problem = badMessage(body, limits.messageChars);
     if (problem) return json(400, { error: problem }, headers);
-    const m = body as { id: string; text: string; choice?: { id?: string; title: string }; page?: WebChatPage };
+    const m = body as { id: string; text: string; choice?: { id?: string; title: string }; page?: WebChatPage; attachments?: Array<{ ref: string }> };
+    // Each file is one this visitor sent (its ref is signed for them) and the store still keeps.
+    const files: WebChatFile[] = [];
+    const attachments: Attachment[] = [];
+    for (const { ref } of m.attachments ?? []) {
+      const id = idOfRef(visitor.address, ref);
+      const kept = id && agent!.media ? await agent!.media.get(id) : null;
+      if (!id || !kept || kept.owner !== `${name}:${visitor.address}`) return json(400, { error: "attachments: each { ref } is one POST " + base + "/files gave this visitor" }, headers);
+      const kind = sniff(kept.data)?.kind ?? "document";
+      files.push({ id, kind, mime: kept.mime, size: kept.size, ...(kept.name ? { name: kept.name } : {}) });
+      const store = agent!.media!;
+      attachments.push({ kind, mime: kept.mime, ...(kept.name ? { name: kept.name } : {}), data: async () => (await store.get(id))?.data ?? Promise.reject(new Error("the file is no longer kept")) });
+    }
     if (!messages.take(visitor.address, limits.messagesPerMinute)) return json(429, { error: "too many messages; wait a moment" }, headers);
     const taken = await agent!.message({
       channel: name,
       from: visitor.address,
       messageId: m.id,
-      message: { text: m.text, ...(m.choice ? { choice: m.choice } : {}) },
+      message: { text: m.text, ...(m.choice ? { choice: m.choice } : {}), ...(attachments.length ? { attachments } : {}) },
       ...(visitor.key ? { key: visitor.key } : {}),
     });
     const conversationId = taken?.conversationId ?? (await agent!.conversationOf({ channel: name, address: visitor.address }));
@@ -329,8 +384,51 @@ export function webChat(options: WebChatOptions): WebChat {
       if (pages.size > MAX_PAGES) pages.delete(pages.keys().next().value!);
     }
     // Echoed, so the visitor's other tabs and a reload show it; a retried id is shown once by the client.
-    await mailbox.append(visitor.address, { type: "message", from: "person", id: m.id, text: m.text, ...(m.choice ? { choice: m.choice } : {}) });
+    await mailbox.append(visitor.address, { type: "message", from: "person", id: m.id, text: m.text, ...(m.choice ? { choice: m.choice } : {}), ...(files.length ? { attachments: files } : {}) });
     return json(202, { id: m.id }, headers);
+  }
+
+  /** A file the visitor sends, kept in the agent's store before the message that carries it. */
+  async function upload(request: Request, visitor: { address: string }, headers: Record<string, string>): Promise<Response> {
+    const store = agent!.media;
+    if (!store) return json(501, { error: "this agent keeps no files: give createAgent a media store" }, headers);
+    if (Number(request.headers.get("content-length") ?? 0) > limits.fileBytes) return json(413, { error: `a file is at most ${limits.fileBytes} bytes` }, headers);
+    if (!uploads.take(visitor.address, limits.filesPerMinute)) return json(429, { error: "too many files; wait a moment" }, headers);
+    const data = new Uint8Array(await request.arrayBuffer());
+    if (!data.length) return json(400, { error: "the body is the file's bytes" }, headers);
+    if (data.length > limits.fileBytes) return json(413, { error: `a file is at most ${limits.fileBytes} bytes` }, headers);
+    // The bytes say what it is; a browser's type that disagrees (a page called a photo) is refused.
+    const real = sniff(data);
+    const said = (request.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
+    const family = (mime: string) => (mime === "application/pdf" ? "document" : mime.split("/")[0]);
+    if (!real || (said && said !== "application/octet-stream" && family(said) !== family(real.mime) && !(real.kind === "audio" && said.startsWith("video/")))) {
+      return json(415, { error: "photos (JPEG, PNG, WebP, GIF), PDFs and voice notes (Ogg, WebM, MP3, MP4, WAV) only" }, headers);
+    }
+    let fileName: string | undefined;
+    try {
+      fileName = decodeURIComponent(request.headers.get("x-file-name") ?? "").replace(/[\u0000-\u001f\/\\]/g, "").slice(0, 200) || undefined;
+    } catch {
+      return json(400, { error: "X-File-Name is the file's name, URL-encoded" }, headers);
+    }
+    const kept = await store.put({ data, mime: real.mime, ...(fileName ? { name: fileName } : {}), owner: `${name}:${visitor.address}` });
+    const file: WebChatFile = { id: kept.id, kind: real.kind, mime: kept.mime, size: kept.size, ...(kept.name ? { name: kept.name } : {}) };
+    return json(201, { file: { ...file, ref: refOf(visitor.address, kept.id), src: srcOf(kept.id) } }, headers);
+  }
+
+  /** A file's bytes by its signed `src` (an <img> sends no session); only files the agent's store keeps. */
+  async function file(request: Request, headers: Record<string, string>): Promise<Response> {
+    const url = new URL(request.url);
+    const id = url.searchParams.get("id") ?? "";
+    const exp = Number(url.searchParams.get("exp"));
+    const sig = url.searchParams.get("sig") ?? "";
+    if (!id || !Number.isInteger(exp) || exp * 1000 <= now() || !sameSecret(sig, mac(`file:${id}:${exp}`))) return json(403, { error: "this link is not valid, or it expired: read the history again for a fresh one" }, headers);
+    const kept = agent?.media ? await agent.media.get(id) : null;
+    if (!kept) return json(404, { error: "the file is no longer kept" }, headers);
+    const inline = kept.mime.startsWith("image/") || kept.mime.startsWith("audio/");
+    return new Response(kept.data as BodyInit, {
+      status: 200,
+      headers: { ...headers, "content-type": kept.mime, "x-content-type-options": "nosniff", "content-disposition": inline ? "inline" : "attachment", "cache-control": "private, max-age=3600" },
+    });
   }
 
   function route(handle: (request: Request, visitor: { address: string; key?: string }, headers: Record<string, string>) => Promise<Response>, method: "GET" | "POST", open = false) {
@@ -338,7 +436,7 @@ export function webChat(options: WebChatOptions): WebChat {
       const headers = cors(request);
       if (!headers) return json(403, { error: "this site may not embed the chat" });
       if (request.method === "OPTIONS") {
-        return new Response(null, { status: 204, headers: { ...headers, "access-control-allow-methods": "GET, POST, OPTIONS", "access-control-allow-headers": "authorization, content-type", "access-control-max-age": "600" } });
+        return new Response(null, { status: 204, headers: { ...headers, "access-control-allow-methods": "GET, POST, OPTIONS", "access-control-allow-headers": "authorization, content-type, x-file-name", "access-control-max-age": "600" } });
       }
       if (request.method !== method) return json(405, { error: `use ${method}` }, headers);
       try {
@@ -366,6 +464,8 @@ export function webChat(options: WebChatOptions): WebChat {
       [`${base}/history`]: route((_request, visitor, headers) => history(visitor, headers), "GET"),
       [`${base}/events`]: route(events, "GET"),
       [`${base}/messages`]: route(message, "POST"),
+      [`${base}/files`]: route(upload, "POST"),
+      [`${base}/file`]: route((request, _visitor, headers) => file(request, headers), "GET", true),
     },
     attach(attached) {
       agent = attached;
@@ -379,12 +479,13 @@ export function webChat(options: WebChatOptions): WebChat {
 /** Why a message body is refused, or null. */
 function badMessage(body: Record<string, unknown> | undefined, maxChars: number): string | null {
   if (!body) return `the body is JSON of at most ${MAX_BODY} bytes`;
-  if (body.attachments !== undefined) return "attachments are not taken on the web chat yet";
   if (typeof body.id !== "string" || !/^[\w.:-]{1,64}$/.test(body.id)) return "id: your own id for the message, 1 to 64 letters, digits, _ . : or -, the same when you send it again";
   if (typeof body.text !== "string" || [...body.text].length > maxChars) return `text: a string of at most ${maxChars} characters`;
   const choice = body.choice as Record<string, unknown> | undefined;
   if (choice !== undefined && (typeof choice !== "object" || choice === null || typeof choice.title !== "string" || (choice.id !== undefined && typeof choice.id !== "string"))) return "choice: { id?, title }, what they tapped";
-  if (!body.text.trim() && !choice) return "text is empty";
+  const attachments = body.attachments as unknown;
+  if (attachments !== undefined && (!Array.isArray(attachments) || attachments.length > MAX_ATTACHMENTS || attachments.some((a) => typeof a?.ref !== "string"))) return `attachments: up to ${MAX_ATTACHMENTS} { ref }, from POST /files`;
+  if (!body.text.trim() && !choice && !(attachments as unknown[] | undefined)?.length) return "text is empty";
   const page = body.page as Record<string, unknown> | undefined;
   if (page !== undefined && (typeof page !== "object" || page === null || typeof page.url !== "string" || page.url.length > 2000 || (page.title !== undefined && (typeof page.title !== "string" || page.title.length > 300)))) return "page: { url, title? }, the page they wrote from";
   return null;

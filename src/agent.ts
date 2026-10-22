@@ -20,6 +20,7 @@ import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, trans
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
 import { businessSchedule, claimDue, summary } from "./schedules.ts";
+import type { MediaStore } from "./media.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
 import { Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
 import { clock, quietUntil, validZone } from "./time.ts";
@@ -62,6 +63,11 @@ export interface AgentOptions {
    * marked as a voice note. Without it, it is told a voice note came that it can't listen to.
    */
   transcribe?: Transcribe;
+  /**
+   * Where files are kept (your storage, or `flowMedia()` for Flow's): what the web chat needs to take
+   * a person's photos, PDFs and voice notes. Without it, nothing is kept and the web chat refuses files.
+   */
+  media?: MediaStore;
   tools?: Tool[];
   /** Backend credentials or clients for a verified person, available only to tool code as context.credentials. */
   credentials?: CredentialProvider;
@@ -670,7 +676,10 @@ export class Agent {
       this.conversations.delete(conversationId);
       await resident.stored();
     }
-    for (const i of await this.store.identities(conversationId)) this.via.delete(viaKey(i.channel, i.address));
+    for (const i of await this.store.identities(conversationId)) {
+      this.via.delete(viaKey(i.channel, i.address));
+      await this.options.media?.forget?.(`${i.channel}:${i.address}`);
+    }
     this.rows.delete(conversationId);
     await this.store.forgetPerson(conversationId);
   }
@@ -941,6 +950,11 @@ export class Agent {
 
   /** What the business and the person set for someone, by a channel identity they wrote from; null for someone who never wrote. */
   /** The conversation a channel identity belongs to, or null when that address never wrote. */
+  /** The agent's file store (`createAgent({ media })`), or undefined. */
+  get media(): MediaStore | undefined {
+    return this.options.media;
+  }
+
   async conversationOf(identity: { channel: string; address: string }): Promise<string | null> {
     await this.settings.ready;
     return (await this.store.identity(identity.channel, identity.address))?.conversationId ?? null;
