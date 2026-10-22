@@ -34,6 +34,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   code only), and `agent.status().store` is `"failing"` until a write is stored again (`"ok"`, or
   `"memory"` with no database). The chat goes on replying: a reply missed is worse than a history
   line lost.
+- **Values per person.** A tool's `ctx.values` keeps small JSON values for the person it serves
+  (`get(name)`, `set(name, value)`, null deletes, `all()`), in the agent's store: read live, written
+  at once (fenced by the lease), kept across restarts, deleted by `forgetPerson`. The business reads
+  and sets them with `agent.values({ channel, address })` and `agent.setValue(person, name, value)`.
+  At most 64 per person, 4 KB each as JSON, names like `onboarding.step`; a refused set throws, in
+  words the model can read. The model is never shown them on their own: only where the agent's
+  instructions or tools show them. They are for conversation state, not business records.
 
 ### Migration notes
 
@@ -59,6 +66,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   12, or drops the argument, saves as in 0.5 (last save wins).
 - `AgentStatus` has a new field, `store`. During a store outage a step that sends waits up to about
   6 seconds for its write before the send goes.
+- Store migration 13 adds the `person_values` table; new store methods `values(conversationId)` and
+  `setValue(conversationId, name, value, at, fence?)`. On a store service that has not got them,
+  `ctx.values` calls fail (the tool gets the error).
 
 ## 0.5.0 (unreleased)
 

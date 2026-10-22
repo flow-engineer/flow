@@ -941,6 +941,25 @@ export class Agent {
     return { status: "set" };
   }
 
+  /** The values kept for someone (`ctx.values` in their tools), by a channel identity they wrote from; null for someone who never wrote. */
+  async values(to: { channel: string; address: string }): Promise<Record<string, unknown> | null> {
+    await this.settings.ready;
+    const identity = await this.store.identity(to.channel, to.address);
+    return identity ? this.store.values(identity.conversationId) : null;
+  }
+
+  /**
+   * Sets one of someone's values from the business's side (null deletes it): their tools read it at
+   * their next call. Throws for someone who never wrote, and as `ctx.values.set` does for a bad
+   * name, a value over 4 KB or a 65th value.
+   */
+  async setValue(to: { channel: string; address: string }, name: string, value: unknown): Promise<void> {
+    await this.settings.ready;
+    const identity = await this.store.identity(to.channel, to.address);
+    if (!identity) throw new Error(`flow: no one has written from ${to.address} on ${to.channel}`);
+    await this.store.setValue(identity.conversationId, name, value, this.now());
+  }
+
   /** What the business and the person set for someone, by a channel identity they wrote from; null for someone who never wrote. */
   async contact(to: { channel: string; address: string }): Promise<Contact | null> {
     await this.settings.ready;

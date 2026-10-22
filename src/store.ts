@@ -117,7 +117,26 @@ const MIGRATIONS: Array<((t: Types) => string) | null> = [
   // flowEvents' snapshot is saved over the version a runner read, so the old and the new runner of
   // a deploy do not save over each other's held sends.
   () => `ALTER TABLE event_state ADD COLUMN version INTEGER NOT NULL DEFAULT 0`,
+  // Small values the agent keeps per person (an onboarding step, a chosen plan), JSON, capped.
+  (t) => `CREATE TABLE person_values (
+     agent_id TEXT NOT NULL, conversation_id TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL, updated_at ${t.int} NOT NULL,
+     PRIMARY KEY (agent_id, conversation_id, name))`,
 ];
+
+/** At most this many values per person, each at most VALUE_BYTES as JSON, named like `onboarding.step`. */
+export const VALUES_PER_PERSON = 64;
+export const VALUE_BYTES = 4096;
+const VALUE_NAME = /^[a-z][a-z0-9_.]{0,63}$/;
+
+/** Why a person value cannot be set, in words a model can read; null when it can. */
+export function valueRefusal(name: string, value: unknown): string | null {
+  if (typeof name !== "string" || !VALUE_NAME.test(name)) return `"${String(name).slice(0, 80)}" is not a value name: lowercase letters, digits, "_" and ".", starting with a letter, at most 64`;
+  if (value === null) return null;
+  const text = JSON.stringify(value);
+  if (text === undefined) return `${name}: only JSON values (text, numbers, true/false, lists, objects)`;
+  if (Buffer.byteLength(text) > VALUE_BYTES) return `${name}: the value is over ${VALUE_BYTES} bytes as JSON`;
+  return null;
+}
 
 /** Quiet hours, "HH:MM" to "HH:MM" in the person's own time; they may wrap midnight. */
 export interface QuietHours {
@@ -460,7 +479,7 @@ export class Store {
     const scope = [this.agentId, conversationId];
     await this.db.transaction(async (tx) => {
       await tx.run("DELETE FROM schedule_runs WHERE agent_id = ? AND schedule_id IN (SELECT id FROM schedules WHERE agent_id = ? AND conversation_id = ?)", [this.agentId, ...scope]);
-      for (const table of ["schedules", "nudges", "no_contact", "background_tools", "inbox", "messages", "inbound", "identities", "sends"]) {
+      for (const table of ["schedules", "nudges", "no_contact", "background_tools", "inbox", "messages", "inbound", "identities", "sends", "person_values"]) {
         await tx.run(`DELETE FROM ${table} WHERE agent_id = ? AND conversation_id = ?`, scope);
       }
       await tx.run("DELETE FROM conversations WHERE agent_id = ? AND id = ?", scope);
@@ -479,6 +498,33 @@ export class Store {
     if (fields.quietHours !== undefined) sets.push("quiet_hours = ?"), params.push(fields.quietHours === null ? null : json(fields.quietHours));
     if (!sets.length) return;
     await this.write(id, fence, (db) => db.run(`UPDATE conversations SET ${sets.join(", ")} WHERE agent_id = ? AND id = ?`, [...params, this.agentId, id]));
+  }
+
+  // Values kept per person.
+
+  /** Every value kept for this person, by name. */
+  async values(conversationId: string): Promise<Record<string, unknown>> {
+    const rows = await this.db.query("SELECT name, value FROM person_values WHERE agent_id = ? AND conversation_id = ? ORDER BY name", [this.agentId, conversationId]);
+    return Object.fromEntries(rows.map((r) => [String(r.name), parse<unknown>(r.value, null)]));
+  }
+
+  /**
+   * Sets one value (null deletes it). Throws, writing nothing, for a bad name, a value over
+   * VALUE_BYTES, or a new name past VALUES_PER_PERSON; with `fence`, also when another runner holds them.
+   */
+  async setValue(conversationId: string, name: string, value: unknown, at: number, fence?: Fence): Promise<void> {
+    const refused = valueRefusal(name, value);
+    if (refused) throw new Error(refused);
+    await this.db.transaction(async (tx) => {
+      await this.fenced(tx, conversationId, fence);
+      if (value === null) return void (await tx.run("DELETE FROM person_values WHERE agent_id = ? AND conversation_id = ? AND name = ?", [this.agentId, conversationId, name]));
+      const [count] = await tx.query("SELECT count(*) AS n FROM person_values WHERE agent_id = ? AND conversation_id = ? AND name <> ?", [this.agentId, conversationId, name]);
+      if (Number(count.n) >= VALUES_PER_PERSON) throw new Error(`${name}: this person already has ${VALUES_PER_PERSON} values; set one to null first`);
+      await tx.run(
+        "INSERT INTO person_values (agent_id, conversation_id, name, value, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (agent_id, conversation_id, name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        [this.agentId, conversationId, name, json(value), at],
+      );
+    });
   }
 
   // History.

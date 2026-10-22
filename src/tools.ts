@@ -31,6 +31,20 @@ export interface ToolContext {
   signal: AbortSignal;
   /** Server-side backend access for this verified person. Never supplied by the model or serialized into history or traces. */
   credentials?: Credentials;
+  /**
+   * Small values kept for this person in the agent's store (an onboarding step, a chosen plan):
+   * read live, written at once. The model sees them only where your instructions or tools show
+   * them. Absent outside a conversation (a standalone MCP call). Never serialized into traces.
+   */
+  values?: PersonValues;
+}
+
+/** A person's values: JSON, at most 64 per person, 4 KB each, names like `onboarding.step`. A refused set throws, in words the model can read. */
+export interface PersonValues {
+  get<T = unknown>(name: string): Promise<T | undefined>;
+  /** null deletes it. */
+  set(name: string, value: unknown): Promise<void>;
+  all(): Promise<Record<string, unknown>>;
 }
 
 /** A business supplies named backend credentials or clients, resolved afresh for the verified person. */

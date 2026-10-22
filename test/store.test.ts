@@ -641,3 +641,50 @@ test("a store write that fails for a passing reason is tried again in order; one
     STORE_RETRY_MS.splice(0, STORE_RETRY_MS.length, ...delays);
   }
 });
+
+test("a tool keeps values per person: read live (also what the business set), kept across a restart, capped, never shown to the model on their own, and forgotten with the person", async () => {
+  const path = file();
+  const seen: unknown[] = [];
+  const step = tool({
+    name: "next_step",
+    description: "Move their onboarding on",
+    input: z.object({}),
+    run: async (_input, ctx) => {
+      const at = (await ctx.values!.get<number>("onboarding.step")) ?? 0;
+      await ctx.values!.set("onboarding.step", at + 1);
+      seen.push(await ctx.values!.all());
+      return { step: at + 1 };
+    },
+  });
+  const person = { channel: "sms", address: "+15550100100" };
+  const before = multi({ channels: CHANNELS, database: sqlite(path), tools: [step] });
+  await before.agent.resume();
+  assert.equal(await before.agent.values(person), null, "no one by that address yet");
+  const a = await before.message("sms", "+15550100100", "hi");
+  (await before.nextCall(0)).answer(respond(call("send_sms", { text: "On it." }), call("next_step", {})));
+  (await before.nextCall(1)).answer(respond());
+  await before.agent.conversation(a!.conversationId)!.whenIdle();
+  await before.agent.setValue(person, "plan", "pro");
+
+  const after = multi({ channels: CHANNELS, database: sqlite(path), dir: before.dir, tools: [step] });
+  await after.agent.resume();
+  await after.message("sms", "+15550100100", "next");
+  const turn = await after.nextCall(0);
+  assert.doesNotMatch(JSON.stringify(turn.request), /"pro"|onboarding\.step/, "the model is not shown them");
+  turn.answer(respond(call("send_sms", { text: "On it." }), call("next_step", {})));
+  (await after.nextCall(1)).answer(respond());
+  await after.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.deepEqual(seen, [{ "onboarding.step": 1 }, { "onboarding.step": 2, plan: "pro" }]);
+
+  await assert.rejects(after.agent.setValue(person, "Plan", 1), /not a value name/);
+  await assert.rejects(after.agent.setValue(person, "note", "x".repeat(4096)), /over 4096 bytes/);
+  for (let i = 0; i < 62; i++) await after.agent.setValue(person, `v${i}`, i);
+  await assert.rejects(after.agent.setValue(person, "one.more", true), /already has 64 values/);
+  await after.agent.setValue(person, "plan", null);
+  await after.agent.setValue(person, "one.more", true);
+  assert.equal(Object.keys((await after.agent.values(person))!).length, 64);
+
+  await after.agent.forgetPerson(a!.conversationId);
+  assert.equal(await after.agent.values(person), null);
+  assert.equal(Number((await sqlite(path).query("SELECT count(*) AS n FROM person_values"))[0].n), 0);
+});

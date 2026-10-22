@@ -52,7 +52,7 @@ import { scheduleTools } from "./schedules.ts";
 import { transient, type ConversationRow, type Fence, type InboxRow, type NoContactRow, type QuietHours, type SendRow, type StoreApi, type TimeZoneSource } from "./store.ts";
 import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
-import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
+import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type PersonValues, type Tool, type ToolContext } from "./tools.ts";
 import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 
 export interface ConversationSettings {
@@ -775,6 +775,16 @@ export class Conversation {
     );
     this.writes = next;
     return next;
+  }
+
+  /** This person's values for a tool: read from the store each time, written at once, fenced by the lease. */
+  private values(): PersonValues {
+    const { store } = this.settings;
+    return {
+      get: async <T>(name: string) => (await store.values(this.id))[name] as T | undefined,
+      set: (name, value) => store.setValue(this.id, name, value, this.settings.now(), this.fence()),
+      all: () => store.values(this.id),
+    };
   }
 
   /** The lease this copy's writes are made under; none before this runner first held it, or with a store that has no leases. */
@@ -1794,6 +1804,7 @@ export class Conversation {
     const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal };
     const credentials = this.settings.credentialProvider?.(identityContext) ?? this.settings.credentials;
     let context = toolContext(identityContext, credentials);
+    Object.defineProperty(context, "values", { value: this.values(), enumerable: false });
     let authorize!: () => void;
     const authorized = new Promise<void>(resolve => { authorize = resolve; });
     const r: Running = {
