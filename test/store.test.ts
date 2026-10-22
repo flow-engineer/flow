@@ -547,3 +547,48 @@ test("a send settled before the runner stopped gives the model its result after 
   await after.agent.runDue();
   assert.equal(await sends(), 0);
 });
+
+test("a conversation's writes are fenced by the lease: once another runner took it, the stalled runner's writes are refused and change nothing; unfenced writes work as before", async () => {
+  const store = new Store(sqlite(), "agent");
+  await store.migrate();
+  await store.createConversation("c1", "sms:+15550100100");
+  const now = Date.now();
+  assert.equal(await store.claimConversation("c1", "old", now, now + LEASE_MS), 1);
+  assert.equal(await store.claimConversation("c1", "new", now + LEASE_MS, now + 2 * LEASE_MS), 2);
+  const stale = { runner: "old", epoch: 1 };
+  await assert.rejects(store.updateConversation("c1", { turns: 5 }, stale), { name: "StaleRunner" });
+  await assert.rejects(store.appendHistory("c1", 0, [{ role: "user", content: "late" }], [], stale), { name: "StaleRunner" });
+  await assert.rejects(store.beginSends("c1", 0, [{ role: "user", content: "late" }], [{ key: "k", callId: "c", channel: "sms" }], now, stale), { name: "StaleRunner" });
+  await assert.rejects(store.addTask("c1", "t1", "c", "tool", now, stale), { name: "StaleRunner" });
+  const row = await store.addInbox("c1", "note", { text: "x" });
+  await assert.rejects(store.doneInbox([row], "c1", stale), { name: "StaleRunner" });
+  assert.deepEqual([(await store.conversation("c1"))!.turns, (await store.history("c1")).length, (await store.sendsFor("c1", ["c"])).length, (await store.tasks("c1")).length, (await store.openInbox("c1")).length], [0, 0, 0, 0, 1], "nothing was written");
+
+  await store.updateConversation("c1", { turns: 5 }, { runner: "new", epoch: 2 });
+  await store.updateConversation("c1", { messageCount: 3 });
+  assert.deepEqual([(await store.conversation("c1"))!.turns, (await store.conversation("c1"))!.messageCount], [5, 3]);
+});
+
+test("a runner that stalled past its lease sends nothing once another runner took the conversation, and stops working on it", async () => {
+  const path = file();
+  const stalled = multi({ channels: CHANNELS, database: sqlite(path) });
+  await stalled.agent.resume();
+  const a = await stalled.message("sms", "+15550100100", "when is my session?");
+  const id = a!.conversationId;
+  const late = await stalled.nextCall(0); // its model call hangs past the lease
+  const copy = stalled.agent.conversation(id)!;
+  await copy.stored();
+
+  const other = multi({ channels: CHANNELS, database: sqlite(path), dir: stalled.dir, now: leaseOver });
+  await other.agent.resume();
+  (await other.nextCall(0)).answer(respond(call("send_sms", { text: "Thursday at 10." })));
+  await other.agent.conversation(id)!.whenIdle();
+
+  late.answer(respond(call("send_sms", { text: "Thursday at 10!" })));
+  await copy.whenIdle();
+  assert.deepEqual(stalled.texts("sms"), [], "the stalled runner's send never went");
+  assert.equal(stalled.agent.conversation(id), undefined, "it dropped its copy");
+  assert.deepEqual(other.texts("sms"), ["Thursday at 10."]);
+  const entries = await new Store(sqlite(path), "default").history(id);
+  assert.equal(entries.filter((e) => e.role === "assistant").length, 1, "only the runner holding it wrote the step");
+});

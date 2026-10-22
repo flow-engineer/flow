@@ -38,7 +38,7 @@ export { postgres, type PostgresPool } from "./postgres.ts";
 export { jsonlSink, type EventSink, type FlowEvent, type ChinwagEvent } from "./events.ts";
 export { choosePort, markRunning } from "./local.ts";
 export { flowModel, flowModelURL, flowTranscribe, openAICompatible, type FlowTranscribeOptions, type OpenAICompatibleOptions } from "./model.ts";
-export { Store, type StoreApi } from "./store.ts";
+export { StaleRunner, Store, type Fence, type StoreApi } from "./store.ts";
 export type { AgentFiles } from "./skills.ts";
 export type { TracesOptions } from "./traces.ts";
 export { tool, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Credentials, type SignIn, type Tool, type ToolContext, type ToolHints } from "./tools.ts";
