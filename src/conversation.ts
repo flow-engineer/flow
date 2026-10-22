@@ -917,7 +917,7 @@ export class Conversation {
     const link = this.channels.get(row.channel);
     const fresh = this.settings.now() - row.createdAt < RESEND_WITHIN_MS;
     if (!link?.info.idempotentSends || !fresh || call.name !== sendToolName(row.channel)) {
-      this.settings.emit(this.id, "send.resumed", { key: row.key, channel: row.channel, outcome: "unknown", reason: !link ? "no link to the channel" : !fresh ? "older than a day" : "the channel does not dedupe sends" });
+      this.settings.emit(this.id, "send.resumed", { key: row.key, channel: row.channel, outcome: "unknown", reason: !link ? "no link to the channel" : !link.info.idempotentSends ? "the channel does not dedupe sends" : !fresh ? "older than a day" : "its send tool is gone" });
       return null;
     }
     this.sendTools = new Map(this.views().map((v) => [sendToolName(v.name), v.name]));
