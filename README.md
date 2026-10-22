@@ -570,6 +570,9 @@ createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamabl
   framework Sentry's CLI uses): every tool is a command, a `defineCli` file adds command groups
   (`acme order -h` lists `place`, `status`), arguments and columns, and every command takes `--json`,
   `--fields`, `--dry-run` and `--yes`. `npx flow cli --server <url> -h` works for any MCP server.
+- `npx flow inspect <url> tools` (then `call <tool> '<json>'`, `auth`, `resources`, `prompts`) tests
+  any MCP server as a host does, with raw results and the host's sign-in, with or without a CLI: how
+  a coding agent checks your server in the chat it is in.
 - `npx flow check` checks it all by rule before you ship: tools that cannot be described
   exactly, a CLI file that no longer matches the tools, skills that name chat-only tools.
 - Every generated piece can be replaced: the instructions, any tool's descriptor, your own MCP

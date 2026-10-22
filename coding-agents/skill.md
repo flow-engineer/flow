@@ -498,12 +498,17 @@ createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamabl
 - Run `npx @flow-engineer/flow check` from the agent's folder before serving: it refuses tools that
   cannot be described exactly (the `flow-framework-tools` skill lists the rules).
 - Check it yourself, in the chat you are in: never ask the owner to open another coding agent to
-  try it. The CLI is an MCP client, so start `npm run mcp` (as a process that outlives your turn,
-  `mkdir -p .flow && nohup npm run mcp > .flow/mcp.log 2>&1 &`; a coding agent's background tasks can be stopped),
-  then `npm run cli -- tools` lists what a host sees and `npm run cli -- <command> --json` calls a
-  tool as a host would (`npx @flow-engineer/flow cli --server http://127.0.0.1:8790/mcp` without a
-  CLI file). Tools that need sign-in: run `npm run cli -- auth login` in the background, give the
-  owner the link it opens, and call the tool once they say they signed in.
+  try it (a server added to a coding agent only loads in a new chat). `flow inspect` is an MCP
+  client for testing, whether or not the agent has a CLI, and installs nothing into it. Start `npm run mcp` as a
+  process that outlives your turn (`mkdir -p .flow && nohup npm run mcp > .flow/mcp.log 2>&1 &`; a
+  coding agent's background tasks can be stopped), then, with
+  `inspect` standing for `npx -y -p @flow-engineer/flow -p @modelcontextprotocol/client@2.3.1 flow inspect http://127.0.0.1:8790/mcp`:
+  `inspect tools` lists what a host sees, schemas included, and `inspect call <tool> '<json>'` calls a
+  tool as a host would and prints the raw result (`resources`, `read <uri>`, `prompts` and `prompt <name>` too).
+  Tools that need sign-in: run `inspect auth` in the background (it prints what the server
+  advertises and the link, then waits), give the owner the link, and once they say they signed in it
+  prints the client and the token's scope; then call the tool. `--token <token>` sends an API key or
+  test token instead.
 - Then give the owner the line for their own host: `claude mcp add --transport http acme http://127.0.0.1:8790/mcp`.
 
 ## A CLI for the organization

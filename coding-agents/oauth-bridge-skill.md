@@ -174,8 +174,10 @@ secrets.
 
 ## Test it on the laptop
 
-Everything runs on localhost. Claude and ChatGPT cannot reach localhost; the agent's CLI runs the
-same OAuth they do (discovery, registration, PKCE, refresh), so it stands in for them. Run each step
+Everything runs on localhost. Claude and ChatGPT cannot reach localhost; `flow inspect` runs the
+same OAuth they do (discovery, registration, PKCE, refresh), so it stands in for them. Below,
+`inspect` is `npx -y -p @flow-engineer/flow -p @modelcontextprotocol/client@2.3.1 flow inspect
+http://127.0.0.1:<port>/mcp` (the `flow-framework` skill says more). Run each step
 and compare; stop at the first that differs and fix it before going on.
 
 1. **Run the brand's app and the agent locally**, the bridge with `issuer: "http://127.0.0.1:<port>"`,
@@ -187,18 +189,18 @@ and compare; stop at the first that differs and fix it before going on.
    http://127.0.0.1:<port>/.well-known/oauth-protected-resource/mcp` lists the issuer under
    `authorization_servers`, and `curl http://127.0.0.1:<port>/.well-known/oauth-authorization-server`
    answers with `registration_endpoint`.
-2. **Signed out.** Call a `signIn: "required"` tool through the CLI. Expected: exit 3, "Sign in
+2. **Signed out.** `inspect call <tool>` on a `signIn: "required"` tool. Expected: exit 3, "Sign in
    first".
-3. **Sign in once, end to end.** `<cli> auth login --server http://127.0.0.1:<port>/mcp` opens the
-   browser on the brand's own login page, then shows "Signed in. You can close this tab". Expected:
-   exit 0, and `<cli> auth status --json` says `"signedIn": true, "source": "login"`.
+3. **Sign in once, end to end.** `inspect auth` (in the background) prints the link; it opens the
+   brand's own login page, then shows "Signed in. You can close this tab". Expected: exit 0, and the
+   token's scope printed.
 4. **The right person.** Call a required tool that returns `context.key` (add a `whoami` tool while
    testing). Expected: the brand's user id for the account just used.
 5. **Refresh.** Expire the access token at the brand (or issue a short `expires_in`) and call the
    tool again. Expected: the same user id, one `refresh` call at the brand, no new sign-in.
-6. **Sign-out.** `<cli> auth logout`, then the tool. Expected: exit 3. `active` false, or a revoked
+6. **Sign-out.** `inspect auth logout`, then the tool. Expected: exit 3. `active` false, or a revoked
    token, gives the same.
-7. **Every way a person arrives**, each from a fresh `<cli> auth logout` then `auth login`:
+7. **Every way a person arrives**, each from a fresh `inspect auth`:
    signed out on the site (the same tab goes to the login page, then back on its own after sign-in);
    already signed in (no page shown, straight to "Signed in"); signed in with an expired site token
    (refreshed, then through); a hand-off link with no parameters ("Invalid link"); a pending
