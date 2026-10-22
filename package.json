@@ -66,6 +66,7 @@
     "prepack": "npm run build",
     "test": "node --test --test-timeout=30000 \"test/**/*.test.ts\"",
     "test:changed": "node scripts/test-changed.ts",
+    "bench:load": "node --expose-gc bench/load.ts",
     "new": "node scripts/new-agent.ts",
     "typecheck": "tsc --noEmit"
   },
