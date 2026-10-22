@@ -15,7 +15,8 @@
 //   finished partialAfterMs ago (the finished results go back now), or past its own limit
 //   (deadlineMs). Its result comes back into this chat later; the same call with the same input
 //   while it runs is not run again. Messages go out in the order the agent wrote them, while tools run.
-// - A sent message's result says it was delivered. A reply to the person of only messages, in a turn
+// - A sent message's result says it was delivered, once the channel accepted it: the next message
+//   goes only after that (docs/guarantees.md). A reply to the person of only messages, in a turn
 //   where the agent used no tool, gets one more step (it may have said "getting your plan" and meant
 //   to act next); a second such response ends the turn. A message that fails to arrive comes back to the agent as
 //   a message.
@@ -47,7 +48,7 @@ import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, Tim
 import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
-import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
+import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 
 export interface ConversationSettings {
   model: Model;
@@ -1375,7 +1376,7 @@ export class Conversation {
   }
 
   private async typing(on: boolean, channel: string): Promise<void> {
-    if (on === this.typingOn.has(channel)) return;
+    if (on === this.typingOn.has(channel) || this.channels.get(channel)?.info.typing === false) return;
     if (on) this.typingOn.add(channel);
     else this.typingOn.delete(channel);
     await this.send(channel, { type: "typing", on });
@@ -1426,10 +1427,15 @@ export class Conversation {
     }
     const refusal = contentRefusal(link.info, outbound);
     if (refusal) return refuse(outbound, "content", contentRefusalText(link.info, refusal), refusal);
+    let receipt: void | SendReceipt;
     try {
-      await link.deliver(outbound);
+      receipt = await link.deliver(outbound);
     } catch (error) {
       return { failure: error instanceof Error ? error.message : String(error) };
+    }
+    // The channel's wait for its signal ran out: it may still arrive, and is never sent again.
+    if (receipt?.status === "unconfirmed") {
+      this.settings.emit(this.id, "message.slow", { channel, origin, text: outbound.type === "template" ? outbound.name : outbound.text, ...(receipt.waitedMs !== undefined ? { waitedMs: receipt.waitedMs } : {}) });
     }
     return { sent: outbound };
   }
