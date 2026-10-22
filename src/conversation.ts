@@ -702,6 +702,41 @@ export class Conversation {
   }
 
   /**
+   * Writes an earlier conversation into this one's history, as if it had been said (a test's seeded
+   * history): the person's messages as theirs, the agent's as sent on `channel`. No model call, no send,
+   * no events. Only a conversation with nothing in its history yet.
+   */
+  async seed(messages: Array<{ from: "person" | "agent"; text: string }>, channel: string): Promise<void> {
+    await this.loaded;
+    if (this.history.length || this.busy) throw new Error("only a conversation with no history yet can be seeded");
+    const tag = this.settings.tagChannels;
+    let group: PersonMessage[] = [];
+    const read = () => {
+      if (!group.length) return;
+      this.history.push({ role: "user", content: group.map((m) => `[${tag ? `${channel} · ` : ""}${m.id}] ${m.text}`).join("\n"), messages: group });
+      group = [];
+    };
+    for (const m of messages) {
+      if (m.from === "person") {
+        const id = `m${++this.messageCount}`;
+        this.messageIds.set(id, channel);
+        group.push({ id, channel, text: m.text });
+        continue;
+      }
+      read();
+      const callId = `seeded_${randomUUID().slice(0, 8)}`;
+      this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(channel), arguments: JSON.stringify({ text: m.text }) }] });
+      this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel }) });
+    }
+    read();
+    this.recentChannels = [...this.recentChannels, channel].slice(-5);
+    const fields = { messageCount: this.messageCount, recentChannels: this.recentChannels };
+    this.persist(() => this.settings.store.updateConversation(this.id, fields));
+    this.flush();
+    await this.writes;
+  }
+
+  /**
    * The person was forgotten: a step in flight is cut off, nothing waiting runs, nothing more is
    * sent or kept. Tools already running finish on their own, and their results go nowhere.
    */
@@ -928,7 +963,7 @@ export class Conversation {
         try {
           await this.sendDirect(next);
         } catch (error) {
-          this.settings.emit(this.id, "model.error", { error: String(error) });
+          this.settings.emit(this.id, "model.error", modelError(error));
           this.settle(next, "failed", errorText(error));
           this.flush([next]);
         }
@@ -947,7 +982,7 @@ export class Conversation {
    * A turn they did not start (a nudge, a scheduled message, a background result) stays silent.
    */
   private async turnFailed(error: unknown): Promise<void> {
-    this.settings.emit(this.id, "model.error", { error: String(error) });
+    this.settings.emit(this.id, "model.error", modelError(error));
     this.absorb();
     for (const o of this.owed.splice(0)) this.settle(o, "failed", `the agent's turn failed: ${errorText(error)}`);
     this.resultUnsent = false;
@@ -1459,7 +1494,7 @@ export class Conversation {
         covered = check.rule;
       } catch (error) {
         // Not knowing whether a rule covers it, nothing is sent, and the person hears nothing of it.
-        this.settings.emit(this.id, "model.error", { error: String(error), purpose: "no-contact check" });
+        this.settings.emit(this.id, "model.error", { ...modelError(error), purpose: "no-contact check" });
         return settle("failed", `their no-contact rules could not be checked: ${errorText(error)}`);
       }
     }
@@ -1907,6 +1942,12 @@ function outDetail(sent: OutboundMessage): Record<string, unknown> {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A model.error event's details: the error, and the code and HTTP status it carries (Flow's typed errors, a provider's APIError). */
+function modelError(error: unknown): { error: string; code?: string; status?: number } {
+  const { code, status } = (error ?? {}) as { code?: unknown; status?: unknown };
+  return { error: String(error), ...(typeof code === "string" && code ? { code } : {}), ...(typeof status === "number" ? { status } : {}) };
 }
 
 function clip(text: string): string {

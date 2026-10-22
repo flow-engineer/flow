@@ -98,7 +98,32 @@ class SessionGone extends SessionStopped {
 }
 
 /** What runInCloud answers. When the cloud lost the session and a second one played the runs it had not finished, `runs` holds both sessions' runs and `lost` names the first. */
-export type CloudSummary = SessionSummary & { lost?: { sessionId: string; dashboard: string } };
+export type CloudSummary = SessionSummary & { lost?: { sessionId: string; dashboard: string }; sendPath?: SendPathProblem[] };
+
+/** A conversation whose messages did not all go one way: how many reached the cloud through the agent's channels,
+ * and how many its `message.out` events say it sent. Equal when every message went through the agent's send. */
+export interface SendPathProblem {
+  conversationId: string;
+  delivered: number;
+  announced: number;
+}
+
+/** Messages, carousels and templates: what the agent's send announces with `message.out`. */
+const isMessage = (outbound: Outbound) => outbound.type === "message" || outbound.type === "carousel" || outbound.type === "template";
+
+/** Counts, per conversation, the messages the channels took and the ones the agent announced. */
+export function sendPathCheck() {
+  const delivered = new Map<string, number>();
+  const announced = new Map<string, number>();
+  const add = (counts: Map<string, number>, id: string) => counts.set(id, (counts.get(id) ?? 0) + 1);
+  return {
+    delivered: (conversationId: string, outbound: Outbound) => { if (isMessage(outbound)) add(delivered, conversationId); },
+    event: (event: FlowEvent) => { if (event.type === "message.out") add(announced, event.conversationId); },
+    problems: (): SendPathProblem[] => [...new Set([...delivered.keys(), ...announced.keys()])].sort()
+      .map((id) => ({ conversationId: id, delivered: delivered.get(id) ?? 0, announced: announced.get(id) ?? 0 }))
+      .filter((p) => p.delivered !== p.announced),
+  };
+}
 
 /** A POST that sat until its own deadline. It fails that one call. Only a cloud that stores keys sends it again. The session abort is not one of these. */
 export class TimeoutError extends Error {
@@ -159,7 +184,7 @@ export function postBudgetMs(baseMs: number, bytes: number): number {
 }
 
 /** What the cloud plays: a Flow Framework Agent's channels, messages in and reactions. */
-export type AgentUnderTest = Pick<Agent, "channels" | "receive" | "reacted"> & Partial<Pick<Agent, "hasProfile">>;
+export type AgentUnderTest = Pick<Agent, "channels" | "receive" | "reacted"> & Partial<Pick<Agent, "hasProfile" | "seedHistory">>;
 
 export interface CloudAccess {
   /** The cloud's front door, as given to --cloud. */
@@ -261,7 +286,7 @@ function unfinishedRuns(files: SuiteFile[], runs: number, done: RunSummary[]): R
 }
 
 /** One session, start to finish. `only`: the runs a re-open plays. */
-async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<SessionSummary> {
+async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<CloudSummary> {
   const log = options.log ?? ((line: string) => console.log(line));
   const postTimeoutMs = options.postTimeoutMs ?? POST_TIMEOUT_MS;
   const streamIdleMs = options.streamIdleMs ?? STREAM_IDLE_MS;
@@ -391,8 +416,10 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     if (flushing || stopped || failure || !session) return;
     flushing = flush().catch((error) => fail("events", error)).finally(() => { flushing = null; });
   };
+  const sendPath = sendPathCheck();
   const events: EventSink = (event) => {
     if (stopped || failure) return;
+    sendPath.event(event);
     try {
       const json = JSON.stringify(event);
       queued.push({ json, bytes: Buffer.byteLength(json), at: Date.now() });
@@ -418,6 +445,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     reopen: true,
     ...(canBusiness ? { business: true } : {}),
     ...(canRestart ? { restart: true } : {}),
+    ...(typeof agent.seedHistory === "function" ? { history: true } : {}),
     flaky: true,
     ...(options.fresh ? { fresh: true } : {}),
     ...(only ? { only } : {}),
@@ -463,6 +491,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
       }),
       watch,
       log,
+      sent: sendPath.delivered,
     })
     : null;
 
@@ -514,7 +543,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     } while (pending.size || queued.length);
   };
   /** One command from the stream. Returns the summary once the session has finished. */
-  const handle = async (command: Command): Promise<SessionSummary | undefined> => {
+  const handle = async (command: Command): Promise<CloudSummary | undefined> => {
     if (draining && (command.type === "message" || command.type === "reaction")) throw new Error("the cloud sent a command after drain");
     if (business && (business.handle(command, (incoming) => withFiles(incoming, options.testsDir, log)))) return;
     if (command.type === "message") {
@@ -529,7 +558,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
           key: `outbound:${command.conversationId}:${command.messageId}:${index}`,
           budgetMs: retryBudgetMs,
           what: "outbound delivery",
-        }).then(() => {});
+        }).then(() => void sendPath.delivered(command.conversationId, outbound));
         deliveries.push(delivery);
         // Keep the rejection for the normal conversation's delivery recovery, but
         // attach a handler immediately for fire-and-forget interceptor sends too.
@@ -537,6 +566,15 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
         watch(delivery, "outbound delivery", true);
         return delivery;
       };
+      // A run that starts from an earlier conversation: it is in the agent's store before the first message.
+      if (command.history?.length) {
+        try {
+          if (typeof agent.seedHistory !== "function") throw new Error("this agent cannot start from an earlier conversation");
+          await agent.seedHistory(command.conversationId, command.history.map(({ from, text }) => ({ from, text })), { channelName: command.channelName });
+        } catch (error) {
+          log(`${command.conversationId}: the earlier conversation (history) could not be written into the agent's store: ${error instanceof Error ? error.message : String(error)}; the run plays without it`);
+        }
+      }
       let taken: string | null;
       try {
         taken = agent.receive(command.conversationId, withFiles(command.incoming, options.testsDir, log), deliver, {
@@ -589,7 +627,8 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     } else if (command.type === "finished") {
       pauseIdle();
       if (!drained) await drainWork();
-      return command.summary;
+      const problems = sendPath.problems();
+      return problems.length ? { ...command.summary, sendPath: problems } : command.summary;
     } else if (command.type === "failed") {
       throw new CloudEnded(command.error);
     }

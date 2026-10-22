@@ -14,7 +14,7 @@ import { LEASE_MS } from "../../src/conversation.ts";
 import type { BusinessCommand, BusinessOutbound, Command, Receipt, StepAnswer } from "./protocol.ts";
 
 /** What a business run's agent must do: a Flow Framework Agent. */
-export type BusinessAgent = Pick<Agent, "channels" | "channel" | "message" | "reacted" | "nudge" | "reach" | "runDue" | "conversation" | "fetch" | "resume" | "runner">;
+export type BusinessAgent = Pick<Agent, "channels" | "channel" | "message" | "reacted" | "nudge" | "reach" | "runDue" | "conversation" | "fetch" | "resume" | "runner"> & Partial<Pick<Agent, "seedHistory">>;
 
 /** What buildAgent is given for a business run, beside its tools and events. */
 export interface BusinessBuild {
@@ -84,6 +84,8 @@ export interface BusinessContext {
   /** Keeps a failure of fire-and-forget work as the session's (refusals allowed). */
   watch: (work: Promise<unknown>, context: string, allowRefusal?: boolean) => void;
   log: (line: string) => void;
+  /** Each outbound a run's channel took (testing/src/client.ts's send-path check). */
+  sent?: (cloudId: string, outbound: Outbound) => void;
 }
 
 export function businessRuns(ctx: BusinessContext) {
@@ -97,6 +99,10 @@ export function businessRuns(ctx: BusinessContext) {
     const run = { clock: command.now, secret: `whsec_test_${randomBytes(18).toString("hex")}`, address: command.address, channelName: command.channelName, conversationId: "", cloudId, deliveries: new Set(), sent: 0, lives: new Set(), database: sqlite(), started: 0, real } as unknown as Run;
     start(run, cloudId);
     run.conversationId = (await run.agent.reach({ channel: command.channelName, address: command.address })).conversationId;
+    if (command.history?.length) {
+      if (typeof run.agent.seedHistory !== "function") return { conversationId: cloudId, step: 0, at: command.now, error: "this agent cannot start from an earlier conversation (history)" };
+      await run.agent.seedHistory(run.conversationId, command.history.map(({ from, text }) => ({ from, text })), { channelName: command.channelName });
+    }
     runs.set(cloudId, run);
     return { conversationId: cloudId, step: 0, at: run.clock };
   };
@@ -181,10 +187,11 @@ export function businessRuns(ctx: BusinessContext) {
   const deliver = (run: Run, cloudId: string, address: string, outbound: Outbound): Promise<void> => {
     if (address !== run.address) {
       ctx.log(`${cloudId}: the agent sent to ${address}, not the run's person; the cloud does not see it`);
+      ctx.sent?.(cloudId, outbound);
       return Promise.resolve();
     }
     const body: BusinessOutbound = { conversationId: cloudId, outbound, at: run.clock };
-    const delivery = ctx.post("outbound", body, `outbound:${cloudId}:b${++run.sent}`, "outbound delivery").then(() => {});
+    const delivery = ctx.post("outbound", body, `outbound:${cloudId}:b${++run.sent}`, "outbound delivery").then(() => void ctx.sent?.(cloudId, outbound));
     run.deliveries.add(delivery);
     const done = () => void run.deliveries.delete(delivery);
     delivery.then(done, done);
