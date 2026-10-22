@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { performance } from "node:perf_hooks";
 import { setTimeout as wait } from "node:timers/promises";
 import { createAgent, tool, z, type Model, type ModelRequest, type ModelResponse } from "../src/index.ts";
 import { PLATFORMS, channelOf } from "../simulators/src/index.ts";
@@ -24,6 +25,13 @@ const N = Number(values.conversations);
 const T = Number(values.turns);
 const modelMs = Number(values["model-ms"]);
 if (!(N >= 1 && T >= 1 && modelMs >= 0)) throw new Error("bench: --conversations and --turns must be 1 or more, --model-ms 0 or more");
+
+// Local only: no traces to Observe (FLOW_FRAMEWORK_TRACES_KEY and the rest are dropped) and no
+// network at all (fetch throws), so a run never reaches a production service whatever the shell holds.
+for (const name of Object.keys(process.env)) if (/^(FLOW_FRAMEWORK_|CHINWAG_)/.test(name)) delete process.env[name];
+globalThis.fetch = async (input) => {
+  throw new Error(`bench: no network in the load test (tried ${String(input instanceof Request ? input.url : input)})`);
+};
 
 const gc = (globalThis as { gc?: () => void }).gc;
 if (!gc) console.error("bench: run with node --expose-gc (npm run bench:load does) for steady memory numbers");
