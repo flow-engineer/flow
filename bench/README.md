@@ -1,7 +1,13 @@
 # Load test
 
 `bench/load.ts` runs N simulated conversations at once on one process and reports what each turn
-costs. It is never part of `npm test`, `test:changed` or any check: run it when you want the numbers.
+costs. It is never part of `npm test`, `test:changed`, the pre-push hook, CI or any merge or deploy
+check: run it by hand, on your own machine, when you want the numbers.
+
+It is local only. The model is a fake, the store is SQLite in memory, and the run drops every
+`FLOW_FRAMEWORK_*` / `CHINWAG_*` setting before the agent is made (so a traces key in your shell
+sends nothing to Observe) and replaces `fetch` with one that throws, so nothing reaches Flow
+Messaging, Observe or a model provider, whatever your environment holds.
 
 ```sh
 npm run bench:load                                   # 50 conversations × 5 turns
@@ -23,12 +29,18 @@ npm run bench:load -- --json                         # one JSON line, to compare
 - One conversation runs first to warm up (compiling, the store's tables); the numbers are measured
   after it.
 
+The work is deterministic: the same N, T and `--model-ms` give the same messages, the same model
+answers and tool calls in the same order, and the same pass or fail (every turn delivers a reply).
+The timings and memory are measurements and move by a few percent from run to run and more on a
+busy machine: compare runs on one machine, with `--json`, not single numbers across machines.
+
 ## Reading the numbers
 
 ```
 50 conversations × 5 turns (fake model, 0 ms a call), 250/250 replies delivered, 0.2s
 throughput     1244.6 turns/s
 CPU per turn   1.271 ms (user + system, the whole process)
+main thread    97% busy (the rest of the wall time it waited)
 turn time      p50 36.7 ms   p95 54.3 ms   max 60.2 ms
 memory         65 KB heap, 1889 KB RSS per conversation (heap 22.1 MB, RSS 215.9 MB after)
 ```

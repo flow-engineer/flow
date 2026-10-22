@@ -79,7 +79,7 @@ const channels = PLATFORMS.map((p) => channelOf(p));
 /** One person: T messages, each sent once the agent has finished the turn before it. */
 async function person(i: number, times: number[], out: { sent: number }) {
   const id = `bench-${i}`;
-  const channel = channels[i % channels.length];
+  const channel = channels[Math.abs(i) % channels.length]; // the warm-up is person -1
   for (let t = 0; t < T; t++) {
     const text = t % 2 ? `where is my order ${1000 + i}` : `hello, message ${t} from person ${i}`;
     const started = performance.now();
