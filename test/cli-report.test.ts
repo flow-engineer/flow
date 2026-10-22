@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadSuite, parseScenario, parseToolFile } from "../testing/src/suite.ts";
+import { turnLines } from "../testing/src/show.ts";
 
 const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
 const run = {
@@ -277,9 +278,14 @@ test("with --json, every exit prints one report on stdout and every other line o
     counts: { runs: 2, passed: 1, failed: 1, flaky: 0, errored: 0, notPlayed: 0 },
     strict: false,
     costUsd: { agent: 0.5, test: 0.5 },
+    // An older cloud: no cost-known, latency, timing or warnings.
+    usage: { agent: { input: 11, output: 6, cacheRead: 0, costUsd: 0.5, costKnown: null }, test: { costUsd: 0.5 } },
+    latency: null,
+    warnings: [],
+    improvements: [],
     runs: [
-      { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }], invalid: null, rerun: null, label: null, replayed: null },
-      { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [], invalid: null, rerun: null, label: null, replayed: null },
+      { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }], invalid: null, rerun: null, label: null, replayed: null, timing: null, costKnown: null },
+      { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [], invalid: null, rerun: null, label: null, replayed: null, timing: null, costKnown: null },
     ],
     invalid: [],
     sessionInvalid: null,
@@ -300,6 +306,27 @@ test("with --json, every exit prints one report on stdout and every other line o
   const unreachable = await cliStreams(["test", "--json", "--cloud", "http://127.0.0.1:9"], dir);
   assert.equal(unreachable.code, 2);
   assert.deepEqual([JSON.parse(unreachable.stdout).outcome, JSON.parse(unreachable.stdout).error.message], ["transport", "Could not reach http://127.0.0.1:9: ECONNREFUSED."]);
+});
+
+test("from a newer cloud, --json gives the agent's tokens and whether its cost is known, the session's latency, each run's timing, and the warnings", { timeout: 20_000 }, async () => {
+  const dir = agentDir();
+  const timing = { firstReply: { p50: 900, p95: 1500, max: 1500, unanswered: 0 }, turn: { count: 2, p50: 1200, p95: 2000, totalMs: 3200 }, model: { calls: 3, totalMs: 2500, p95: 1100 }, tools: { calls: 1, totalMs: 400, simulated: true }, ownMs: 300 };
+  const runs = [runOf({ runId: "trn_1", passed: true, timing, agentUsage: { input: 100, output: 10, cacheRead: 60, calls: 3, costUsd: 0.02, costKnown: "some" } })];
+  const warning = { scenario: "hello", path: "scenarios/hello.yaml", channel: "sms", kind: "budget", metric: "turn_ms", value: 2000, limit: 1500, runs: 1 };
+  const latency = { firstReply: { p50: 900, p95: 1500, max: 1500, slowest: { scenario: "hello", run: 1, channel: "sms", runId: "trn_1" } }, turn: { p50: 1200, p95: 2000 }, split: { modelMs: 2500, toolsMs: 400, ownMs: 300 } };
+  const local = await cloud(false, [{ type: "finished", summary: { sessionId: "s1", suiteHash: "h", testModel: "m", runs, dashboard: "http://dash/s1", latency, warnings: [warning], improvements: [] } }], "s1");
+  let result;
+  try {
+    result = await cliStreams(["test", "--cloud", local.url, "--json"], dir);
+  } finally { local.close(); }
+  assert.equal(result.code, 0, result.out);
+  const report = JSON.parse(result.stdout);
+  assert.deepEqual(report.usage, { agent: { input: 100, output: 10, cacheRead: 60, costUsd: 0.02, costKnown: "some" }, test: { costUsd: 0 } });
+  assert.deepEqual(report.latency, { firstReply: { p50: 900, p95: 1500, max: 1500 }, turn: { p50: 1200, p95: 2000 } });
+  assert.deepEqual([report.runs[0].timing, report.runs[0].costKnown], [timing, "some"]);
+  assert.deepEqual([report.warnings, report.improvements], [[warning], []]);
+  assert.equal(report.exitCode, 0, "a warning never fails the session");
+  assert.match(result.stderr, /^ {2}scenarios\/hello\.yaml \(sms\): p95 agent turn 2\.0 s, budget 1\.5 s$/m);
 });
 
 test("the cloud's limits are printed on one line when the session opens and kept in --json", { timeout: 20_000 }, async () => {
@@ -585,6 +612,28 @@ test("test files: old ones parse as before, the clock, calls and never parse, an
   assert.throws(() => parseToolFile({ path: "tools/t.yaml", content: `${tool}    input:\n      days: ['{{now + 1d | year}}']\n` }), {
     message: `tools/t.yaml:7: responses[0].input.days[0]: ${placeholder("{{now + 1d | year}}")}`,
   });
+});
+
+test("a scenario's budget is a mapping of cost_usd, first_reply_ms and turn_ms, and a typo or a negative number in it is named with its file and line", () => {
+  const old = "id: x\nchannels: [sms]\nperson:\n  persona: a\n  goal: b\nopening:\n  - say: hi\n";
+  const scenario = (more: string) => ({ path: "scenarios/x.yaml", content: `${old}${more}\n` });
+  assert.deepEqual(parseScenario(scenario("budget:\n  cost_usd: 0.02\n  first_reply_ms: 4000\n  turn_ms: 8000")).budget, { cost_usd: 0.02, first_reply_ms: 4000, turn_ms: 8000 });
+  assert.throws(() => parseScenario(scenario("budget:\n  cost: 0.02")), { message: 'scenarios/x.yaml:9: budget: Unrecognized key: "cost"' });
+  assert.throws(() => parseScenario(scenario("budget:\n  turn_ms: -1")), { message: /^scenarios\/x\.yaml:9: budget\.turn_ms: / });
+  assert.throws(() => parseScenario(scenario("budget: 0.02")), { message: /^scenarios\/x\.yaml:8: budget: / });
+});
+
+test("flow show's per-turn table: each turn's person, first reply, model, tools, own time, tokens and cost; once the record expired, only that it did", () => {
+  const row = { turn: 1, person: "Can I move my check-in to Thursday?", firstReplyMs: 900, turnMs: 2400, modelMs: 1800, modelCalls: 2, toolsMs: 400, ownMs: 200, input: 1200, output: 40, cacheRead: 800, costUsd: 0.0031 };
+  assert.deepEqual(turnLines({ turnTiming: [row, { ...row, turn: 2, person: null, firstReplyMs: null, cacheRead: 0, costUsd: null }] }), [
+    "",
+    "Turns (tools simulated):",
+    "  turn  person                                 first reply  model (calls)  tools   own     tokens in/out (cached)  cost",
+    '  #1    "Can I move my check-in to Thursday?"  900 ms       1800 ms (2)    400 ms  200 ms  1200/40 (800)           $0.0031',
+    "  #2    -                                      -            1800 ms (2)    400 ms  200 ms  1200/40                 not reported",
+  ]);
+  assert.deepEqual(turnLines({ summary: { timing: {} } }), ["", "Turns: per-turn detail expired, totals kept"]);
+  assert.deepEqual(turnLines({ summary: {} }), [], "an older cloud: nothing");
 });
 
 test("the summary reads the same on every machine: token counts in one format, and whether every run called the agent's model", { timeout: 15_000 }, async () => {

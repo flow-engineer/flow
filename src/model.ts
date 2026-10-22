@@ -90,8 +90,9 @@ export function openAICompatible(options: OpenAICompatibleOptions = {}): Model {
     maxRetries: 1,
   });
   const model = options.model?.trim() || fromEnv?.model || KEYS[0].model;
+  const openRouter = baseURL.startsWith("https://openrouter.ai/");
   // Flow reads PDFs for every model it offers, as OpenRouter (behind it) does.
-  const readsPdfs = baseURL.startsWith("https://openrouter.ai/") || baseURL === flowModelURL(process.env);
+  const readsPdfs = openRouter || baseURL === flowModelURL(process.env);
   return {
     reads: { images: options.images ?? true, pdfs: options.pdfs ?? readsPdfs },
     ...(options.contextTokens ? { contextTokens: options.contextTokens } : {}),
@@ -106,7 +107,9 @@ export function openAICompatible(options: OpenAICompatibleOptions = {}): Model {
             ...(request.tools.length
               ? { tools: request.tools.map((t) => ({ type: "function" as const, function: t })) }
               : {}),
-          },
+            // OpenRouter reports each call's cost only when asked; Flow's gateway asks for FLOW_KEY itself.
+            ...(openRouter ? { usage: { include: true } } : {}),
+          } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming,
           { signal: request.signal },
         );
       } catch (error) {
@@ -231,8 +234,10 @@ function toWire(message: ChatMessage): OpenAI.Chat.ChatCompletionMessageParam {
   };
 }
 
-/** OpenRouter adds the call's cost in US dollars to usage; other providers leave it out. */
-function costOf(usage: object): { costUsd?: number } {
+/** OpenRouter adds the call's cost in US dollars to usage (other providers leave it out); the prompt
+ * tokens read from the provider's cache, when it says. */
+function costOf(usage: object): { costUsd?: number; cacheReadTokens?: number } {
   const cost = (usage as { cost?: unknown }).cost;
-  return typeof cost === "number" ? { costUsd: cost } : {};
+  const cached = (usage as { prompt_tokens_details?: { cached_tokens?: unknown } | null }).prompt_tokens_details?.cached_tokens;
+  return { ...(typeof cost === "number" ? { costUsd: cost } : {}), ...(typeof cached === "number" ? { cacheReadTokens: cached } : {}) };
 }

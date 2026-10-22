@@ -6,6 +6,7 @@
 // message, unless a base URL is named (a local server needs no key). Flow's typed errors (credit
 // used up, ...) come back as its message and next step. flowTranscribe posts the audio to Flow's
 // /audio/transcriptions with the same key and address, and reports Flow's errors the same way.
+// Only OpenRouter is asked for each call's cost; a reported cost and cached tokens come back on usage.
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -94,6 +95,23 @@ test("a model through Flow sends FLOW_KEY and the default model, reads PDFs, and
     }
   });
   assert.deepEqual(seen, [{ auth: `Bearer ${FAKE_TRIAL}`, model: "anthropic/claude-haiku-5.5" }, { auth: `Bearer ${FAKE_TRIAL}`, model: "anthropic/claude-haiku-5.5" }], "a 402 is not tried again");
+});
+
+test("only OpenRouter is asked for each call's cost, and the cost and cached prompt tokens a provider reports come back on usage", async (t) => {
+  const bodies: Array<{ url: string; usage?: unknown }> = [];
+  const real = globalThis.fetch;
+  t.after(() => { globalThis.fetch = real; });
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    bodies.push({ url: String(input instanceof Request ? input.url : input), usage: JSON.parse(String(init?.body)).usage });
+    const usage = { prompt_tokens: 1200, completion_tokens: 40, cost: 0.0031, prompt_tokens_details: { cached_tokens: 800 } };
+    return new Response(JSON.stringify({ id: "c", object: "chat.completion", created: 0, model: "m", choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "hi" } }], usage }), { headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  const request = { system: "s", messages: [{ role: "user" as const, content: "hi" }], tools: [], signal: new AbortController().signal };
+  const openRouter = await openAICompatible({ apiKey: FAKE, baseURL: "https://openrouter.ai/api/v1" }).complete(request);
+  assert.deepEqual(openRouter.usage, { inputTokens: 1200, outputTokens: 40, costUsd: 0.0031, cacheReadTokens: 800 });
+  await openAICompatible({ apiKey: FAKE, baseURL: "https://api.openai.com/v1" }).complete(request);
+  await openAICompatible({ apiKey: FAKE, baseURL: "https://flow.engineer/llm/framework/v1" }).complete(request);
+  assert.deepEqual(bodies.map((b) => b.usage), [{ include: true }, undefined, undefined], "Flow's gateway asks OpenRouter itself");
 });
 
 test("flowTranscribe posts the audio and language as multipart with FLOW_KEY, returns { text }, and reports Flow's typed error with its next step", async (t) => {

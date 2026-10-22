@@ -3,7 +3,7 @@
 
 import { existsSync } from "node:fs";
 import { CloudEnded, isTransportFailure, PostError, SessionStopped } from "./client.ts";
-import type { SessionLimits } from "./protocol.ts";
+import type { CostWarning, RunTiming, SessionLimits } from "./protocol.ts";
 
 /** How a `flow test` ended, one per exit status (0 passed; 1 failed, invalid; 2 errored, transport; 3 refused; 130 interrupted). */
 export type Outcome = "passed" | "failed" | "errored" | "transport" | "refused" | "interrupted" | "invalid";
@@ -41,6 +41,10 @@ export interface ReportRun {
   label: "flaky" | "failing" | null;
   /** How many person, tool and judge answers this run replayed from stored ones; null when the cloud said none. */
   replayed: { person: number; tools: number; judge: number } | null;
+  /** The run's times in ms (first reply, turns, model, simulated tools, the agent's own); null from an older cloud. */
+  timing: RunTiming | null;
+  /** Whether every model call of the run reported its cost; null from an older cloud. */
+  costKnown: "all" | "some" | "none" | null;
 }
 
 /** A scenario the cloud could not play, once per scenario. */
@@ -74,7 +78,17 @@ export interface JsonReport {
   counts: { runs: number; passed: number; failed: number; flaky: number; errored: number; notPlayed: number };
   /** --strict: a flaky run counts as failed (outcome failed, exit 1). */
   strict: boolean;
+  /** Kept for older readers; `usage` says the same with tokens and whether the agent's cost is known. */
   costUsd: { agent: number; test: number };
+  /** Every play's model use. agent.costKnown: "all" when every model call reported its cost, "none" when none did
+   * (costUsd is then not the agent's cost), "some" (costUsd is at least it); null from an older cloud. */
+  usage: { agent: { input: number; output: number; cacheRead: number; costUsd: number; costKnown: "all" | "some" | "none" | null }; test: { costUsd: number } };
+  /** Over every play, in ms; null from an older cloud. */
+  latency: { firstReply: { p50: number | null; p95: number | null; max: number | null }; turn: { p50: number | null; p95: number | null } } | null;
+  /** Budgets first, then regressions against the scenario's baseline session; never a failure. [] from an older cloud. */
+  warnings: CostWarning[];
+  /** Better than the baseline by the same rule. */
+  improvements: CostWarning[];
   runs: ReportRun[];
   /** Each scenario the cloud could not play; the other scenarios played. */
   invalid: InvalidScenario[];

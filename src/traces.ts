@@ -272,12 +272,15 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
       case "model.call": {
         if (!turn) return;
         const ms = Number(e.ms ?? 0);
-        const usage = e.usage as { inputTokens?: number; outputTokens?: number } | undefined;
+        const usage = e.usage as { inputTokens?: number; outputTokens?: number; costUsd?: number; cacheReadTokens?: number } | undefined;
         const model = typeof e.model === "string" ? e.model : undefined;
         const attributes = [attr("gen_ai.operation.name", "chat")];
         if (model) attributes.push(attr("gen_ai.response.model", model));
         if (usage?.inputTokens !== undefined) attributes.push(attr("gen_ai.usage.input_tokens", usage.inputTokens));
         if (usage?.outputTokens !== undefined) attributes.push(attr("gen_ai.usage.output_tokens", usage.outputTokens));
+        if (usage?.cacheReadTokens !== undefined) attributes.push(attr("gen_ai.usage.cache_read.input_tokens", usage.cacheReadTokens));
+        // No OpenTelemetry convention for cost yet: Flow's own name, the cost the provider reported, always a double.
+        if (usage?.costUsd !== undefined) attributes.push({ key: "flow.usage.cost_usd", value: { doubleValue: usage.costUsd } });
         turn.spans.push(child(turn, model ? `chat ${model}` : "chat", e.at - ms, e.at, attributes));
         return;
       }

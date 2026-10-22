@@ -55,7 +55,53 @@ export interface Check {
 export interface Usage {
   input: number;
   output: number;
+  /** The sum of the costs the provider reported (see costKnown on the agent's). */
   costUsd: number;
+  /** The agent's: input tokens read from the provider's prompt cache (a newer cloud). */
+  cacheRead?: number;
+  /** The agent's: its model calls in the run (a newer cloud). */
+  calls?: number;
+  /** The agent's: whether every model call reported its cost ("all", also with no calls), some or none (a newer cloud). */
+  costKnown?: "all" | "some" | "none";
+}
+
+/** A run's times in ms, from the agent's events (a newer cloud). Percentiles are nearest-rank, null with no values. */
+export interface RunTiming {
+  /** From each person's message to the agent's first answer; unanswered ones are left out of the numbers. */
+  firstReply: { p50: number | null; p95: number | null; max: number | null; unanswered: number };
+  turn: { count: number; p50: number | null; p95: number | null; totalMs: number };
+  model: { calls: number; totalMs: number; p95: number | null };
+  /** The tool simulator picks tools' latency in a test: the scenario's number, not the agent's. */
+  tools: { calls: number; totalMs: number; simulated: true };
+  /** Turn time that was neither the model nor tools: the agent's own code and Flow Framework. */
+  ownMs: number;
+}
+
+/** A session's latency over every play (a newer cloud). */
+export interface SessionLatency {
+  firstReply: { p50: number | null; p95: number | null; max: number | null; slowest?: { scenario: string; run: number; channel: string; runId: string } };
+  turn: { p50: number | null; p95: number | null };
+  split: { modelMs: number; toolsMs: number; ownMs: number };
+}
+
+/** A scenario over its budget, or worse (or, as an improvement, better) than its baseline session. Never changes a verdict. */
+export interface CostWarning {
+  scenario: string;
+  /** The scenario file, such as scenarios/refund-request.yaml. */
+  path: string;
+  channel: string;
+  kind: "budget" | "regression";
+  metric: "cost_usd" | "first_reply_ms" | "turn_ms";
+  /** This session's median over the pair's plays: cost per run, p95 first reply, p95 turn. */
+  value: number;
+  /** budget: the scenario's budget. */
+  limit?: number;
+  /** regression: the baseline session's median, and where it is. */
+  baseline?: number;
+  baselineSessionId?: string;
+  baselineRunId?: string;
+  runs: number;
+  baselineRuns?: number;
 }
 
 export interface OpenSession {
@@ -284,6 +330,8 @@ export interface RunSummary {
   label?: "flaky" | "failing";
   /** How many simulator answers this run replayed from stored ones (person, tool simulator, judge). */
   replayed?: { person: number; tools: number; judge: number };
+  /** The run's times (a newer cloud; an older one sends only slowestAckMs). */
+  timing?: RunTiming;
 }
 
 export interface SessionSummary {
@@ -293,4 +341,10 @@ export interface SessionSummary {
   testModel: string;
   runs: RunSummary[];
   dashboard: string;
+  /** Latency over every play (a newer cloud). */
+  latency?: SessionLatency;
+  /** Budgets first, then regressions against the baseline session (a newer cloud; [] when none). */
+  warnings?: CostWarning[];
+  /** Better than the baseline session by the same rule; never a warning. */
+  improvements?: CostWarning[];
 }

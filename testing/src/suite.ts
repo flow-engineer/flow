@@ -224,6 +224,14 @@ const scenarioSchema = z.object({
   tools: z.strictObject({ real: z.array(z.string().min(1)).min(1) }).optional(),
   world: withClock(z.string()).optional(),
   max_turns: z.number().int().min(1).max(50).default(8),
+  /** Limits per run, warned about in the summary and never failing it: the agent's cost, the p95 first reply and the p95 agent turn. */
+  budget: z
+    .strictObject({
+      cost_usd: z.number().min(0).optional(),
+      first_reply_ms: z.number().int().min(0).optional(),
+      turn_ms: z.number().int().min(0).optional(),
+    })
+    .optional(),
   expect: z
     .object({
       outcome: z.array(withClock(z.string())).optional(),
