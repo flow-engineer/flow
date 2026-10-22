@@ -118,19 +118,21 @@ export interface Carousel {
 }
 
 export interface WhatsAppProvider {
-  sendMessage(to: string, message: Message): Promise<void>;
+  /** Resolves once the platform accepted the message (optionally saying how far it got, SendReceipt); rejects when it refused it. */
+  sendMessage(to: string, message: Message): Promise<void | SendReceipt>;
   /** A media carousel; without it the agent is never offered one. */
-  sendCarousel?(to: string, carousel: Carousel): Promise<void>;
+  sendCarousel?(to: string, carousel: Carousel): Promise<void | SendReceipt>;
   /** Which parts of a message this provider can send. Default: all. */
   features?: { buttons?: boolean; lists?: boolean; replies?: boolean; links?: boolean; images?: boolean };
   react?(to: string, messageId: string, emoji: string): Promise<void>;
   typing?(to: string, on: boolean): Promise<void>;
   markRead?(to: string, messageIds: string[]): Promise<void>;
-  sendTemplate?(to: string, template: Template, idempotencyKey?: string): Promise<void>;
+  sendTemplate?(to: string, template: Template, idempotencyKey?: string): Promise<void | SendReceipt>;
 }
 
 export interface SmsProvider {
-  sendMessage(to: string, message: Pick<Message, "text" | "idempotencyKey">): Promise<void>;
+  /** Resolves once the provider accepted the text; rejects when it refused it. */
+  sendMessage(to: string, message: Pick<Message, "text" | "idempotencyKey">): Promise<void | SendReceipt>;
 }
 
 /** Your own UI. `message` carries the text, any buttons, and your params by name. */
@@ -140,9 +142,10 @@ export interface CustomUIProvider {
   params?: Record<string, z.ZodType>;
   /** Your own guidance for the agent on this channel, such as how to use your params. */
   instructions?: string;
-  sendMessage(to: string, message: Message & Record<string, unknown>): Promise<void>;
+  /** Resolves once your UI has the message (stored or shown); rejects when it could not take it. */
+  sendMessage(to: string, message: Message & Record<string, unknown>): Promise<void | SendReceipt>;
   /** A carousel, on a UI whose info declares carousels; without it the cards go one by one through sendMessage. */
-  sendCarousel?(to: string, carousel: Carousel): Promise<void>;
+  sendCarousel?(to: string, carousel: Carousel): Promise<void | SendReceipt>;
   react?(to: string, messageId: string, emoji: string): Promise<void>;
   typing?(to: string, on: boolean): Promise<void>;
   markRead?(to: string, messageIds: string[]): Promise<void>;
@@ -317,9 +320,20 @@ export function carouselMessages(info: ChannelInfo, carousel: Carousel): Message
   return [first, ...cards.filter((m) => m.text || m.image)];
 }
 
-/** Sends a carousel's messages one by one, in order, each after the last went. */
-async function sendCards(info: ChannelInfo, carousel: Carousel, send: (message: Message) => Promise<void>): Promise<void> {
-  for (const m of carouselMessages(info, carousel)) await send(m);
+/** Sends a carousel's messages one by one, in order, each after the last went; its receipt is the least far of theirs. */
+async function sendCards(info: ChannelInfo, carousel: Carousel, send: (message: Message) => Promise<void | SendReceipt>): Promise<SendReceipt | undefined> {
+  const receipts: Array<void | SendReceipt> = [];
+  for (const m of carouselMessages(info, carousel)) receipts.push(await send(m));
+  return leastOf(receipts);
+}
+
+const RECEIPT_RANK: Record<SendReceipt["status"], number> = { unconfirmed: 0, queued: 1, sent: 2, delivered: 3 };
+
+/** The least far of several sends' receipts (none when no send gave one). */
+function leastOf(receipts: Array<void | SendReceipt>): SendReceipt | undefined {
+  let least: SendReceipt | undefined;
+  for (const r of receipts) if (r && (!least || RECEIPT_RANK[r.status] < RECEIPT_RANK[least.status])) least = r;
+  return least;
 }
 
 /**
