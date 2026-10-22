@@ -18,6 +18,11 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   Flow Messaging's channels (WhatsApp, SMS, Telegram, iMessage) set it.
 - Sends written ahead are deleted a day after they were made, by the hourly clean-up that deletes
   old provider message ids.
+- **Writes are fenced by the lease.** A conversation's writes from a turn (history, sends written
+  ahead, the turn's state, inbox rows handled, background tools) carry the runner and the lease's
+  epoch, and the store refuses them once another runner has taken the conversation (`StaleRunner`,
+  exported). A runner that stalled past its lease then sends nothing of the step it was on and
+  stops working on the conversation, instead of writing over the runner that now holds it.
 
 ### Migration notes
 
@@ -31,6 +36,12 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   tests sees the new field.
 - Each step that sends waits for its write to the store before the send goes: one write per such
   step (about a millisecond on a local database, one round trip to a store service).
+- `Store`'s `appendHistory`, `beginSends`, `updateConversation`, `addTask` and `removeTask` take an
+  optional last argument, `{ runner, epoch }`, and `doneInbox` takes `(ids, conversationId, fence)`;
+  without it a write is made as before. A store service passes it through as a plain trailing
+  argument; one that does not yet (an older one) drops it, and writes are unfenced as in 0.5. To
+  fence over a service, it should answer a refused write so the agent's error is named
+  `StaleRunner`.
 
 ## 0.5.0 (unreleased)
 

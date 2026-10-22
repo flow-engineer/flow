@@ -89,6 +89,8 @@ redelivers events it is not sure arrived. The agent takes each message once:
   `channel_timeout_unknown_outcome` (it may have arrived). Idempotency keys cannot undo that.
 - One runner works on a conversation at a time (a lease in the database), so a deploy's overlap
   never answers one message twice.
+- A runner that stalled past its lease (another runner took the conversation meanwhile) changes
+  nothing more: its writes carry the lease's epoch and are refused, so it sends nothing and stops.
 
 ## Writing your own provider
 

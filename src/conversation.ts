@@ -49,7 +49,7 @@ import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type Conten
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { scheduleTools } from "./schedules.ts";
-import type { ConversationRow, InboxRow, NoContactRow, QuietHours, SendRow, StoreApi, TimeZoneSource } from "./store.ts";
+import type { ConversationRow, Fence, InboxRow, NoContactRow, QuietHours, SendRow, StoreApi, TimeZoneSource } from "./store.ts";
 import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
@@ -136,6 +136,8 @@ let leaseWarned = false;
 /** How long a send written ahead may be sent again after a restart: Flow Messaging keeps idempotency keys for 24 h. */
 export const RESEND_WITHIN_MS = 24 * 60 * 60 * 1000;
 let sendsWarned = false;
+/** A fenced write refused: another runner took the conversation (by name, so it also holds for a store elsewhere that answers with it). */
+const isStale = (error: unknown) => error instanceof Error && error.name === "StaleRunner";
 const EARLIER = "[Chinwag] Older messages of this conversation are no longer shown to you.";
 const RESET = "[Chinwag] The conversation starts again here: earlier messages are no longer shown to you.";
 
@@ -492,7 +494,7 @@ export class Conversation {
       }
       item.inbox = inbox;
       this.knownInbox.add(item.inbox);
-      await this.settings.store.updateConversation(this.id, fields);
+      await this.settings.store.updateConversation(this.id, fields, this.fence());
       if (link) await this.settings.store.touchIdentity(channel, link.address, at);
     });
     const attachments = incoming.attachments?.map((a) => ({ kind: a.kind, mime: a.mime, ...(a.name ? { name: a.name } : {}) }));
@@ -549,7 +551,7 @@ export class Conversation {
       if (inbox === null) return void (lost = true);
       item.inbox = inbox;
       this.knownInbox.add(inbox);
-      await this.settings.store.updateConversation(this.id, fields);
+      await this.settings.store.updateConversation(this.id, fields, this.fence());
       if (link) await this.settings.store.touchIdentity(channel, link.address, at);
     });
     const taken = stored.then(() => {
@@ -752,10 +754,22 @@ export class Conversation {
     if (this.closed) return this.writes;
     const next = this.writes.then(work).then(
       () => undefined,
-      (error) => console.warn("flow: could not save conversation %s:", this.id, error),
+      (error) => {
+        if (!isStale(error)) return void console.warn("flow: could not save conversation %s:", this.id, error);
+        // A runner that stalled past its lease: another has the conversation, so this copy stops here.
+        if (this.closed) return;
+        console.warn("flow: runner %s lost conversation %s to another runner; its write was refused and it stops working on it", this.settings.runner, this.id);
+        this.close();
+        this.leave(false);
+      },
     );
     this.writes = next;
     return next;
+  }
+
+  /** The lease this copy's writes are made under; none before this runner first held it, or with a store that has no leases. */
+  private fence(): Fence | undefined {
+    return this.epoch ? { runner: this.settings.runner, epoch: this.epoch } : undefined;
   }
 
   /** Reads the conversation only while this runner holds it, so no other runner adds to it meanwhile. */
@@ -844,7 +858,7 @@ export class Conversation {
       const p = row.payload as Record<string, any>;
       if (row.kind === "message" && this.messageIds.get(p.id) === p.channel) {
         this.knownInbox.add(row.id);
-        this.persist(() => this.settings.store.doneInbox([row.id]));
+        this.persist(() => this.settings.store.doneInbox([row.id], this.id, this.fence()));
         continue;
       }
       this.enqueue(row);
@@ -883,12 +897,12 @@ export class Conversation {
     }
     for (const task of await store.tasks(this.id)) {
       this.note(`[Chinwag] ${task.tool} (${task.taskId}) was still running in the background when the agent restarted. It may or may not have finished; check before telling them it is done.`);
-      this.persist(() => store.removeTask(this.id, task.taskId));
+      this.persist(() => store.removeTask(this.id, task.taskId, this.fence()));
     }
     for (const row of await store.openInbox(this.id)) {
       // Already in the history (its row was not marked done): answered, so not answered again.
       const p = row.payload as Record<string, any>;
-      if (row.kind === "message" && this.messageIds.get(p.id) === p.channel) this.persist(() => store.doneInbox([row.id]));
+      if (row.kind === "message" && this.messageIds.get(p.id) === p.channel) this.persist(() => store.doneInbox([row.id], this.id, this.fence()));
       else this.enqueue(row);
     }
     const row = await store.conversation(this.id);
@@ -1015,7 +1029,7 @@ export class Conversation {
     this.absorb();
     for (const o of this.owed.splice(0)) this.settle(o, "failed", `the agent's turn failed: ${errorText(error)}`);
     this.resultUnsent = false;
-    this.persist(() => this.settings.store.updateConversation(this.id, { turnOpen: false }));
+    this.persist(() => this.settings.store.updateConversation(this.id, { turnOpen: false }, this.fence()));
     const waiting = this.theirMessages ? [...this.unanswered] : [];
     if (waiting.length) await this.sendMessage(waiting.includes(this.currentChannel()) ? this.currentChannel() : waiting[0], { type: "message", text: APOLOGY }, "framework");
   }
@@ -1100,7 +1114,7 @@ export class Conversation {
   private flush(items: Array<{ inbox?: number }> = []): void {
     const { seq, entries } = this.unsaved();
     if (!entries.length && !items.length) return;
-    this.persist(() => this.settings.store.appendHistory(this.id, seq, entries, items.flatMap((i) => (i.inbox === undefined ? [] : [i.inbox]))));
+    this.persist(() => this.settings.store.appendHistory(this.id, seq, entries, items.flatMap((i) => (i.inbox === undefined ? [] : [i.inbox])), this.fence()));
   }
 
   /** History entries not yet stored, from `seq` on; they count as stored from now. */
@@ -1128,13 +1142,14 @@ export class Conversation {
     const at = this.settings.now();
     await this.persist(async () => {
       try {
-        await store.beginSends!(this.id, seq, entries, sends, at);
+        await store.beginSends!(this.id, seq, entries, sends, at, this.fence());
       } catch (error) {
+        if (isStale(error)) throw error;
         // An older store service, or a write that failed: the step is stored as before and its
         // sends still go, keyed, but a restart cannot tell how they ended.
         if (!sendsWarned) console.warn("flow: could not write conversation %s's sends ahead; they go anyway (later failures are not logged):", this.id, error);
         sendsWarned = true;
-        await store.appendHistory(this.id, seq, entries);
+        await store.appendHistory(this.id, seq, entries, [], this.fence());
       }
     });
   }
@@ -1173,7 +1188,7 @@ export class Conversation {
     this.signInPrompts.clear();
     this.authBlocked.clear();
     this.authPromptsSent.clear();
-    this.persist(() => store.updateConversation(this.id, { turnOpen: true, turns }));
+    this.persist(() => store.updateConversation(this.id, { turnOpen: true, turns }, this.fence()));
     this.turnFrom = this.history.length;
     this.absorb();
     // A turn the person started (as against a background result, a scheduled message or a nudge).
@@ -1182,7 +1197,7 @@ export class Conversation {
     if (!this.channels.size) {
       // No way to reach them right now (a channel with no adapter, after a restart).
       for (const o of this.owed.splice(0)) this.settle(o, "failed", "no way to reach them on that channel right now");
-      this.persist(() => store.updateConversation(this.id, { turnOpen: false }));
+      this.persist(() => store.updateConversation(this.id, { turnOpen: false }, this.fence()));
       return;
     }
     const context = this.settings.context ? await this.settings.context(this.id) : "";
@@ -1300,6 +1315,8 @@ export class Conversation {
 
       this.history.push({ role: "assistant", content: response.text, toolCalls: response.toolCalls });
       await this.flushStep(talk);
+      // Another runner took the conversation while this step was written: nothing of it goes.
+      if (this.closed) return;
       if (work.length) acted = true;
       const working = this.runTools(work);
       const said: Array<{ content: string; refused: boolean }> = [];
@@ -1342,7 +1359,7 @@ export class Conversation {
       else this.settle(o, o.mode === "check" ? "quiet" : "silent");
     }
     this.resultUnsent = false;
-    this.persist(() => store.updateConversation(this.id, { turnOpen: false }));
+    this.persist(() => store.updateConversation(this.id, { turnOpen: false }, this.fence()));
     this.settings.emit(this.id, "turn.end", { ms: Date.now() - started, turn: turns });
   }
 
@@ -1562,7 +1579,7 @@ export class Conversation {
   private async sendDirect(d: Direct): Promise<void> {
     // Settled already (by an earlier process, or another one running beside this): never sent twice.
     if (await this.directSettled(d)) {
-      if (d.inbox !== undefined) this.persist(() => this.settings.store.doneInbox([d.inbox!]));
+      if (d.inbox !== undefined) this.persist(() => this.settings.store.doneInbox([d.inbox!], this.id, this.fence()));
       return;
     }
     const settle = (status: string, reason?: string) => {
@@ -1846,11 +1863,11 @@ export class Conversation {
     const { call, startedAt } = r;
     const task: Task = { id: `task_${++this.taskCount}`, tool: call.name, input: r.input, startedAt };
     this.tasks.set(task.id, task);
-    this.persist(() => this.settings.store.addTask(this.id, task.id, call.id, call.name, startedAt));
+    this.persist(() => this.settings.store.addTask(this.id, task.id, call.id, call.name, startedAt, this.fence()));
     this.settings.emit(this.id, "tool.detached", { callId: call.id, tool: call.name, task: task.id, ms: Date.now() - startedAt, why });
     void r.outcome.then((result) => {
       this.tasks.delete(task.id);
-      this.persist(() => this.settings.store.removeTask(this.id, task.id));
+      this.persist(() => this.settings.store.removeTask(this.id, task.id, this.fence()));
       this.settings.emit(this.id, "task.done", { callId: call.id, tool: call.name, task: task.id, ms: Date.now() - startedAt, ok: result.ok, output: clipOutput(result.text) });
       this.note(`[Background result: ${call.name} (${task.id})] ${this.capped(result.text)}\n[Chinwag] They have not seen this result: tell them with ${this.sendToolsNow()}.`);
       this.checkIdle();

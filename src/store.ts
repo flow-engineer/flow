@@ -229,6 +229,24 @@ export interface SendRow {
   createdAt: number;
 }
 
+/**
+ * The runner a conversation's write is made by and the lease epoch it holds: the write is refused
+ * (StaleRunner) once another runner took the conversation since, so a runner that stalled past its
+ * lease changes nothing. Left out, the write is made as before leases.
+ */
+export interface Fence {
+  runner: string;
+  epoch: number;
+}
+
+/** A fenced write from a runner that no longer holds the conversation: nothing was written. */
+export class StaleRunner extends Error {
+  override name = "StaleRunner";
+  constructor(conversationId: string) {
+    super(`flow: another runner took conversation ${conversationId}; this runner's write was refused`);
+  }
+}
+
 /** Where flowEvents keeps its send state. */
 export type EventStateStore = Pick<Store, "loadEventState" | "takeEvents" | "saveEventState">;
 
@@ -262,6 +280,20 @@ export class Store {
       }
     })();
     return this.ready;
+  }
+
+  /** Throws StaleRunner unless `fence` still holds the conversation's lease (locked on Postgres until the transaction ends). */
+  private async fenced(db: Omit<Database, "transaction">, conversationId: string, fence: Fence | undefined): Promise<void> {
+    if (!fence) return;
+    const lock = this.db.dialect === "postgres" ? " FOR UPDATE" : "";
+    const held = await db.query(`SELECT 1 FROM conversation_leases WHERE agent_id = ? AND conversation_id = ? AND runner = ? AND epoch = ?${lock}`, [this.agentId, conversationId, fence.runner, fence.epoch]);
+    if (!held.length) throw new StaleRunner(conversationId);
+  }
+
+  /** `work` on its own, or with `fence` checked first in the same transaction. */
+  private async write<T>(conversationId: string, fence: Fence | undefined, work: (db: Omit<Database, "transaction">) => Promise<T>): Promise<T> {
+    if (!fence) return work(this.db);
+    return this.db.transaction(async (tx) => (await this.fenced(tx, conversationId, fence), work(tx)));
   }
 
   // flowEvents' send state (business events).
@@ -377,7 +409,7 @@ export class Store {
     });
   }
 
-  async updateConversation(id: string, fields: { turnOpen?: boolean; turns?: number; messageCount?: number; recentChannels?: string[]; timeZone?: string; timeZoneSource?: TimeZoneSource; quietHours?: QuietHours | "off" | null }): Promise<void> {
+  async updateConversation(id: string, fields: { turnOpen?: boolean; turns?: number; messageCount?: number; recentChannels?: string[]; timeZone?: string; timeZoneSource?: TimeZoneSource; quietHours?: QuietHours | "off" | null }, fence?: Fence): Promise<void> {
     const sets: string[] = [];
     const params: unknown[] = [];
     if (fields.turnOpen !== undefined) sets.push("turn_open = ?"), params.push(fields.turnOpen ? 1 : 0);
@@ -388,7 +420,7 @@ export class Store {
     if (fields.timeZoneSource !== undefined) sets.push("time_zone_source = ?"), params.push(fields.timeZoneSource);
     if (fields.quietHours !== undefined) sets.push("quiet_hours = ?"), params.push(fields.quietHours === null ? null : json(fields.quietHours));
     if (!sets.length) return;
-    await this.db.run(`UPDATE conversations SET ${sets.join(", ")} WHERE agent_id = ? AND id = ?`, [...params, this.agentId, id]);
+    await this.write(id, fence, (db) => db.run(`UPDATE conversations SET ${sets.join(", ")} WHERE agent_id = ? AND id = ?`, [...params, this.agentId, id]));
   }
 
   // History.
@@ -405,8 +437,9 @@ export class Store {
   }
 
   /** Appends history entries from `seq` on, and marks inbox rows handled, together. */
-  async appendHistory(conversationId: string, seq: number, entries: ChatMessage[], doneInbox: number[] = []): Promise<void> {
+  async appendHistory(conversationId: string, seq: number, entries: ChatMessage[], doneInbox: number[] = [], fence?: Fence): Promise<void> {
     await this.db.transaction(async (tx) => {
+      await this.fenced(tx, conversationId, fence);
       for (const [i, entry] of entries.entries()) {
         await tx.run("INSERT INTO messages (agent_id, conversation_id, seq, entry, at) VALUES (?, ?, ?, ?, ?)", [this.agentId, conversationId, seq + i, json(entry), Date.now()]);
       }
@@ -418,8 +451,9 @@ export class Store {
    * Appends history entries from `seq` on (a step whose last entry makes send calls) and writes
    * those sends ahead, `pending`, in one transaction: a send goes only once this is stored.
    */
-  async beginSends(conversationId: string, seq: number, entries: ChatMessage[], sends: Array<{ key: string; callId: string; channel: string }>, at: number): Promise<void> {
+  async beginSends(conversationId: string, seq: number, entries: ChatMessage[], sends: Array<{ key: string; callId: string; channel: string }>, at: number, fence?: Fence): Promise<void> {
     await this.db.transaction(async (tx) => {
+      await this.fenced(tx, conversationId, fence);
       for (const [i, entry] of entries.entries()) {
         await tx.run("INSERT INTO messages (agent_id, conversation_id, seq, entry, at) VALUES (?, ?, ?, ?, ?)", [this.agentId, conversationId, seq + i, json(entry), Date.now()]);
       }
@@ -500,8 +534,11 @@ export class Store {
     return rows.map((r) => ({ id: Number(r.id), kind: r.kind as InboxRow["kind"], payload: parse(r.payload, {}) }));
   }
 
-  async doneInbox(ids: number[]): Promise<void> {
-    for (const id of ids) await this.db.run("UPDATE inbox SET done = 1 WHERE agent_id = ? AND id = ?", [this.agentId, id]);
+  /** Marks inbox rows handled; with `fence`, only rows of the conversation it holds (else StaleRunner, and none is marked). */
+  async doneInbox(ids: number[], conversationId?: string, fence?: Fence): Promise<void> {
+    await this.write(conversationId ?? "", conversationId === undefined ? undefined : fence, async (db) => {
+      for (const id of ids) await db.run("UPDATE inbox SET done = 1 WHERE agent_id = ? AND id = ?", [this.agentId, id]);
+    });
   }
 
   // Which runner works on a conversation.
@@ -531,12 +568,12 @@ export class Store {
 
   // Background tools.
 
-  async addTask(conversationId: string, taskId: string, callId: string, tool: string, startedAt: number): Promise<void> {
-    await this.db.run("INSERT INTO background_tools (agent_id, conversation_id, task_id, call_id, tool, started_at) VALUES (?, ?, ?, ?, ?, ?)", [this.agentId, conversationId, taskId, callId, tool, startedAt]);
+  async addTask(conversationId: string, taskId: string, callId: string, tool: string, startedAt: number, fence?: Fence): Promise<void> {
+    await this.write(conversationId, fence, (db) => db.run("INSERT INTO background_tools (agent_id, conversation_id, task_id, call_id, tool, started_at) VALUES (?, ?, ?, ?, ?, ?)", [this.agentId, conversationId, taskId, callId, tool, startedAt]));
   }
 
-  async removeTask(conversationId: string, taskId: string): Promise<void> {
-    await this.db.run("DELETE FROM background_tools WHERE agent_id = ? AND conversation_id = ? AND task_id = ?", [this.agentId, conversationId, taskId]);
+  async removeTask(conversationId: string, taskId: string, fence?: Fence): Promise<void> {
+    await this.write(conversationId, fence, (db) => db.run("DELETE FROM background_tools WHERE agent_id = ? AND conversation_id = ? AND task_id = ?", [this.agentId, conversationId, taskId]));
   }
 
   async tasks(conversationId: string): Promise<Array<{ taskId: string; tool: string; startedAt: number }>> {
