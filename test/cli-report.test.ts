@@ -606,6 +606,8 @@ test("test files: old ones parse as before, the clock, calls and never parse, an
     expect: { calls: ["cancel_session", { tool: "move_session", args: { slot: { at: "{{now+1w|date}}" } } }], never: ["delete_account"] },
   });
   for (const now of ["2026-10-16T09:00:30Z", "2026-10-16T09:00-04:00"]) assert.equal(parseScenario(scenario(`now: ${now}\n`)).now, now);
+  // A run that starts from an earlier conversation: what each side said, oldest first.
+  assert.deepEqual(parseScenario(scenario("history:\n  - person: Book Friday\n  - agent: Done, {{now + 1d | weekday}}.\n")).history, [{ person: "Book Friday" }, { agent: "Done, {{now + 1d | weekday}}." }]);
   // The café example, as shipped, is valid.
   for (const file of loadSuite(fileURLToPath(new URL("../examples/cafe/tests", import.meta.url)))) (file.path.startsWith("scenarios/") ? parseScenario : parseToolFile)(file);
 
@@ -615,6 +617,8 @@ test("test files: old ones parse as before, the clock, calls and never parse, an
     ["now: 2026-02-30T09:00", "scenarios/x.yaml:9: now: not a date and time: write YYYY-MM-DDTHH:MM, with :SS, Z or an offset such as -04:00 if needed"],
     ["now: 2026-10-16 09:00", "scenarios/x.yaml:9: now: not a date and time: write YYYY-MM-DDTHH:MM, with :SS, Z or an offset such as -04:00 if needed"],
     ["expect:\n  calls:\n    - tool: move_session\n      arg: {}", "scenarios/x.yaml:11: expect.calls[0]: Unrecognized key: \"arg\""],
+    ["history:\n  - customer: hi", "scenarios/x.yaml:10: history[0]: { person: <what they said> } or { agent: <what it said> }"],
+    ["history: []", "scenarios/x.yaml:9: history: Too small: expected array to have >=1 items"],
     ["expect:\n  never:\n    - args: { slot: s-2 }", "scenarios/x.yaml:11: expect.never[0]: a tool name, or { tool: <name>, args: { <field>: <value> } }"],
     ["expect:\n  judge:\n    - It is booked for {{now + 3 days}}.", `scenarios/x.yaml:11: expect.judge[0]: ${placeholder("{{now + 3 days}}")}`],
     ["expect:\n  calls:\n    - tool: t\n      args:\n        at: '{{now @ 9:00}}'", `scenarios/x.yaml:13: expect.calls[0].args.at: ${placeholder("{{now @ 9:00}}")}`],
