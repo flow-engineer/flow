@@ -18,6 +18,7 @@ export interface FlowEvent {
     | "tool.end"
     | "tool.detached"
     | "tool.repeated"
+    | "tool.rerun"
     | "task.done"
     | "skill.loaded"
     | "text.hidden"
