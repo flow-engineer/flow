@@ -175,8 +175,8 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   tap gives the id back (Flow Messaging's WhatsApp and Telegram, the simulators); a channel of your own
   (a customUI) sets it in its `info` once it does, else number labels where taps must be told apart. A channel that gets a carousel without a way to show
   one sends its text, then each card as a message, in order (`carouselMessages`).
-- The simulators and the test cloud play an agent's own channels with these definitions (the web
-  simulator plays a customUI), so the model sees the production tools; they show params such as
+- The simulators and the test cloud play an agent's own channels with these definitions (a customUI
+  on Telegram or iMessage, as Flow Messaging's are, plays in that platform's simulator; any other in the web one), so the model sees the production tools; they show params such as
   app_link under the message instead of calling your sendMessage.
 - Every send is checked against its platform's content rules, Flow Messaging's (`ChannelInfo.platform`,
   `CONTENT_LIMITS`, `contentRefusal`): what WhatsApp, Telegram, iMessage or SMS would refuse (a
@@ -323,8 +323,8 @@ conversation across every channel: switch channels and the chat resumes. A liste
 write from a real provider once a channel is live; replies, scheduled messages and nudges go back
 wherever that person last wrote from on that channel.
 
-`src/main.ts` serves it with the simulators (SMS, WhatsApp, and the web simulator for a custom UI),
-each with that platform's real rules, on the agent's own `channels` (declare them, with a provider
+`src/main.ts` serves it with the simulators (SMS, WhatsApp, Telegram and iMessage, and the web
+simulator for a custom UI), each drawn like its app and with that platform's real rules, on the agent's own `channels` (declare them, with a provider
 that is not connected yet if the numbers are not ready: test people never reach it):
 
 ```ts
