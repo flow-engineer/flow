@@ -141,7 +141,7 @@ export interface FakeStream {
 
 /** A multipart body as its fields: a file part as { name, type, bytes }. */
 async function formOf(raw: Buffer, type: string): Promise<Record<string, unknown>> {
-  const form = await new Response(raw, { headers: { "content-type": type } }).formData();
+  const form = await new Response(new Uint8Array(raw), { headers: { "content-type": type } }).formData();
   const fields: Record<string, unknown> = {};
   for (const [key, value] of form) fields[key] = typeof value === "string" ? value : { name: value.name, type: value.type, bytes: Buffer.from(await value.arrayBuffer()) };
   return fields;

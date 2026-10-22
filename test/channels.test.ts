@@ -68,7 +68,7 @@ test("a channel with files offers a file of its kinds on the send tool; it goes 
   const menu = { kind: "document", url: "https://example.com/menu.pdf", name: "menu.pdf" };
   first.answer(respond(call("send_chat", { text: "Here", file: menu, buttons: ["Thanks"] })));
   const again = await h.nextCall(1);
-  assert.match(again.request.messages.at(-1)!.content, /a file goes alone/);
+  assert.match(String(again.request.messages.at(-1)!.content), /a file goes alone/);
   again.answer(respond(call("send_chat", { text: "Today's menu", file: menu })));
   await h.agent.conversation("f1")!.whenIdle();
   assert.deepEqual(h.out.filter((o) => o.type === "message"), [{ type: "message", text: "Today's menu", file: { kind: "document", name: "menu.pdf", url: "https://example.com/menu.pdf" } }]);
