@@ -129,7 +129,9 @@ is a definition in its own file; Flow Framework knows the platform (WhatsApp's l
 provider only says how to send:
 
 ```ts
-// src/channels/whatsapp.ts: one sendMessage, plus whatever else your provider can do
+// src/channels/whatsapp.ts: one sendMessage, plus whatever else your provider can do.
+// sendMessage resolves only once your API accepted the message, and throws when it refused it
+// (never earlier: the next message waits for it). docs/guarantees.md
 export const wa = whatsapp({
   sendMessage: (to, m) => api.send(to, m),        // m: { text, replyTo?, buttons?: (label | { id, label })[], list?, link?, image? }
   react: (to, id, emoji) => api.react(to, id, emoji),
@@ -439,7 +441,9 @@ printf '%s' "$VALUE" | npx @flow-engineer/flow deploy secret NAME --env producti
 ```
 
 Promote, or `deploy --env production`, only when the owner says so. A refused deploy lists the
-hosting lint's findings (`deploy.findings`): fix the errors and deploy again. One `deploy` is the whole first deploy: there is no
+hosting lint's findings (`deploy.findings`): fix the errors and deploy again. An agent locked to a
+newer Flow Framework release line than hosting runs is refused before anything is sent
+(`error.code` `chinwag_too_new`): run its `next` (pin the version hosting runs) and deploy again. One `deploy` is the whole first deploy: there is no
 separate secrets step (it sends only new or changed `.env` values each time; promote sends them to
 production). Commit first, or the version reads `<sha>+dirty`. Stop the laptop's `npm start` once the deployed one is live: two copies on one key
 both answer every message.

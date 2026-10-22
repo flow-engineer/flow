@@ -216,8 +216,24 @@ export interface TemplateDefinition {
 
 export type TemplateButton = { type: "quick_reply"; text: string } | { type: "url"; text: string; url: string } | { type: "phone"; text: string; phone: string };
 
-/** Sends one outbound; a rejection means it did not reach the person. */
-export type Deliver = (outbound: Outbound) => Promise<void> | void;
+/**
+ * Sends one outbound. It resolves once the channel has it (the platform accepted it), so the next
+ * message goes only after it; a rejection means it did not reach the person. It may resolve with a
+ * receipt saying how far the message got.
+ */
+export type Deliver = (outbound: Outbound) => Promise<void | SendReceipt> | void | SendReceipt;
+
+/**
+ * How far a sent message got when its send resolved. sent: the platform accepted it. delivered: it
+ * reached the person's device. queued: the provider stored it to send later (it does not wait).
+ * unconfirmed: no signal came within the provider's wait; it may still arrive and is never sent
+ * again (Flow Framework emits `message.slow`).
+ */
+export interface SendReceipt {
+  status: "queued" | "sent" | "delivered" | "unconfirmed";
+  /** How long the send waited for that, ms. */
+  waitedMs?: number;
+}
 
 /** What the channel a conversation is on can show. */
 export interface ChannelInfo {
@@ -254,6 +270,14 @@ export interface ChannelInfo {
   carousels?: { maxCards: number; textMax: number; cardTextMax: number; buttons: number; labelMax: number };
   /** The channel shows the person when their message has been read. */
   readReceipts?: boolean;
+  /**
+   * Templates the owner set up with the platform (WhatsApp's), which also go outside its window.
+   * false: a template send is refused before it goes, with the platform's error. Absent: not known
+   * (a hand-written channel), so its send decides, as before.
+   */
+  templates?: boolean;
+  /** A typing indicator while the agent writes. Absent: not known, so typing is handed to the channel, as before. */
+  typing?: boolean;
   /**
    * The business may message first only this many hours after the person's last message
    * (WhatsApp: 24); after that, only templates.
