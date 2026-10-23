@@ -39,7 +39,7 @@ import { CHAT_LINE, chatCli } from "./chat.ts";
 import { DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
-import { displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
+import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
 import { EXIT, finishedOutcome, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
@@ -47,11 +47,14 @@ import type { RunOutcome, RunSummary } from "./protocol.ts";
 
 const NEW_LINE = `  flow new <name> [--display-name <name>]
                             Make ./<name>/, a new agent started from the café example
-  flow init [--display-name <name>]
-                            Make that agent in the current folder, named after it.
+  flow init [--name <name>] [--display-name <name>]
+                            Make that agent in the current folder.
                             --display-name is what people call it, such as "FlatX agent": a
                             phone reaches it with "Hi FlatX agent (ref <code>)" (asked for when
-                            run in a terminal; else the folder's name in words)`;
+                            run in a terminal; else the name in words).
+                            --name is its package, CLI command and MCP server name, such as
+                            flatx-agent (else the display name in lowercase and dashes, else
+                            the folder's name)`;
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
                             the tests are in tests/scenarios and tests/tools)`;
@@ -174,16 +177,18 @@ if (process.argv[2] === "mcp") {
     console.error(MCP_LINE.trim());
     process.exit(1);
   }
+  // Loaded here first, so a missing optional peer is one line; mcpUpdateCli's own import of it is then cached.
+  await withPeers("mcp update", () => import("../../mcp/src/client.ts"));
   process.exit(await mcpUpdateCli());
 }
 if (process.argv[2] === "cli") {
-  // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client, an optional peer.
-  const { defineCli, runCli } = await import("../../cli/src/index.ts");
+  // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client and @stricli/core, optional peers.
+  const { defineCli, runCli } = await withPeers("cli", () => import("../../cli/src/index.ts"));
   process.exit(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
 }
 if (process.argv[2] === "inspect") {
   // Loaded only here: it needs @modelcontextprotocol/client, an optional peer.
-  const { inspectCli } = await import("./inspect.ts");
+  const { inspectCli } = await withPeers("inspect", () => import("./inspect.ts"));
   process.exit(await inspectCli(process.argv.slice(3)));
 }
 if (process.argv[2] === "deploy") process.exit(await deployCli(process.argv.slice(3)));
@@ -246,6 +251,7 @@ const namedLine = (dir: string) => {
 };
 
 const displayNameFlag = (values as { "display-name"?: string })["display-name"];
+const nameFlag = (values as { name?: string }).name;
 
 if (command === "new") {
   const name = rest.length === 1 ? rest[0]! : "";
@@ -266,8 +272,9 @@ ${nextSteps()}`);
 if (command === "init") {
   let name: string;
   try {
-    if (rest.length) throw new Error("Usage: flow init [--display-name <name>] (it makes the agent in the current folder; flow new <name> makes a folder for it)");
-    name = initHere(process.cwd(), { displayName: await askDisplayName(displayNameFlag, folderName(process.cwd())) });
+    if (rest.length) throw new Error("Usage: flow init [--name <name>] [--display-name <name>] (it makes the agent in the current folder; flow new <name> makes a folder for it)");
+    if (nameFlag !== undefined) checkName(nameFlag);
+    name = initHere(process.cwd(), { name: nameFlag, displayName: await askDisplayName(displayNameFlag, nameFlag ?? folderName(process.cwd())) });
   } catch (error) {
     console.error((error as Error).message);
     process.exit(1);
@@ -645,6 +652,20 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
   process.exit(exitCode);
 }
 
+/** A command's module, or exits 1 with one line when an optional peer it needs is not installed where
+ * flow runs from (npx's cache, say, rather than the agent's folder). */
+async function withPeers<T>(command: string, load: () => Promise<T>): Promise<T> {
+  try {
+    return await load();
+  } catch (error) {
+    const missing = /Cannot find package '([^']+)'/.exec((error as Error).message)?.[1];
+    const peers = JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).peerDependencies as Record<string, string>;
+    if ((error as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND" || !missing || !(missing in peers)) throw error;
+    console.error(`flow ${command} needs ${missing}: run it from your agent's folder (npx @flow-engineer/flow ${command}), or npm install ${missing}.`);
+    process.exit(1);
+  }
+}
+
 /** Nothing was sent: prints what is wrong and exits 1 (with --json, after the report). */
 function invalid(message: string): never {
   console.error(message);
@@ -700,7 +721,7 @@ function stoppedReason(error: unknown, cloud: string): string {
 /** The command's flags, or exits 1 with what is wrong and that command's usage. */
 function parseCommandLine() {
   const isNew = process.argv[2] === "new" || process.argv[2] === "init";
-  const options = isNew ? { help: TEST_FLAGS.help, version: TEST_FLAGS.version, "display-name": { type: "string" } } : TEST_FLAGS;
+  const options = isNew ? { help: TEST_FLAGS.help, version: TEST_FLAGS.version, "display-name": { type: "string" }, ...(process.argv[2] === "init" ? { name: { type: "string" } } : {}) } : TEST_FLAGS;
   try {
     return parseArgs({ allowPositionals: true, strict: true, options: options as typeof TEST_FLAGS });
   } catch (error) {

@@ -2,11 +2,13 @@
 // that depends on the @flow-engineer/flow package. Its imports become "@flow-engineer/flow",
 // "@flow-engineer/flow/simulators" and "@flow-engineer/flow/flow-messaging", and the coding-agent
 // skills go in .claude/skills/, with an AGENTS.md (and a CLAUDE.md importing it) pointing at them.
-// `flow init` makes the same agent in the current folder. Inside a clone, `npm run new -- <name>`
-// makes agents/<name>/ instead. `--display-name` is what people call the agent ("FlatX agent"), kept
-// as package.json's displayName: the message a phone sends to reach it is "Hi <it> (ref <code>)".
-// The café's agent is Pip; the display name takes Pip's place in its prompt (agent/AGENTS.md), and
-// its playground and MCP server read the name from package.json. `flow link --display-name` (and
+// `flow init` makes the same agent in the current folder, named by `--name`, else after
+// `--display-name`, else after the folder. Inside a clone, `npm run new -- <name>` makes
+// agents/<name>/ instead. `--display-name` is what people call the agent ("FlatX agent"), kept as
+// package.json's displayName: the message a phone sends to reach it is "Hi <it> (ref <code>)".
+// The café's agent is Pip; the display name takes Pip's place in its prompt (agent/AGENTS.md). Every
+// other name in the agent's code comes from package.json through src/name.ts (its CLI command, the
+// CLI's variables, its MCP server), so nothing here rewrites them. `flow link --display-name` (and
 // `setup`) renames an agent made already, the same way (setDisplayName).
 
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -60,7 +62,7 @@ GEMINI_API_KEY=
 FLOW_KEY=
 
 # Optional. The model id for that provider; empty is that provider's default.
-# CAFE_MODEL=
+# MODEL=
 
 # The test cloud (npx @flow-engineer/flow test --synthetic) and traces. Sign in at https://flow.engineer/observe,
 # add the agent, and on its Developers page make a CI key (oci_..., shown once); the trace key is
@@ -82,9 +84,13 @@ MCP server and a CLI. It starts as the café example; replace the café with the
   server and CLI), \`flow-framework-tools\` for its tools and their test files, \`flow-framework-tests\` for its test
   scenarios, \`flow-framework-context\` to gather what the tools are written from out of an existing
   codebase, and \`flow-framework-auth\` for sign-in.
-- \`agent/AGENTS.md\` is the agent's own prompt, not instructions for coding agents. What people call
-  the agent is package.json's \`displayName\`; \`npx @flow-engineer/flow link --display-name <name>\`
-  changes it there and in that prompt.
+- \`agent/AGENTS.md\` is the agent's own prompt, not instructions for coding agents.
+- The agent's names live in package.json, and the code reads them from there (src/name.ts):
+  \`name\` is the package, the CLI command (keep the \`bin\` key the same), its \`<NAME>_SERVER\` and
+  \`<NAME>_TOKEN\` variables and the MCP server's name; \`displayName\` is what people call the agent,
+  also written in its prompt. To rename it, change \`name\` and the \`bin\` key; for the display name
+  run \`npx @flow-engineer/flow link --display-name <name>\` (package.json and the prompt). Where
+  people see each name: the flow-framework skill, "Names".
 - The model key goes in \`.env\` (never read or print it): \`npx @flow-engineer/flow link\` (or \`setup\`)
   writes \`FLOW_KEY\`, the agent's one Flow key, which calls models on Flow's free trial credit, so no provider key is needed; a key the owner types
   (\`OPENROUTER_API_KEY\`, \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`) wins over it. \`npm start\` runs it in the playground,
@@ -164,16 +170,25 @@ export function newStandalone(name: string, options: MakeOptions & { into?: stri
 /** What `flow init` writes into a folder; it refuses a folder that holds any of them, so nothing is overwritten. */
 const MADE = ["package.json", "tsconfig.json", "src", "agent", "tests", ".env.example", "AGENTS.md", "CLAUDE.md", ".npmrc"];
 
-/** The package name `flow init` gives the agent in `dir`: the folder's name in lowercase and dashes. */
-export function folderName(dir: string): string {
-  return basename(dir).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "my-agent";
+/** Words as a package name: lowercase letters, digits and dashes ("Café Bot" is "cafe-bot"); empty when nothing is left. */
+function slugOf(text: string): string {
+  return text.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
-/** Makes the agent in `dir` (the current folder by default), named after the folder; returns its name. */
-export function initHere(dir = process.cwd(), options: MakeOptions = {}): string {
+/** The package name `flow init` gives the agent in `dir` when no name or display name gives one: the folder's name in lowercase and dashes. */
+export function folderName(dir: string): string {
+  return slugOf(basename(dir)) || "my-agent";
+}
+
+/**
+ * Makes the agent in `dir` (the current folder by default) and returns its name: `options.name`,
+ * else the display name as a package name ("FlatX agent" is flatx-agent), else the folder's name.
+ */
+export function initHere(dir = process.cwd(), options: MakeOptions & { name?: string } = {}): string {
+  if (options.name !== undefined) checkName(options.name);
   const taken = MADE.filter((f) => existsSync(join(dir, f)));
   if (taken.length) throw new Error(`${dir} has ${taken.join(", ")} already: run flow init in an empty folder, or flow new <name> to make one.`);
-  const name = folderName(dir);
+  const name = options.name ?? (slugOf(options.displayName ?? "") || folderName(dir));
   makeAgent(dir, name, displayNameOf(options.displayName, name), options.root ?? packageRoot());
   return name;
 }
@@ -191,10 +206,8 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
       .replace(/(["'])(\.\.\/)+flow-messaging\/src\/index\.ts\1/g, '"@flow-engineer/flow/flow-messaging"')
       .replace(/(["'])(\.\.\/)+mcp\/src\/index\.ts\1/g, '"@flow-engineer/flow/mcp"')
       .replace(/(["'])(\.\.\/)+cli\/src\/index\.ts\1/g, '"@flow-engineer/flow/cli"');
-    // The CLI is the agent's own command, named after it (and so is its server's setting, which mcp.ts names too).
-    const text = (file === "cli.ts" ? source.replace(/name: "cafe"/, `name: "${name}"`) : source).replace(/CAFE_SERVER/g, `${name.toUpperCase().replace(/-/g, "_")}_SERVER`);
-    if (/["']\.\.\/\.\.\//.test(text)) throw new Error(`flow: ${file} imports a file outside the agent; only Flow Framework's public entries can be rewritten.`);
-    writeFileSync(path, text);
+    if (/["']\.\.\/\.\.\//.test(source)) throw new Error(`flow: ${file} imports a file outside the agent; only Flow Framework's public entries can be rewritten.`);
+    writeFileSync(path, source);
   }
 
   const own = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
@@ -204,7 +217,8 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
     displayName,
     version: "0.1.0",
     private: true,
-    description: `${name}: a Flow Framework agent, started from the café example.`,
+    // Generated plugins carry it (flow plugin): say what the agent does once it does.
+    description: `${displayName}, a Flow Framework agent.`,
     type: "module",
     bin: { [name]: "src/cli.ts" },
     engines: own.engines,

@@ -57,7 +57,8 @@ Before `init` (or `flow new <folder>`), ask the owner what people should call th
 "FlatX agent", and pass it as `--display-name`. It is kept as `displayName` in `package.json`, and
 the message their phone sends to reach the agent is `Hi FlatX agent (ref <code>)`. The name takes the
 starter's (Pip) place in the agent's prompt, `agent/AGENTS.md`, and the playground and MCP server
-read it from `package.json`. To rename an agent made already, `link --display-name "<name>"` (or
+read it from `package.json`. `init` names the package, its CLI command and its MCP server after it
+(`flatx-agent`), or after `--name <name>` when given, else after the folder. To rename an agent made already, `link --display-name "<name>"` (or
 `setup --display-name`) changes both; restart `npm start` after it. Without the flag, `init` asks in
 a terminal and otherwise uses the folder's name in words.
 

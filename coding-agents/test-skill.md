@@ -322,7 +322,7 @@ To implement one:
    POST per message of the person's, answered in the same response with status 200 and
    `{ "replies": [...] }` (`[]` for no reply, never 204). Keep history by `conversationId`, ignore
    request fields you do not know, and check `authorization: Bearer` when `FLOW_FRAMEWORK_AGENT_TOKEN` is set.
-2. Only send what the run's platform shows (`x-chinwag-platforms` in the spec): no buttons on SMS,
+2. Only send what the run's platform shows (`x-flow-platforms` in the spec): no buttons on SMS,
    text within `maxLength`. Name the person's messages by the `messageId` they came with.
 3. Start the endpoint and run `npx @flow-engineer/flow check-endpoint <url>` (`--token-env NAME` when it needs
    a token). Fix every FAIL line; it must end "5 of 5 cases passed". Give the agent a mode with no

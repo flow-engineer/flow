@@ -44,6 +44,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - `POST /v1/events` answers 202 once the event is recorded in the database, and 503 when it could
   not be recorded (retry with the same id).
 - `events.idle()` also waits for work queued while it waited (a restart's unprocessed events).
+- `flow inspect`, `flow cli` and `flow mcp update` run where the MCP client is not installed (from
+  `npx --package`, outside an agent's folder) say which package they need and how to get it, and
+  exit 1, instead of crashing with `ERR_MODULE_NOT_FOUND`.
 - **A generated CLI command whose arguments the server's schema refuses** (a maximum, a pattern)
   exits 2 with one line per field (`--days: Too big: expected number to be <=16`) and the command's
   `--help` hint, as other wrong arguments do. It printed the MCP `ProtocolError` with a stack and
@@ -55,6 +58,18 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   stored history, so guards hold after a restart.
 - `agent.resetHistory({ to, note })`: the model's history starts again from a point (nothing is
   deleted); a new event, `history.reset`, when a turn reads it.
+- **`flow init --name <name>`**, and without it `init` names the agent after `--display-name`
+  (`--display-name "FlatX agent"` is `flatx-agent`), then after the folder as before.
+- **Every name in a new agent comes from the name it was given.** The starter's names live in
+  `package.json` only: a new file, `src/name.ts`, reads `name` and `displayName` there for
+  `src/cli.ts` (the command, `<NAME>_SERVER`, its help examples), `src/mcp.ts` (the MCP server's
+  name and the `claude mcp add` line it prints) and `src/main.ts` (the playground's title). A new
+  agent no longer names `bean-and-leaf`, `cafe` or `CAFE_*` anywhere, and its package.json
+  `description` (which `flow plugin` puts in plugins) no longer says "started from the café
+  example". The coding-agent skill lists where people see each name ("Names").
+- More Chinwag names become Flow's: the spec's platform table is `x-flow-platforms`, a drafted
+  context-pack spec is marked `x-flow-draft`, and `flow plugin` records what it wrote in
+  `.flow-skills.json`.
 - **`flow test` tells a credit or infrastructure stop from a failure.** Each run's outcome is
   `passed`, `failed`, `credit` or `infra`; credit and infra runs are counted apart and never as
   failed (they still exit 2). With `--runs N` the summary prints each scenario's pass rate per
@@ -71,6 +86,15 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
+- **Agents made already keep working unchanged**; the starter changes only what `new` and `init`
+  write. To take the new shape, copy `src/name.ts` from a new agent and use its `name`,
+  `displayName` and `serverEnv` in place of the names written in `src/cli.ts`, `src/mcp.ts` and
+  `src/main.ts`.
+- **The starter reads `MODEL`, not `CAFE_MODEL`**, for the model id (`openAICompatible()` reads
+  `MODEL` itself). An agent made already still reads `CAFE_MODEL`; a new one ignores it, so move
+  the value to `MODEL=` in `.env`.
+- **`flow init --display-name` names the package after the display name**, no longer the folder:
+  pass `--name <folder's name>` to keep the old name.
 - **A generated CLI command refused by the server's schema exits 2, not 1.** A script that treated
   exit 1 as "bad arguments" checks for 2, the usage code the CLI already used for other wrong arguments.
 - **Flow Messaging sends wait for `message.sent`.** A send now takes until the channel accepted it
@@ -105,6 +129,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   anything is sent: stay on the line hosting runs until it moves.
 - **The free trial line is worded in people.** `flow setup`, `link` and `status` print
   `3 of 25 people, 2 waiting for a place` instead of messages used; scripts read `--json`.
+- **Chinwag names renamed, the old ones still read for now.** `spec/agent-endpoint.openapi.yaml`'s
+  platform table is `x-flow-platforms`; `x-chinwag-platforms` is kept beside it as the same table,
+  deprecated, and goes in 0.6: code that reads it from the package reads `x-flow-platforms`.
+  `flow plugin` writes `.flow-skills.json` and removes `.chinwag-skills.json`; `flow check --plugin`
+  still accepts a package with only the old file, so nothing to do but commit the renamed file after
+  the next `flow plugin`. The context skill now marks a drafted spec `x-flow-draft: true`; nothing in
+  Flow Framework reads the marker, and `x-chinwag-draft` in an existing pack means the same.
 - **`flow test`'s printed summary is worded differently.** `N errored (...)` is now
   `N hit an infrastructure error (...)` or `N stopped for credit (...)`, and `K failed a check` is
   `F failed`. Scripts that read the printed summary read `--json` instead (its fields are only
