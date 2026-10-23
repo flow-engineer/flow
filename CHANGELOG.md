@@ -39,6 +39,19 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   stored history, so guards hold after a restart.
 - `agent.resetHistory({ to, note })`: the model's history starts again from a point (nothing is
   deleted); a new event, `history.reset`, when a turn reads it.
+- **`flow test` tells a credit or infrastructure stop from a failure.** Each run's outcome is
+  `passed`, `failed`, `credit` or `infra`; credit and infra runs are counted apart and never as
+  failed (they still exit 2). With `--runs N` the summary prints each scenario's pass rate per
+  channel (`hello (sms): 2/3 passed, flaky`).
+- **Seeded history in scenarios.** A scenario's `history:` (`- person: ...` / `- agent: ...`) is
+  written into the agent's store before the first message, with no model call and nothing sent
+  (new `agent.seedHistory()` and `Conversation.seed()`).
+- **One send path.** On a Flow Framework agent, `flow test` checks that every message the agent
+  sent went through its channels (`/outbound` against `message.out`); a mismatch fails the session.
+- `flow test --json` adds `outcome` per run, `counts.credit` and `counts.infra` (still inside
+  `errored`), `scenarios` (each scenario's runs, passed runs, credit and infra) and `sendPath`;
+  `.flow/last-session.json` runs get `outcome`. `model.error` events carry `code` and `status` when
+  the error has them.
 
 ### Migration notes
 
@@ -68,3 +81,7 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   (or `Math.floor(contextTokens * 0.6)`).
 - **A new event type, `history.reset`.** An event sink that switches on event types sees it. A
   custom `StoreApi` passes inbox payloads through unchanged; nothing to do.
+- **`flow test`'s printed summary is worded differently.** `N errored (...)` is now
+  `N hit an infrastructure error (...)` or `N stopped for credit (...)`, and `K failed a check` is
+  `F failed`. Scripts that read the printed summary read `--json` instead (its fields are only
+  added to).
