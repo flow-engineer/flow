@@ -2,7 +2,7 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## 0.5.0 (unreleased)
+## 0.5.1 (2026-10-24)
 
 ### Changes
 
@@ -13,7 +13,19 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   without replaying a tool request. `--refresh-tools` forces discovery; `discoveryCache: false`
   disables caching and `{ maxAgeMs }` changes the background interval. Embedded CLIs can schedule
   refreshes with `CliIO.background`. Handwritten commands work without discovery and take precedence
-  over derived names. No migration is required; MCP-backed commands still execute on the server.
+  over derived names. MCP-backed commands still execute on the server.
+
+### Migration notes
+
+- **CLI tool discovery is cached by default.** Cached commands load immediately and refresh in the
+  background. To keep discovery on every invocation, set `discoveryCache: false` in `defineCli`.
+  `--refresh-tools` fetches current definitions on demand. The MCP server must still be deployed;
+  tool implementations continue to run there. No changes to tool definitions are needed.
+
+## 0.5.0 (2026-10-23)
+
+### Changes
+
 - **The API may change until 1.0, with a migration note every time.** [docs/stability.md](docs/stability.md)
   lists what freezes at 1.0; [docs/releasing.md](docs/releasing.md) is the release checklist.
   New guides: [docs/channels.md](docs/channels.md) (every channel's options and params) and
