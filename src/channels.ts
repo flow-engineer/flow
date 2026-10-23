@@ -265,8 +265,8 @@ export function customUI(name: string, provider: CustomUIProvider): Channel {
     reactions: Boolean(provider.react),
     status: Boolean(provider.status),
     readReceipts: Boolean(provider.markRead),
-    edits: Boolean(provider.editMessage),
-    unsends: Boolean(provider.unsendMessage),
+    ...(provider.editMessage ? { edits: true } : {}),
+    ...(provider.unsendMessage ? { unsends: true } : {}),
   };
   return {
     name,

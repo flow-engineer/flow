@@ -90,7 +90,7 @@ export interface StreamHandle {
   stopped: Promise<StreamStop>;
 }
 
-/** Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos (one with buttons is one message), carousels (Flow sends their cards one by one), Markdown, no read receipts for bots. */
+/** Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos (one with buttons is one message), carousels (Flow sends their cards one by one), Markdown, edits and unsends, no read receipts for bots. */
 export const TELEGRAM: ChannelInfo = {
   platform: "telegram",
   reactions: true,
@@ -105,12 +105,14 @@ export const TELEGRAM: ChannelInfo = {
   carousels: WHATSAPP_CAROUSELS,
   readReceipts: false,
   templates: false,
+  edits: true,
+  unsends: true,
 };
 
 /**
  * iMessage as Flow sends it: plain text up to 9999 characters, photos, inline replies, tapbacks
- * (other emoji go as emoji reactions), typing and read receipts (the whole conversation). No buttons,
- * lists or templates. No reply window is set: the line only answers people who wrote to it, and a
+ * (other emoji go as emoji reactions), typing and read receipts (the whole conversation), edits
+ * and unsends (Flow refuses one that comes too late, and the agent is told). No buttons, lists or templates. No reply window is set: the line only answers people who wrote to it, and a
  * send it will not deliver comes back as Not delivered (outside_window).
  */
 export const IMESSAGE: ChannelInfo = {
@@ -123,6 +125,8 @@ export const IMESSAGE: ChannelInfo = {
   images: { captionMax: 1024 },
   readReceipts: true,
   templates: false,
+  edits: true,
+  unsends: true,
 };
 
 /** Flow sends a list as buttons, whose labels take at most 20 characters, and has no row descriptions. */
@@ -230,7 +234,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * past the wait it resolves "unconfirmed" (the message may still go, and is never sent again).
    */
   function arrived(route: Route, message: FlowMessage): Promise<SendReceipt> {
-    if (waitFor === "queued" || !message.id) return Promise.resolve({ status: "queued" });
+    if (waitFor === "queued" || !message.id) return Promise.resolve({ status: "queued", ...(message.id ? { messageId: message.id } : {}) });
     const started = Date.now();
     const target = waitFor === "delivered" && route.kind !== "telegram" ? "delivered" : "sent";
     return new Promise<SendReceipt>((resolve, reject) => {
@@ -243,7 +247,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         clearTimeout(poll);
         waiting.delete(message.id);
         if (outcome instanceof Error) reject(outcome);
-        else resolve({ status: outcome, waitedMs: Date.now() - started });
+        else resolve({ status: outcome, waitedMs: Date.now() - started, messageId: message.id });
       };
       const take = (status: string | undefined, error?: FlowMessage["error"]): boolean => {
         if (done || !status) return done;
@@ -276,6 +280,16 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       };
       poll = setTimeout(readBack, delay);
     });
+  }
+
+  /** An edit or unsend: resolves once Flow took it, rejects with Flow's reason (its error type and message). */
+  async function change(call: () => Promise<unknown>): Promise<void> {
+    try {
+      await call();
+    } catch (error) {
+      if (!(error instanceof FlowMessagingError)) throw error;
+      throw new Error(error.channelCode ? `${error.type} (${error.channelCode}): ${error.message}` : `${error.type}: ${error.message}`);
+    }
   }
 
   /**
@@ -353,6 +367,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       },
       sendCarousel: (to: string, carousel: Carousel) => send(route, to, carouselContent(carousel), carousel.replyTo, carousel.replyTo, carousel.idempotencyKey),
       react: async (to: string, messageId: string, emoji: string) => void (await send(route, to, { type: "reaction", message_id: messageId, emoji }, undefined, messageId)),
+      // An edit or unsend Flow refuses (too late, or a channel without them) rejects with its reason, for the agent.
+      editMessage: (to: string, messageId: string, text: string) => change(() => client.patch(`/v1/messages/${idSegment("msg", messageId)}`, { content: { type: "text", text, format: route.kind === "telegram" ? "markdown" : "plain" } })),
+      unsendMessage: (to: string, messageId: string) => change(() => client.delete(`/v1/messages/${idSegment("msg", messageId)}`)),
       typing: (to: string, on: boolean) => courtesy(route, to, "typing", { state: on ? "on" : "off" }),
       markRead: (to: string, messageIds: string[]) => courtesy(route, to, "read", { up_to: messageIds.at(-1) }, messageIds.at(-1)),
       sendTemplate: async (to: string, wanted: Template, idempotencyKey?: string) => {
@@ -432,12 +449,17 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
             return (async () => {
               const receipts: SendReceipt[] = [];
               for (const m of carouselMessages(info, carousel)) receipts.push(await p.sendMessage(to, m));
-              // The carousel got as far as its least far card.
-              return receipts.find((r) => r.status === "unconfirmed") ?? receipts.find((r) => r.status === "queued") ?? receipts.find((r) => r.status === "sent") ?? receipts[0];
+              // The carousel got as far as its least far card; its id is its first message's.
+              const least = receipts.find((r) => r.status === "unconfirmed") ?? receipts.find((r) => r.status === "queued") ?? receipts.find((r) => r.status === "sent") ?? receipts[0];
+              return least && { ...least, messageId: receipts[0]!.messageId };
             })();
           }
           case "reaction":
             return p.react(to, outbound.messageId, outbound.emoji);
+          case "edit":
+            return p.editMessage(to, outbound.messageId, outbound.text);
+          case "unsend":
+            return p.unsendMessage(to, outbound.messageId);
           case "typing":
             return p.typing(to, outbound.on);
           case "read":
@@ -555,7 +577,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       if (target?.fromAgent) agent.reacted(conversationId, event.data.emoji, target.text);
     } else if (event.type === "message.failed" && event.data?.message) {
       const m = event.data.message;
-      const text = textOf(m.content);
+      // An edit or unsend Flow took and the channel then refused: told as what it was.
+      const target = typeof m.content.message_id === "string" ? m.content.message_id : "";
+      const text = m.content.type === "edit" ? `edit of ${target}: ${textOf(m.content.content as Record<string, unknown>)}` : m.content.type === "unsend" ? `unsend of ${target}` : textOf(m.content);
       const type = m.error?.type ?? "channel_error";
       if (text) agent.undelivered(conversationId, text, reason({ type, channelCode: m.error?.channel_code, message: m.error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" }));
     }

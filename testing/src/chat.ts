@@ -66,10 +66,11 @@ export async function chatCli(args: string[], input: NodeJS.ReadableStream = pro
   if (!person) return fail("no_test_people", `${values.person ? `${values.person} is not one of the agent's testPeople` : "the agent has no testPeople"}; declare them in createAgent({ testPeople: [{ name, phone }] }).`);
   if (!channel) return fail("no_channel", `${values.channel ? `no channel named ${values.channel}` : "the agent has no channels"}; it has ${agent.channels().map((c) => c.name).join(", ") || "none"}.`);
 
-  // The agent's messages get ids (a1, a2, ...), so on a channel with edits it can name one to change.
+  // On a channel with edits or unsends the agent's messages get ids (a1, a2, ...), so it can name one to change.
+  const ids = channel.info.edits || channel.info.unsends;
   let sent = 0;
   agent.attachPlayground(({ outbound }) => {
-    const id = outbound.type === "message" || outbound.type === "carousel" || outbound.type === "template" ? `a${++sent}` : undefined;
+    const id = ids && (outbound.type === "message" || outbound.type === "carousel" || outbound.type === "template") ? `a${++sent}` : undefined;
     print(outbound, channel.name, json, id);
     return id ? { status: "sent" as const, messageId: id } : undefined;
   });

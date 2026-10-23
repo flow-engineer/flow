@@ -28,7 +28,9 @@
 // person id, through AgentConnection.receive; the same API with `platform` for `channel`, `person`
 // free, and POST /api/reset to start a conversation over. Its transcript is kept in memory.
 //
-// The person's messages have the agent's ids (m1, m2, ...); the agent's messages get a1, a2, ...
+// The person's messages have the agent's ids (m1, m2, ...); the agent's messages get a1, a2, ...,
+// which its sends resolve with, so on a platform with edits and unsends (Telegram, iMessage) it can
+// change or take back one: an `edit` or `unsend` line names it, and the page shows it changed.
 
 import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -58,6 +60,7 @@ import {
   type ReplyButton,
   type FlowEvent,
   type PlaygroundSink,
+  type SendReceipt,
   type Template,
   type TemplateDefinition,
   type TestPerson,
@@ -345,6 +348,10 @@ export type Line =
     }
   | { kind: "reaction"; messageId: string; emoji: string; at: number; by: "agent" | "person" }
   | { kind: "read"; messageIds: string[]; at: number }
+  /** The agent changed the text of its message `messageId`: it now reads `text`. */
+  | { kind: "edit"; messageId: string; text: string; at: number }
+  /** The agent took back its message `messageId`. */
+  | { kind: "unsend"; messageId: string; at: number }
   /** A tool call by the agent: shown only in the simulator's debug mode, never to the person. */
   | {
       kind: "tool";
@@ -499,8 +506,15 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     push(k, { type: "line", line });
   }
 
+  /** A message as it shows now: with its latest edit's text; none once it was unsent. */
   function findLine(k: string, id: string): Line | undefined {
-    return thread(k).lines.find((l) => (l.kind === "in" || l.kind === "out") && l.id === id);
+    const lines = thread(k).lines;
+    const line = lines.find((l) => (l.kind === "in" || l.kind === "out") && l.id === id);
+    if (line?.kind !== "out") return line;
+    const changes = lines.filter((l): l is Extract<Line, { kind: "edit" | "unsend" }> => (l.kind === "edit" || l.kind === "unsend") && l.messageId === id);
+    if (changes.some((l) => l.kind === "unsend")) return undefined;
+    const edit = changes.findLast((l) => l.kind === "edit");
+    return edit?.kind === "edit" ? { ...line, text: edit.text } : line;
   }
 
   /** Tool calls in progress, by call id, so later events update the same line. */
@@ -532,8 +546,11 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
   /** What the platform does with one thing the agent sends. Throws when it would not arrive. */
   function deliverer(p: Platform, k: string, templates: TemplateDefinition[] = [], who: Who = { name: "", phone: "" }) {
-    const emitOut = (line: Extract<Line, { kind: "out" }>) => emitLine(k, wired(p, line, who));
-    const deliver = (outbound: Outbound): void => {
+    const emitOut = (line: Extract<Line, { kind: "out" }>): SendReceipt => {
+      emitLine(k, wired(p, line, who));
+      return { status: "sent", messageId: line.id };
+    };
+    const deliver = (outbound: Outbound): SendReceipt | undefined => {
       const t = thread(k);
       // What the platform refuses (Flow Messaging's content rules), it refuses here too, with its error.
       // An agent on Flow Framework checks this before it sends; this catches anything else (an agent
@@ -556,8 +573,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
           throw error;
         }
         const { body, ...shown } = filled ?? { body: valuesOf(sent) };
-        emitOut({ kind: "out", id: `a${++t.agentCount}`, text: body, at: Date.now(), template: { name: sent.name, ...shown } });
-        return;
+        return emitOut({ kind: "out", id: `a${++t.agentCount}`, text: body, at: Date.now(), template: { name: sent.name, ...shown } });
       }
       if (outbound.type === "carousel") {
         const { type: _type, ...carousel } = outbound;
@@ -565,16 +581,16 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
         // gets the cards one by one (Flow Messaging sends them so), and so does the test cloud, whose runs
         // mark a carousel's lines themselves.
         if (!cloud && (p.id === "whatsapp" || p.id === "web")) {
-          emitOut({ kind: "out", id: `a${++t.agentCount}`, text: carousel.text, at: Date.now(), ...(carousel.replyTo ? { replyTo: carousel.replyTo } : {}), carousel: carousel.cards });
-          return;
+          return emitOut({ kind: "out", id: `a${++t.agentCount}`, text: carousel.text, at: Date.now(), ...(carousel.replyTo ? { replyTo: carousel.replyTo } : {}), carousel: carousel.cards });
         }
-        for (const m of carouselMessages(channelOf(p), carousel)) deliver({ type: "message", ...m });
-        return;
+        // Card by card: its id is its first message's.
+        const receipts = carouselMessages(channelOf(p), carousel).map((m) => deliver({ type: "message", ...m }));
+        return receipts[0];
       }
       if (outbound.type === "message") {
         if (t.optedOut) throw new Error("the person texted STOP, so the carrier blocks messages to them");
         const sms = p.segments ? smsSegments(outbound.text) : undefined;
-        emitOut({
+        return emitOut({
           kind: "out",
           id: `a${++t.agentCount}`,
           text: outbound.text,
@@ -588,6 +604,23 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
           ...(outbound.fields ? { fields: outbound.fields } : {}),
           ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}),
         });
+      }
+      if (outbound.type === "edit" || outbound.type === "unsend") {
+        // As the platform would: only where it has them, only the agent's own messages, an edit's text within its limits.
+        const edit = outbound.type === "edit";
+        const target = findLine(k, outbound.messageId);
+        const refused = !(edit ? p.edits : p.unsends)
+          ? `${p.name} messages cannot be ${edit ? "edited" : "unsent"}`
+          : target?.kind !== "out" || target.carrier
+            ? `there is no message ${outbound.messageId} of the agent's to ${edit ? "edit" : "unsend"}`
+            : null;
+        const content = edit && !refused ? contentRefusal(channelOf(p), { type: "message", text: outbound.text }) : null;
+        const reason = refused ?? (content ? `${content.message} (${content.type}, ${content.param})` : null);
+        if (reason) {
+          emitLine(k, { kind: "undelivered", text: edit ? outbound.text : `unsend ${outbound.messageId}`, reason, at: Date.now() });
+          throw new Error(reason);
+        }
+        emitLine(k, edit ? { kind: "edit", messageId: outbound.messageId, text: outbound.text, at: Date.now() } : { kind: "unsend", messageId: outbound.messageId, at: Date.now() });
         return;
       }
       if (outbound.type === "reaction") {
@@ -835,7 +868,10 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     agent.attachPlayground(({ conversationId, person, channel, outbound }) => {
       rememberPerson(conversationId, { ...person, visitorChannel: channel });
       const own = agent.channels().find((c) => c.name === channel);
-      if (own) for (const other of people.get(conversationId)!.values()) deliverer(platformFor(own), threadKey(channel, other), agent.templates?.(), other)(outbound);
+      if (!own) return;
+      // Shown to each simulator the person has open; the send resolves with the first one's id.
+      const receipts = [...people.get(conversationId)!.values()].map((other) => deliverer(platformFor(own), threadKey(channel, other), agent.templates?.(), other)(outbound));
+      return receipts[0];
     });
   }
 
@@ -862,14 +898,20 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
         const declared = agent.templates?.().find((d) => d.name === e.template);
         lines.push({ kind: "out", id: `a${++count}`, text: e.text, at: e.at, template: { name: e.template, ...(declared ? asDeclared(declared) : {}) } });
       } else if (e.kind === "reaction") lines.push({ kind: "reaction", messageId: e.messageId, emoji: e.emoji, at: e.at, by: "agent" });
+      else if (e.kind === "edit") lines.push({ kind: "edit", messageId: e.messageId, text: e.text, at: e.at });
+      else if (e.kind === "unsend") lines.push({ kind: "unsend", messageId: e.messageId, at: e.at });
       else {
         // The agent's message as this platform showed it (a link's URL in the text where it has no link button).
-        const { kind: _kind, channel: _channel, template: _template, carousel, ...sent } = e;
+        const { kind: _kind, channel: _channel, template: _template, carousel, messageId, ...sent } = e;
         const swiped = carousel && (p.id === "whatsapp" || p.id === "web");
         const shown = swiped ? [{ ...sent, carousel }] : carousel ? carouselMessages(channel.info, { text: sent.text, cards: carousel }) : [fitMessage(channel.info, sent)];
-        for (const rest of shown) {
+        for (const [i, rest] of shown.entries()) {
           const sms = p.segments ? smsSegments(rest.text) : undefined;
-          lines.push({ kind: "out", id: `a${++count}`, at: e.at, ...rest, ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}) });
+          // The id its send resolved with, where the agent kept it (on channels with edits): what its edits name.
+          const kept = i === 0 ? messageId : undefined;
+          const counted = kept ? /^a(\d+)$/.exec(kept) : null;
+          if (counted) count = Math.max(count, Number(counted[1]));
+          lines.push({ kind: "out", id: kept ?? `a${++count}`, at: e.at, ...rest, ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}) });
         }
       }
     }
