@@ -6,6 +6,22 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **The API may change until 1.0, with a migration note every time.** [docs/stability.md](docs/stability.md)
+  lists what freezes at 1.0; [docs/releasing.md](docs/releasing.md) is the release checklist.
+  New guides: [docs/channels.md](docs/channels.md) (every channel's options and params) and
+  [docs/patterns.md](docs/patterns.md) (patterns that worked). The README is rewritten around one
+  codebase for every interface: MCP server, plugin, CLI and messaging agent.
+- **`flow deploy` checks hosting's Flow Framework release line first.** An agent on a newer
+  major.minor than hosting runs (from `package-lock.json`) is refused before anything is sent. A
+  cloud that does not say which release it runs deploys as before.
+- **`flow inspect <url>`** tests any MCP server as a host does (`tools`, `call`, `auth`,
+  `resources`, `prompts`), and `flow setup` checks the agent's own MCP server.
+- **The simulators look and behave like the real apps**: WhatsApp's bubbles, ticks, reply buttons,
+  lists and carousels; Telegram's keyboards; iMessage's tapbacks and Delivered/Read; photos,
+  documents and voice notes; Debug shows each platform's own payloads.
+- **The free trial counts people.** `flow setup`, `link` and `status` print the trial as people per
+  channel (`3 of 25 people, 2 waiting for a place`); an older cloud's answer still prints messages
+  used.
 - **Delivery guarantees, written down and checked.** [docs/guarantees.md](docs/guarantees.md) says
   what `send()` resolving means, what is ordered, and where messages are sent once or at least once.
   `npm run test:conformance` runs every channel adapter Flow Framework ships through those
@@ -104,7 +120,15 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   (`history.trimmed`). To keep the old behaviour: `createAgent({ history: { maxTokens: 50_000 } })`
   (or `Math.floor(contextTokens * 0.6)`).
 - **A new event type, `history.reset`.** An event sink that switches on event types sees it. A
-  custom `StoreApi` passes inbox payloads through unchanged; nothing to do.
+  custom `StoreApi` passes inbox payloads through unchanged; nothing to do. The same goes for
+  `message.slow` (a send whose provider gave up waiting; it is never sent again).
+- **`POST /v1/events` may answer 503.** It answers 202 only once the event is recorded. A system
+  that sends business events retries a 503 with the same event id (taken once).
+- **`flow deploy` may refuse a newer release line.** Once Flow's hosting says which Flow Framework
+  it runs, an agent on a newer major.minor (0.5.x against hosting's 0.4.x) is refused before
+  anything is sent: stay on the line hosting runs until it moves.
+- **The free trial line is worded in people.** `flow setup`, `link` and `status` print
+  `3 of 25 people, 2 waiting for a place` instead of messages used; scripts read `--json`.
 - **Chinwag names renamed, the old ones still read for now.** `spec/agent-endpoint.openapi.yaml`'s
   platform table is `x-flow-platforms`; `x-chinwag-platforms` is kept beside it as the same table,
   deprecated, and goes in 0.6: code that reads it from the package reads `x-flow-platforms`.
