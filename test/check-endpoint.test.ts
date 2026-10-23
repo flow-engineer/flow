@@ -132,9 +132,10 @@ test("the response schema accepts and refuses what the platform check does", () 
 });
 
 test("the spec's platform table is the simulators' platforms", () => {
-  const table = parse(specFile("agent-endpoint.openapi.yaml"))["x-chinwag-platforms"];
+  const spec = parse(specFile("agent-endpoint.openapi.yaml"));
   const platforms = Object.fromEntries(PLATFORMS.map((p) => [p.id, JSON.parse(JSON.stringify(channelOf(p)))]));
-  assert.deepEqual(table, platforms);
+  assert.deepEqual(spec["x-flow-platforms"], platforms);
+  assert.deepEqual(spec["x-chinwag-platforms"], platforms, "the deprecated name still carries the same table");
 });
 
 test("an HTTP agent's reply meets its platform's content rules, refused with Flow Messaging's error", () => {

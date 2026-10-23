@@ -34,6 +34,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   stored history, so guards hold after a restart.
 - `agent.resetHistory({ to, note })`: the model's history starts again from a point (nothing is
   deleted); a new event, `history.reset`, when a turn reads it.
+- More Chinwag names become Flow's: the spec's platform table is `x-flow-platforms`, a drafted
+  context-pack spec is marked `x-flow-draft`, and `flow plugin` records what it wrote in
+  `.flow-skills.json`.
 
 ### Migration notes
 
@@ -61,3 +64,10 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   (or `Math.floor(contextTokens * 0.6)`).
 - **A new event type, `history.reset`.** An event sink that switches on event types sees it. A
   custom `StoreApi` passes inbox payloads through unchanged; nothing to do.
+- **Chinwag names renamed, the old ones still read for now.** `spec/agent-endpoint.openapi.yaml`'s
+  platform table is `x-flow-platforms`; `x-chinwag-platforms` is kept beside it as the same table,
+  deprecated, and goes in 0.6: code that reads it from the package reads `x-flow-platforms`.
+  `flow plugin` writes `.flow-skills.json` and removes `.chinwag-skills.json`; `flow check --plugin`
+  still accepts a package with only the old file, so nothing to do but commit the renamed file after
+  the next `flow plugin`. The context skill now marks a drafted spec `x-flow-draft: true`; nothing in
+  Flow Framework reads the marker, and `x-chinwag-draft` in an existing pack means the same.
