@@ -31,6 +31,11 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - `flow inspect`, `flow cli` and `flow mcp update` run where the MCP client is not installed (from
   `npx --package`, outside an agent's folder) say which package they need and how to get it, and
   exit 1, instead of crashing with `ERR_MODULE_NOT_FOUND`.
+- **A generated CLI command whose arguments the server's schema refuses** (a maximum, a pattern)
+  exits 2 with one line per field (`--days: Too big: expected number to be <=16`) and the command's
+  `--help` hint, as other wrong arguments do. It printed the MCP `ProtocolError` with a stack and
+  exited 1. A custom command still gets `cli.call`'s own error to handle; one it lets through is
+  reported the same way.
 - `guards(...)`, `oncePerChat`, `noRepeats`, `linkAllowlist`, `noWriteButtons`: ready-made checks
   for `beforeSend`, composed in order, the first refusal winning.
 - `beforeSend`'s context has `sent`: the texts already sent in the conversation, read from the
@@ -40,6 +45,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
+- **A generated CLI command refused by the server's schema exits 2, not 1.** A script that treated
+  exit 1 as "bad arguments" checks for 2, the usage code the CLI already used for other wrong arguments.
 - **Flow Messaging sends wait for `message.sent`.** A send now takes until the channel accepted it
   (usually well under a second, at most `waitTimeoutMs`, 30 s by default). On a webhook, add
   `message.sent` to the endpoint's `events`, or each send reads its message back and takes up to a
