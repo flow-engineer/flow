@@ -10,7 +10,7 @@ import { runTerminal } from "./terminal.ts";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
-import { Client, InsufficientScopeError, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider } from "@modelcontextprotocol/client";
+import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider } from "@modelcontextprotocol/client";
 import { buildApplication, buildCommand, buildRouteMap, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
 import { isSignedIn, signIn, signOut, storedProvider } from "./auth.ts";
 import {
@@ -155,6 +155,8 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
     },
   };
 
+  // A custom command gets cli.call's own error and may handle it; one it lets through is a usage error here.
+  const refused = (error: unknown) => badArguments(config, wordsKnown(rest.filter((w) => !w.startsWith("-")), config, tools), error, (field) => field);
   const disconnect = () => { void client?.close(); };
   io.signal?.addEventListener("abort", disconnect, { once: true });
   try {
@@ -162,8 +164,8 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
       name,
       scanner: { caseStyle: "original" },
       // A CliExit is a message for the person (sign in, --yes, the tool's own error): one line, no stack.
-      localization: { text: { ...text_en, exceptionWhileRunningCommand(exc, ansiColor) { return exc instanceof CliExit ? exc.message : text_en.exceptionWhileRunningCommand.call(this, exc, ansiColor); } } },
-      determineExitCode: (error) => (error instanceof CliExit ? error.code : needsSignIn(error) ? EXIT.signIn : EXIT.failed),
+      localization: { text: { ...text_en, exceptionWhileRunningCommand(exc, ansiColor) { return exc instanceof CliExit ? exc.message : refused(exc)?.message ?? text_en.exceptionWhileRunningCommand.call(this, exc, ansiColor); } } },
+      determineExitCode: (error) => (error instanceof CliExit ? error.code : needsSignIn(error) ? EXIT.signIn : refused(error) ? EXIT.usage : EXIT.failed),
     });
     await runStricli(app, rest, { ...context, process: stricliProcess });
   } finally {
@@ -220,6 +222,32 @@ function explain(config: CliConfig, server: string, error: unknown): CliExit {
   const status = error instanceof SdkHttpError ? (error.data as { status?: number } | undefined)?.status : undefined;
   const why = short((error as Error).message);
   return new CliExit(EXIT.unreachable, status ? `${server} answered ${status}, not as an MCP server: is this its /mcp address? (${why})` : `Could not reach ${server}: ${why}`);
+}
+
+/**
+ * The server refused the arguments (its schema can be stricter than the flags: a maximum, a pattern):
+ * a usage error, one line per field and the command's help, never the protocol error's stack.
+ */
+function badArguments(config: CliConfig, words: string[], error: unknown, label: (field: string) => string): CliExit | undefined {
+  if (!(error instanceof ProtocolError) || error.code !== ProtocolErrorCode.InvalidParams) return undefined;
+  const lines = issuesIn(error.message, label) ?? [short(error.message.replace(/^MCP error -?\d+:\s*/, ""))];
+  return new CliExit(EXIT.usage, `${lines.join("\n")}\nRun \`${[config.name, ...words].join(" ")} --help\` to see how to use it.`);
+}
+
+/** The schema's issues in a server's message (a JSON list of { path, message }), as "<field>: <what is wrong>". */
+function issuesIn(message: string, label: (field: string) => string): string[] | undefined {
+  const start = message.indexOf("[");
+  if (start < 0) return undefined;
+  try {
+    const issues = JSON.parse(message.slice(start)) as { path?: (string | number)[]; message?: string }[];
+    if (!Array.isArray(issues) || !issues.length || !issues.every((i) => typeof i?.message === "string")) return undefined;
+    return issues.map(({ path = [], message }) => {
+      const [field, ...rest] = path.map(String);
+      return field === undefined ? message! : `${[label(field), ...rest].join(".")}: ${message}`;
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 /** A server's error as one short line: a web page answering instead of an MCP server is not printed whole. */
@@ -322,7 +350,7 @@ function toolCommand(config: CliConfig, c: Command, client: Client | undefined, 
       }
       if (!client) throw new CliExit(EXIT.unreachable, noServer(config));
       const result = await client.callTool({ name: tool.name, arguments: input, _meta: callMeta(config, c.words.join(" ")) }).catch((error: unknown) => {
-        throw needsSignIn(error) ? explain(config, "", error) : error;
+        throw needsSignIn(error) ? explain(config, "", error) : (badArguments(config, c.words, error, (field) => (args.includes(field) ? `<${field}>` : `--${flagName(field)}`)) ?? error);
       });
       if (result.isError) throw new CliExit(EXIT.failed, textOf(result.content as Block[]) || `${tool.name} failed.`);
       io.write(`${render(valueOf(result), { json: Boolean(parsed.json), fields: parsed.fields as string[] | undefined, columns: settings?.columns, view: settings?.view })}\n`);
