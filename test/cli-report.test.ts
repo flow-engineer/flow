@@ -661,7 +661,7 @@ test("--dotenv is read in place of the folder's .env, and variables already set 
   assert.deepEqual(await cliOutput(["test", "--dotenv", "none.env"], dir), { code: 1, out: "--dotenv none.env: no such file.\n" });
 });
 
-/** A run's record as the cloud keeps it: a judge check failed, one tool call between the messages. */
+/** A run's record as the cloud keeps it: a judge check failed, one tool call between the messages, the agent's message edited and then unsent. */
 const record = {
   runId: "trn_2", sessionId: "s1", agent: "agt_1", scenario: { id: "bee", path: "scenarios/b.yaml", hash: "h" }, run: 1, channel: "whatsapp",
   startedAt: 1_000, finishedAt: 9_000,
@@ -669,6 +669,8 @@ const record = {
     { kind: "in", id: "m1", text: "a large latte please", at: 1_000 },
     { kind: "out", id: "a1", text: "Placed! Anything else?", at: 4_000, buttons: [{ title: "No thanks" }, "Yes"] },
     { kind: "reaction", messageId: "a1", emoji: "👍", at: 5_000, by: "person" },
+    { kind: "edit", messageId: "a1", text: "Placed a large latte! Anything else?", at: 6_000 },
+    { kind: "unsend", messageId: "a1", at: 7_000 },
   ],
   toolCalls: [{ tool: "place_order", input: { size: "large" }, ok: true, output: { order: 7 }, latencyMs: 800, changes: ["order 7 placed"], kind: "write", at: 2_000, overheadMs: 3 }],
   checks: [
@@ -719,6 +721,8 @@ test("flow show prints a run's record from the cloud with the CI key: checks wit
       "           changes: order 7 placed",
       "   +3.0s agent: Placed! Anything else? [buttons: No thanks | Yes]",
       "   +4.0s person reacted 👍 to a1",
+      "   +5.0s agent edited a1: Placed a large latte! Anything else?",
+      "   +6.0s agent unsent a1",
       "",
       "Watch: http://watch/trn_2",
       "",

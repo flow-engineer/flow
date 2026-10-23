@@ -1414,6 +1414,8 @@ export class Conversation {
         return done(JSON.stringify({ unsent: true, channel: on, message_id: id }));
       }
       const text = "text" in input.data ? String(input.data.text) : "";
+      const max = link!.info.maxLength;
+      if (max && text.length > max) return refused(`${not}: the text is over ${max} characters on ${on}.`);
       const result = await this.sendMessage(on, { type: "message", text }, "agent", link, id);
       if ("refused" in result) return refused(result.refused.replace(/^Not sent/, not));
       if ("failure" in result) return refused(`${not}: ${result.failure}`);
