@@ -245,6 +245,10 @@ test("human chat distinguishes input, waiting and agent replies", async (t) => {
   const old = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "chinwag-chat-presentation-"));
   t.after(() => { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; });
+  // styleText colours by process.stdout and the environment, not the io the CLI is given; FORCE_COLOR=0 keeps this plain in any terminal.
+  const oldColor = process.env.FORCE_COLOR;
+  process.env.FORCE_COLOR = "0";
+  t.after(() => { if (oldColor === undefined) delete process.env.FORCE_COLOR; else process.env.FORCE_COLOR = oldColor; });
   let received!: () => void, release!: () => void;
   const requested = new Promise<void>(resolve => { received = resolve; });
   const response = new Promise<void>(resolve => { release = resolve; });
