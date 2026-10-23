@@ -42,6 +42,15 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   stored history, so guards hold after a restart.
 - `agent.resetHistory({ to, note })`: the model's history starts again from a point (nothing is
   deleted); a new event, `history.reset`, when a turn reads it.
+- **`flow init --name <name>`**, and without it `init` names the agent after `--display-name`
+  (`--display-name "FlatX agent"` is `flatx-agent`), then after the folder as before.
+- **Every name in a new agent comes from the name it was given.** The starter's names live in
+  `package.json` only: a new file, `src/name.ts`, reads `name` and `displayName` there for
+  `src/cli.ts` (the command, `<NAME>_SERVER`, its help examples), `src/mcp.ts` (the MCP server's
+  name and the `claude mcp add` line it prints) and `src/main.ts` (the playground's title). A new
+  agent no longer names `bean-and-leaf`, `cafe` or `CAFE_*` anywhere, and its package.json
+  `description` (which `flow plugin` puts in plugins) no longer says "started from the café
+  example". The coding-agent skill lists where people see each name ("Names").
 - More Chinwag names become Flow's: the spec's platform table is `x-flow-platforms`, a drafted
   context-pack spec is marked `x-flow-draft`, and `flow plugin` records what it wrote in
   `.flow-skills.json`.
@@ -61,6 +70,15 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
+- **Agents made already keep working unchanged**; the starter changes only what `new` and `init`
+  write. To take the new shape, copy `src/name.ts` from a new agent and use its `name`,
+  `displayName` and `serverEnv` in place of the names written in `src/cli.ts`, `src/mcp.ts` and
+  `src/main.ts`.
+- **The starter reads `MODEL`, not `CAFE_MODEL`**, for the model id (`openAICompatible()` reads
+  `MODEL` itself). An agent made already still reads `CAFE_MODEL`; a new one ignores it, so move
+  the value to `MODEL=` in `.env`.
+- **`flow init --display-name` names the package after the display name**, no longer the folder:
+  pass `--name <folder's name>` to keep the old name.
 - **A generated CLI command refused by the server's schema exits 2, not 1.** A script that treated
   exit 1 as "bad arguments" checks for 2, the usage code the CLI already used for other wrong arguments.
 - **Flow Messaging sends wait for `message.sent`.** A send now takes until the channel accepted it

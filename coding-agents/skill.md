@@ -28,7 +28,7 @@ read or print it), and the agent calls models through Flow with it on $2 of Flow
 at the provider: `OPENROUTER_API_KEY` at https://openrouter.ai/keys,
 `OPENAI_API_KEY` at https://platform.openai.com/api-keys, `ANTHROPIC_API_KEY` at
 https://console.anthropic.com/settings/keys, or `GEMINI_API_KEY` at https://aistudio.google.com/apikey.
-The first one with a value is used, and `CAFE_MODEL` sets the café's model id. Then `npm start`
+The first one with a value is used, and `MODEL` sets the model id. Then `npm start`
 opens the playground; `npm run typecheck` checks the types.
 
 Inside a clone of Flow Framework itself, `npm run new -- <name>` copies the café to `agents/<name>/`
@@ -36,6 +36,38 @@ instead (git-ignored, so it never collides with a pull). Its imports of `../../.
 `../../../simulators/src/` stay as they are, so changes to Flow Framework show at once; the key goes in
 `agents/<name>/.env`. The snippets below import `@flow-engineer/flow` and `@flow-engineer/flow/simulators`; in a clone's
 agent, keep its relative imports.
+
+## Names
+
+Before `new` or `init`, ask the owner what people should call the agent (the machine name follows
+from it unless they want another), and tell them where people see each name:
+
+- **`name`**, the machine name (`skycast-agent`: lowercase letters, digits and dashes). `flow new
+  <name>` takes it; `flow init --name <name>` too, else it is `--display-name` in lowercase and
+  dashes, else the folder's name. People see it as:
+  - the CLI command they type (package.json's `bin` key), in its help and every hint it prints
+    (`skycast-agent auth login`), and as the speaker in `skycast-agent chat`;
+  - the CLI's variables `SKYCAST_AGENT_SERVER` and `SKYCAST_AGENT_TOKEN`, and its folder
+    `~/.config/skycast-agent/`;
+  - the CLI's sign-in: it registers itself with the login server as "skycast-agent CLI", which a
+    consent screen may show, and the browser page after sign-in says "go back to skycast-agent";
+  - the MCP server's own name (`serverInfo.name`), which hosts that show a server's name show, and
+    the name in the `claude mcp add` line `npm run mcp` prints, which Claude Code lists (in Claude's
+    and ChatGPT's connector settings the person types a name of their own);
+  - the plugins `flow plugin` makes: the plugin's name and its MCP server's (`--name` overrides),
+    with package.json's `description` as the plugin's description.
+- **`displayName`**, what people call the agent (`Skycast`): `--display-name`. People see it as:
+  - the message their phone sends to reach it, `Hi Skycast (ref <code>)`, filled in by the link
+    `link` prints and by its /try page;
+  - the name the agent gives itself in chats, from its prompt `agent/AGENTS.md`.
+  The owner also sees it on the playground and in what `npm start` and `npm run mcp` print.
+
+Both live in `package.json` and nowhere else in the code: `src/name.ts` reads them for `src/cli.ts`,
+`src/mcp.ts` and `src/main.ts`. To rename the agent, change `name` and the `bin` key to the same
+new name; to change the display name, run `npx @flow-engineer/flow link --display-name "<name>"`,
+which changes `displayName` and the name in `agent/AGENTS.md`. Flow's account knows the agent by
+`name` once `link` or `setup` ran: a new `name` is a new agent there while the keys already in
+`.env` stay the old one's, so rename before the first `link` when you can.
 
 ## Layout
 
@@ -46,6 +78,7 @@ my-agent/
   src/tools.ts                 the agent's tools (see tools-skill.md)
   src/agent.ts                 buildAgent(): the one place the agent is built
   src/main.ts                  runs it in the playground
+  src/name.ts                  the agent's names, read from package.json (see "Names")
   src/mcp.ts                   optional: the tools as an MCP server (below)
   src/cli.ts                   optional: the CLI file, for the organization's command line (below)
   context/                     optional: the context pack the tools are written from (context-skill.md)
@@ -373,7 +406,8 @@ and every simulated message is logged with the person, channel, time and address
 
 To chat with the agent from the owner's phone, with no tunnel and no key made by hand, run these
 from the agent's folder (`npx @flow-engineer/flow init --display-name "<name>"` makes a starter in
-an empty one: first ask the owner what people should call their agent, such as "FlatX agent"; the
+an empty one, named `flatx-agent` after it unless `--name` says otherwise: first ask the owner what
+people should call their agent, such as "FlatX agent" (see "Names"); the
 phone's first message is `Hi FlatX agent (ref <code>)`, and `package.json`'s `displayName` keeps it;
 `link --display-name "<name>"` renames it later, in `package.json` and `agent/AGENTS.md`).
 Only `chat` reads stdin; `init` asks for the name only in a terminal, and nothing else asks for input.
