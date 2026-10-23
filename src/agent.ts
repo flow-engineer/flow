@@ -289,6 +289,12 @@ export interface NudgeResult {
    */
   status: NudgeStatus;
   reason?: string;
+  /**
+   * sent: the platform's id for the message (SendReceipt.messageId; for a prompt nudge, the agent's
+   * first message), when the channel gave one and this process sent it. What PATCH or DELETE
+   * /v1/messages/{id} take on Flow Messaging.
+   */
+  messageId?: string;
 }
 
 export type NudgeStatus = "sent" | "silent" | "dropped" | "refused" | "failed" | "scheduled" | "held" | "expired";
@@ -338,6 +344,8 @@ export interface NudgeState {
   id: string;
   status: NudgeStatus | "queued";
   reason?: string;
+  /** As NudgeResult's. */
+  messageId?: string;
 }
 
 const NO_EXTRAS: ChannelInfo = { reactions: false, status: false };
@@ -441,7 +449,7 @@ export class Agent {
       windowClosed: (nudge, to) => this.windowClosed(nudge, to),
       tagChannels: (options.channels ?? []).length > 1,
       links: (id) => this.links(id),
-      settle: (target, status, reason) => this.settle(target, status, reason),
+      settle: (target, status, reason, messageId) => this.settle(target, status, reason, messageId),
     };
     const every = options.scheduleCheckMs ?? 5_000;
     if (every > 0) setInterval(() => void this.runDue().catch((error) => console.warn("flow: scheduled messages:", error)), every).unref();
@@ -1311,11 +1319,11 @@ export class Agent {
     return this.channelsByName.get(channel)?.info ?? this.conversations.get(conversationId)?.channelInfo(channel) ?? NO_EXTRAS;
   }
 
-  private async settle(target: { run?: string; nudge?: string }, status: string, reason?: string): Promise<void> {
+  private async settle(target: { run?: string; nudge?: string }, status: string, reason?: string, messageId?: string): Promise<void> {
     if (target.run) await this.store.settleRun(target.run, status, reason);
     if (target.nudge) {
       await this.store.settleNudge(target.nudge, status, reason);
-      this.release(target.nudge, this.result(target.nudge, status, reason));
+      this.release(target.nudge, { ...this.result(target.nudge, status, reason), ...(messageId ? { messageId } : {}) });
     }
   }
 

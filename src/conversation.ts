@@ -98,7 +98,7 @@ export interface ConversationSettings {
   /** How the channels of a conversation loaded from the store are reached again. */
   links(conversationId: string): Promise<ChannelLink[]>;
   /** Records how a scheduled run or a nudge ended. */
-  settle(target: { run?: string; nudge?: string }, status: string, reason?: string): Promise<void>;
+  settle(target: { run?: string; nudge?: string }, status: string, reason?: string, messageId?: string): Promise<void>;
   /** A window-closed prompt nudge the agent sent no template for: held until they reply, and the fallback goes. */
   windowClosed(nudge: string, to: { channel: string; address: string }): Promise<void>;
   /** This process among the agent's runners: it holds a conversation's lease while working on it. */
@@ -1391,7 +1391,7 @@ export class Conversation {
       const sent = result.sent as Extract<Outbound, { type: "message" | "carousel" }>;
       const changed = JSON.stringify(sent) !== JSON.stringify(outbound);
       this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, ...(changed ? { rewritten: true } : {}), ...idDetail(result.receipt) });
-      this.sent();
+      this.sent(result.receipt);
       this.sentThisTurn.add(input.text.trim());
       this.sentThisTurn.add(sent.text.trim());
       await this.acknowledged(channel);
@@ -1451,14 +1451,14 @@ export class Conversation {
   }
 
   /** How a scheduled run or a nudge ended, stored in order with everything else. */
-  private settle(target: { run?: string; nudge?: string }, status: string, reason?: string): void {
-    this.persist(() => this.settings.settle({ run: target.run, nudge: target.nudge }, status, reason));
+  private settle(target: { run?: string; nudge?: string }, status: string, reason?: string, messageId?: string): void {
+    this.persist(() => this.settings.settle({ run: target.run, nudge: target.nudge }, status, reason, messageId));
   }
 
-  /** A message reached the person: whatever this turn owed them is sent. */
-  private sent(): void {
+  /** A message reached the person: whatever this turn owed them is sent, by it (the platform's id, when it gave one). */
+  private sent(receipt?: SendReceipt): void {
     this.resultUnsent = false;
-    for (const o of this.owed.splice(0)) this.settle(o, "sent");
+    for (const o of this.owed.splice(0)) this.settle(o, "sent", undefined, receipt?.messageId);
   }
 
   private async acknowledged(channel: string): Promise<void> {
@@ -1570,8 +1570,8 @@ export class Conversation {
       if (d.inbox !== undefined) this.persist(() => this.settings.store.doneInbox([d.inbox!]));
       return;
     }
-    const settle = (status: string, reason?: string) => {
-      this.settle(d, status, reason);
+    const settle = (status: string, reason?: string, messageId?: string) => {
+      this.settle(d, status, reason, messageId);
       this.flush([d]);
     };
     const link = d.address === undefined ? this.channels.get(d.channel) : (await this.settings.links(this.id)).find(l => l.name === d.channel && l.address === d.address);
@@ -1616,7 +1616,7 @@ export class Conversation {
       this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel: d.channel, ...this.ownId(d.channel, result.receipt) }) });
     }
     this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel: d.channel, direct: true, ...idDetail(result.receipt) });
-    settle("sent");
+    settle("sent", undefined, result.receipt?.messageId);
   }
 
   private async directSettled(d: Direct): Promise<boolean> {

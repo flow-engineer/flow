@@ -278,7 +278,7 @@ test("on Telegram a send resolves with Flow's message id, which the agent edits 
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
-test("after a restart, a nudge with no known Flow conversation starts one from the channel's sender (Telegram, Markdown)", async (t) => {
+test("after a restart, a nudge with no known Flow conversation starts one from the channel's sender (Telegram, Markdown); a sent nudge gives the message's id", async (t) => {
   const flow = await fakeFlow();
   const database = join(mkdtempSync(join(tmpdir(), "flow-fm-db-")), "agent.db");
   flow.contacts.ct_tg = { address: { telegram_user_id: "777", username: "maya" } };
@@ -290,8 +290,13 @@ test("after a restart, a nudge with no known Flow conversation starts one from t
 
   const after = await liveAgent(flow, { database: sqlite(database) });
   t.after(() => (flow.close(), after.close()));
-  assert.equal((await after.agent.nudge({ to: { channel: "telegram", address: "777" }, text: "Your table is **ready**" })).status, "sent");
+  const nudged = await after.agent.nudge({ to: { channel: "telegram", address: "777" }, text: "Your table is **ready**" });
+  assert.deepEqual([nudged.status, nudged.messageId], ["sent", "msg_out2"], "a sent nudge names the message Flow sent");
   assert.deepEqual((await flow.request(post("/v1/messages"))).body, { sender: "snd_TG", to: { telegram_user_id: "777" }, content: { type: "text", text: "Your table is **ready**", format: "markdown" } });
+  // A prompt nudge names the agent's first message.
+  const prompted = after.agent.nudge({ to: { channel: "telegram", address: "777" }, prompt: "Their table is ready" });
+  (await after.nextCall(0)).answer(respond(call("send_telegram", { text: "Your table is ready!" }), call("send_telegram", { text: "See you soon." })));
+  assert.deepEqual([(await prompted).status, (await prompted).messageId], ["sent", "msg_out3"]);
 });
 
 test("the key and base URL come from FLOW_MESSAGING_KEY and FLOW_MESSAGING_BASE_URL, as in Flow's SDKs, else the older names", async (t) => {
