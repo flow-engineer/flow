@@ -270,6 +270,7 @@ function localCliRunner(options: LocalCliOptions, base: string): Handler & { clo
       const owned = s;
       const io: CliIO = {
         env: { NO_COLOR: "1", TERM: "dumb" }, signal: s.abort.signal, interactive: true,
+        background: work => { void work(); },
         write: (text) => emit(owned, "stdout", text), writeError: (text) => emit(owned, "stderr", text),
         async *lines(prompt) {
           while (!owned.abort.signal.aborted) {
