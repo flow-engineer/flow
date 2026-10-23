@@ -68,6 +68,25 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `.flow/last-session.json` runs get `outcome`. `model.error` events carry `code` and `status` when
   the error has them.
 
+- **Edits and unsends.** On channels that have them (Telegram and iMessage on Flow Messaging, a
+  custom UI with the new `editMessage` / `unsendMessage`) the agent is offered `edit_message`
+  (`{ message_id, text }`) and `unsend_message` (`{ message_id }`), as `react` is offered only where
+  reactions exist; WhatsApp and SMS offer neither. The send tool's result there names the message
+  (`{"delivered":true,"channel":"imessage","message_id":"msg_..."}`), read back from the history
+  after a restart. An edit's text passes `beforeSend` (`context.edit` names the message) and the
+  content rules like any send. When the platform refuses one (too late, say), the tool's result is
+  its error (`Not edited: <type>: <message>`), and nothing is sent instead. New `ChannelInfo.edits` /
+  `unsends`, `Outbound` `{ type: "edit", messageId, text }` / `{ type: "unsend", messageId }`, events
+  `message.edited` and `message.unsent`, transcript entries `edit` and `unsend`.
+- **Sends return the platform's message id.** `SendReceipt.messageId`: Flow Messaging's sends
+  resolve with it (`msg_...`; a carousel sent card by card, its first message's), and so can any
+  provider's; `message.out` carries it as `messageId`.
+- The playground, `flow chat` and the test cloud's simulators play edits and unsends: their sends
+  resolve with their ids (`a1`, `a2`, ...), the thread shows the message edited or gone (lines
+  `edit` and `unsend`), a platform without them refuses them with its error, and `flow show` prints
+  them. The cloud's answer to an outbound may carry `messageId` (an older cloud's does not, and its
+  runs offer no edits).
+
 ### Migration notes
 
 - **Agents made already keep working unchanged**; the starter changes only what `new` and `init`
@@ -95,6 +114,11 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   A store that forwards calls to a `Store` elsewhere (a `StoreApi` given to `createAgent({ store })`)
   must run the migration there and forward `loadEventState`, `takeEvents` and `saveEventState`; without
   them flowEvents keeps its state in memory, as before.
+- **`Outbound` has two more members, `edit` and `unsend`.** They go only to channels whose info
+  says `edits` / `unsends`, so a hand-written channel is never sent one. TypeScript code that
+  narrows `Outbound` by what it is not (`Exclude<...>`, or an exhaustive `switch` with a `never`
+  check) handles the two (or ignores them, as for `typing`).
+- **`PlaygroundSink` may return a `SendReceipt`.** A sink that returns nothing keeps working unchanged.
 - **flowEvents state is now one per agent in the database.** Two flowEvents mounted on the same agent
   and database, or one agent's events side on two runners at once, overwrite each other's state: run
   one. To keep the old in-memory behaviour, pass `persist: false`.

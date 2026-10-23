@@ -89,7 +89,8 @@ my-agent/
 
 `agent/AGENTS.md` is the agent's prompt, not instructions for coding agents. Keep it short: what
 the agent is for, what it may and may not do. Don't explain messaging in it: Flow Framework adds how to
-talk to the person (send_<channel>, react, acknowledging first, channel formatting) on its own.
+talk to the person (send_<channel>, react, edit_message and unsend_message where the channel has
+them, acknowledging first, channel formatting) on its own.
 
 A skill's `SKILL.md` starts with `name` and `description`; the agent sees every description and
 loads the full skill only when it decides it needs it. Put rules for one kind of request in a
@@ -226,7 +227,8 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   another message to send that, or `{ refuse: "why" }`. Never wrap a channel's `send` for it: the
   playground and the test cloud never call it, and what you change there is not what the
   transcript and the judge see. What `beforeSend` returns is what is checked, sent and recorded
-  (`message.out`, the history, the transcript); a refusal is a `message.refused` event.
+  (`message.out`, the history, the transcript); a refusal is a `message.refused` event. An edit's
+  new text passes through it too, as a message with only `text` and `context.edit.messageId` set.
 - Common checks are ready-made: `beforeSend: guards(oncePerChat("I'm an AI assistant."), noRepeats(),
   linkAllowlist(["example.com"]), noWriteButtons(["pay", "confirm order"]))`. Write your own beside
   them as plain functions; `context.sent` is what was already sent, read from the stored history.

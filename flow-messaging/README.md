@@ -139,6 +139,10 @@ Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret
   characters and 1 or 2 reply buttons or one link, the same on every card. WhatsApp shows the cards
   side by side; Telegram gets them one by one, in order. On iMessage the agent is not offered one.
 - Quotes (`reply_to`), reactions (tapbacks on iMessage), typing, and read receipts (WhatsApp, iMessage).
+- Edits and unsends (Telegram, iMessage): the agent's `edit_message` is `PATCH /v1/messages/{id}`,
+  its `unsend_message` `DELETE /v1/messages/{id}`, by the id its send resolved with (`SendReceipt.messageId`).
+  How late each may come is Flow's and the channel's rule: a refusal (`422`, with Flow's error type and
+  message) goes back to the agent as its tool result, and nothing is sent instead. WhatsApp has neither.
 - WhatsApp templates, by name or `tpl_` ID, with their header (text, or media by URL or file ID),
   body values (`{{1}}`, `{{2}}`, ...) and button values (URL suffixes, quick-reply payloads).
 
@@ -149,7 +153,7 @@ Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret
   or row's id and its label. A quick reply's payload is its ID.
 - Quotes, read from Flow.
 - Reactions to the agent's messages.
-- Late failures (`message.failed`), told to the agent as "Not delivered".
+- Late failures (`message.failed`), told to the agent as "Not delivered" (an edit's or unsend's as `edit of msg_...`, `unsend of msg_...`).
 - Photos, voice notes, audio and documents, as attachments. Their bytes are fetched from
   `GET /v1/files/{id}` only when the agent can use them. A voice note Flow already transcribed
   arrives as its transcript.

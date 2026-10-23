@@ -70,6 +70,7 @@ set for themselves are not part of the API.
 
 - Event types an `EventSink` gets: `turn.start`, `turn.context`, `turn.end`, `message.arrived`,
   `message.in`, `message.out`, `message.duplicate`, `message.refused`, `message.undelivered`,
+  `message.edited`, `message.unsent`,
   `reaction.in`, `model.call`, `model.error`, `model.restarted`, `tool.start`, `tool.end`,
   `tool.detached`, `tool.repeated`, `task.done`, `skill.loaded`, `history.trimmed`, `ack.required`,
   `auth.required`, `attachment.failed`, `template.missing`, `text.hidden`, and their fields.
