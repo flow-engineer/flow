@@ -98,8 +98,12 @@ Flow posts events to a public HTTPS URL. Create a webhook endpoint for it:
 curl https://api.flow.engineer/v1/webhook_endpoints \
   -H "Authorization: Bearer $FLOW_MESSAGING_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://your-agent.example.com/", "events": ["message.received", "message.failed", "reaction.added", "contact.deleted"]}'
+  -d '{"url": "https://your-agent.example.com/", "events": ["message.received", "message.sent", "message.failed", "reaction.added", "contact.deleted"]}'
 ```
+
+`message.sent` lets each send resolve the moment the channel has the message (below); without it a
+send reads its message back instead, which takes up to a second longer. With `waitFor: "delivered"`,
+add `message.delivered`.
 
 The answer holds the signing secret (`secret`, `whsec_...`), shown once. Save it as
 `FLOW_MESSAGING_WEBHOOK_SECRET`.
@@ -115,7 +119,7 @@ On a laptop there is no public URL: use the event stream instead.
 | `FLOW_MESSAGING_TELEGRAM_SENDER`, `FLOW_MESSAGING_WHATSAPP_SENDER`, `FLOW_MESSAGING_IMESSAGE_SENDER`, `FLOW_MESSAGING_SMS_SENDER` | Each channel's sender, `snd_...`. Needed to start conversations (nudges, templates) and to tell senders apart. Replies to people who wrote first work without it. |
 | `FLOW_MESSAGING_BASE_URL` | Optional. Default `https://api.flow.engineer`. |
 
-Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret, baseUrl })`, and
+Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret, baseUrl, waitFor, waitTimeoutMs })`, and
 `fm.telegram({ sender, name, instructions })` (the same for `whatsapp`, `imessage` and `sms`).
 
 ## What it maps
@@ -152,6 +156,16 @@ Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret
 - A video, a file Flow did not keep, a location or a contact card arrives as a note in the text.
 
 ## What it does for you
+
+- **A send resolves once the channel has the message.** Flow answers a send `202` (queued); the
+  channel's send then waits for `message.sent` (from the stream or the webhook, else by reading the
+  message back), so the agent's next message goes only after it, and a `message.failed` comes back
+  to the agent from that send, as Not delivered. `flowMessaging({ waitFor })` changes when a send
+  resolves: `"sent"` (the default), `"delivered"` (the person's device has it, where the channel
+  reports it; Telegram never does, so there it is `"sent"`), or `"queued"` (on the 202, as before
+  0.5.0). `waitTimeoutMs` (default 30,000) is the longest a send waits: past it, it resolves anyway,
+  the agent emits `message.slow`, and the message is never sent again. See
+  [docs/guarantees.md](../docs/guarantees.md).
 
 - Every send carries its own Idempotency-Key. A 429 or 5xx is tried again with the same key after
   a short Retry-After, so a message never goes out twice. A nudge or a scheduled text keeps one key

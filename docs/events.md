@@ -81,11 +81,11 @@ Sign the exact bytes you send.
 
 | Status | Body | When |
 |---|---|---|
-| 202 | `{"status":"accepted"}` or `{"status":"duplicate"}` | Recorded; processed in order in the background. A duplicate id was already taken. |
+| 202 | `{"status":"accepted"}` or `{"status":"duplicate"}` | Recorded (in the agent's database when it has a durable one); processed in order in the background. A duplicate id was already taken. |
 | 400 | `{"field","error"}` | Malformed; `field` names what is wrong (`data.user.phone`, `type`, a value your message needs). |
 | 401 | `{"error"}` | Bad or missing `Flow-Signature`. |
 | 405 | `{"error"}` | Not a POST. |
-| 503 | `{"error"}` | The agent has no secret configured. |
+| 503 | `{"error"}` | The agent has no secret configured, or the event could not be recorded (retry). |
 
 On a network error, a 429 or a 5xx, retry with the same `id`: the id dedupes, so a retry never
 sends twice. An `Idempotency-Key` header is honoured too.
@@ -168,7 +168,13 @@ The catalog (each type's level, `message`, `topic`, `liveOnly`), the templates a
 rules: `rules.notification` (return `"handled"` when you sent or dropped it yourself),
 `rules.copy`, `onEvent` and `onTick`.
 
-The engine keeps its state in memory (`createEventState()`); pass your own `state` to keep or share it.
+The engine keeps its state (event ids taken, held sends, caps, watches, what was told) in the
+attached agent's database when that database survives a restart (`sqlite(path)`, `postgres(...)`;
+store migration 9). A restart then neither processes an event id again nor forgets a held send, and
+an event answered 202 but not yet processed when the agent stopped is processed after it; sends keep
+their idempotency keys, so one that went just before a crash is not sent again. With an in-memory
+database, it stays in memory. One events side per agent, on one runner at a time. Pass your own
+`state` (`createEventState()`) to share it: then you keep it, unless you also pass `persist: true`.
 
 ## Mount it
 

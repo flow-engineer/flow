@@ -14,11 +14,16 @@
 // open conversation if there is one. On Flow's shared iMessage sender, as on WhatsApp after 24
 // hours, the agent can only answer someone who wrote first: a start to anyone else fails. What this process learns (conversations, contacts,
 // event ids) is kept in memory only.
+//
+// A send resolves once the channel has the message: Flow answers a send with 202 (queued), and the
+// channel's send waits for message.sent (from the stream or the webhook, else by reading the message
+// back), so the agent's next message goes only after it. `waitFor: "delivered"` waits for the
+// person's phone instead, where the channel reports it; `waitFor: "queued"` resolves on the 202.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
-import { carouselMessages, replyButton, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type Template, type WhatsAppFeature } from "../../src/index.ts";
+import { carouselMessages, replyButton, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type SendReceipt, type Template, type WhatsAppFeature } from "../../src/index.ts";
 import { Client, FlowMessagingError, idSegment, verifySignature } from "./client.ts";
 
 export { API_VERSION, FlowMessagingError, verifySignature } from "./client.ts";
@@ -30,6 +35,18 @@ export interface FlowMessagingOptions {
   webhookSecret?: string;
   /** Default: FLOW_MESSAGING_BASE_URL (or the older FLOW_MESSAGING_API_URL), else https://api.flow.engineer. */
   baseUrl?: string;
+  /**
+   * When a send resolves, so the agent's next message waits for it. "sent" (the default): the
+   * channel accepted it (Flow's message.sent). "delivered": it reached the person's device
+   * (message.delivered), where the channel reports it; Telegram never does, so there it is "sent".
+   * "queued": Flow stored it (the 202), as before 0.5.0. A send that fails first rejects with why.
+   */
+  waitFor?: "queued" | "sent" | "delivered";
+  /**
+   * The longest a send waits for that signal (ms). Past it the send resolves anyway, as the message
+   * may still go (it is never sent again), and a warning is logged. Default 30,000.
+   */
+  waitTimeoutMs?: number;
 }
 
 export interface FlowChannelOptions {
@@ -87,6 +104,7 @@ export const TELEGRAM: ChannelInfo = {
   images: { captionMax: 1024 },
   carousels: WHATSAPP_CAROUSELS,
   readReceipts: false,
+  templates: false,
 };
 
 /**
@@ -104,6 +122,7 @@ export const IMESSAGE: ChannelInfo = {
   replies: true,
   images: { captionMax: 1024 },
   readReceipts: true,
+  templates: false,
 };
 
 /** Flow sends a list as buttons, whose labels take at most 20 characters, and has no row descriptions. */
@@ -111,8 +130,15 @@ const LIST_TITLE_MAX = 20;
 const MAX_BODY_BYTES = 1_000_000;
 /** Event ids remembered to drop Flow's redeliveries (deliveries are at least once). */
 const SEEN_MAX = 10_000;
-/** The events the handler acts on; the stream asks for only these. */
-const HANDLED = ["message.received", "message.failed", "reaction.added", "contact.deleted"];
+/** The events the handler acts on; the stream asks for only these (less message.sent when sends resolve on the 202, plus message.delivered when they wait for it). */
+const HANDLED = ["message.received", "message.failed", "reaction.added", "contact.deleted", "message.sent"];
+/** How far a message has got: a send waiting for one status is done at it or any later one. */
+const PROGRESS: Record<string, number> = { queued: 0, sent: 1, delivered: 2, read: 3 };
+/** Statuses heard before their send's 202 came back, kept to settle it then. */
+const EARLY_MAX = 1_000;
+/** A send waiting for its status reads the message back after this, then twice as long each time, up to POLL_MAX (ms). */
+const POLL_FIRST = 500;
+const POLL_MAX = 5_000;
 /** The longest wait between two tries to reconnect the stream (ms). */
 const STREAM_BACKOFF_MAX = 30_000;
 /** Tries of one event before the stream gives up on it and goes on to the next. */
@@ -124,6 +150,7 @@ interface FlowMessage {
   id: string;
   conversation: string;
   direction: "in" | "out";
+  status?: string;
   content: Record<string, unknown> & { type: string };
   reply_to?: string;
   error?: { type?: string; message?: string; channel_code?: string };
@@ -148,6 +175,13 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   const templates = new Map<string, Array<{ id: string; name: string; language: string }>>(); // sender -> approved templates
   const seen = new Set<string>();
   const handling = new Map<string, Promise<void>>();
+  const waitFor = options.waitFor ?? "sent";
+  const waitTimeoutMs = options.waitTimeoutMs ?? 30_000;
+  // The status events sends wait for: none when they resolve on the 202.
+  const handled = waitFor === "queued" ? HANDLED.filter((t) => t !== "message.sent") : waitFor === "delivered" ? [...HANDLED, "message.delivered"] : HANDLED;
+  /** Sends waiting for their message's status, by Flow message id: true once settled by it. */
+  const waiting = new Map<string, (status: string, error?: FlowMessage["error"]) => boolean>();
+  const early = new Map<string, { status: string; error?: FlowMessage["error"] }>();
   const key = (channel: string, address: string) => `${channel}\u0000${address}`;
 
   function register(kind: Kind, o: FlowChannelOptions): Route {
@@ -173,7 +207,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   /** One message: into the person's conversation, or a new one from the channel's sender. */
-  async function send(route: Route, to: string, content: Record<string, unknown>, replyTo?: string, about = replyTo, idempotencyKey?: string, channelOptions?: Record<string, unknown>): Promise<void> {
+  async function send(route: Route, to: string, content: Record<string, unknown>, replyTo?: string, about = replyTo, idempotencyKey?: string, channelOptions?: Record<string, unknown>): Promise<SendReceipt> {
     try {
       const conversation = await conversationFor(route.name, to, about);
       const options = channelOptions ? { channel_options: channelOptions } : {};
@@ -184,9 +218,64 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         sent = await client.post("/v1/messages", { sender: route.sender, to: recipient(route.kind, to), content, ...options }, undefined, idempotencyKey);
       }
       flowConversation.set(key(route.name, to), sent.conversation);
+      return await arrived(route, sent);
     } catch (error) {
       throw error instanceof FlowMessagingError ? new Error(reason(error)) : error;
     }
+  }
+
+  /**
+   * Waits until the channel has the message (or the person's device, with waitFor "delivered"): by
+   * its status event, else by reading it back, at most waitTimeoutMs. A failure rejects, with why;
+   * past the wait it resolves "unconfirmed" (the message may still go, and is never sent again).
+   */
+  function arrived(route: Route, message: FlowMessage): Promise<SendReceipt> {
+    if (waitFor === "queued" || !message.id) return Promise.resolve({ status: "queued" });
+    const started = Date.now();
+    const target = waitFor === "delivered" && route.kind !== "telegram" ? "delivered" : "sent";
+    return new Promise<SendReceipt>((resolve, reject) => {
+      let done = false;
+      let timeout: NodeJS.Timeout | undefined;
+      let poll: NodeJS.Timeout | undefined;
+      const finish = (outcome: Error | SendReceipt["status"]) => {
+        done = true;
+        clearTimeout(timeout);
+        clearTimeout(poll);
+        waiting.delete(message.id);
+        if (outcome instanceof Error) reject(outcome);
+        else resolve({ status: outcome, waitedMs: Date.now() - started });
+      };
+      const take = (status: string | undefined, error?: FlowMessage["error"]): boolean => {
+        if (done || !status) return done;
+        if (status === "failed" || status === "unsent") {
+          const type = error?.type ?? (status === "unsent" ? "unsent" : "channel_error");
+          finish(new Error(reason({ type, channelCode: error?.channel_code, message: error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" })));
+        } else if ((PROGRESS[status] ?? -1) >= PROGRESS[target]!) finish(PROGRESS[status]! >= PROGRESS.delivered! ? "delivered" : "sent");
+        return done;
+      };
+      if (take(message.status, message.error)) return;
+      const heard = early.get(message.id);
+      early.delete(message.id);
+      if (heard && take(heard.status, heard.error)) return;
+      waiting.set(message.id, take);
+      timeout = setTimeout(() => {
+        console.warn(`@flow-engineer/flow/flow-messaging: ${message.id} on ${route.name} was not ${target} within ${waitTimeoutMs} ms; going on (it may still arrive, and is not sent again)`);
+        finish("unconfirmed");
+      }, waitTimeoutMs);
+      let delay = POLL_FIRST;
+      const readBack = async () => {
+        try {
+          const now = await client.get<FlowMessage>(`/v1/messages/${idSegment("msg", message.id)}`);
+          if (take(now.status, now.error)) return;
+        } catch {
+          // Read again later: the status event or the timeout settles it meanwhile.
+        }
+        if (done) return;
+        delay = Math.min(delay * 2, POLL_MAX);
+        poll = setTimeout(readBack, delay);
+      };
+      poll = setTimeout(readBack, delay);
+    });
   }
 
   /**
@@ -260,17 +349,17 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         // A message the business started: on WhatsApp, no link preview (its card's title would be the phone's notification).
         const sent = content(route.kind, message);
         const options = message.preview === false && route.kind === "whatsapp" && sent.type === "text" ? { preview_url: false } : undefined;
-        await send(route, to, sent, message.replyTo, message.replyTo, message.idempotencyKey, options);
+        return send(route, to, sent, message.replyTo, message.replyTo, message.idempotencyKey, options);
       },
       sendCarousel: (to: string, carousel: Carousel) => send(route, to, carouselContent(carousel), carousel.replyTo, carousel.replyTo, carousel.idempotencyKey),
-      react: (to: string, messageId: string, emoji: string) => send(route, to, { type: "reaction", message_id: messageId, emoji }, undefined, messageId),
+      react: async (to: string, messageId: string, emoji: string) => void (await send(route, to, { type: "reaction", message_id: messageId, emoji }, undefined, messageId)),
       typing: (to: string, on: boolean) => courtesy(route, to, "typing", { state: on ? "on" : "off" }),
       markRead: (to: string, messageIds: string[]) => courtesy(route, to, "read", { up_to: messageIds.at(-1) }, messageIds.at(-1)),
       sendTemplate: async (to: string, wanted: Template, idempotencyKey?: string) => {
         if (!route.sender) throw new Error(`a template needs the channel's sender (set FLOW_MESSAGING_${route.kind.toUpperCase()}_SENDER)`);
         const found = await template(route.sender, wanted);
         const params = templateParams(wanted);
-        await send(route, to, { type: "template", template_id: found.id, language: wanted.language ?? found.language, ...(Object.keys(params).length ? { params } : {}) }, undefined, undefined, idempotencyKey);
+        return send(route, to, { type: "template", template_id: found.id, language: wanted.language ?? found.language, ...(Object.keys(params).length ? { params } : {}) }, undefined, undefined, idempotencyKey);
       },
     };
   }
@@ -341,7 +430,10 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
             const { type: _type, ...carousel } = outbound;
             if (info.carousels) return p.sendCarousel(to, carousel);
             return (async () => {
-              for (const m of carouselMessages(info, carousel)) await p.sendMessage(to, m);
+              const receipts: SendReceipt[] = [];
+              for (const m of carouselMessages(info, carousel)) receipts.push(await p.sendMessage(to, m));
+              // The carousel got as far as its least far card.
+              return receipts.find((r) => r.status === "unconfirmed") ?? receipts.find((r) => r.status === "queued") ?? receipts.find((r) => r.status === "sent") ?? receipts[0];
             })();
           }
           case "reaction":
@@ -429,6 +521,20 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         }
       }
       return;
+    }
+    if (event.type === "message.sent" || event.type === "message.delivered" || event.type === "message.read" || event.type === "message.failed") {
+      const m = event.data?.message;
+      if (!m?.id) return;
+      const status = event.type.slice("message.".length);
+      const settle = waiting.get(m.id);
+      if (typeof settle === "function") {
+        // A failure its send is waiting on is told through that send, not again as Not delivered.
+        if (settle(status, m.error) && status === "failed") return;
+      } else if (status !== "failed" && waitFor !== "queued") {
+        early.set(m.id, { status, error: m.error });
+        if (early.size > EARLY_MAX) early.delete(early.keys().next().value!);
+      }
+      if (event.type !== "message.failed") return;
     }
     const route = routeOf(event);
     if (!route || !event.conversation) return;
@@ -551,7 +657,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       const mine = ++generation;
       const url = new URL(`${client.baseUrl.replace(/^http/, "ws")}/v1/stream`);
       if (cursor) url.searchParams.set("after", cursor);
-      for (const type of HANDLED) url.searchParams.append("type", type);
+      for (const type of handled) url.searchParams.append("type", type);
       // Node's WebSocket cannot set headers: the key goes as a subprotocol beside "flow", which Flow selects.
       const ws = new WebSocket(url, ["flow", `flow.key.${apiKey}`]);
       socket = ws;
