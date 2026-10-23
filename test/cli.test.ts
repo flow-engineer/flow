@@ -1,4 +1,4 @@
-// covers: cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/agent.ts src/channels.ts
+// covers: cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/skills.ts src/agent.ts src/channels.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -100,6 +100,111 @@ test("a group's help lists its subcommands, and the top level lists groups and c
   assert.doesNotMatch(top.out, /\n {2}ask +/);
   assert.match(top.out, /\n {2}cancel-order +Cancel order\n/, "a tool the file does not name keeps its own name");
   assert.doesNotMatch(top.out.slice(top.out.indexOf("COMMANDS")), /\n {2}(list|view) /, "subcommands are not listed at the top");
+});
+
+// The old skill smoke test checked only exit status; it cannot protect selective discovery or multi-skill reads.
+test("skill lists summaries and reads only selected skills, including the generated CLI guide", async () => {
+  const events: any[] = [];
+  let connections = 0;
+  const files = {
+    "AGENTS.md": "Private agent instructions",
+    "skills/booking/SKILL.md": "---\nname: booking\ndescription: Move a booking\n---\nOffer three slots.",
+    "skills/refunds/SKILL.md": "---\nname: refunds\ndescription: Handle a refund\n---\nCheck the refund policy first.",
+  };
+  const handle = mcpServer({ name: "acme", version: "1", tools: [listOrders], files, events: [event => { events.push(event); }] });
+  const server = `${await listen((req, res) => {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => { if (body && JSON.parse(body).method === "initialize") connections++; });
+    void handle.node(req, res);
+  })}/mcp`;
+  const cli = acme(server);
+  cli.commands = {
+    ...cli.commands,
+    "report local": { command: buildCommand({ docs: { brief: "A handwritten report" }, parameters: {}, func() {} }) },
+  };
+  const listed = io();
+  assert.equal(await runCli(cli, ["skill", "list", "--json"], listed.channel), 0);
+  assert.deepEqual(JSON.parse(listed.out), [
+    { name: "acme-cli", description: "How to use the acme command line" },
+    { name: "booking", description: "Move a booking" },
+    { name: "refunds", description: "Handle a refund" },
+  ]);
+  assert.equal(events.filter(e => e.type === "tool.start").length, 0, "listing never reads skill bodies");
+  const defaults = io();
+  assert.equal(await runCli(cli, ["skill"], defaults.channel), 0);
+  assert.match(defaults.out, /booking +Move a booking/);
+  assert.doesNotMatch(defaults.out, /Offer three slots|JSON output schema|order list|Private agent instructions/);
+  const got = io();
+  connections = 0;
+  assert.equal(await runCli(cli, ["skill", "get", "booking", "refunds", "--json"], got.channel), 0);
+  assert.equal(connections, 1, "batch reads share one MCP connection");
+  const records = JSON.parse(got.out);
+  assert.deepEqual(records.map((s: any) => s.name), ["booking", "refunds"]);
+  assert.match(records[0].content, /name: booking[\s\S]*Offer three slots/);
+  assert.match(records[1].content, /Check the refund policy first/);
+  assert.doesNotMatch(got.out, /Private agent instructions|JSON output schema/);
+  assert.deepEqual(events.filter(e => e.type === "tool.start").map(e => e.input.name).sort(), ["booking", "refunds"]);
+  const guide = io();
+  assert.equal(await runCli(cli, ["skill", "get", "acme-cli"], guide.channel), 0);
+  assert.match(guide.out, /name: acme-cli/);
+  assert.match(guide.out, /### acme report local[\s\S]*A handwritten report/);
+  assert.match(guide.out, /acme report local --help/);
+  assert.match(guide.out, /MCP tool: `list_orders`/);
+  assert.equal(events.filter(e => e.type === "tool.start").length, 2, "the generated guide is local");
+  const plain = io();
+  assert.equal(await runCli(cli, ["skill", "get", "refunds", "booking"], plain.channel), 0);
+  assert.match(plain.out, /# Skill: refunds[\s\S]*Check the refund policy first[\s\S]*# Skill: booking[\s\S]*Offer three slots/);
+  const before = events.filter(e => e.type === "tool.start").length;
+  for (const args of [["get"], ["list", "booking"], ["unknown"], ["get", "booking", "missing"]]) {
+    assert.equal(await runCli(cli, ["skill", ...args], io().channel), 2);
+  }
+  assert.equal(events.filter(e => e.type === "tool.start").length, before, "an invalid batch is refused before reading any body");
+  const folder = mkdtempSync(join(testDirectory, "skills-export-"));
+  assert.equal(await runCli(cli, ["skill", "get", "booking", "refunds", "--write", folder], io().channel), 0);
+  assert.deepEqual(readdirSync(folder).sort(), ["booking", "refunds"]);
+  assert.equal(readFileSync(join(folder, "booking", "SKILL.md"), "utf8"), records[0].content);
+  assert.equal(readFileSync(join(folder, "refunds", "SKILL.md"), "utf8"), records[1].content);
+  assert.equal(await runCli(cli, ["skill", "--write", folder], io().channel), 0);
+  assert.match(readFileSync(join(folder, "acme-cli", "SKILL.md"), "utf8"), /### acme order list/);
+});
+
+// New clients must still discover names on older servers, preserve authored overrides, and prevent remote names escaping export folders.
+test("skill supports legacy MCP discovery and authored overrides while refusing unsafe export names", async () => {
+  const cli = acme(await serve({ tools: [], files: {
+    "skills/guide/SKILL.md": "---\nname: acme-cli\ndescription: Our own CLI guide\n---\nUse our custom workflow.",
+    "skills/unsafe/SKILL.md": "---\nname: ../outside\ndescription: Unsafe folder name\n---\nInstructions.",
+  }, descriptor: (_tool, descriptor) => {
+    const _meta = { ...descriptor._meta };
+    delete _meta["flow.engineer/skills"];
+    return { ...descriptor, _meta };
+  } }));
+  const listed = io();
+  assert.equal(await runCli(cli, ["skill", "list", "--json"], listed.channel), 0);
+  assert.deepEqual(JSON.parse(listed.out), [{ name: "../outside", description: "" }, { name: "acme-cli", description: "" }]);
+  const read = io();
+  assert.equal(await runCli(cli, ["skill", "get", "acme-cli"], read.channel), 0);
+  assert.match(read.out, /Use our custom workflow/);
+  assert.doesNotMatch(read.out, /## Commands/);
+  const folder = mkdtempSync(join(testDirectory, "skills-safe-"));
+  const error = io();
+  assert.equal(await runCli(cli, ["skill", "get", "acme-cli", "../outside", "--write", folder], error.channel), 2);
+  assert.match(error.err, /single folder name/);
+  assert.deepEqual(readdirSync(folder), [], "the whole export is validated before any files are written");
+  assert.equal(await runCli(cli, ["skill", "--write", folder], io().channel), 0, "legacy export remains the generated guide");
+  assert.match(readFileSync(join(folder, "acme-cli", "SKILL.md"), "utf8"), /## Commands/);
+});
+
+// A fresh skill may be absent from the cached catalog even when its get invocation parses correctly.
+test("skill get refreshes an unknown cached name before reading it", async () => {
+  let handle = mcpServer({ name: "acme", version: "1", tools: [], files: { "skills/old/SKILL.md": "---\nname: old\ndescription: Old\n---\nOld instructions." } });
+  const server = `${await listen((req, res) => void handle.node(req, res))}/mcp`;
+  const cli = acme(server);
+  assert.equal(await runCli(cli, ["skill", "list"], io().channel), 0);
+  handle = mcpServer({ name: "acme", version: "1", tools: [], files: { "skills/new/SKILL.md": "---\nname: new\ndescription: New\n---\nNew instructions." } });
+  const got = io();
+  assert.equal(await runCli(cli, ["skill", "get", "new"], got.channel), 0);
+  assert.match(got.out, /New instructions/);
 });
 
 // Existing command tests check output, but cannot detect extra connections or tools/list requests.

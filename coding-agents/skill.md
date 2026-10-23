@@ -605,8 +605,14 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   needs `--yes`, 5 the server could not be reached. `--server <url>` and `--token <token>` work on
   every command. `acme auth login` signs in on the organization's own login (tokens in
   `~/.config/acme/`, mode 600), `ACME_TOKEN` is for CI, `acme tools` lists every tool and schema, and
-  `acme skill --write ~/.claude/skills` installs the CLI's SKILL.md, made from the tools and the CLI
-  file, for coding agents. For any MCP server without a CLI file, `npx @flow-engineer/flow cli --server <url> -h`.
+  `acme skill list` (or bare `skill`) lists the generated `acme-cli` guide and workflow skill names
+  and descriptions. `acme skill get booking refunds` reads only those skills; `--json` returns an
+  array of `{ name, description, content }`. `skill get acme-cli` reads the CLI guide, including
+  handwritten commands and MCP-tool-to-command mappings. `skill get <names...> --write <dir>` exports
+  selected SKILL.md files; `skill --write <dir>` keeps exporting the generated guide. Listings use
+  `read_skill` descriptor metadata (`flow.engineer/skills`); older MCP servers supply names with
+  empty descriptions. Workflow bodies are fetched through `read_skill` only when selected.
+  For any MCP server without a CLI file, `npx @flow-engineer/flow cli --server <url> -h`.
 - `npx @flow-engineer/flow check` checks the CLI file against the tools: a command naming a tool that does not
   exist, an `args` field the input lacks, a `columns` or `view` field the output lacks, two commands
   with one name, a word that is both a command and a group, or one of the CLI's own words (`auth`,

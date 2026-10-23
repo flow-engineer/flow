@@ -151,6 +151,9 @@ test("skills are listed in the instructions and read with read_skill", async () 
   const files = { "AGENTS.md": "# Pip\nThe chat agent's prompt.", "skills/allergens/SKILL.md": "---\nname: allergens\ndescription: questions about allergies\n---\nNever say an item is safe." };
   const c = await client(await serve({ name: "cafe", version: "1", tools: [], files }));
   assert.equal(c.getInstructions(), "This server's skills are rules for one kind of request each. Read a skill with read_skill before doing what it covers.\n- allergens: questions about allergies");
+  const descriptor = (await c.listTools()).tools.find(t => t.name === "read_skill")!;
+  assert.deepEqual(descriptor._meta?.["flow.engineer/skills"], [{ name: "allergens", description: "questions about allergies" }]);
+  assert.ok(!JSON.stringify(descriptor).includes("Never say an item is safe"), "discovery carries summaries, not skill bodies");
   const read = await c.callTool({ name: "read_skill", arguments: { name: "allergens" } });
   assert.deepEqual(read.content, [{ type: "text", text: "Never say an item is safe." }]);
   await c.close();

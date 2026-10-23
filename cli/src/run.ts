@@ -10,12 +10,13 @@ import { runTerminal } from "./terminal.ts";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider, type Tool as McpTool } from "@modelcontextprotocol/client";
 import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
 import { configDir, isSignedIn, signIn, signOut, storedProvider } from "./auth.ts";
+import { SKILLS_META } from "../../src/skills.ts";
 import {
   BUILT_IN,
   commandTable,
@@ -138,6 +139,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
   const asksHelp = rest.length === 0 || rest[0] === "-h" || rest[0] === "--help";
 
   let client: Client | undefined;
+  let connecting: Promise<Client> | undefined;
   let tools: ToolInfo[] = [];
   let cached: Discovery | undefined;
   let recoveredCall = false;
@@ -145,11 +147,12 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
   let problem: CliExit | undefined;
   const getClient = async (): Promise<Client> => {
     if (!server) throw new CliExit(EXIT.unreachable, noServer(config));
-    if (!client) {
-      try { client = await connect(config, server, token, io.signal); }
-      catch (error) { throw explain(config, server, error); }
-    }
-    return client;
+    if (client) return client;
+    connecting ??= connect(config, server, token, io.signal).then(connected => client = connected).catch(error => {
+      connecting = undefined;
+      throw explain(config, server, error);
+    });
+    return connecting;
   };
   const discover = async (): Promise<boolean> => {
     const before = JSON.stringify(tools);
@@ -172,7 +175,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
       else await discover();
       io.signal?.throwIfAborted();
     } catch (error) {
-      await client?.close(); client = undefined;
+      await client?.close(); client = undefined; connecting = undefined;
       problem = error instanceof CliExit ? error : explain(config, server, error);
     }
   }
@@ -223,7 +226,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
       const app = buildApplication(routes(config, server, tools, async tool => {
         try { await prepare(tool); }
         catch (error) { if (error instanceof CliReparse) reparse = true; throw error; }
-      }, call, output), {
+      }, call, output, async () => { await discover(); return tools; }), {
         name: config.name,
         scanner: { caseStyle: "original" },
         localization: { text: { ...text_en, exceptionWhileParsingArguments(exc, ansiColor) {
@@ -464,7 +467,7 @@ type Target = StricliCommand<CliContext> | RouteMap<CliContext>;
 type ToolCall = (tool: string, input: Record<string, unknown>, command: string) => ReturnType<Client["callTool"]>;
 
 /** The command tree: groups from the commands' words, then the CLI's own commands. */
-function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[], prepare: (tool: ToolInfo) => Promise<void>, call: ToolCall, io: CliIO): RouteMap<CliContext> {
+function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[], prepare: (tool: ToolInfo) => Promise<void>, call: ToolCall, io: CliIO, refresh: () => Promise<ToolInfo[]>): RouteMap<CliContext> {
   interface Node {
     command?: StricliCommand<CliContext>;
     children: Map<string, Node>;
@@ -497,7 +500,7 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
   return buildRouteMap({
     routes: { ...top,
       chat: top.chat ?? buildCommand({ docs: { brief: "Chat with the agent in a terminal (chat --help)" }, parameters: {}, func() {} }),
-      tools: toolsCommand(tools, io), skill: skillCommand(config, tools, io), auth: authRoutes(config, server, io) },
+      tools: toolsCommand(tools, io), skill: skillCommand(config, tools, call, io, server ? refresh : undefined), auth: authRoutes(config, server, io) },
     docs: { brief: config.description ?? config.name, fullDescription: `${config.description ?? config.name}\n\n${notice}\n--server <url>, --token <token> and --refresh-tools (bypass discovery cache) work on every command.` },
   });
 }
@@ -612,19 +615,85 @@ function toolsCommand(tools: ToolInfo[], io: CliIO): StricliCommand<CliContext> 
   });
 }
 
-function skillCommand(config: CliConfig, tools: ToolInfo[], io: CliIO): StricliCommand<CliContext> {
-  return buildCommand<{ write?: string }, [], CliContext>({
-    docs: { brief: "This CLI's SKILL.md for coding agents", fullDescription: "Every command, flag, JSON shape and exit code, for Claude Code, Codex or Cursor. --write puts it in <dir>/<name>-cli/SKILL.md." },
-    parameters: { flags: { write: { kind: "parsed", parse: String, brief: "Write it into this skills folder", placeholder: "dir", optional: true } } },
-    async func(flags) {
-      const text = skillFile(config, tools);
-      if (!flags.write) return void io.write(text);
-      const { mkdirSync, writeFileSync } = await import("node:fs");
-      const { join } = await import("node:path");
-      const folder = join(flags.write, `${config.name}-cli`);
-      mkdirSync(folder, { recursive: true });
-      writeFileSync(join(folder, "SKILL.md"), text);
-      io.writeError(`Wrote ${join(folder, "SKILL.md")}\n`);
+interface CliSkill {
+  name: string;
+  description: string;
+  reader?: string;
+}
+
+/** Handwritten workflows and the generated CLI guide share discovery, not their full bodies. */
+function skillCatalog(config: CliConfig, tools: ToolInfo[]): CliSkill[] {
+  const reader = tools.find(t => Array.isArray(t._meta?.[SKILLS_META])) ?? tools.find(t => t.name === "read_skill");
+  const entries = new Map<string, CliSkill>();
+  if (reader) {
+    const given = reader._meta?.[SKILLS_META];
+    const summaries = Array.isArray(given) ? given : (reader.inputSchema.properties?.name?.enum ?? []).map(name => ({ name, description: "" }));
+    for (const item of summaries) {
+      if (!item || typeof item.name !== "string" || !item.name || entries.has(item.name)) continue;
+      entries.set(item.name, { name: item.name, description: typeof item.description === "string" ? item.description : "", reader: reader.name });
+    }
+  }
+  const name = `${config.name}-cli`;
+  // An authored skill may replace the generated entry, just as authored commands replace defaults.
+  if (!entries.has(name)) entries.set(name, { name, description: `How to use the ${config.name} command line` });
+  return [...entries.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function skillCommand(config: CliConfig, tools: ToolInfo[], call: ToolCall, io: CliIO, refresh?: () => Promise<ToolInfo[]>): StricliCommand<CliContext> {
+  const usage = `${config.name} skill list | ${config.name} skill get <name> [name...] [--json] [--write <dir>]`;
+  return buildCommand<{ write?: string; json?: boolean }, string[], CliContext>({
+    docs: { brief: "List skills or read selected skills", fullDescription: `${usage}\n\nWith no arguments, list names and descriptions. The generated CLI guide is ${config.name}-cli. --write with no action keeps exporting that guide.` },
+    parameters: {
+      flags: {
+        json: { kind: "boolean", brief: "Print named skill records as JSON", optional: true, withNegated: false },
+        write: { kind: "parsed", parse: String, brief: "Write selected skills into this skills folder", placeholder: "dir", optional: true },
+      },
+      positional: { kind: "array", parameter: { brief: "list, or get followed by one or more skill names", placeholder: "action/name", parse: String } },
+    },
+    async func(flags, ...words) {
+      const legacy = words.length === 0 && flags.write !== undefined;
+      const action = words.shift() ?? "list";
+      const names = legacy ? [`${config.name}-cli`] : [...new Set(words)];
+      if ((action !== "list" && action !== "get") || (!legacy && action === "list" && (names.length > 0 || flags.write !== undefined)) || (action === "get" && names.length === 0)) {
+        throw new CliExit(EXIT.usage, `Usage: ${usage}`);
+      }
+      let current = tools;
+      let catalog = skillCatalog(config, current);
+      if (!legacy && action === "list") {
+        const summaries = catalog.map(({ name, description }) => ({ name, description }));
+        if (flags.json) return void io.write(`${JSON.stringify(summaries)}\n`);
+        const width = Math.max(...summaries.map(s => s.name.length));
+        return void io.write(`${summaries.map(s => `${s.name.padEnd(width)}  ${s.description}`.trimEnd()).join("\n")}\n`);
+      }
+      if (!legacy && names.some(name => !catalog.some(s => s.name === name)) && refresh) {
+        current = await refresh();
+        catalog = skillCatalog(config, current);
+      }
+      const missing = names.filter(name => !catalog.some(s => s.name === name));
+      if (!legacy && missing.length) throw new CliExit(EXIT.usage, `No skill named ${missing.join(", ")}. Run \`${config.name} skill list\` to see available skills.`);
+      const selected = legacy ? [{ name: `${config.name}-cli`, description: `How to use the ${config.name} command line` }] : names.map(name => catalog.find(s => s.name === name)!);
+      if (flags.write) {
+        for (const { name } of selected) {
+          if (name !== basename(name) || name === "." || name === ".." || /[\\:]/.test(name)) throw new CliExit(EXIT.usage, `Cannot write skill ${JSON.stringify(name)}: its name must be a single folder name.`);
+        }
+      }
+      const records = await Promise.all(selected.map(async skill => {
+        if (!skill.reader) return { name: skill.name, description: skill.description, content: skillFile(config, current) };
+        const result = await call(skill.reader, { name: skill.name }, `skill get ${names.join(" ")}`);
+        if (result.isError) throw new CliExit(EXIT.failed, textOf(result.content as Block[]) || `Could not read skill ${skill.name}.`);
+        const body = textOf(result.content as Block[]);
+        return { name: skill.name, description: skill.description, content: `---\nname: ${skill.name}\ndescription: ${skill.description}\n---\n\n${body}\n` };
+      }));
+      if (flags.write) {
+        for (const { name, content } of records) {
+          const folder = join(flags.write, name);
+          mkdirSync(folder, { recursive: true });
+          writeFileSync(join(folder, "SKILL.md"), content);
+          io.writeError(`Wrote ${join(folder, "SKILL.md")}\n`);
+        }
+      }
+      if (flags.json) io.write(`${JSON.stringify(records)}\n`);
+      else if (!flags.write) io.write(records.length === 1 ? records[0]!.content : records.map(s => `# Skill: ${s.name}\n\n${s.content}`).join("\n"));
     },
   });
 }
