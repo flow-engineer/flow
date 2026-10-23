@@ -167,16 +167,18 @@ if (process.argv[2] === "mcp") {
     console.error(MCP_LINE.trim());
     process.exit(1);
   }
+  // Loaded here first, so a missing optional peer is one line; mcpUpdateCli's own import of it is then cached.
+  await withPeers("mcp update", () => import("../../mcp/src/client.ts"));
   process.exit(await mcpUpdateCli());
 }
 if (process.argv[2] === "cli") {
-  // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client, an optional peer.
-  const { defineCli, runCli } = await import("../../cli/src/index.ts");
+  // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client and @stricli/core, optional peers.
+  const { defineCli, runCli } = await withPeers("cli", () => import("../../cli/src/index.ts"));
   process.exit(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
 }
 if (process.argv[2] === "inspect") {
   // Loaded only here: it needs @modelcontextprotocol/client, an optional peer.
-  const { inspectCli } = await import("./inspect.ts");
+  const { inspectCli } = await withPeers("inspect", () => import("./inspect.ts"));
   process.exit(await inspectCli(process.argv.slice(3)));
 }
 if (process.argv[2] === "deploy") process.exit(await deployCli(process.argv.slice(3)));
@@ -594,6 +596,20 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
     writeAll(`${JSON.stringify(report)}\n`);
   }
   process.exit(exitCode);
+}
+
+/** A command's module, or exits 1 with one line when an optional peer it needs is not installed where
+ * flow runs from (npx's cache, say, rather than the agent's folder). */
+async function withPeers<T>(command: string, load: () => Promise<T>): Promise<T> {
+  try {
+    return await load();
+  } catch (error) {
+    const missing = /Cannot find package '([^']+)'/.exec((error as Error).message)?.[1];
+    const peers = JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).peerDependencies as Record<string, string>;
+    if ((error as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND" || !missing || !(missing in peers)) throw error;
+    console.error(`flow ${command} needs ${missing}: run it from your agent's folder (npx @flow-engineer/flow ${command}), or npm install ${missing}.`);
+    process.exit(1);
+  }
 }
 
 /** Nothing was sent: prints what is wrong and exits 1 (with --json, after the report). */
