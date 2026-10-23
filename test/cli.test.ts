@@ -47,7 +47,7 @@ const orders = [
 const listOrders = tool({
   name: "list_orders",
   description: "Their orders.",
-  input: z.object({ status: z.enum(["ready", "making"]).optional(), limit: z.number().int().optional() }),
+  input: z.object({ status: z.enum(["ready", "making"]).optional(), limit: z.number().int().max(50).optional() }),
   output: z.object({ orders: z.array(z.object({ order_id: z.string(), status: z.string(), total: z.number(), items: z.array(z.string()) })) }),
   signIn: "none",
   hints: { readOnly: true },
@@ -113,7 +113,7 @@ test("a write shows its call with --dry-run, and one that may delete needs --yes
   assert.deepEqual(cancelled, ["BL-1042"]);
 });
 
-test("wrong arguments exit 2 with what is wrong and the help to read, before anything is sent", async () => {
+test("wrong arguments exit 2 with what is wrong and the help to read, also when the server's schema refuses them", async () => {
   const cli = acme(await serve({ tools: [listOrders, getOrder, cancelOrder] }));
   const unknown = io();
   assert.equal(await runCli(cli, ["order", "list", "--colour", "red"], unknown.channel), 2);
@@ -124,6 +124,11 @@ test("wrong arguments exit 2 with what is wrong and the help to read, before any
   assert.match(missing.err, /order_id/);
   const badEnum = io();
   assert.equal(await runCli(cli, ["orders", "--status", "lost"], badEnum.channel), 2);
+  const tooMany = io();
+  assert.equal(await runCli(cli, ["order", "list", "--limit", "500"], tooMany.channel), 2);
+  assert.match(tooMany.err, /^--limit: .*50/m);
+  assert.match(tooMany.err, /Run `acme order list --help`/);
+  assert.doesNotMatch(tooMany.err, /ProtocolError|\n\s+at /);
   const typo = io();
   assert.equal(await runCli(cli, ["ordr"], typo.channel), 2);
   assert.match(typo.err, /did you mean `order`/);
