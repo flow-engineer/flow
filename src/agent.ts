@@ -1024,6 +1024,21 @@ export class Agent {
   }
 
   /**
+   * Starts a conversation from an earlier one, as if it had been said: the person's messages and the
+   * agent's, oldest first, written into its history with no model call and nothing sent. The test
+   * cloud's seeded history (a scenario's `history`); `channelName` as receive() takes it. Only a
+   * conversation with no history yet.
+   */
+  async seedHistory(conversationId: string, messages: Array<{ from: "person" | "agent"; text: string }>, options: { channelName?: string } = {}): Promise<void> {
+    this.mustBeResumed();
+    const name = options.channelName ?? "chat";
+    const isNew = !this.conversations.has(conversationId) && !this.rows.has(conversationId);
+    const conversation = this.open(conversationId, `${name}:${conversationId}`);
+    if (isNew) conversation.persist(() => this.store.addIdentity(conversationId, name, conversationId, "channel"));
+    await conversation.seed(messages, name);
+  }
+
+  /**
    * Where flowEvents (business events) keeps its send state, so a restart does not forget it; its
    * attach() asks. null when the database does not survive a restart or the store cannot hold it.
    */

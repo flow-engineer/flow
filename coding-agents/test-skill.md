@@ -164,6 +164,20 @@ expect:
     - restart: deploy              # or crash
     - say: "and where is it?"      # reaches the new agent
   ```
+- `history` (top level) starts a run from an earlier conversation, to test what happens late in a
+  long chat (a correction about something said 40 messages ago, a history near the model's budget)
+  without playing it: what each side said, oldest first, 1 to 200 items of up to 4,000 characters.
+  It is written into the agent's store before the run, as if said (no model call, nothing sent);
+  the person model and the judge see it as the conversation so far. Needs a client that says so
+  (0.5.0); an older one's run ends `client_outdated`.
+
+  ```yaml
+  history:
+    - person: "Book a table for four on Friday"
+    - agent: "Done: Friday at 8 pm, for four."
+  opening:
+    - say: "can we make it 9?"
+  ```
 - Timers of your own (held sends, reminders timed from your data) go in `createAgent`'s `onTick`,
   which runs on the agent's clock, never in a `setInterval` of your own.
 
@@ -226,6 +240,15 @@ connects out to the cloud, which plays the person and the tools and judges.
    the test when the failed play shows a real problem. The cloud also replays the person's, the tools'
    and the judge's stored answers for a scenario it has played unchanged (`replayed` counts them), so
    runs vary less; `--fresh` plays every simulator anew.
+   Each run's `outcome` is `passed`, `failed`, `credit` (the workspace's test budget, `spend_cap`, or the
+   agent's model refused for credit, `agent_credit`; its line reads `CREDIT`) or `infra` (the cloud
+   could not play or judge it; `ERROR`). Credit and infra runs are never failures and are counted apart
+   (`counts.credit`, `counts.infra`): on credit, say the agent needs a model key or more credit, and
+   do not change the agent. With `--runs 3`, `scenarios` gives each scenario's pass rate per channel
+   (`runs` passed or failed, `passedRuns`, `credit`, `infra`, `label: "flaky"` when some passed and some
+   failed); a flaky scenario is a real problem that shows only sometimes. `sendPath` names a
+   conversation whose messages did not all go through the agent's send (a channel wrapper or the app's
+   own code sent one the agent never did): the session fails; send every message through the agent.
    Exit status: 0 all passed (or flaky, without `--strict`); 1 a run failed, or nothing was sent (a wrong flag, a test file that does
    not parse, no key); 2 the connection or the cloud failed, or runs errored or were not played (the
    session ended early: one line says how many and why) and none failed; 3 the cloud refused (key,
@@ -299,7 +322,7 @@ To implement one:
    POST per message of the person's, answered in the same response with status 200 and
    `{ "replies": [...] }` (`[]` for no reply, never 204). Keep history by `conversationId`, ignore
    request fields you do not know, and check `authorization: Bearer` when `FLOW_FRAMEWORK_AGENT_TOKEN` is set.
-2. Only send what the run's platform shows (`x-chinwag-platforms` in the spec): no buttons on SMS,
+2. Only send what the run's platform shows (`x-flow-platforms` in the spec): no buttons on SMS,
    text within `maxLength`. Name the person's messages by the `messageId` they came with.
 3. Start the endpoint and run `npx @flow-engineer/flow check-endpoint <url>` (`--token-env NAME` when it needs
    a token). Fix every FAIL line; it must end "5 of 5 cases passed". Give the agent a mode with no

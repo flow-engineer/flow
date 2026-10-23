@@ -28,6 +28,14 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - `POST /v1/events` answers 202 once the event is recorded in the database, and 503 when it could
   not be recorded (retry with the same id).
 - `events.idle()` also waits for work queued while it waited (a restart's unprocessed events).
+- `flow inspect`, `flow cli` and `flow mcp update` run where the MCP client is not installed (from
+  `npx --package`, outside an agent's folder) say which package they need and how to get it, and
+  exit 1, instead of crashing with `ERR_MODULE_NOT_FOUND`.
+- **A generated CLI command whose arguments the server's schema refuses** (a maximum, a pattern)
+  exits 2 with one line per field (`--days: Too big: expected number to be <=16`) and the command's
+  `--help` hint, as other wrong arguments do. It printed the MCP `ProtocolError` with a stack and
+  exited 1. A custom command still gets `cli.call`'s own error to handle; one it lets through is
+  reported the same way.
 - `guards(...)`, `oncePerChat`, `noRepeats`, `linkAllowlist`, `noWriteButtons`: ready-made checks
   for `beforeSend`, composed in order, the first refusal winning.
 - `beforeSend`'s context has `sent`: the texts already sent in the conversation, read from the
@@ -43,6 +51,22 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   agent no longer names `bean-and-leaf`, `cafe` or `CAFE_*` anywhere, and its package.json
   `description` (which `flow plugin` puts in plugins) no longer says "started from the café
   example". The coding-agent skill lists where people see each name ("Names").
+- More Chinwag names become Flow's: the spec's platform table is `x-flow-platforms`, a drafted
+  context-pack spec is marked `x-flow-draft`, and `flow plugin` records what it wrote in
+  `.flow-skills.json`.
+- **`flow test` tells a credit or infrastructure stop from a failure.** Each run's outcome is
+  `passed`, `failed`, `credit` or `infra`; credit and infra runs are counted apart and never as
+  failed (they still exit 2). With `--runs N` the summary prints each scenario's pass rate per
+  channel (`hello (sms): 2/3 passed, flaky`).
+- **Seeded history in scenarios.** A scenario's `history:` (`- person: ...` / `- agent: ...`) is
+  written into the agent's store before the first message, with no model call and nothing sent
+  (new `agent.seedHistory()` and `Conversation.seed()`).
+- **One send path.** On a Flow Framework agent, `flow test` checks that every message the agent
+  sent went through its channels (`/outbound` against `message.out`); a mismatch fails the session.
+- `flow test --json` adds `outcome` per run, `counts.credit` and `counts.infra` (still inside
+  `errored`), `scenarios` (each scenario's runs, passed runs, credit and infra) and `sendPath`;
+  `.flow/last-session.json` runs get `outcome`. `model.error` events carry `code` and `status` when
+  the error has them.
 
 ### Migration notes
 
@@ -55,7 +79,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   the value to `MODEL=` in `.env`.
 - **`flow init --display-name` names the package after the display name**, no longer the folder:
   pass `--name <folder's name>` to keep the old name.
-
+- **A generated CLI command refused by the server's schema exits 2, not 1.** A script that treated
+  exit 1 as "bad arguments" checks for 2, the usage code the CLI already used for other wrong arguments.
 - **Flow Messaging sends wait for `message.sent`.** A send now takes until the channel accepted it
   (usually well under a second, at most `waitTimeoutMs`, 30 s by default). On a webhook, add
   `message.sent` to the endpoint's `events`, or each send reads its message back and takes up to a
@@ -80,3 +105,14 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   (or `Math.floor(contextTokens * 0.6)`).
 - **A new event type, `history.reset`.** An event sink that switches on event types sees it. A
   custom `StoreApi` passes inbox payloads through unchanged; nothing to do.
+- **Chinwag names renamed, the old ones still read for now.** `spec/agent-endpoint.openapi.yaml`'s
+  platform table is `x-flow-platforms`; `x-chinwag-platforms` is kept beside it as the same table,
+  deprecated, and goes in 0.6: code that reads it from the package reads `x-flow-platforms`.
+  `flow plugin` writes `.flow-skills.json` and removes `.chinwag-skills.json`; `flow check --plugin`
+  still accepts a package with only the old file, so nothing to do but commit the renamed file after
+  the next `flow plugin`. The context skill now marks a drafted spec `x-flow-draft: true`; nothing in
+  Flow Framework reads the marker, and `x-chinwag-draft` in an existing pack means the same.
+- **`flow test`'s printed summary is worded differently.** `N errored (...)` is now
+  `N hit an infrastructure error (...)` or `N stopped for credit (...)`, and `K failed a check` is
+  `F failed`. Scripts that read the printed summary read `--json` instead (its fields are only
+  added to).

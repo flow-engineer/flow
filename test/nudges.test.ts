@@ -416,9 +416,11 @@ test("a model error in a nudge texts the person nothing, and the nudge settles a
   assert.equal(h.events.filter((e) => e.type === "model.error").length, 2);
 
   await h.message("sms", SAM.address, "is it at 10?");
-  (await h.nextCall(5)).fail(new Error("503 overloaded"));
+  // A typed error (Flow's model API, a provider's APIError) keeps its code and status on the event, so a test cloud can tell credit from a failure.
+  (await h.nextCall(5)).fail(Object.assign(new Error("Your trial model credit is used up."), { code: "trial_credit_used", status: 402 }));
   await h.conversation.whenIdle();
   assert.equal(h.texts("sms").at(-1), "Sorry, something went wrong on my side. Could you send that again?");
+  assert.deepEqual(h.events.filter((e) => e.type === "model.error").map((e) => [e.code ?? null, e.status ?? null]), [[null, null], [null, null], ["trial_credit_used", 402]]);
 });
 
 test("two calls with one idempotency key at once send once, and both get its result; a scheduled one is written once", async () => {

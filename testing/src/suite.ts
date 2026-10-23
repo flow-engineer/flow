@@ -200,6 +200,12 @@ const openingStep = z
   })
   .transform((step) => (step.event || step.nudge || step.wait !== undefined || step.restart ? step : { ...step, say: step.say ?? "" }));
 
+/** One message of the conversation a scenario starts from: what the person said, or what the agent said. */
+const historyItem = z.union(
+  [z.strictObject({ person: withClock(z.string().min(1).max(4000)) }), z.strictObject({ agent: withClock(z.string().min(1).max(4000)) })],
+  { error: "{ person: <what they said> } or { agent: <what it said> }" },
+);
+
 const scenarioSchema = z.object({
   id: z.string().min(1),
   title: z.string().optional(),
@@ -219,6 +225,8 @@ const scenarioSchema = z.object({
     goal: withClock(z.string()),
     knows: z.array(withClock(z.string())).optional(),
   }),
+  /** The conversation so far: the run starts after these, as if they had been said (oldest first). */
+  history: z.array(historyItem).min(1).max(200).optional(),
   opening: z.array(openingStep).min(1),
   /** Tools whose own code runs in this scenario, in place of the cloud's simulation (state the agent keeps itself). */
   tools: z.strictObject({ real: z.array(z.string().min(1)).min(1) }).optional(),

@@ -29,7 +29,7 @@ import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 import { hasModelKey } from "../../src/model.ts";
 import { PLUGIN_LINE, pluginCli } from "./plugin.ts";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
-import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions } from "./client.ts";
+import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions, type SendPathProblem } from "./client.ts";
 import type { SessionLimits } from "./protocol.ts";
 import { runPrinter } from "./print-run.ts";
 import { checkEndpointCli } from "./check-endpoint.ts";
@@ -40,10 +40,10 @@ import { DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
-import { EXIT, finishedOutcome, invalidLines, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
+import { EXIT, finishedOutcome, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
-import type { RunSummary } from "./protocol.ts";
+import type { RunOutcome, RunSummary } from "./protocol.ts";
 
 const NEW_LINE = `  flow new <name> [--display-name <name>]
                             Make ./<name>/, a new agent started from the café example
@@ -70,7 +70,8 @@ const INSPECT_LINE = `  flow inspect <url> <command>
 const NEW_USAGE = `Usage:\n${NEW_LINE}\n\n  -h, --help                Show this help`;
 const TEST_OPTIONS = `Options for test:
   --cloud <url>            The test cloud (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)
-  --runs <n>               Runs per scenario (default: 1)
+  --runs <n>               Runs per scenario (default: 1); above 1 the summary gives each
+                           scenario's pass rate on each channel, flaky when some runs passed
   --only <ids>             Only these scenarios, comma-separated (file names without .yaml)
   --failed                 Only the scenarios that failed, were flaky, errored or never played in
                            the last session (.flow/last-session.json), on every channel each plays.
@@ -108,9 +109,15 @@ too, the run failed. A flaky run does not fail the session unless --strict. The 
 the person's, the tools' and the judge's stored answers for a scenario it has played unchanged, so
 runs vary less and --runs 3 is rarely needed; --fresh plays everything anew.
 
+Outcomes: each run passed, failed, stopped for credit (the workspace's daily test budget, or the
+agent's model refused for credit: CREDIT on its line) or hit an infrastructure error (the cloud
+could not play or judge it: ERROR). Credit and infrastructure runs are counted apart, never as
+failures, and are left out of the pass rate. A message that reached the cloud without the agent's
+send (or one the agent says it sent that never arrived) is a second send path: the session fails.
+
 Exit status:
   0    Every run passed, or was flaky (without --strict)
-  1    A run failed (with --strict, or was flaky). Or nothing was sent: a wrong flag, a test file that does not parse,
+  1    A run failed (with --strict, or was flaky), or a message took a second send path. Or nothing was sent: a wrong flag, a test file that does not parse,
        no FLOW_FRAMEWORK_CLOUD_KEY. The message is printed on its own
   2    The connection, the tunnel or the stream failed (before or after the session opened),
        the cloud answered 5xx or no JSON, the cloud ended the session for its own failure, or
@@ -170,16 +177,18 @@ if (process.argv[2] === "mcp") {
     console.error(MCP_LINE.trim());
     process.exit(1);
   }
+  // Loaded here first, so a missing optional peer is one line; mcpUpdateCli's own import of it is then cached.
+  await withPeers("mcp update", () => import("../../mcp/src/client.ts"));
   process.exit(await mcpUpdateCli());
 }
 if (process.argv[2] === "cli") {
-  // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client, an optional peer.
-  const { defineCli, runCli } = await import("../../cli/src/index.ts");
+  // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client and @stricli/core, optional peers.
+  const { defineCli, runCli } = await withPeers("cli", () => import("../../cli/src/index.ts"));
   process.exit(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
 }
 if (process.argv[2] === "inspect") {
   // Loaded only here: it needs @modelcontextprotocol/client, an optional peer.
-  const { inspectCli } = await import("./inspect.ts");
+  const { inspectCli } = await withPeers("inspect", () => import("./inspect.ts"));
   process.exit(await inspectCli(process.argv.slice(3)));
 }
 if (process.argv[2] === "deploy") process.exit(await deployCli(process.argv.slice(3)));
@@ -292,6 +301,8 @@ let agentId = "";
 const seen: RunSummary[] = [];
 /** Set when the cloud ended the whole session scenario_invalid. */
 let endedInvalid: SessionInvalid | null = null;
+/** Conversations whose messages did not all go through the agent's send (client.ts sendPathCheck). */
+let sendPath: SendPathProblem[] = [];
 
 if (command !== undefined && (command !== "test" || rest.length)) invalid(`flow: unknown command "${positionals.join(" ")}".\n\n${USAGE}`);
 
@@ -433,19 +444,31 @@ for (const r of summary.runs) printRun(r);
 // The suite's runs: a second play of a failed run (rerunOf) is shown under its original, never counted.
 const played = summary.runs.filter((r) => !r.rerunOf);
 const passed = played.filter((r) => runVerdict(r) === "passed").length;
-const errored = played.filter((r) => runVerdict(r) === "errored").length;
+const failedRuns = played.filter((r) => runVerdict(r) === "failed").length;
+const credit = played.filter((r) => runOutcome(r) === "credit");
+const infra = played.filter((r) => runOutcome(r) === "infra" && !r.invalid).length;
 // Cost counts every play, second plays included: the cloud spent it.
 const total = (pick: (r: (typeof summary.runs)[number]) => number) => summary.runs.reduce((n, r) => n + pick(r), 0);
 const agentModels = [...new Set(summary.runs.flatMap((r) => r.agentModels))].join(", ") || "unknown";
 const noModel = played.filter((r) => r.agentModels.length === 0 && r.agentUsage.input + r.agentUsage.output === 0).length;
 const modelCalls = noModel ? `${noModel} ${noModel === 1 ? "run never called" : "runs never called"} the agent's model.` : "Every run called the agent's model.";
 const checkFails = played.filter((r) => runVerdict(r) === "failed" && r.checks.some((c) => !c.pass)).length;
-const erroredLine = errored ? ` ${errored} errored (the cloud could not play or judge ${errored === 1 ? "it" : "them"}).` : "";
+// Credit and infrastructure runs say nothing about the agent: each has its own count, never with the failures.
+const failedLine = failedRuns ? ` ${failedRuns} failed${checkFails && checkFails < failedRuns ? ` (${checkFails} on a check)` : ""}.` : "";
+const creditLine = credit.length ? ` ${credit.length} stopped for credit (not the agent's fault, not counted as failed).` : "";
+const infraLine = infra ? ` ${infra} hit an infrastructure error (the cloud could not play or judge ${infra === 1 ? "it" : "them"}; not counted as failed).` : "";
 const tokens = (n: number) => n.toLocaleString("en-US");
-say(`\n${passed} of ${played.length} runs passed.${erroredLine} ${modelCalls} ${checkFails} failed a check. Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
+say(`\n${passed} of ${played.length} runs passed.${failedLine}${creditLine}${infraLine} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
+if (credit.length) say(`Credit: ${creditReason(credit[0]!)}`);
 for (const channel of [...new Set(played.map((r) => r.channel))]) {
   const runs = played.filter((r) => r.channel === channel);
   say(`  ${channel}: ${runs.filter((r) => runVerdict(r) === "passed").length} of ${runs.length} passed`);
+}
+// With --runs above 1 (or a run played again), each scenario's pass rate: credit and infrastructure runs are not counted.
+const rates = scenarioRates(mergedRuns(summary.runs).map((m) => ({ ...m, scenario: m.id })));
+if (perScenario > 1 || rates.some((r) => r.label === "flaky")) {
+  say("Pass rate per scenario (runs that passed or failed; credit and infrastructure runs not counted):");
+  for (const r of rates) say(`  ${rateLine(r)}`);
 }
 const flaky = played.filter((r) => runVerdict(r) === "flaky");
 if (flaky.length) {
@@ -456,10 +479,22 @@ for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
 say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
 if (mergedRuns(summary.runs).some((m) => m.verdict === "not_played")) endedEarly(summary.runs, "the cloud finished the session without playing every run", say);
+sendPath = summary.sendPath ?? [];
+if (sendPath.length) {
+  say(`${sendPath.length} ${sendPath.length === 1 ? "conversation" : "conversations"} sent messages by a second path: every message must go through the agent's send (its channels), so the session failed:`);
+  for (const p of sendPath) say(`  ${p.conversationId}: ${p.delivered} reached the cloud through the agent's channels, ${p.announced} the agent says it sent (message.out)`);
+}
 sessionId = summary.sessionId || sessionId;
 dashboard = summary.dashboard || dashboard;
 saveSession("finished", summary.runs, dashboard, say);
-end(finishedOutcome(mergedRuns(summary.runs), values.strict), { received: summary.runs });
+end(sendPath.length ? "failed" : finishedOutcome(mergedRuns(summary.runs), values.strict), { received: summary.runs });
+
+/** "late-order (sms): 2/3 passed, flaky", with the runs that were not counted. */
+function rateLine(r: ReturnType<typeof scenarioRates>[number]): string {
+  const left = [r.credit ? `${r.credit} stopped for credit` : "", r.infra ? `${r.infra} infrastructure error${r.infra === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ");
+  const rate = r.runs ? `${r.passedRuns}/${r.runs} passed${r.label === "flaky" ? ", flaky" : r.passedRuns === r.runs ? "" : ", failing"}` : "nothing counted";
+  return `${r.scenario} (${r.channel}): ${rate}${left ? ` (${left}, not counted)` : ""}`;
+}
 
 /** The one line that says the session ended before every run played: how many finished, how many did not, and why. */
 function endedEarly(received: RunSummary[], reason: string, print: (line: string) => void): void {
@@ -475,9 +510,15 @@ type Ended = LastSession["ended"];
 /** One run the session was to play, with what the cloud reported for it (none: it was never played). */
 interface Merged {
   scenario: string;
+  /** The scenario's id (its file's `id:`), as the cloud names it. */
+  id: string;
+  /** Its file in the tests folder: scenarios/<scenario>.yaml. */
+  path: string;
   channel: string;
   run: number;
   verdict: Verdict;
+  /** null: never played. */
+  outcome: RunOutcome | null;
   summary?: RunSummary;
 }
 
@@ -489,12 +530,15 @@ function mergedRuns(received: RunSummary[]): Merged[] {
   const key = (scenario: string, channel: string, run: number) => `${scenario}\n${channel}\n${run}`;
   // A second play of a failed run has its original's scenario, channel and number: it never takes its place.
   for (const r of received) if (!r.rerunOf) byRun.set(key(r.scenario, r.channel, r.run), r);
-  const merged = (scenario: string, r: RunSummary): Merged => ({
+  const merged = (scenario: string, r: RunSummary, id = r.scenario): Merged => ({
     scenario,
+    id,
+    path: `scenarios/${scenario}.yaml`,
     channel: r.channel,
     run: r.run,
     // An error or run_failed: the cloud could not play or judge the run, which says nothing about the agent.
     verdict: runVerdict(r),
+    outcome: runOutcome(r),
     summary: r,
   });
   const out: Merged[] = [];
@@ -508,7 +552,7 @@ function mergedRuns(received: RunSummary[]): Merged[] {
         const r = byRun.get(key(scenario.id, channel, run)) ?? byRun.get(key(id, channel, run));
         byRun.delete(key(scenario.id, channel, run));
         if (r) byRun.delete(key(r.scenario, channel, run));
-        out.push(r ? merged(id, r) : { scenario: id, channel, run, verdict: "not_played" });
+        out.push(r ? merged(id, r, scenario.id) : { scenario: id, id: scenario.id, path: file.path, channel, run, verdict: "not_played", outcome: null });
       }
     }
   }
@@ -539,6 +583,7 @@ function saveSession(ended: Ended, received: RunSummary[], link: string, print: 
       run: m.run,
       runId: m.summary?.runId ?? null,
       verdict: m.verdict,
+      outcome: m.outcome,
       failedChecks: failedChecks(m.summary),
       ...(m.summary?.invalid ? { invalid: m.summary.invalid } : {}),
     })),
@@ -567,6 +612,7 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       channel: m.channel,
       run: m.run,
       verdict: m.verdict,
+      outcome: m.outcome,
       error: m.summary?.error || null,
       ended: m.summary?.ended ?? null,
       turns: m.summary?.turns ?? null,
@@ -588,7 +634,12 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       dashboard: dashboard || null,
       suiteHash: files.length ? suiteHash(files) : null,
       error: options.error ?? null,
-      counts: { runs: runs.length, passed: count("passed"), failed: count("failed") + (values.strict ? count("flaky") : 0), flaky: count("flaky"), errored: count("errored"), notPlayed: count("not_played") },
+      counts: {
+        runs: runs.length, passed: count("passed"), failed: count("failed") + (values.strict ? count("flaky") : 0), flaky: count("flaky"), errored: count("errored"), notPlayed: count("not_played"),
+        credit: runs.filter((r) => r.outcome === "credit").length, infra: runs.filter((r) => r.outcome === "infra").length,
+      },
+      scenarios: sessionId ? scenarioRates(mergedRuns(received).map((m) => ({ ...m, scenario: m.id }))) : [],
+      sendPath,
       strict: values.strict,
       costUsd: { agent: cost((r) => r.agentUsage.costUsd), test: cost((r) => r.testUsage.costUsd) },
       runs,
@@ -599,6 +650,20 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
     writeAll(`${JSON.stringify(report)}\n`);
   }
   process.exit(exitCode);
+}
+
+/** A command's module, or exits 1 with one line when an optional peer it needs is not installed where
+ * flow runs from (npx's cache, say, rather than the agent's folder). */
+async function withPeers<T>(command: string, load: () => Promise<T>): Promise<T> {
+  try {
+    return await load();
+  } catch (error) {
+    const missing = /Cannot find package '([^']+)'/.exec((error as Error).message)?.[1];
+    const peers = JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).peerDependencies as Record<string, string>;
+    if ((error as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND" || !missing || !(missing in peers)) throw error;
+    console.error(`flow ${command} needs ${missing}: run it from your agent's folder (npx @flow-engineer/flow ${command}), or npm install ${missing}.`);
+    process.exit(1);
+  }
 }
 
 /** Nothing was sent: prints what is wrong and exits 1 (with --json, after the report). */

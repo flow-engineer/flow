@@ -178,7 +178,7 @@ export const app = customUI("app", {
   sendMessage: (to, m) => myApp.push(to, m),      // m.text, m.app_link
 });
 
-createAgent({ ..., channels: [wa, sms(twilioLike), app], database: sqlite("data/chinwag.db"),
+createAgent({ ..., channels: [wa, sms(twilioLike), app], database: sqlite("data/flow.db"),
   resolve: ({ channel, address }) => members.idFor(channel, address), timeZone: "America/New_York" });
 // A person's time zone is never guessed from timeZone (the business's): set it when you know it,
 // agent.setTimeZone({ to, timeZone }) or peopleHandler over HTTP; else the agent asks them.
