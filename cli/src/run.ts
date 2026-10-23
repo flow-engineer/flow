@@ -149,15 +149,14 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
     cli: {
       call: async (tool, input) => {
         if (!client) throw new CliExit(EXIT.unreachable, noServer(config));
-        const words = findCommand(commandTable(config, tools), rest)?.command.words;
-        return valueOf(await client.callTool({ name: tool, arguments: input, _meta: callMeta(config, words?.join(" ") ?? "custom") }).catch((error: unknown) => {
-          throw badArguments(config, words ?? wordsKnown(rest.filter((w) => !w.startsWith("-")), config, tools), error, (field) => field) ?? error;
-        }));
+        return valueOf(await client.callTool({ name: tool, arguments: input, _meta: callMeta(config, findCommand(commandTable(config, tools), rest)?.command.words.join(" ") ?? "custom") }));
       },
       print: (value, options = {}) => io.write(`${render(value, options)}\n`),
     },
   };
 
+  // A custom command gets cli.call's own error and may handle it; one it lets through is a usage error here.
+  const refused = (error: unknown) => badArguments(config, wordsKnown(rest.filter((w) => !w.startsWith("-")), config, tools), error, (field) => field);
   const disconnect = () => { void client?.close(); };
   io.signal?.addEventListener("abort", disconnect, { once: true });
   try {
@@ -165,8 +164,8 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
       name,
       scanner: { caseStyle: "original" },
       // A CliExit is a message for the person (sign in, --yes, the tool's own error): one line, no stack.
-      localization: { text: { ...text_en, exceptionWhileRunningCommand(exc, ansiColor) { return exc instanceof CliExit ? exc.message : text_en.exceptionWhileRunningCommand.call(this, exc, ansiColor); } } },
-      determineExitCode: (error) => (error instanceof CliExit ? error.code : needsSignIn(error) ? EXIT.signIn : EXIT.failed),
+      localization: { text: { ...text_en, exceptionWhileRunningCommand(exc, ansiColor) { return exc instanceof CliExit ? exc.message : refused(exc)?.message ?? text_en.exceptionWhileRunningCommand.call(this, exc, ansiColor); } } },
+      determineExitCode: (error) => (error instanceof CliExit ? error.code : needsSignIn(error) ? EXIT.signIn : refused(error) ? EXIT.usage : EXIT.failed),
     });
     await runStricli(app, rest, { ...context, process: stricliProcess });
   } finally {

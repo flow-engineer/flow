@@ -31,7 +31,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - **A generated CLI command whose arguments the server's schema refuses** (a maximum, a pattern)
   exits 2 with one line per field (`--days: Too big: expected number to be <=16`) and the command's
   `--help` hint, as other wrong arguments do. It printed the MCP `ProtocolError` with a stack and
-  exited 1. The same goes for `cli.call` in custom commands.
+  exited 1. A custom command still gets `cli.call`'s own error to handle; one it lets through is
+  reported the same way.
 - `guards(...)`, `oncePerChat`, `noRepeats`, `linkAllowlist`, `noWriteButtons`: ready-made checks
   for `beforeSend`, composed in order, the first refusal winning.
 - `beforeSend`'s context has `sent`: the texts already sent in the conversation, read from the
