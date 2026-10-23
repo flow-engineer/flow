@@ -3,7 +3,7 @@
 
 import { fileURLToPath } from "node:url";
 import { createAgent, customUI, openAICompatible, sms, whatsapp, type Channel, type EventSink, type HostOptions, type Model, type Tool } from "../../../src/index.ts";
-import { tools as cafeTools } from "./tools.ts";
+import { tools } from "./tools.ts";
 
 export interface BuildOptions {
   model?: Model;
@@ -15,7 +15,7 @@ export interface BuildOptions {
   host?: HostOptions;
 }
 
-export const tools = cafeTools;
+export { tools };
 
 // The café's numbers and web chat are not connected yet, so every provider refuses to send. Test
 // people write from the playground, and replies to them go back there, never through these.
@@ -31,8 +31,8 @@ export function buildAgent(options: BuildOptions = {}) {
   return createAgent({
     dir: fileURLToPath(new URL("../agent", import.meta.url)),
     host: options.host,
-    model: options.model ?? openAICompatible({ model: process.env.CAFE_MODEL }),
-    tools: options.tools ?? cafeTools,
+    model: options.model ?? openAICompatible(),
+    tools: options.tools ?? tools,
     events: options.events ?? [],
     channels: [...unconnected, ...connected],
     testPeople: [

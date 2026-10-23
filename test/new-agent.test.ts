@@ -1,8 +1,9 @@
-// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/src/main.ts examples/cafe/src/mcp.ts src/local.ts examples/cafe/src/agent.ts examples/cafe/src/tools.ts examples/cafe/src/channels.ts coding-agents/skill.md
+// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/src/main.ts examples/cafe/src/mcp.ts src/local.ts examples/cafe/src/agent.ts examples/cafe/src/tools.ts examples/cafe/src/channels.ts examples/cafe/src/name.ts examples/cafe/src/cli.ts coding-agents/skill.md
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import { createServer as createHttpServer } from "node:http";
 import { createServer, type AddressInfo } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -32,7 +33,6 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   assert.match(readFileSync(join(dir, "src", "mcp.ts"), "utf8"), /from "@flow-engineer\/flow\/mcp"/);
   const cli = readFileSync(join(dir, "src", "cli.ts"), "utf8");
   assert.match(cli, /from "@flow-engineer\/flow\/cli"/);
-  assert.match(cli, /name: "my-agent"/, "the CLI is named after the agent");
   assert.doesNotMatch(main + readFileSync(join(dir, "src", "tools.ts"), "utf8"), /\.\.\/\.\.\//);
   const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
   const own = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -57,9 +57,16 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   assert.throws(() => newStandalone("My_Agent", { into }), /not a usable name/);
 });
 
-test("flow init makes the same agent in the folder it runs in, named after it, on Flow Messaging when .env has its key, and never over files already there", () => {
+test("flow init makes the same agent in the folder it runs in, named by --name, else its display name, else the folder, on Flow Messaging when .env has its key, and never over files already there", () => {
   const dir = join(mkdtempSync(join(tmpdir(), "flow-init-")), "My Shop");
   mkdirSync(dir);
+  for (const [options, name] of [[{ name: "shop-agent", displayName: "Skycast" }, "shop-agent"], [{ displayName: "Café Skycast" }, "cafe-skycast"]] as const) {
+    const here = join(dir, "..", name);
+    mkdirSync(here);
+    assert.equal(initHere(here, options), name);
+    assert.deepEqual(JSON.parse(readFileSync(join(here, "package.json"), "utf8")).bin, { [name]: "src/cli.ts" });
+  }
+  assert.throws(() => initHere(join(dir, ".."), { name: "Shop Agent" }), /not a usable name/);
   writeFileSync(join(dir, ".gitignore"), "dist/");
   assert.equal(initHere(dir), "my-shop");
   assert.equal(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).name, "my-shop");
@@ -104,7 +111,27 @@ test("the name people call the agent (--display-name) is package.json's displayN
   assert.match(result.stdout, /a phone reaches it with "Hi FlatX agent \(ref <code>\)"/);
 });
 
-test("the display name takes Pip's place in the agent's prompt, no other file of a new agent names Pip, and renaming later replaces it again (whole words only)", () => {
+test("every name in a new agent's code comes from its package.json: the CLI, its variables and examples, and the MCP server", async (t) => {
+  // In the clone's own folder, so the agent's relative imports of Flow Framework resolve.
+  const agents = mkdtempSync(fileURLToPath(new URL("../.agents-test-", import.meta.url)));
+  t.after(() => rmSync(agents, { recursive: true, force: true }));
+  const dir = newAgent("skycast-agent", { agents });
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).bin, { "skycast-agent": "src/cli.ts" });
+  const { cli } = await import(join(dir, "src", "cli.ts"));
+  assert.equal(cli.name, "skycast-agent");
+  assert.equal(cli.server, "http://127.0.0.1:8790/mcp");
+  assert.deepEqual(Object.values(cli.commands).flatMap((c) => (c as { examples?: string[] }).examples ?? []).map((e) => e.split(" ")[0]), ["skycast-agent", "skycast-agent"]);
+  assert.equal((await import(join(dir, "src", "name.ts"))).serverEnv, "SKYCAST_AGENT_SERVER");
+  const { mcp } = await import(join(dir, "src", "mcp.ts"));
+  const init = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } };
+  const server = createHttpServer((req, res) => void mcp.node(req, res));
+  t.after(() => server.close());
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const answer = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify(init) });
+  assert.match(await answer.text(), /"serverInfo":\{"name":"skycast-agent"/);
+});
+
+test("the display name takes Pip's place in the agent's prompt, no other file of a new agent names Pip or the café's identifiers, and renaming later replaces it again (whole words only)", () => {
   const into = mkdtempSync(join(tmpdir(), "flow-named-prompt-"));
   const dir = newStandalone("juniper", { into, displayName: "Juniper" });
   const prompt = readFileSync(join(dir, "agent", "AGENTS.md"), "utf8");
@@ -114,6 +141,9 @@ test("the display name takes Pip's place in the agent's prompt, no other file of
   // Nor anywhere else a coding agent reads: the template's code and comments, the skills.
   const named = readdirSync(dir, { recursive: true, encoding: "utf8" }).filter((f) => statSync(join(dir, f)).isFile() && /\bPip\b/.test(readFileSync(join(dir, f), "utf8")));
   assert.deepEqual(named, [], "no file in a new agent names the café's Pip");
+  // Nor its machine names (the café's menu and prompt are the example, and stay until replaced).
+  const code = readdirSync(dir, { recursive: true, encoding: "utf8" }).filter((f) => !f.startsWith(".claude") && statSync(join(dir, f)).isFile() && /bean-and-leaf|CAFE_|\bcafe\b|chinwag/i.test(readFileSync(join(dir, f), "utf8")));
+  assert.deepEqual(code, [], "no file in a new agent names the café's package, CLI, variables or MCP server");
   // The playground and the MCP server read the name from package.json, so they never say Pip.
   for (const file of ["main.ts", "mcp.ts"]) assert.match(readFileSync(join(dir, "src", file), "utf8"), /displayName/, file);
   assert.deepEqual(setDisplayName(dir, "Pip Jr"), { displayName: "Pip Jr", prompt: true });

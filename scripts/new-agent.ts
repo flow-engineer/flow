@@ -18,8 +18,10 @@ export function newAgent(name: string, options: { source?: string; agents?: stri
   cpSync(source, dir, { recursive: true, filter: (path) => !LEFT_OUT.has(basename(path)) });
   const file = join(dir, "package.json");
   const pkg = JSON.parse(readFileSync(file, "utf8"));
+  // The code reads its names from here (src/name.ts): the CLI command is the bin key.
   pkg.name = name;
-  pkg.description = `${name}: a Flow Framework agent, started from the café example.`;
+  pkg.bin = { [name]: "src/cli.ts" };
+  pkg.description = `${pkg.displayName ?? name}, a Flow Framework agent.`;
   writeFileSync(file, `${JSON.stringify(pkg, null, 2)}\n`);
   return dir;
 }
