@@ -6,6 +6,14 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **Generated CLIs use cached MCP definitions immediately and refresh in the background.** The cache
+  keeps tools and the server's name/version per endpoint, client and credentials. Background refresh
+  runs at most every five minutes; version changes detected before a tool call refresh immediately.
+  Unknown commands/arguments refresh and reparse once; server argument errors refresh definitions
+  without replaying a tool request. `--refresh-tools` forces discovery; `discoveryCache: false`
+  disables caching and `{ maxAgeMs }` changes the background interval. Embedded CLIs can schedule
+  refreshes with `CliIO.background`. Handwritten commands work without discovery and take precedence
+  over derived names. No migration is required; MCP-backed commands still execute on the server.
 - **The API may change until 1.0, with a migration note every time.** [docs/stability.md](docs/stability.md)
   lists what freezes at 1.0; [docs/releasing.md](docs/releasing.md) is the release checklist.
   New guides: [docs/channels.md](docs/channels.md) (every channel's options and params) and

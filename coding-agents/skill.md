@@ -611,6 +611,16 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   exist, an `args` field the input lacks, a `columns` or `view` field the output lacks, two commands
   with one name, a word that is both a command and a group, or one of the CLI's own words (`auth`,
   `tools`, `skill`) is an error; a tool no command names is a warning (it keeps its own name).
+- MCP-backed commands need a shipped MCP server. Cached definitions (including server name/version)
+  load immediately, with background refresh every five minutes, scoped to endpoint, client and
+  credentials in the CLI's config directory (`directory` overrides it). Version changes detected
+  on connection refresh before a call. Unknown commands/arguments refresh and reparse once; server
+  argument errors refresh help without replaying the request. `--refresh-tools` forces discovery.
+  Set `discoveryCache: false` to disable caching or `{ maxAgeMs: 60_000 }` for a one-minute background
+  interval. Handwritten commands and their help need no discovery; their bodies are never replayed,
+  and their names override derived commands. Only explicit `this.cli.call` reaches MCP. Results and
+  credentials are never stored in the discovery cache. A custom command declaring its own
+  `--refresh-tools` flag keeps that flag; use `tools --refresh-tools` to force framework discovery.
 
 
 ### Native plugins and standalone MCP
