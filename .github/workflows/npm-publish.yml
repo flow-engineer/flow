@@ -1,0 +1,67 @@
+name: Publish npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Check the release tag and source
+        shell: bash
+        run: |
+          test "$GITHUB_REF_TYPE" = tag
+          version=$(node -p "require('./package.json').version")
+          test "$GITHUB_REF_NAME" = "v$version"
+          git merge-base --is-ancestor HEAD origin/main
+
+      - name: Use the tested npm CLI with OIDC support
+        run: npm install --global npm@11.8.0
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:conformance
+
+      - name: Test, build and publish the clean tagged commit
+        run: bash scripts/release.sh
+
+      - name: Verify registry availability and latest tag
+        shell: bash
+        run: |
+          package=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          for attempt in {1..30}; do
+            published=$(npm view "$package@$version" version --prefer-online 2>/dev/null || true)
+            latest=$(npm view "$package" dist-tags.latest --prefer-online 2>/dev/null || true)
+            if [ "$published" = "$version" ] && [ "$latest" = "$version" ]; then
+              echo "$package@$version is available as latest."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "npm accepted the publish, but registry availability was not confirmed. Check the registry before retrying." >&2
+          exit 1
