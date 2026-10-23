@@ -28,6 +28,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - `POST /v1/events` answers 202 once the event is recorded in the database, and 503 when it could
   not be recorded (retry with the same id).
 - `events.idle()` also waits for work queued while it waited (a restart's unprocessed events).
+- `flow inspect`, `flow cli` and `flow mcp update` run where the MCP client is not installed (from
+  `npx --package`, outside an agent's folder) say which package they need and how to get it, and
+  exit 1, instead of crashing with `ERR_MODULE_NOT_FOUND`.
 - **A generated CLI command whose arguments the server's schema refuses** (a maximum, a pattern)
   exits 2 with one line per field (`--days: Too big: expected number to be <=16`) and the command's
   `--help` hint, as other wrong arguments do. It printed the MCP `ProtocolError` with a stack and

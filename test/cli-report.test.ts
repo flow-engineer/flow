@@ -187,6 +187,13 @@ test("what is wrong on this machine is said before the cloud is called, an addre
   assert.match((await cliOutput(["test"], good)).out, /^A hosted cloud needs the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY\. Run npx @flow-engineer\/flow login, then npx @flow-engineer\/flow setup, to get one into \.env\.$/m);
 });
 
+test("a command whose optional peer is not installed where flow runs (npx's cache) says so in one line and exits 1", { timeout: 15_000 }, async () => {
+  // Resolved from a folder with no node_modules, as from npx's cache: Node's own error, not a made-up one.
+  const hook = `import { registerHooks } from "node:module"; registerHooks({ resolve: (s, c, next) => next(s, s === "@modelcontextprotocol/client" ? { ...c, parentURL: "file:///nowhere/x.js" } : c) });`;
+  const result = await cliOutput(["inspect", "http://127.0.0.1:1/mcp", "tools"], agentDir(), ["--import", `data:text/javascript,${encodeURIComponent(hook)}`]);
+  assert.deepEqual(result, { code: 1, out: "flow inspect needs @modelcontextprotocol/client: run it from your agent's folder (npx @flow-engineer/flow inspect), or npm install @modelcontextprotocol/client.\n" });
+});
+
 test("Ctrl-C prints the same partial report, keeps what finished, and exits 130", { timeout: 15_000 }, async () => {
   const local = await cloud(true);
   const dir = agentDir();
