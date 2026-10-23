@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, sqlite, type AgentOptions, type ChannelInfo, type Database, type Outbound, type FlowEvent, type SendReceipt } from "../src/index.ts";
+import { createAgent, sqlite, type AgentOptions, type ChannelInfo, type ChatMessage, type Database, type Outbound, type FlowEvent, type SendReceipt } from "../src/index.ts";
 import { call, respond, say, scriptedModel } from "./helpers.ts";
 
 /** A channel like iMessage on Flow Messaging: its sends resolve with the platform's id, and it takes edits and unsends. */
@@ -27,7 +27,7 @@ function phone(options: { info?: ChannelInfo; dir?: string; database?: Database;
   };
   const send = (conversation: string, text: string) => agent.receive(conversation, text, deliver, { channel: options.info ?? EDITS });
   const changes = () => out.filter((o) => o.type === "edit" || o.type === "unsend");
-  const results = (request: { messages: Array<{ role: string }> }) => request.messages.flatMap((m) => (m.role === "tool" ? [(m as { content: string }).content] : []));
+  const results = (request: { messages: ChatMessage[] }) => request.messages.flatMap((m) => (m.role === "tool" ? [m.content] : []));
   return { agent, out, send, changes, events, results, dir, ...scripted };
 }
 

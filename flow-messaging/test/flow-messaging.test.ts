@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { sqlite } from "../../src/index.ts";
+import { sqlite, type ChatMessage } from "../../src/index.ts";
 import { call, respond, users } from "./helpers.ts";
 import { fakeFlow, liveAgent, received, event, sign, SECRET, type Recorded } from "./fake.ts";
 import { flowMessaging } from "../src/index.ts";
@@ -248,7 +248,7 @@ test("on Telegram a send resolves with Flow's message id, which the agent edits 
   const live = await liveAgent(flow);
   t.after(() => (flow.close(), live.close()));
   flow.contacts.ct_tg = { address: { telegram_user_id: "777" } };
-  const tools = (r: { request: { messages: Array<{ role: string }> } }) => r.request.messages.flatMap((m) => (m.role === "tool" ? [(m as { content: string }).content] : []));
+  const tools = (r: { request: { messages: ChatMessage[] } }) => r.request.messages.flatMap((m) => (m.role === "tool" ? [m.content] : []));
 
   await live.deliver(received(TG, "msg_1", { type: "text", text: "top bid?" }));
   (await live.nextCall(0)).answer(respond(call("send_telegram", { text: "Top bid ₹47,133" }), call("send_telegram", { text: "Bid?" })));
