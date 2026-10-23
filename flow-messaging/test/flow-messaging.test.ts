@@ -243,6 +243,41 @@ test("failures reach the agent as Not delivered: a permanent refusal once, untri
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
+test("on Telegram a send resolves with Flow's message id, which the agent edits (PATCH) and unsends (DELETE) by; a late edit Flow refuses goes back to it as Flow's error", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_tg = { address: { telegram_user_id: "777" } };
+  const tools = (r: { request: { messages: Array<{ role: string }> } }) => r.request.messages.flatMap((m) => (m.role === "tool" ? [(m as { content: string }).content] : []));
+
+  await live.deliver(received(TG, "msg_1", { type: "text", text: "top bid?" }));
+  (await live.nextCall(0)).answer(respond(call("send_telegram", { text: "Top bid ₹47,133" }), call("send_telegram", { text: "Bid?" })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+  await live.deliver(received(TG, "msg_2", { type: "text", text: "hm" }));
+  const second = await live.nextCall(1);
+  assert.deepEqual(tools(second).slice(-2).map((r) => JSON.parse(r).message_id), ["msg_out1", "msg_out2"]);
+  flow.queued.push({ match: (r) => r.method === "PATCH" && r.path === "/v1/messages/msg_out2", status: 422, body: { error: { type: "edit_window_closed", message: "This message can no longer be edited.", hint: "", doc_url: "" } } });
+  second.answer(respond(call("edit_message", { message_id: "msg_out1", text: "Top bid ₹39,500" }), call("edit_message", { message_id: "msg_out2", text: "Bid now?" }), call("unsend_message", { message_id: "msg_out2" })));
+  const third = await live.nextCall(2);
+  assert.deepEqual(tools(third).slice(-3), [
+    JSON.stringify({ edited: true, channel: "telegram", message_id: "msg_out1" }),
+    "Not edited: edit_window_closed: This message can no longer be edited.",
+    JSON.stringify({ unsent: true, channel: "telegram", message_id: "msg_out2" }),
+  ]);
+  assert.deepEqual((await flow.request((r) => r.method === "PATCH" && r.path === "/v1/messages/msg_out1")).body, { content: { type: "text", text: "Top bid ₹39,500", format: "markdown" } });
+  assert.ok(await flow.request((r) => r.method === "DELETE" && r.path === "/v1/messages/msg_out2"));
+  third.answer(respond(call("send_telegram", { text: "Corrected above." })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+
+  // An edit Flow took that the channel refused later comes back as what it was.
+  const failed = { id: "msg_e1", conversation: "conv_tg", direction: "out", status: "failed", content: { type: "edit", message_id: "msg_out1", content: { type: "text", text: "Top bid ₹39,500" } }, error: { type: "channel_error", message: "Telegram refused the edit." } };
+  await live.deliver(event("message.failed", TG, { message: failed }));
+  const told = await live.nextCall(3);
+  assert.equal(lastUser(told.request.messages), "[Not delivered] \"edit of msg_out1: Top bid ₹39,500\": channel_error: Telegram refused the edit. It will fail again: don't resend it.");
+  told.answer(respond(call("send_telegram", { text: "Top bid is ₹39,500." })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+});
+
 test("after a restart, a nudge with no known Flow conversation starts one from the channel's sender (Telegram, Markdown)", async (t) => {
   const flow = await fakeFlow();
   const database = join(mkdtempSync(join(tmpdir(), "flow-fm-db-")), "agent.db");

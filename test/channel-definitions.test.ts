@@ -157,6 +157,29 @@ test("a custom UI's params are on its send tool only, checked, handed to its pro
   assert.deepEqual(sent.at(-1), { text: "Anytime." });
 });
 
+test("a custom UI with editMessage and unsendMessage offers edits and unsends by the ids its sendMessage resolved with; WhatsApp and SMS have neither", async () => {
+  const calls: unknown[][] = [];
+  const app = customUI("app", {
+    sendMessage: async (_to, message) => (calls.push(["sendMessage", message.text]), { status: "sent", messageId: `ui-${calls.length}` }),
+    editMessage: async (to, messageId, text) => void calls.push(["editMessage", to, messageId, text]),
+    unsendMessage: async (to, messageId) => void calls.push(["unsendMessage", to, messageId]),
+  });
+  assert.equal(app.info.edits, true);
+  assert.equal(app.info.unsends, true);
+  for (const plain of [whatsapp(recorder().provider), sms({ sendMessage: async () => {} })]) {
+    assert.ok(!plain.info.edits && !plain.info.unsends, `${plain.name} offers neither`);
+    await assert.rejects(Promise.resolve().then(() => plain.send("+15550100100", { type: "edit", messageId: "x", text: "y" })), /cannot be edited or unsent/);
+  }
+  const h = agentWith([app]);
+  const a = await h.agent.message({ channel: "app", from: "session-1", message: "price?" });
+  (await h.nextCall(0)).answer(respond(call("send_app", { text: "₹47,133" })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  await h.agent.message({ channel: "app", from: "session-1", message: "sure?" });
+  (await h.nextCall(1)).answer(respond(call("edit_message", { message_id: "ui-1", text: "₹39,500" }), call("unsend_message", { message_id: "ui-1" }), call("send_app", { text: "Fixed." })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.deepEqual(calls, [["sendMessage", "₹47,133"], ["editMessage", "session-1", "ui-1", "₹39,500"], ["unsendMessage", "session-1", "ui-1"], ["sendMessage", "Fixed."]]);
+});
+
 test("receive() with one of the agent's channel names plays that channel, delivering where it is told", async () => {
   const app = customUI("app", { params: { app_link: z.object({ url: z.string() }) }, sendMessage: async () => assert.fail("the simulator delivers, not the provider") });
   const h = agentWith([app]);

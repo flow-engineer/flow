@@ -48,6 +48,9 @@ export async function fakeFlow() {
       // The channel took it by the time Flow answered; a test of the wait for message.sent queues a "queued" answer.
       return { status: 202, body: { id: `msg_out${++sent}`, conversation: into ?? "conv_started", direction: "out", status: "sent", content: r.body.content } };
     }
+    // An edit shows the message with its new content; an unsend, the message as it was.
+    if (r.method === "PATCH" && r.path.startsWith("/v1/messages/")) return { status: 200, body: { id, conversation: "conv_tg", direction: "out", status: "sent", content: r.body.content } };
+    if (r.method === "DELETE" && r.path.startsWith("/v1/messages/")) return { status: 200, body: { id, conversation: "conv_tg", direction: "out", status: "sent", content: { type: "text", text: "" } } };
     if (r.method === "POST" && /\/(typing|read)$/.test(r.path)) return { status: 202, body: { conversation: r.path.split("/")[3], action: "read" } };
     return notFound();
   }
