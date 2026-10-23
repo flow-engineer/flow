@@ -329,7 +329,7 @@ test("a file sent from a simulator reaches the agent with its bytes, the message
 });
 
 test("the playground shows the person's conversation from the agent's store, also after a restart", async () => {
-  const path = join(mkdtempSync(join(tmpdir(), "flow-play-")), "chinwag.db");
+  const path = join(mkdtempSync(join(tmpdir(), "flow-play-")), "flow.db");
   const first = agentOn(sqlite(path));
   await first.agent.resume();
   const play = simulators();

@@ -53,8 +53,9 @@ Look at the repository's routes, its framework and its dependencies first, then 
   drf-spectacular, rswag). Use theirs as is.
 - **A REST API without a spec.** Draft one from the routes and handlers, with an `operationId` and a
   plain description on every operation, request and response schemas from the code's own types,
-  and the error responses the handlers send. Put `x-chinwag-draft: true` at its top and list it in
-  the questions: the team confirms it, and from then on it is theirs.
+  and the error responses the handlers send. Put `x-flow-draft: true` at its top and list it in
+  the questions: the team confirms it, and from then on it is theirs. (Packs from before 0.5 say
+  `x-chinwag-draft`: it means the same; write `x-flow-draft` when you next touch the spec.)
 - **GraphQL.** Keep the schema (`context/schema.graphql`) instead of OpenAPI, and describe the
   queries and mutations the tasks use in the workflows file as plain steps.
 - **Supabase.** PostgREST generates an OpenAPI spec from the database. It is no longer served with

@@ -8,7 +8,14 @@ import { CHAT_ONLY } from "../../mcp/src/describe.ts";
 import { loadSkills, readAgentFolder } from "../../src/skills.ts";
 
 export const PLUGIN_LINE = "  flow plugin --server <url> --out <dir>  Write Claude Code and Agent Plugins packages";
-const STAMP = ".chinwag-skills.json";
+const STAMP = ".flow-skills.json";
+/** Deprecated: the stamp's name before 0.5. Read when STAMP is absent, removed on the next write. */
+const OLD_STAMP = ".chinwag-skills.json";
+
+/** The stamp that records which skill files the generator wrote, under either name. */
+function stampOf(out: string): string {
+  return existsSync(join(out, STAMP)) || !existsSync(join(out, OLD_STAMP)) ? join(out, STAMP) : join(out, OLD_STAMP);
+}
 
 function skillFiles(dir: string): Record<string, Buffer> {
   const files: Record<string, Buffer> = {};
@@ -33,7 +40,7 @@ function hashes(files: Record<string, string | Buffer>): Record<string, string> 
 export function pluginProblems(dir: string, out: string): string[] {
   const expected = hashes(skillFiles(dir));
   try {
-    const recorded = JSON.parse(readFileSync(join(out, STAMP), "utf8"));
+    const recorded = JSON.parse(readFileSync(stampOf(out), "utf8"));
     if (JSON.stringify(recorded) !== JSON.stringify(expected)) return ["plugin skills are stale; run flow plugin again"];
     for (const format of ["claude", "agent-plugins"]) {
       if (JSON.stringify(hashes(Object.fromEntries(Object.keys(expected).map((p) => [p, readFileSync(join(out, format, p))])))) !== JSON.stringify(expected)) {
@@ -67,7 +74,7 @@ export function writePlugins(dir: string, server: string, out: string, name?: st
   }
   // Remove only files this generator previously owned, so deleted source skills do not linger.
   let previous: Record<string, string> = {};
-  if (existsSync(join(out, STAMP))) previous = JSON.parse(readFileSync(join(out, STAMP), "utf8"));
+  if (existsSync(stampOf(out))) previous = JSON.parse(readFileSync(stampOf(out), "utf8"));
   for (const path of Object.keys(previous)) {
     if (!path.startsWith("skills/") || path.split("/").includes("..")) throw new Error("Invalid plugin skills stamp");
     if (!(path in files)) for (const format of ["claude", "agent-plugins"]) rmSync(join(out, format, path), { force: true });
@@ -84,6 +91,7 @@ export function writePlugins(dir: string, server: string, out: string, name?: st
     }
   }
   json(join(out, STAMP), hashes(files));
+  rmSync(join(out, OLD_STAMP), { force: true });
 }
 
 export function pluginCli(argv: string[], dir = process.cwd()): number {

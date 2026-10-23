@@ -10,7 +10,7 @@
   "properties": {
     "replies": {
       "type": "array",
-      "description": "Sent to the person one after another. Each is checked on its own against what the run's platform can show (see x-chinwag-platforms in agent-endpoint.openapi.yaml): one that does not fit is not sent and the run says why; the others still go.",
+      "description": "Sent to the person one after another. Each is checked on its own against what the run's platform can show (see x-flow-platforms in agent-endpoint.openapi.yaml): one that does not fit is not sent and the run says why; the others still go.",
       "items": {
         "oneOf": [
           {
