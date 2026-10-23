@@ -28,6 +28,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - `POST /v1/events` answers 202 once the event is recorded in the database, and 503 when it could
   not be recorded (retry with the same id).
 - `events.idle()` also waits for work queued while it waited (a restart's unprocessed events).
+- `flow inspect`, `flow cli` and `flow mcp update` run where the MCP client is not installed (from
+  `npx --package`, outside an agent's folder) say which package they need and how to get it, and
+  exit 1, instead of crashing with `ERR_MODULE_NOT_FOUND`.
 - `guards(...)`, `oncePerChat`, `noRepeats`, `linkAllowlist`, `noWriteButtons`: ready-made checks
   for `beforeSend`, composed in order, the first refusal winning.
 - `beforeSend`'s context has `sent`: the texts already sent in the conversation, read from the
