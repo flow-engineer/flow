@@ -39,6 +39,8 @@ export interface LastSession {
     runId?: string | null;
     /** flaky: failed, then passed when the cloud played it again. */
     verdict: "passed" | "failed" | "flaky" | "errored" | "not_played";
+    /** passed, failed, credit or infra; null for a run never played. Absent in a file from an older client. */
+    outcome?: "passed" | "failed" | "credit" | "infra" | null;
     /** The checks as the test file says them, with the judge's reason. The file is local and
      * git-ignored, and the suite is synthetic by attestation; the messages themselves are never kept. */
     failedChecks: Array<{ kind: string; text: string; reason?: string }>;

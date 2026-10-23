@@ -2,8 +2,8 @@
 // outcome and an exit status, and the pieces `flow test` and `flow show` share.
 
 import { existsSync } from "node:fs";
-import { CloudEnded, isTransportFailure, PostError, SessionStopped } from "./client.ts";
-import type { SessionLimits } from "./protocol.ts";
+import { CloudEnded, isTransportFailure, PostError, SessionStopped, type SendPathProblem } from "./client.ts";
+import type { RunOutcome, ScenarioSummary, SessionLimits } from "./protocol.ts";
 
 /** How a `flow test` ended, one per exit status (0 passed; 1 failed, invalid; 2 errored, transport; 3 refused; 130 interrupted). */
 export type Outcome = "passed" | "failed" | "errored" | "transport" | "refused" | "interrupted" | "invalid";
@@ -27,6 +27,8 @@ export interface ReportRun {
   channel: string;
   run: number;
   verdict: Verdict;
+  /** passed, failed, credit or infra (runOutcome); null for a run never played. */
+  outcome: RunOutcome | null;
   /** The cloud's code when it could not play or judge the run (judge_failed, spend_cap, ...); else null. */
   error: string | null;
   ended: string | null;
@@ -71,7 +73,11 @@ export interface JsonReport {
   error: ReportError | null;
   /** runs: the suite's runs (a cloud's second play of a failed run is not one of its own). failed: the runs
    * that failed, and with --strict the flaky ones too; flaky: the runs that failed once and passed when played again. */
-  counts: { runs: number; passed: number; failed: number; flaky: number; errored: number; notPlayed: number };
+  counts: { runs: number; passed: number; failed: number; flaky: number; errored: number; notPlayed: number; credit: number; infra: number };
+  /** Each scenario's pass rate per channel, over its --runs times (credit and infra runs not counted). */
+  scenarios: ScenarioSummary[];
+  /** Messages that reached the cloud by another way than the agent's send, or that the agent said it sent and never did (testing/src/client.ts). */
+  sendPath: SendPathProblem[];
   /** --strict: a flaky run counts as failed (outcome failed, exit 1). */
   strict: boolean;
   costUsd: { agent: number; test: number };
@@ -82,6 +88,45 @@ export interface JsonReport {
   sessionInvalid: SessionInvalid | null;
   /** The cloud's limits for the workspace (runs and sessions at once, the daily test budget); null when it sent none. */
   limits: SessionLimits | null;
+}
+
+/** Error codes that mean a model or the workspace's test budget was out of credit. */
+const CREDIT_ERRORS = new Set(["spend_cap", "agent_credit"]);
+const OUTCOMES = new Set<string>(["passed", "failed", "credit", "infra"]);
+
+/** What a run came to: the cloud's `outcome` when it sent one, else from its error and result the same way.
+ * A run the cloud played again keeps the first play's outcome (failed); its verdict says flaky. */
+export function runOutcome(run: { passed: boolean; ended: string; error?: string; outcome?: string }): RunOutcome {
+  if (run.outcome && OUTCOMES.has(run.outcome)) return run.outcome as RunOutcome;
+  if (run.error && CREDIT_ERRORS.has(run.error)) return "credit";
+  if (run.error || run.ended === "run_failed") return "infra";
+  return run.passed ? "passed" : "failed";
+}
+
+/** Why a credit run says nothing about the agent: the cloud's sentence, else one per code. */
+export function creditReason(run: { error?: string; errorMessage?: string }): string {
+  if (run.errorMessage) return run.errorMessage;
+  return run.error === "spend_cap"
+    ? "the workspace's daily test budget ran out, so this run says nothing about the agent"
+    : "the agent's model refused its calls for credit, so this run says nothing about the agent: add a model key or top up, then run it again";
+}
+
+/** Each scenario's pass rate per channel, in the order the runs come, as the cloud's summary says it (protocol.ts ScenarioSummary):
+ * runs counts the ones that passed or failed; flaky when some but not all passed, or a run failed and passed when the cloud played it again. */
+export function scenarioRates(runs: Array<{ scenario: string; path?: string; channel: string; verdict: Verdict; outcome: RunOutcome | null }>): ScenarioSummary[] {
+  const out = new Map<string, ScenarioSummary & { mixed: boolean }>();
+  for (const r of runs) {
+    const key = `${r.scenario}\n${r.channel}`;
+    let s = out.get(key);
+    if (!s) out.set(key, (s = { scenario: r.scenario, ...(r.path ? { path: r.path } : {}), channel: r.channel, runs: 0, passedRuns: 0, credit: 0, infra: 0, mixed: false }));
+    if (r.outcome === "credit" || r.outcome === "infra") s[r.outcome]++;
+    if (r.outcome === "passed" || r.outcome === "failed") {
+      s.runs++;
+      if (r.outcome === "passed") s.passedRuns++;
+      if (r.verdict === "flaky") s.mixed = true;
+    }
+  }
+  return [...out.values()].map(({ mixed, ...s }) => (mixed || (s.passedRuns > 0 && s.passedRuns < s.runs) ? { ...s, label: "flaky" as const } : s));
 }
 
 /** A run's verdict: errored when the cloud names an error for it or ended it run_failed, since the cloud

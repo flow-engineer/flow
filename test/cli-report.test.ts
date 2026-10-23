@@ -274,12 +274,17 @@ test("with --json, every exit prints one report on stdout and every other line o
   assert.match(report.suiteHash, /^[0-9a-f]{64}$/);
   assert.deepEqual({ ...report, suiteHash: undefined }, {
     version: 1, outcome: "failed", exitCode: 1, sessionId: "s1", agent: "agt_1", dashboard: "http://dash/s1", suiteHash: undefined, error: null,
-    counts: { runs: 2, passed: 1, failed: 1, flaky: 0, errored: 0, notPlayed: 0 },
+    counts: { runs: 2, passed: 1, failed: 1, flaky: 0, errored: 0, notPlayed: 0, credit: 0, infra: 0 },
+    scenarios: [
+      { scenario: "bee", path: "scenarios/b.yaml", channel: "sms", runs: 1, passedRuns: 0, credit: 0, infra: 0 },
+      { scenario: "hello", path: "scenarios/hello.yaml", channel: "sms", runs: 1, passedRuns: 1, credit: 0, infra: 0 },
+    ],
+    sendPath: [],
     strict: false,
     costUsd: { agent: 0.5, test: 0.5 },
     runs: [
-      { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }], invalid: null, rerun: null, label: null, replayed: null },
-      { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [], invalid: null, rerun: null, label: null, replayed: null },
+      { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", outcome: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }], invalid: null, rerun: null, label: null, replayed: null },
+      { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", outcome: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [], invalid: null, rerun: null, label: null, replayed: null },
     ],
     invalid: [],
     sessionInvalid: null,
@@ -337,19 +342,24 @@ test("a run the cloud names an error for is errored, whatever it ended as: ERROR
   assert.equal(result.code, 2, result.out);
   assert.match(result.stderr, /^ERROR {2}bee #1 \(sms\) trn_2: 1 turn, ended: goal_met; error: judge_failed \(the cloud could not play or judge this run, not the agent's fault\);/m);
   assert.doesNotMatch(result.stderr, /FAIL {2}bee|not judged/);
-  assert.match(result.stderr, /^1 of 2 runs passed\. 1 errored \(the cloud could not play or judge it\)\. .* 0 failed a check\./m);
+  assert.match(result.stderr, /^1 of 2 runs passed\. 1 hit an infrastructure error \(the cloud could not play or judge it; not counted as failed\)\. /m);
   const report = JSON.parse(result.stdout);
-  assert.deepEqual([report.outcome, report.exitCode, report.counts], ["errored", 2, { runs: 2, passed: 1, failed: 0, flaky: 0, errored: 1, notPlayed: 0 }]);
+  assert.deepEqual([report.outcome, report.exitCode, report.counts], ["errored", 2, { runs: 2, passed: 1, failed: 0, flaky: 0, errored: 1, notPlayed: 0, credit: 0, infra: 1 }]);
   assert.deepEqual(report.runs.map((r: { runId: string; verdict: string; error: string | null; ended: string }) => `${r.runId} ${r.verdict} ${r.error} ${r.ended}`), ["trn_2 errored judge_failed goal_met", "trn_1 passed null goal_met"]);
   assert.deepEqual(lastSession(dir).runs.map((r: { runId: string; verdict: string }) => `${r.runId} ${r.verdict}`), ["trn_2 errored", "trn_1 passed"]);
 
-  // An error beats passed too, and without --json the exit is the same.
-  const capped = await cloud(false, [{ type: "finished", summary: { ...finished().summary, runs: [runs[0], { ...judged, passed: true, error: "spend_cap", checks: [] }] } }], "s2");
+  // Out of credit is shown apart from failures (CREDIT, its own count, never failed), and the exit is the same 2,
+  // whether the cloud says so (outcome, its sentence) or an older cloud names only the code.
+  const credit = { ...judged, runId: "trn_4", scenario: "hello", run: 2, passed: false, error: "agent_credit", outcome: "credit", errorMessage: "Flow's trial model credit ran out: add a model key or top up, then run again.", checks: [] };
+  const capped = await cloud(false, [{ type: "finished", summary: { ...finished().summary, runs: [runs[0], { ...judged, passed: true, error: "spend_cap", checks: [] }, credit] } }], "s2");
   try {
-    const plain = await cliStreams(["test", "--cloud", capped.url], dir);
+    const plain = await cliStreams(["test", "--cloud", capped.url, "--runs", "2"], dir);
     assert.equal(plain.code, 2, plain.out);
-    assert.match(plain.stdout, /^ERROR {2}bee #1 \(sms\) trn_2: .*error: spend_cap/m);
-    assert.match(plain.stdout, /^ {2}sms: 1 of 2 passed$/m);
+    assert.match(plain.stdout, /^CREDIT {2}bee #1 \(sms\) trn_2: .*credit: spend_cap \(the workspace's daily test budget ran out/m);
+    assert.match(plain.stdout, /^CREDIT {2}hello #2 \(sms\) trn_4: .*credit: agent_credit \(Flow's trial model credit ran out/m);
+    assert.match(plain.stdout, /^1 of 3 runs passed\. 2 stopped for credit \(not the agent's fault, not counted as failed\)\. /m);
+    assert.doesNotMatch(plain.stdout, /failed\. |FAIL /);
+    assert.match(plain.stdout, /^ {2}hello \(sms\): 1\/1 passed \(1 stopped for credit, not counted\)$/m);
   } finally { capped.close(); }
 
   // A run that failed still makes the session fail (exit 1), beside an errored one.
@@ -377,7 +387,7 @@ test("a run that failed and passed when the cloud played it again is flaky: its 
     assert.match(result.stderr, /^1 of 2 runs passed\./m);
     assert.match(result.stderr, /^1 flaky \(failed once, passed when played again\):\n {2}hello #1 \(sms\): http:\/\/watch\/trn_1 then http:\/\/watch\/trn_3$/m);
     const report = JSON.parse(result.stdout);
-    assert.deepEqual([report.outcome, report.strict, report.counts], ["passed", false, { runs: 2, passed: 1, failed: 0, flaky: 1, errored: 0, notPlayed: 0 }]);
+    assert.deepEqual([report.outcome, report.strict, report.counts], ["passed", false, { runs: 2, passed: 1, failed: 0, flaky: 1, errored: 0, notPlayed: 0, credit: 0, infra: 0 }]);
     assert.deepEqual(report.runs.map((r: { runId: string; verdict: string; label: string | null; rerun: { runId: string } | null }) => `${r.runId} ${r.verdict} ${r.label} ${r.rerun?.runId ?? null}`), ["trn_2 passed null null", "trn_1 flaky flaky trn_3"]);
     assert.deepEqual(report.runs[1].replayed, { person: 2, tools: 1, judge: 0 });
     assert.deepEqual(lastSession(dir).runs.map((r: { runId: string; verdict: string }) => `${r.runId} ${r.verdict}`), ["trn_2 passed", "trn_1 flaky"]);
@@ -389,6 +399,34 @@ test("a run that failed and passed when the cloud played it again is flaky: its 
     // Every open asks for flaky runs; only --fresh asks the cloud to replay nothing.
     assert.deepEqual(local.opens.map((o) => [o.flaky, o.fresh]), [[true, undefined], [true, true]]);
   } finally { local.close(); }
+});
+
+test("with --runs, each scenario's pass rate on each channel: flaky when some runs passed and some failed, credit and infrastructure runs not counted; the same in --json", { timeout: 20_000 }, async () => {
+  const dir = agentDir({ b: scenarioYaml("bee", "sms") });
+  const played = [
+    runOf({ runId: "h1", run: 1, passed: true }),
+    runOf({ runId: "h2", run: 2, passed: false }),
+    runOf({ runId: "h3", run: 3, passed: true }),
+    runOf({ runId: "b1", scenario: "bee", run: 1, passed: true }),
+    runOf({ runId: "b2", scenario: "bee", run: 2, passed: true }),
+    runOf({ runId: "b3", scenario: "bee", run: 3, passed: false, error: "judge_failed" }),
+  ];
+  const local = await cloud(false, [{ type: "finished", summary: { sessionId: "s", suiteHash: "h", testModel: "m", runs: played, dashboard: "http://dash/s" } }]);
+  let result;
+  try {
+    result = await cliStreams(["test", "--cloud", local.url, "--runs", "3", "--json"], dir);
+  } finally { local.close(); }
+  assert.equal(result.code, 1, result.out);
+  assert.equal(local.opens[0]!.runs, 3);
+  assert.match(result.stderr, /^Pass rate per scenario/m);
+  assert.match(result.stderr, /^ {2}bee \(sms\): 2\/2 passed \(1 infrastructure error, not counted\)$/m);
+  assert.match(result.stderr, /^ {2}hello \(sms\): 2\/3 passed, flaky$/m);
+  const report = JSON.parse(result.stdout);
+  assert.deepEqual(report.scenarios, [
+    { scenario: "bee", path: "scenarios/b.yaml", channel: "sms", runs: 2, passedRuns: 2, credit: 0, infra: 1 },
+    { scenario: "hello", path: "scenarios/hello.yaml", channel: "sms", runs: 3, passedRuns: 2, credit: 0, infra: 0, label: "flaky" },
+  ]);
+  assert.deepEqual([report.counts.failed, report.counts.infra], [1, 1]);
 });
 
 test("a scenario the cloud could not play is named with its file and reason, and a session it ended scenario_invalid says why, what was sent and that the cloud may be older; both exit 2", { timeout: 20_000 }, async () => {
@@ -512,10 +550,10 @@ test("a finished session's results are kept, and --failed runs again only what d
   assert.deepEqual({ ...last, endedAt: undefined, suiteHash: undefined }, {
     sessionId: "s1", dashboard: "http://dash/s1", ended: "finished", only: null, endedAt: undefined, suiteHash: undefined,
     runs: [
-      { scenario: "b", channel: "sms", run: 1, runId: "r2", verdict: "failed", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }] },
-      { scenario: "c", channel: "sms", run: 1, runId: "r3", verdict: "errored", failedChecks: [] },
-      { scenario: "c", channel: "whatsapp", run: 1, runId: "r4", verdict: "passed", failedChecks: [] },
-      { scenario: "hello", channel: "sms", run: 1, runId: "r1", verdict: "passed", failedChecks: [] },
+      { scenario: "b", channel: "sms", run: 1, runId: "r2", verdict: "failed", outcome: "failed", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }] },
+      { scenario: "c", channel: "sms", run: 1, runId: "r3", verdict: "errored", outcome: "infra", failedChecks: [] },
+      { scenario: "c", channel: "whatsapp", run: 1, runId: "r4", verdict: "passed", outcome: "passed", failedChecks: [] },
+      { scenario: "hello", channel: "sms", run: 1, runId: "r1", verdict: "passed", outcome: "passed", failedChecks: [] },
     ],
   });
   assert.match(last.suiteHash, /^[0-9a-f]{64}$/);
@@ -568,6 +606,8 @@ test("test files: old ones parse as before, the clock, calls and never parse, an
     expect: { calls: ["cancel_session", { tool: "move_session", args: { slot: { at: "{{now+1w|date}}" } } }], never: ["delete_account"] },
   });
   for (const now of ["2026-10-16T09:00:30Z", "2026-10-16T09:00-04:00"]) assert.equal(parseScenario(scenario(`now: ${now}\n`)).now, now);
+  // A run that starts from an earlier conversation: what each side said, oldest first.
+  assert.deepEqual(parseScenario(scenario("history:\n  - person: Book Friday\n  - agent: Done, {{now + 1d | weekday}}.\n")).history, [{ person: "Book Friday" }, { agent: "Done, {{now + 1d | weekday}}." }]);
   // The café example, as shipped, is valid.
   for (const file of loadSuite(fileURLToPath(new URL("../examples/cafe/tests", import.meta.url)))) (file.path.startsWith("scenarios/") ? parseScenario : parseToolFile)(file);
 
@@ -577,6 +617,8 @@ test("test files: old ones parse as before, the clock, calls and never parse, an
     ["now: 2026-02-30T09:00", "scenarios/x.yaml:9: now: not a date and time: write YYYY-MM-DDTHH:MM, with :SS, Z or an offset such as -04:00 if needed"],
     ["now: 2026-10-16 09:00", "scenarios/x.yaml:9: now: not a date and time: write YYYY-MM-DDTHH:MM, with :SS, Z or an offset such as -04:00 if needed"],
     ["expect:\n  calls:\n    - tool: move_session\n      arg: {}", "scenarios/x.yaml:11: expect.calls[0]: Unrecognized key: \"arg\""],
+    ["history:\n  - customer: hi", "scenarios/x.yaml:10: history[0]: { person: <what they said> } or { agent: <what it said> }"],
+    ["history: []", "scenarios/x.yaml:9: history: Too small: expected array to have >=1 items"],
     ["expect:\n  never:\n    - args: { slot: s-2 }", "scenarios/x.yaml:11: expect.never[0]: a tool name, or { tool: <name>, args: { <field>: <value> } }"],
     ["expect:\n  judge:\n    - It is booked for {{now + 3 days}}.", `scenarios/x.yaml:11: expect.judge[0]: ${placeholder("{{now + 3 days}}")}`],
     ["expect:\n  calls:\n    - tool: t\n      args:\n        at: '{{now @ 9:00}}'", `scenarios/x.yaml:13: expect.calls[0].args.at: ${placeholder("{{now @ 9:00}}")}`],

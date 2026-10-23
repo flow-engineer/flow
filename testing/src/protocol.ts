@@ -33,6 +33,11 @@
 // cloud lost the session (its tunnel restarted). The client opens one new session with `only`, the
 // runs that have no result yet, and merges the two reports. Never more than once.
 //
+// When both sides said history, a run whose scenario starts from an earlier conversation carries it
+// as `history` on its first `message` command (a business run: on `open`). The client writes those
+// messages into the agent's store as the conversation's earlier ones (no model call, no send) before
+// it hands the agent the message.
+//
 // When Opened says flaky, a run that fails is played once more: the failed run's `run` command carries
 // `rerun` and `label`, and the second play comes as a `run` command of its own with `rerunOf`, in any
 // order (match them by runId); it is not a run of the suite. When Opened says replay, the cloud
@@ -42,6 +47,10 @@
 // address) and carries `authorization: Bearer <token>` from Opened.
 
 import type { Attachment, ChannelInfo, ChannelSummary, Incoming, Outbound, Template, ToolSpec } from "../../src/index.ts";
+
+/** What a run came to: passed or failed says something about the agent; credit (a model or the
+ * workspace's test budget refused for credit) and infra (the cloud could not play or judge it) never count as failures. */
+export type RunOutcome = "passed" | "failed" | "credit" | "infra";
 
 /** One graded expect item of a run. */
 export interface Check {
@@ -81,6 +90,8 @@ export interface OpenSession {
   flaky?: boolean;
   /** Play every simulator afresh: the cloud replays no stored person, tool or judge answers. */
   fresh?: boolean;
+  /** The client seeds a run's earlier conversation (`history` on a run's first message or open). */
+  history?: boolean;
   /** Play only these runs, numbered as given: a re-open after session_gone. Sent only to a cloud whose Opened said reopen,
    * and only when some run finished: the cloud checks it against the suite's files it already stores. */
   only?: RunKey[];
@@ -124,6 +135,8 @@ export interface Opened {
   flaky?: boolean;
   /** This cloud replays stored simulator answers for the same scenario version (absent with `fresh`, or on an older cloud). */
   replay?: boolean;
+  /** This cloud sends a scenario's `history`; the client sent `history`. Absent on an older cloud. */
+  history?: boolean;
   /** What this workspace may do, printed when the session opens. Absent on an older cloud. */
   limits?: SessionLimits;
 }
@@ -147,7 +160,7 @@ export interface UploadFile {
 }
 
 export type Command =
-  | { type: "message"; conversationId: string; messageId: string; incoming: WireIncoming; channel: ChannelInfo; channelName?: string }
+  | { type: "message"; conversationId: string; messageId: string; incoming: WireIncoming; channel: ChannelInfo; channelName?: string; history?: SeededHistory }
   | { type: "reaction"; conversationId: string; emoji: string; toText: string }
   | { type: "drain" }
   | { type: "run"; run: RunSummary }
@@ -155,6 +168,9 @@ export type Command =
   /** The session stopped before it finished; the CLI exits with this error. */
   | { type: "failed"; error: string }
   | BusinessCommand;
+
+/** The conversation a run starts from, oldest first: written into the agent's store before the run plays. */
+export type SeededHistory = Array<{ from: "person" | "agent"; text: string }>;
 
 /**
  * A business run's commands. `step` numbers the run's business commands from 1 in the order the
@@ -164,7 +180,7 @@ export type Command =
 export type BusinessCommand =
   /** A run starts: build its agent with its clock at `now` (epoch ms). The person is `address` on `channelName`;
    * `realTools` run the agent's own code in place of the cloud's simulation. */
-  | { type: "open"; conversationId: string; channelName: string; channel: ChannelInfo; address: string; now: number; realTools?: string[] }
+  | { type: "open"; conversationId: string; channelName: string; channel: ChannelInfo; address: string; now: number; realTools?: string[]; history?: SeededHistory }
   /** The business's backend sends an event: POST `path` (default /v1/events) to the agent's own routes with this
    * envelope as the body, signed with the run's test secret (`signature` bad: with another secret; missing: no header). */
   | { type: "event"; conversationId: string; step: number; envelope: FlowEventEnvelope; path?: string; signature?: "bad" | "missing" }
@@ -272,6 +288,10 @@ export interface RunSummary {
   /** The cloud's code when it could not play or judge the run (judge_failed, spend_cap, simulator_failed, ...).
    * The run then says nothing about the agent, whatever `passed` and `ended` say. */
   error?: string;
+  /** What the run came to, from the cloud; an older cloud sends none and the client works it out (report.ts runOutcome). */
+  outcome?: RunOutcome;
+  /** With outcome credit or infra: the cloud's fixed sentence for its error. */
+  errorMessage?: string;
   /** With error scenario_invalid: the scenario file the cloud could not play, and what is wrong in it
    * (`unsupported: ...` when the cloud does not know a key). */
   invalid?: { path: string; reason: string };
@@ -293,4 +313,19 @@ export interface SessionSummary {
   testModel: string;
   runs: RunSummary[];
   dashboard: string;
+  /** Each scenario's pass rate per channel. Absent on an older cloud; the client works it out from `runs` the same way (report.ts scenarioRates). */
+  scenarios?: ScenarioSummary[];
+}
+
+/** A scenario on one channel over the session's runs. runs: the ones that passed or failed (credit and infra are not counted);
+ * label flaky when some but not all of them passed. */
+export interface ScenarioSummary {
+  scenario: string;
+  path?: string;
+  channel: string;
+  runs: number;
+  passedRuns: number;
+  credit: number;
+  infra: number;
+  label?: "flaky";
 }
