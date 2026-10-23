@@ -78,6 +78,7 @@ export interface ToolInfo {
   inputSchema: { properties?: Record<string, JsonSchema>; required?: string[]; [key: string]: unknown };
   outputSchema?: JsonSchema;
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
+  _meta?: Record<string, unknown>;
 }
 
 export interface JsonSchema {
@@ -223,6 +224,7 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     "Commands that change things accept `--dry-run` (shows the call, sends nothing) and, when they may delete or overwrite, need `--yes` without a terminal.",
     `Sign in once with \`${name} auth login\`, or set ${tokenEnvOf(config)} in CI.`,
     "Tool definitions may be cached; add `--refresh-tools` to fetch current commands and schemas.",
+    `List workflow summaries with \`${name} skill list\`; read selected instructions with \`${name} skill get <name> [name...]\` before doing what they cover.`,
     "",
     "Exit codes: 0 done, 1 the tool failed (its message on stderr), 2 wrong command or arguments, 3 sign-in needed, 4 needs --yes, 5 the server could not be reached.",
     "",
@@ -234,9 +236,13 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     "## Commands",
   ];
   for (const c of commandTable(config, tools)) {
-    if (!c.tool) continue;
+    if (!c.tool) {
+      if (c.config && isCustom(c.config)) lines.push("", `### ${name} ${c.words.join(" ")}`, "", c.config.command.brief, "", `Run \`${name} ${c.words.join(" ")} --help\` for its arguments and flags.`);
+      continue;
+    }
     lines.push("", `### ${name} ${c.words.join(" ")}`, "", c.summary);
     if (c.tool) {
+      lines.push("", `MCP tool: \`${c.tool.name}\``);
       if (c.tool.description && c.tool.description !== c.summary) lines.push("", c.tool.description);
       const args = c.config && !isCustom(c.config) ? (c.config.args ?? []) : [];
       const flags = flagList(c.tool, args);

@@ -2,6 +2,26 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.5.2 (2026-10-24)
+
+### Changes
+
+- **`skill` lists skills and reads only the ones requested.** `skill` or `skill list` prints names
+  and descriptions; `skill get <name> [name...]` reads selected workflows or the generated
+  `<cli-name>-cli` guide. `--json` returns named records; `--write <dir>` exports selected SKILL.md
+  files. Batch reads share one MCP connection.
+- MCP advertises skill summaries on the existing `read_skill` descriptor, without exposing bodies
+  during discovery or adding another tool. Older servers still supply names from `read_skill`'s
+  schema. The generated CLI guide includes handwritten commands and maps MCP tool names to commands.
+
+### Migration notes
+
+- **Bare `skill` now lists summaries instead of printing the whole CLI guide.** Use
+  `skill get <cli-name>-cli` for the previous content. `skill --write <dir>` keeps exporting the
+  generated guide unchanged in purpose. Deploy the updated MCP server to include workflow
+  descriptions in listings; older servers list names with empty descriptions. Skill definitions
+  and the `read_skill` request format do not change.
+
 ## 0.5.1 (2026-10-24)
 
 ### Changes
