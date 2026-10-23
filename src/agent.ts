@@ -25,7 +25,7 @@ import { Store, type ConversationRow, type EventStateStore, type IdentityRow, ty
 import { clock, quietUntil, validZone } from "./time.ts";
 import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } from "./tools.ts";
 import { traces, tracesFromEnv, type Traces, type TracesOptions } from "./traces.ts";
-import type { BeforeSend, ChannelInfo, Deliver, Incoming, Model, Outbound, Template, TemplateDefinition, Transcribe } from "./types.ts";
+import type { BeforeSend, ChannelInfo, Deliver, Incoming, Model, Outbound, SendReceipt, Template, TemplateDefinition, Transcribe } from "./types.ts";
 
 /** What a host supplies to an agent: `createAgent({ ..., host })`. */
 export interface HostOptions {
@@ -238,8 +238,8 @@ export interface TestPerson {
   phone: string;
 }
 
-/** Where the playground shows what the agent sends to a test person who wrote from it. */
-export type PlaygroundSink = (delivery: { conversationId: string; person: TestPerson & { key?: string; visitor?: string }; channel: string; outbound: Outbound }) => Promise<void> | void;
+/** Where the playground shows what the agent sends to a test person who wrote from it; it may resolve with a receipt (the message's id, for edits), as a channel's send does. */
+export type PlaygroundSink = (delivery: { conversationId: string; person: TestPerson & { key?: string; visitor?: string }; channel: string; outbound: Outbound }) => Promise<void | SendReceipt> | void | SendReceipt;
 
 export interface AgentStatus {
   busy: boolean;

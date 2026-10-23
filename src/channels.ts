@@ -1,7 +1,8 @@
 // Channels: where people reach an agent. Flow Framework knows each platform (what WhatsApp can show, its
 // limits, its 24-hour window); a provider only says how to send through its own API. A provider
 // implements one sendMessage, which gets everything the agent's send tool carries, plus the
-// optional actions that are not messages (react, typing, markRead, sendTemplate). A feature the
+// optional actions that are not messages (react, typing, markRead, sendTemplate, editMessage,
+// unsendMessage). A feature the
 // provider leaves out, or switches off, is never offered to the agent.
 //
 //   whatsapp(new MyWhatsApp(keys))                       every WhatsApp feature the provider has
@@ -138,7 +139,7 @@ export interface SmsProvider {
 /** Your own UI. `message` carries the text, any buttons, and your params by name. */
 export interface CustomUIProvider {
   /** What your UI can show. Default: Markdown, no buttons. */
-  info?: Omit<ChannelInfo, "reactions" | "status" | "readReceipts">;
+  info?: Omit<ChannelInfo, "reactions" | "status" | "readReceipts" | "edits" | "unsends">;
   params?: Record<string, z.ZodType>;
   /** Your own guidance for the agent on this channel, such as how to use your params. */
   instructions?: string;
@@ -151,6 +152,13 @@ export interface CustomUIProvider {
   markRead?(to: string, messageIds: string[]): Promise<void>;
   /** A short line of what the agent is doing, in your loading indicator; null clears it. */
   status?(to: string, text: string | null): Promise<void>;
+  /**
+   * New text for a message the agent sent, by the id your sendMessage resolved with (SendReceipt's
+   * messageId); with it the agent is offered edit_message. Reject to refuse it: the reason goes to the agent.
+   */
+  editMessage?(to: string, messageId: string, text: string): Promise<void>;
+  /** Takes back a message the agent sent, by that id; with it the agent is offered unsend_message. */
+  unsendMessage?(to: string, messageId: string): Promise<void>;
 }
 
 /** WhatsApp's own limits, the same for every provider. */
@@ -222,6 +230,9 @@ export function whatsapp(provider: WhatsAppProvider, options: { name?: string; d
           const { type: _type, idempotencyKey, ...template } = outbound;
           return provider.sendTemplate(to, template, idempotencyKey);
         }
+        case "edit":
+        case "unsend":
+          throw new Error("WhatsApp messages cannot be edited or unsent");
         case "status":
           return;
       }
@@ -241,6 +252,7 @@ export function sms(provider: SmsProvider, options: { name?: string; instruction
       if (outbound.type === "message") return provider.sendMessage(to, { text: outbound.text, ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}) });
       if (outbound.type === "carousel") return sendCards(SMS, carouselOf(outbound), (m) => provider.sendMessage(to, { text: m.text, ...(m.idempotencyKey ? { idempotencyKey: m.idempotencyKey } : {}) }));
       if (outbound.type === "template") throw new Error("SMS has no templates");
+      if (outbound.type === "edit" || outbound.type === "unsend") throw new Error("SMS messages cannot be edited or unsent");
       // Reactions, typing, read receipts and status do not exist on SMS.
     },
   };
@@ -253,6 +265,8 @@ export function customUI(name: string, provider: CustomUIProvider): Channel {
     reactions: Boolean(provider.react),
     status: Boolean(provider.status),
     readReceipts: Boolean(provider.markRead),
+    edits: Boolean(provider.editMessage),
+    unsends: Boolean(provider.unsendMessage),
   };
   return {
     name,
@@ -274,6 +288,12 @@ export function customUI(name: string, provider: CustomUIProvider): Channel {
           return provider.markRead?.(to, outbound.messageIds);
         case "status":
           return provider.status?.(to, outbound.text);
+        case "edit":
+          if (!provider.editMessage) throw new Error(`${name} cannot edit messages`);
+          return provider.editMessage(to, outbound.messageId, outbound.text);
+        case "unsend":
+          if (!provider.unsendMessage) throw new Error(`${name} cannot unsend messages`);
+          return provider.unsendMessage(to, outbound.messageId);
         case "template":
           throw new Error(`${name} has no templates`);
       }
@@ -322,11 +342,20 @@ export function carouselMessages(info: ChannelInfo, carousel: Carousel): Message
   return [first, ...cards.filter((m) => m.text || m.image)];
 }
 
-/** Sends a carousel's messages one by one, in order, each after the last went; its receipt is the least far of theirs. */
+/** Sends a carousel's messages one by one, in order, each after the last went; its receipt is the least far of theirs, with the first one's id. */
 async function sendCards(info: ChannelInfo, carousel: Carousel, send: (message: Message) => Promise<void | SendReceipt>): Promise<SendReceipt | undefined> {
   const receipts: Array<void | SendReceipt> = [];
   for (const m of carouselMessages(info, carousel)) receipts.push(await send(m));
-  return leastOf(receipts);
+  return cardsReceipt(receipts);
+}
+
+/** A carousel sent card by card: as far as its least far card got, by its first message's id. */
+function cardsReceipt(receipts: Array<void | SendReceipt>): SendReceipt | undefined {
+  const least = leastOf(receipts);
+  const messageId = receipts[0]?.messageId;
+  if (!least || !messageId) return least;
+  const { messageId: _own, ...rest } = least;
+  return { ...rest, messageId };
 }
 
 const RECEIPT_RANK: Record<SendReceipt["status"], number> = { unconfirmed: 0, queued: 1, sent: 2, delivered: 3 };

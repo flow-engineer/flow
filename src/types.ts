@@ -140,6 +140,14 @@ export type Outbound =
   | { type: "read"; messageIds: string[] }
   /** A reaction on one of the person's messages, by the id Flow Framework gave it. */
   | { type: "reaction"; emoji: string; messageId: string }
+  /**
+   * New text for one of the agent's own messages, by the id its send resolved with
+   * (`SendReceipt.messageId`); only on channels with `edits`. Rejects when the platform refuses it
+   * (too late, say), with the platform's reason.
+   */
+  | { type: "edit"; messageId: string; text: string }
+  /** Takes back one of the agent's own messages, by the id its send resolved with; only on channels with `unsends`. */
+  | { type: "unsend"; messageId: string }
   /** A template the owner set up with the channel (WhatsApp), sent as is, even outside its window. */
   | ({ type: "template"; idempotencyKey?: string } & Template)
   /** A short line of what the agent is doing, shown in the loading indicator; null clears it. */
@@ -163,6 +171,8 @@ export interface SendContext {
    * prompt, the apology after a failed turn).
    */
   origin: "agent" | "direct" | "framework";
+  /** Set when the message is new text for one of the agent's sent messages (edit_message): that message's id. */
+  edit?: { messageId: string };
   /**
    * The texts already sent to the person in this conversation, oldest first, read from its stored
    * history (so they hold across restarts): what guards such as `oncePerChat` and `noRepeats` check against.
@@ -172,7 +182,9 @@ export interface SendContext {
 
 /**
  * createAgent's `beforeSend`: every message, carousel and template passes through it before it is
- * checked against the platform's content rules, sent and recorded. Return nothing (or the message)
+ * checked against the platform's content rules, sent and recorded, and so does an edit's new text,
+ * as a message with only `text` (`context.edit` names the message it changes; what is returned
+ * keeps only its text). Return nothing (or the message)
  * to send it as it is, another message to send that instead, or `{ refuse: why }` to send nothing.
  * A refused send of the agent's goes back to it with the reason, to fix and send again.
  */
@@ -233,6 +245,11 @@ export interface SendReceipt {
   status: "queued" | "sent" | "delivered" | "unconfirmed";
   /** How long the send waited for that, ms. */
   waitedMs?: number;
+  /**
+   * The platform's id for the message (Flow Messaging's msg_...), when the provider knows it: what
+   * an edit or unsend names it by. A carousel sent card by card gives its first message's.
+   */
+  messageId?: string;
 }
 
 /** What the channel a conversation is on can show. */
@@ -278,6 +295,13 @@ export interface ChannelInfo {
   templates?: boolean;
   /** A typing indicator while the agent writes. Absent: not known, so typing is handed to the channel, as before. */
   typing?: boolean;
+  /**
+   * The agent can change the text of a message it sent (Telegram, iMessage): it is offered
+   * edit_message. The platform decides how late an edit may come; a refused one goes back to the agent.
+   */
+  edits?: boolean;
+  /** The agent can take back a message it sent (Telegram, iMessage): it is offered unsend_message. */
+  unsends?: boolean;
   /**
    * The business may message first only this many hours after the person's last message
    * (WhatsApp: 24); after that, only templates.

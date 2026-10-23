@@ -15,12 +15,17 @@ import type { CarouselCard, ChannelInfo, Outbound, Photo, ReplyButton, ToolSpec 
 
 export const REACT = "react";
 export const UPDATE = "share_updates";
+export const EDIT = "edit_message";
+export const UNSEND = "unsend_message";
 
 export const reactInput = z.object({
   message_id: z.string().describe("The id of the person's message, such as m3"),
   emoji: z.string().min(1).max(16),
 });
 export const updateInput = z.object({ text: z.string().min(1).max(120) });
+const ownMessage = z.string().min(1).describe("The message_id your send's result gave");
+export const editInput = z.object({ message_id: ownMessage, text: z.string().min(1).describe("Its whole new text") });
+export const unsendInput = z.object({ message_id: ownMessage });
 
 /** A channel the person has written on, by the name the agent's channels use. */
 export interface ChannelView {
@@ -200,6 +205,19 @@ const updateTool = tool({
   run: () => "",
 });
 
+const editTool = tool({
+  name: EDIT,
+  description: "Change the text of a message you sent, to correct it: they see it edited, not a new message. If the channel refuses (too late, say), you are told; then send a correction if it matters.",
+  input: editInput,
+  run: () => "",
+});
+const unsendTool = tool({
+  name: UNSEND,
+  description: "Take back a message you sent: it disappears from their chat, though they may have read it. If the channel refuses (too late, say), you are told.",
+  input: unsendInput,
+  run: () => "",
+});
+
 export interface TalkSettings {
   /** Live status on channels that can show it (web and app UIs). Default on. */
   shareUpdates: boolean;
@@ -220,6 +238,8 @@ export function talkSpecs(channels: ChannelView[], settings: TalkSettings): Tool
     ),
   );
   if (channels.some((c) => c.info.reactions)) specs.push(toSpec(reactTool));
+  if (channels.some((c) => c.info.edits)) specs.push(toSpec(editTool));
+  if (channels.some((c) => c.info.unsends)) specs.push(toSpec(unsendTool));
   if (channels.some((c) => c.info.status) && settings.shareUpdates) specs.push(toSpec(updateTool));
   return specs;
 }
