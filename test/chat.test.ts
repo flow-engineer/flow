@@ -54,6 +54,32 @@ test("flow chat reads one message per line, as the agent's first test person, an
   assert.deepEqual(JSON.parse(json.out), { channel: "web", type: "message", text: "You said: hi" });
 });
 
+test("flow chat on a channel with edits gives the agent's messages ids it can edit by, and prints the edit", async () => {
+  const dir = agentFolder(`[{ name: "Maria", phone: "+15555550101" }]`);
+  writeFileSync(join(dir, "src", "agent.ts"), `
+import { createAgent, customUI } from ${JSON.stringify(framework)};
+const model = {
+  async complete(request) {
+    const last = request.messages.at(-1);
+    if (last?.role !== "user") return { text: null, toolCalls: [] };
+    const sent = request.messages.filter((m) => m.role === "tool").map((m) => JSON.parse(m.content).message_id);
+    const n = request.messages.length;
+    if (!sent.length) return { text: null, toolCalls: [{ id: "s" + n, name: "send_web", arguments: JSON.stringify({ text: "Top bid ₹47,133" }) }] };
+    return { text: null, toolCalls: [{ id: "e" + n, name: "edit_message", arguments: JSON.stringify({ message_id: sent[0], text: "Top bid ₹39,500" }) }, { id: "s" + n, name: "send_web", arguments: JSON.stringify({ text: "Fixed it." }) }] };
+  },
+};
+const provider = { sendMessage: async () => { throw new Error("not connected"); }, editMessage: async () => {} };
+export function buildAgent({ events = [] } = {}) {
+  return createAgent({ dir: new URL("../agent", import.meta.url).pathname, model, events, debounceMs: 0, channels: [customUI("web", provider)], testPeople: [{ name: "Maria", phone: "+15555550101" }] });
+}
+`);
+  const result = await chat(dir, "top bid?\nsure?\n");
+  assert.equal(result.code, 0, result.err);
+  assert.equal(result.out, "agent: Top bid ₹47,133\nagent edited a message: Top bid ₹39,500\nagent: Fixed it.\n");
+  const json = await chat(dir, "top bid?\n", ["--json"]);
+  assert.deepEqual(JSON.parse(json.out), { channel: "web", type: "message", text: "Top bid ₹47,133", id: "a1" });
+});
+
 test("flow chat with no test people, or outside an agent's folder, says what is missing and exits 1", async () => {
   const none = await chat(agentFolder("[]"), "hello\n");
   assert.equal(none.code, 1);

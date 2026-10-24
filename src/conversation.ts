@@ -5,7 +5,8 @@
 // - Double texts fold into the reply in progress. Someone who sends another message is usually
 //   correcting themselves, so a model step in flight is aborted and runs again with every message
 //   so far; one that arrives while tools run ends the wait for them (below).
-// - The person sees only what the agent sends with its send tools, react or share_updates.
+// - The person sees only what the agent sends with its send tools, react or share_updates, and
+//   its edits and unsends of what it sent, where the channel has them.
 // - Acknowledgement first: after the person writes, the agent's first response must reach them,
 //   on every channel they are waiting on. A first response that only calls tools is held, and the
 //   agent is asked to acknowledge in the same response as those calls.
@@ -29,7 +30,8 @@
 //   confirms it.
 // - Everything is kept in the store as it happens: the history, the inbox of events not yet
 //   handled, background tools in flight. After a restart the conversation carries on.
-// - Scheduled messages and nudges arrive through the inbox and wait for the turn in progress.
+// - Scheduled messages, nudges and the agent's own wake-ups arrive through the inbox and wait for
+//   the turn in progress.
 // - A message the agent's own rules answer with no model call (its intercept, a STOP, START or
 //   HELP keyword) is kept with what was sent back, in order with the person's other messages, and
 //   starts no turn: a turn running takes it in at its next step, else it is stored at once.
@@ -41,12 +43,13 @@ import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type ContentRefusal } from "./channels.ts";
+import type { FlowEvents } from "./business-events/engine.ts";
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { recordsUntil, type Records } from "./records.ts";
-import { scheduleTools } from "./schedules.ts";
+import { addWakeUp, scheduleTools, wakeUpsOf, wakeUpsSection, wakeUpTools, type WakeUps } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
-import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
+import { EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
 import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
@@ -82,6 +85,8 @@ export interface ConversationSettings {
   store: StoreApi;
   /** The agent's records, for its tools (`context.records`). */
   records: Records;
+  /** The agent's events side once attached, for its tools (`context.events`). */
+  events?: () => FlowEvents | undefined;
   /** Resolves once the store's tables exist. */
   ready: Promise<void>;
   now: () => number;
@@ -95,12 +100,14 @@ export interface ConversationSettings {
   beforeSend?: BeforeSend;
   /** The declared template Flow Framework sends when no other one fits a closed window (createAgent's fallbackTemplate). */
   fallbackTemplate?: string;
+  /** The model has wake_me_up and cancel_wake_up, and its prompt lists its wake-ups (createAgent's wakeUps). */
+  wakeUps: boolean;
   /** Tag every message with its channel (the agent has several), even for a person on one so far. */
   tagChannels: boolean;
   /** How the channels of a conversation loaded from the store are reached again. */
   links(conversationId: string): Promise<ChannelLink[]>;
   /** Records how a scheduled run or a nudge ended. */
-  settle(target: { run?: string; nudge?: string }, status: string, reason?: string): Promise<void>;
+  settle(target: { run?: string; nudge?: string }, status: string, reason?: string, messageId?: string): Promise<void>;
   /** A window-closed prompt nudge the agent sent no template for: held until they reply, and the fallback goes. */
   windowClosed(nudge: string, to: { channel: string; address: string }): Promise<void>;
   /** This process among the agent's runners: it holds a conversation's lease while working on it. */
@@ -185,14 +192,14 @@ interface Task {
   startedAt: number;
 }
 
-/** A scheduled run or a prompt nudge whose turn owes the person a message. */
+/** A scheduled run, a prompt nudge or a wake-up, whose turn may owe the person a message. */
 interface Owed {
   run?: string;
   nudge?: string;
-  mode: "message" | "check" | "prompt";
+  mode: "message" | "check" | "prompt" | "wake";
   channel: string;
   address?: string;
-  /** A prompt nudge to someone whose WhatsApp window is closed: only a template reaches them. */
+  /** A prompt nudge or a wake-up for someone whose WhatsApp window is closed: only a template reaches them. */
   windowClosed?: boolean;
 }
 
@@ -266,6 +273,8 @@ export class Conversation {
   private owed: Owed[] = [];
   /** The person's message ids, and the channel each came on. */
   private readonly messageIds = new Map<string, string>();
+  /** The agent's own messages by the platform's id (SendReceipt.messageId), and the channel each went on: read from the history at the first use, then kept up to date. */
+  private ownIds: Map<string, string> | null = null;
   private readonly knownInbox = new Set<number>();
   private messageCount = 0;
   /** Turns begun, kept in the store: tools' idempotency keys carry the turn's number. */
@@ -278,6 +287,8 @@ export class Conversation {
   private readonly puts = new Set<Promise<unknown>>();
   /** The agent's records as this conversation's tools have them (`context.records`): no put once it is closed. */
   private readonly records: Records;
+  /** The agent's wake-ups as this conversation's tools have them (`context.wakeUps`): none added once it is closed. */
+  private readonly wakeUps: WakeUps;
   private recentChannels: string[] = [];
   private promptDestination?: { channel: string; address?: string };
   private timeZone: string | null = null;
@@ -323,6 +334,8 @@ export class Conversation {
   private leftOut = 0;
   /** They texted STOP (as of the latest look): what the business starts is dropped, with no model call. */
   private stop: NoContactRow | null = null;
+  /** Their STOP or a pause in force, as of this turn's start: a wake-up's turn sends them nothing. */
+  private block: NoContactRow | null = null;
   /**
    * The lease's epoch this copy was read under: 0 for a conversation new here (no runner held it
    * yet). Another epoch at a claim means another runner worked on it since: this copy is stale.
@@ -345,6 +358,21 @@ export class Conversation {
       this.timeZone = existing.timeZone;
       this.quietHours = existing.quietHours;
     }
+    const wakeScope = {
+      store: settings.store,
+      conversationId: id,
+      channel: () => this.currentChannel(),
+      now: settings.now,
+      zone: () => this.timeZone ?? settings.timeZone ?? "UTC",
+    };
+    this.wakeUps = {
+      add: (input) => {
+        if (this.closedWhy) throw new Error(`flow: wake-ups: not added: ${this.closedWhy}`);
+        return addWakeUp(wakeScope, input);
+      },
+      cancel: (key) => settings.store.cancelWakeUps(key),
+      list: () => wakeUpsOf(settings.store, id),
+    };
     const builtins = [
       ...scheduleTools({
         store: settings.store,
@@ -356,6 +384,7 @@ export class Conversation {
         agentZone: settings.timeZone,
       }),
       ...noContactTools({ store: settings.store, conversationId: id, now: settings.now, zone: () => this.timeZone, setQuietHours: (q) => this.setQuietHours(q) }),
+      ...(settings.wakeUps ? wakeUpTools(wakeScope) : []),
     ];
     const fallback = settings.fallbackTemplate;
     const offered = settings.templates.filter((t) => t.name !== fallback);
@@ -393,6 +422,8 @@ export class Conversation {
         header: z.string().optional().describe("The header's {{1}}, when its header is text with a value"),
       }),
       run: async ({ name, body, header }, context) => {
+        const blocked = this.blockedSend();
+        if (blocked) return { error: blocked };
         const template: Template = { name, ...(body?.length ? { body } : {}), ...(header ? { header: { kind: "text", text: header } } : {}) };
         const declared = declaredTemplate(this.settings.templates, template);
         let reads = "";
@@ -412,7 +443,7 @@ export class Conversation {
             reads = shown ? fillTemplate(shown, sent).body : "";
           } catch {}
         }
-        this.settings.emit(this.id, "message.out", { text: sent.name, channel, template: true });
+        this.settings.emit(this.id, "message.out", { text: sent.name, channel, template: true, ...idDetail(result.receipt) });
         this.history.push({ role: "user", content: `[Chinwag] You sent them the template "${sent.name}" on ${channel}. It reads:\n${reads}` });
         this.sent();
         return { delivered: true, channel };
@@ -573,7 +604,7 @@ export class Conversation {
       } else if (result) {
         // What went is what the history keeps.
         if (result.sent.type === "message") answer.reply = result.sent.text;
-        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent), channel, direct: true, answered: true });
+        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent), channel, direct: true, answered: true, ...idDetail(result.receipt) });
       }
       if (!this.running && !this.timer) void this.run();
     };
@@ -645,8 +676,14 @@ export class Conversation {
     } else if (row.kind === "note") {
       this.notes.push({ text: p.text, inbox: row.id, wait: p.wait === true, ...(p.reset === true ? { reset: true } : {}) });
     } else if (row.kind === "schedule") {
+      const link = p.mode === "wake" ? this.channels.get(p.channel) : undefined;
+      const closed = !!link && windowClosed(link, this.settings.now());
       if (p.fixed) this.direct.push({ inbox: row.id, channel: p.channel, text: p.text, run: p.run, schedule: p.schedule });
-      else this.notes.push({ text: p.text, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel } });
+      else if (closed) {
+        // A wake-up past their WhatsApp window: the agent may still do its work, and only a template reaches them.
+        const how = this.builtins.has("send_template") ? "If one of the business's templates says what you have to tell them, send it with send_template, its values filled in; otherwise send them nothing." : "So send them nothing.";
+        this.notes.push({ text: `${p.text} Their WhatsApp 24-hour window is closed: no ordinary message reaches them. ${how}`, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel, windowClosed: true } });
+      } else this.notes.push({ text: p.text, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel } });
     } else if (row.kind === "nudge") {
       if (p.prompt !== undefined) {
         if (p.windowClosed) {
@@ -905,6 +942,7 @@ export class Conversation {
     this.saved = history.length;
     this.history.push(...history);
     this.sentTexts = null;
+    this.ownIds = null;
     const only = [...this.channels.keys()][0] ?? "chat";
     for (const entry of history) {
       if (entry.role !== "user") continue;
@@ -1047,13 +1085,15 @@ export class Conversation {
     if (!this.pending.length && !this.notes.length) return false;
     const items: Array<{ inbox?: number }> = [];
     for (const note of this.notes.splice(0)) {
-      if (note.owed && this.stop) {
+      if (note.owed && this.stop && note.owed.mode !== "wake") {
         // They texted STOP: what the business started never reaches the model.
         this.settle(note.owed, "dropped", `no-contact rule ${this.stop.id}: ${this.stop.rule}`);
         items.push(note);
         continue;
       }
-      this.history.push({ role: "user", content: note.text, ...(note.reset ? { reset: true as const } : {}) });
+      // A wake-up after their STOP or a pause runs, told that Flow sends them nothing in it.
+      const text = note.owed?.mode === "wake" && this.block ? `${note.text} ${this.blockLine(this.block)}` : note.text;
+      this.history.push({ role: "user", content: text, ...(note.reset ? { reset: true as const } : {}) });
       if (note.reset) this.settings.emit(this.id, "history.reset", { text: note.text });
       if (note.text.startsWith("[Background result:")) this.resultUnsent = "background";
       if (note.owed) this.owed.push(note.owed);
@@ -1127,7 +1167,8 @@ export class Conversation {
     const { store } = this.settings;
     const noContact = await store.noContact(this.id, this.settings.now());
     this.stop = noContact.find((r) => r.hard) ?? null;
-    if (this.stop && !this.resumeTurn && !this.unread() && !this.notes.some((n) => !n.wait && !n.owed)) {
+    this.block = this.stop ?? noContact.find((r) => r.kind === "pause") ?? null;
+    if (this.stop && !this.resumeTurn && !this.unread() && !this.notes.some((n) => !n.wait && (!n.owed || n.owed.mode === "wake"))) {
       // Only what the business started is waiting, and they texted STOP: it is dropped, no turn runs.
       this.absorb();
       return;
@@ -1167,7 +1208,9 @@ export class Conversation {
       }
     }
     const quiet = this.quietHours === "off" ? null : (this.quietHours ?? (this.settings.quietHours === false ? null : (this.settings.quietHours ?? { from: "22:00", to: "07:00" })));
-    const rules = rulesSection(noContact, this.timeZone ?? this.settings.timeZone ?? "UTC", this.timeZone ? quiet : null);
+    const zone = this.timeZone ?? this.settings.timeZone ?? "UTC";
+    const rules = rulesSection(noContact, zone, this.timeZone ? quiet : null);
+    const wakeUps = this.settings.wakeUps ? wakeUpsSection(await wakeUpsOf(store, this.id), zone) : "";
     // A message that came while those loaded had no step to restart: it joins the first one.
     this.absorb();
     let restarts = 0;
@@ -1189,7 +1232,7 @@ export class Conversation {
       const views = this.views();
       const several = views.length > 1;
       this.sendTools = new Map(views.map((v) => [sendToolName(v.name), v.name]));
-      const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), context].filter(Boolean).join("\n\n");
+      const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, wakeUps, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), context].filter(Boolean).join("\n\n");
       const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
       const specs = [...ownSpecs, ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk)];
       const abort = new AbortController();
@@ -1317,13 +1360,15 @@ export class Conversation {
   }
 
   private isTalk(name: string): boolean {
-    return this.sendTools.has(name) || name === REACT || name === UPDATE;
+    return this.sendTools.has(name) || name === REACT || name === UPDATE || name === EDIT || name === UNSEND;
   }
 
   /** The channels a talk call reaches (for the acknowledgement rule), before it runs. */
   private targets(call: ToolCall): string[] {
     if (this.sendTools.has(call.name)) return [this.sendTools.get(call.name)!];
     if (call.name === UPDATE) return [...this.channels.values()].filter((c) => c.info.status).map((c) => c.name);
+    // Changing what was sent before answers nothing new.
+    if (call.name === EDIT || call.name === UNSEND) return [];
     try {
       const channel = this.messageIds.get(JSON.parse(call.arguments || "{}").message_id);
       return channel ? [channel] : [];
@@ -1333,13 +1378,15 @@ export class Conversation {
   }
 
   /**
-   * Run one of the send tools, react or share_updates. A message that went out says where it was
+   * Run one of the send tools, react, share_updates, edit_message or unsend_message. A message that went out says where it was
    * delivered; one that failed on the way is told as a message of its own. `refused` is a call
    * that did nothing because of its input: the agent gets another step to fix it.
    */
   private async talk(call: ToolCall): Promise<{ content: string; refused: boolean }> {
     const refused = (content: string) => ({ content, refused: true });
     const done = (content = "") => ({ content, refused: false });
+    const blocked = this.blockedSend();
+    if (blocked) return refused(blocked);
     let raw: unknown;
     try {
       raw = JSON.parse(call.arguments || "{}");
@@ -1395,12 +1442,39 @@ export class Conversation {
       // What went, after beforeSend, is what the events, the history and the transcript keep.
       const sent = result.sent as Extract<Outbound, { type: "message" | "carousel" }>;
       const changed = JSON.stringify(sent) !== JSON.stringify(outbound);
-      this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, ...(changed ? { rewritten: true } : {}) });
-      this.sent();
+      this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, ...(changed ? { rewritten: true } : {}), ...idDetail(result.receipt) });
+      this.sent(result.receipt);
       this.sentThisTurn.add(input.text.trim());
       this.sentThisTurn.add(sent.text.trim());
       await this.acknowledged(channel);
-      return done(JSON.stringify({ delivered: true, channel, ...(changed ? { sent: sentArgs(sent) } : {}) }));
+      return done(JSON.stringify({ delivered: true, channel, ...this.ownId(channel, result.receipt), ...(changed ? { sent: sentArgs(sent) } : {}) }));
+    }
+    if (call.name === EDIT || call.name === UNSEND) {
+      const edit = call.name === EDIT;
+      const input = edit ? editInput.safeParse(raw) : unsendInput.safeParse(raw);
+      const not = edit ? "Not edited" : "Not unsent";
+      if (!input.success) return refused(`${not}, fix and try again: ${input.error.message}`);
+      const id = input.data.message_id;
+      const on = this.ownMessages().get(id);
+      if (!on) return refused(`${not}: there is no message ${id} of yours. Name one by the message_id its send's result gave.`);
+      const link = this.channels.get(on);
+      if (!(edit ? link?.info.edits : link?.info.unsends)) return refused(`${not}: messages on ${on} cannot be ${edit ? "edited" : "unsent"}.${edit ? " Send a correction if it matters." : ""}`);
+      if (!edit) {
+        const failure = await this.send(on, { type: "unsend", messageId: id });
+        if (failure) return refused(`${not}: ${failure}`);
+        this.settings.emit(this.id, "message.unsent", { messageId: id, channel: on });
+        return done(JSON.stringify({ unsent: true, channel: on, message_id: id }));
+      }
+      const text = "text" in input.data ? String(input.data.text) : "";
+      const max = link!.info.maxLength;
+      if (max && text.length > max) return refused(`${not}: the text is over ${max} characters on ${on}.`);
+      const result = await this.sendMessage(on, { type: "message", text }, "agent", link, id);
+      if ("refused" in result) return refused(result.refused.replace(/^Not sent/, not));
+      if ("failure" in result) return refused(`${not}: ${result.failure}`);
+      const now = (result.sent as { text: string }).text;
+      this.settings.emit(this.id, "message.edited", { messageId: id, channel: on, text: now, ...(now !== text ? { rewritten: true } : {}) });
+      this.sentThisTurn.add(now.trim());
+      return done(JSON.stringify({ edited: true, channel: on, message_id: id, ...(now !== text ? { text: now } : {}) }));
     }
     if (call.name === REACT) {
       const input = reactInput.safeParse(raw);
@@ -1428,15 +1502,34 @@ export class Conversation {
     return refused(`There is no tool named ${call.name}.`);
   }
 
-  /** How a scheduled run or a nudge ended, stored in order with everything else. */
-  private settle(target: { run?: string; nudge?: string }, status: string, reason?: string): void {
-    this.persist(() => this.settings.settle({ run: target.run, nudge: target.nudge }, status, reason));
+  /**
+   * Why nothing may go to them now: a wake-up's turn after their STOP or in a pause, until they write
+   * in it. Null when sends may go.
+   */
+  private blockedSend(): string | null {
+    if (!this.block || this.theirMessages || !this.owed.some((o) => o.mode === "wake")) return null;
+    return `Not sent: ${this.blockWhy(this.block)}, so Flow sends them nothing in this wake-up. Do the rest without messaging them.`;
   }
 
-  /** A message reached the person: whatever this turn owed them is sent. */
-  private sent(): void {
+  private blockWhy(rule: NoContactRow): string {
+    if (rule.kind === "stop") return "they texted STOP";
+    return `they paused messages from the business${rule.until ? ` until ${formatLocal(this.timeZone ?? this.settings.timeZone ?? "UTC", rule.until - 1)}` : ""}`;
+  }
+
+  /** The wake-up note's line after their STOP or in a pause. */
+  private blockLine(rule: NoContactRow): string {
+    return `${this.blockWhy(rule)[0].toUpperCase()}${this.blockWhy(rule).slice(1)}: Flow sends them nothing in this turn. Do only what needs no message to them (your tools), or nothing.`;
+  }
+
+  /** How a scheduled run or a nudge ended, stored in order with everything else. */
+  private settle(target: { run?: string; nudge?: string }, status: string, reason?: string, messageId?: string): void {
+    this.persist(() => this.settings.settle({ run: target.run, nudge: target.nudge }, status, reason, messageId));
+  }
+
+  /** A message reached the person: whatever this turn owed them is sent, by it (the platform's id, when it gave one). */
+  private sent(receipt?: SendReceipt): void {
     this.resultUnsent = false;
-    for (const o of this.owed.splice(0)) this.settle(o, "sent");
+    for (const o of this.owed.splice(0)) this.settle(o, "sent", undefined, receipt?.messageId);
   }
 
   private async acknowledged(channel: string): Promise<void> {
@@ -1468,21 +1561,22 @@ export class Conversation {
    * A message, carousel or template to the person: through the owner's beforeSend, then the
    * platform's content rules, then the channel. Returns what went (what the events, the history and
    * the transcript keep), why it was refused (also a `message.refused` event), or why it failed on
-   * the way. `link` is the channel's link when it is not this conversation's current one.
+   * the way. `link` is the channel's link when it is not this conversation's current one. With
+   * `edit`, the draft is new text for that message of the agent's: it goes as an edit.
    */
-  private async sendMessage(channel: string, draft: OutboundMessage, origin: SendContext["origin"], link = this.channels.get(channel)): Promise<{ sent: OutboundMessage } | { refused: string } | { failure: string }> {
+  private async sendMessage(channel: string, draft: OutboundMessage, origin: SendContext["origin"], link = this.channels.get(channel), edit?: string): Promise<{ sent: OutboundMessage; receipt?: SendReceipt } | { refused: string } | { failure: string }> {
     if (this.closed) return { failure: "this person was forgotten" };
     if (!link) return { failure: `no way to reach them on ${channel} right now` };
     const refuse = (outbound: OutboundMessage, by: "beforeSend" | "content", reason: string, refusal?: ContentRefusal) => {
       const text = outbound.type === "template" ? outbound.name : outbound.text;
-      this.settings.emit(this.id, "message.refused", { channel, origin, text, by, reason, ...(refusal ? { code: refusal.type, param: refusal.param, message: refusal.message } : {}), outbound });
+      this.settings.emit(this.id, "message.refused", { channel, origin, text, by, reason, ...(refusal ? { code: refusal.type, param: refusal.param, message: refusal.message } : {}), outbound, ...(edit ? { edit } : {}) });
       return { refused: reason };
     };
     let outbound = draft;
     if (this.settings.beforeSend) {
       let result: Awaited<ReturnType<BeforeSend>>;
       try {
-        result = await this.settings.beforeSend(draft, { conversationId: this.id, channel, info: link.info, address: link.address, origin, sent: [...this.sentSoFar()] });
+        result = await this.settings.beforeSend(draft, { conversationId: this.id, channel, info: link.info, address: link.address, origin, sent: [...this.sentSoFar()], ...(edit ? { edit: { messageId: edit } } : {}) });
       } catch (error) {
         return refuse(draft, "beforeSend", `Not sent: beforeSend failed: ${errorText(error)}`);
       }
@@ -1494,20 +1588,44 @@ export class Conversation {
         outbound = result.type === "message" ? fitMessage(link.info, result) : result;
       }
     }
+    if (edit) {
+      // An edit changes only the text.
+      if (outbound.type !== "message") return refuse(draft, "beforeSend", `Not sent: beforeSend returned a ${outbound.type} for an edit.`);
+      outbound = { type: "message", text: outbound.text };
+    }
     const refusal = contentRefusal(link.info, outbound);
     if (refusal) return refuse(outbound, "content", contentRefusalText(link.info, refusal), refusal);
     let receipt: void | SendReceipt;
     try {
-      receipt = await link.deliver(outbound);
+      receipt = await link.deliver(edit ? { type: "edit", messageId: edit, text: (outbound as { text: string }).text } : outbound);
     } catch (error) {
       return { failure: error instanceof Error ? error.message : String(error) };
     }
+    if (edit) return { sent: outbound };
     if (outbound.type !== "template") this.sentSoFar().push(outbound.text);
     // The channel's wait for its signal ran out: it may still arrive, and is never sent again.
     if (receipt?.status === "unconfirmed") {
       this.settings.emit(this.id, "message.slow", { channel, origin, text: outbound.type === "template" ? outbound.name : outbound.text, ...(receipt.waitedMs !== undefined ? { waitedMs: receipt.waitedMs } : {}) });
     }
-    return { sent: outbound };
+    return { sent: outbound, ...(receipt ? { receipt } : {}) };
+  }
+
+  /** The agent's own messages it may edit or unsend, by id. */
+  private ownMessages(): Map<string, string> {
+    const only = [...this.channels.keys()][0] ?? "chat";
+    this.ownIds ??= new Map(transcriptOf(this.history.map((entry) => ({ entry, at: 0 })), only).flatMap((e) => (e.kind === "out" && e.messageId ? [[e.messageId, e.channel] as const] : [])));
+    return this.ownIds;
+  }
+
+  /**
+   * A sent message's id, for its send's result, on a channel where the agent can edit or unsend
+   * it (elsewhere it would cost every turn for nothing): kept so it can name it later.
+   */
+  private ownId(channel: string, receipt?: SendReceipt): { message_id?: string } {
+    const info = this.channels.get(channel)?.info;
+    if (!receipt?.messageId || !(info?.edits || info?.unsends)) return {};
+    this.ownMessages().set(receipt.messageId, channel);
+    return { message_id: receipt.messageId };
   }
 
   private sentSoFar(): string[] {
@@ -1523,8 +1641,8 @@ export class Conversation {
       if (d.inbox !== undefined) this.persist(() => this.settings.store.doneInbox([d.inbox!]));
       return;
     }
-    const settle = (status: string, reason?: string) => {
-      this.settle(d, status, reason);
+    const settle = (status: string, reason?: string, messageId?: string) => {
+      this.settle(d, status, reason, messageId);
       this.flush([d]);
     };
     const link = d.address === undefined ? this.channels.get(d.channel) : (await this.settings.links(this.id)).find(l => l.name === d.channel && l.address === d.address);
@@ -1566,10 +1684,10 @@ export class Conversation {
       const callId = `direct_${d.inbox ?? Date.now()}`;
       this.history.push({ role: "user", content: `[Chinwag] The business sent them this message through you on ${d.channel}, as written:` });
       this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(d.channel), arguments: JSON.stringify(sentArgs(sent)) }] });
-      this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel: d.channel }) });
+      this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel: d.channel, ...this.ownId(d.channel, result.receipt) }) });
     }
-    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel: d.channel, direct: true });
-    settle("sent");
+    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel: d.channel, direct: true, ...idDetail(result.receipt) });
+    settle("sent", undefined, result.receipt?.messageId);
   }
 
   private async directSettled(d: Direct): Promise<boolean> {
@@ -1720,7 +1838,9 @@ export class Conversation {
 
     this.settings.emit(this.id, "tool.start", { callId: call.id, tool: call.name, input: parsed.data });
     const key = createHash("sha256").update(`${this.id}\u0000${this.turns}\u0000${call.name}\u0000${input}`).digest("hex").slice(0, 32);
-    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal, records: this.records };
+    // The agent's events side as it is now (attach() may come after createAgent), only when there is one.
+    const events = this.settings.events?.();
+    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal, records: this.records, wakeUps: this.wakeUps, ...(events ? { events } : {}) };
     const credentials = this.settings.credentialProvider?.(identityContext) ?? this.settings.credentials;
     let context = toolContext(identityContext, credentials);
     let authorize!: () => void;
@@ -1796,7 +1916,7 @@ export class Conversation {
     const callId = `auth_${randomUUID()}`;
     this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(channel), arguments: JSON.stringify(sentArgs(sent)) }] });
     this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel, authentication: true }) });
-    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, authentication: true });
+    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, authentication: true, ...idDetail(result.receipt) });
     this.sent();
     this.sentThisTurn.add(prompt.message.trim());
     await this.acknowledged(channel);
@@ -1852,15 +1972,21 @@ export type TranscriptEntry =
       fields?: Record<string, unknown>;
       /** A WhatsApp template the business sent, by name; the text is its body when it was declared. */
       template?: string;
+      /** The platform's id for it, on channels where the agent can edit or unsend it. */
+      messageId?: string;
     }
   | { kind: "reaction"; channel: string; messageId: string; emoji: string; at: number }
+  /** The agent changed the text of its message `messageId` to `text` (edit_message). */
+  | { kind: "edit"; channel: string; messageId: string; text: string; at: number }
+  /** The agent took back its message `messageId` (unsend_message). */
+  | { kind: "unsend"; channel: string; messageId: string; at: number }
   | { kind: "tool"; callId: string; tool: string; input: unknown; output: string; ok: boolean; at: number };
 
 const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "carousel", "confirm"]);
 
 /**
  * The history as the person saw it: their messages (with their ids and channels), what the agent
- * delivered with its send tools and reactions, and its other tool calls with their results.
+ * delivered with its send tools and reactions, its edits and unsends, and its other tool calls with their results.
  * Flow Framework's notes and the agent's plain text never reached the person and are left out. `only` is
  * the channel of untagged messages (an agent with one channel does not tag them).
  */
@@ -1890,7 +2016,7 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
         args = JSON.parse(call.arguments || "{}");
       } catch {}
       if (call.name.startsWith("send_")) {
-        let delivered: { delivered?: boolean; channel?: string; authentication?: boolean; sent?: Record<string, unknown> } = {};
+        let delivered: { delivered?: boolean; channel?: string; authentication?: boolean; sent?: Record<string, unknown>; message_id?: string } = {};
         try {
           delivered = JSON.parse(result?.content ?? "");
         } catch {}
@@ -1911,7 +2037,16 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
           ...(args.image ? { image: photoOf(args.image as never) } : {}),
           ...(Array.isArray(args.carousel) ? { carousel: cardsOf(args.carousel as never) } : {}),
           ...(Object.keys(fields).length ? { fields } : {}),
+          ...(typeof delivered.message_id === "string" ? { messageId: delivered.message_id } : {}),
         });
+      } else if (call.name === EDIT || call.name === UNSEND) {
+        let done: { edited?: boolean; unsent?: boolean; channel?: string; message_id?: string; text?: string } = {};
+        try {
+          done = JSON.parse(result?.content ?? "");
+        } catch {}
+        if (!done.channel || !done.message_id) continue;
+        if (done.edited) lines.push({ kind: "edit", channel: done.channel, messageId: done.message_id, text: done.text ?? String(args.text ?? ""), at: result!.at });
+        else if (done.unsent) lines.push({ kind: "unsend", channel: done.channel, messageId: done.message_id, at: result!.at });
       } else if (call.name === REACT) {
         const channel = channelOf.get(String(args.message_id));
         if (result?.content === "" && channel) lines.push({ kind: "reaction", channel, messageId: String(args.message_id), emoji: String(args.emoji), at: result.at });
@@ -2005,6 +2140,11 @@ function clipOutput(text: string): string {
 }
 
 /** A sent message or carousel as its `message.out` event tells it. */
+/** The platform's id for a sent message, on its message.out event, when the channel gave one. */
+function idDetail(receipt?: SendReceipt): { messageId?: string } {
+  return receipt?.messageId ? { messageId: receipt.messageId } : {};
+}
+
 function outDetail(sent: OutboundMessage): Record<string, unknown> {
   if (sent.type === "template") return { text: sent.name, template: true };
   if (sent.type === "carousel") return { text: sent.text, carousel: sent.cards, replyTo: sent.replyTo };

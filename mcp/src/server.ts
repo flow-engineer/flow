@@ -22,6 +22,7 @@ import {
   type AuthInfo,
   type CallToolResult,
 } from "@modelcontextprotocol/server";
+import type { FlowEvents } from "../../src/business-events/engine.ts";
 import { emitter, type EventSink } from "../../src/events.ts";
 import { unavailableRecords, type Records } from "../../src/records.ts";
 import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, SKILLS_META, type AgentFiles } from "../../src/skills.ts";
@@ -66,6 +67,8 @@ export interface McpServerOptions {
   credentials?: CredentialProvider;
   /** The agent's records (`agent.records`), for tools that use `context.records`. Without them, such a tool's call fails saying so. */
   records?: Records;
+  /** The agent's business events side (its `flowEvents`, or `agent.events` once attached: read here once), as the tools' `context.events`. Without it, `context.events` is absent. */
+  businessEvents?: FlowEvents;
   /** Where the endpoint is mounted (default "/mcp"). */
   path?: string;
   /** Native plugins deliver skills themselves. Default: tools only at `${path}/plugin`. */
@@ -163,6 +166,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         idempotencyKey: typeof sentKey === "string" && sentKey.length > 0 && sentKey.length <= 256 ? sentKey : randomUUID(),
         signal: ctx.mcpReq?.signal ?? new AbortController().signal,
         records: options.records ?? NO_RECORDS,
+        ...(options.businessEvents ? { events: options.businessEvents } : {}),
       }, (ctx.http?.authInfo?.extra?.credentials as CredentialProvider | undefined) ?? options.credentials);
       const started = Date.now();
       emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input: parsed.data, ...detail });

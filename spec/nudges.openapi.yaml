@@ -154,12 +154,13 @@ components:
       properties:
         id: { type: string }
         status:
-          enum: [queued, sent, silent, dropped, refused, failed, scheduled, held, expired]
+          enum: [queued, sent, silent, dropped, refused, failed, scheduled, held, expired, cancelled]
           description: |
             queued (waiting for its send or turn); sent; silent (the agent chose to send nothing);
             dropped (a no-contact rule covers it, or their STOP); refused (outside_window,
             unknown_person); failed (it could not be sent, or the model failed); scheduled; held (their
-            quiet hours, until they end or the person writes); expired (held past expires_at).
+            quiet hours, until they end or the person writes); expired (held past expires_at);
+            cancelled (a scheduled one, cancelled by the agent's code before it went).
         reason: { type: string, description: Why, for dropped, refused and failed. }
     Error:
       type: object

@@ -103,6 +103,8 @@ export function channelOf(p: Platform): ChannelInfo {
     linkButton: p.linkButton,
     images: p.images,
     readReceipts: p.readReceipts,
+    ...(p.edits ? { edits: true } : {}),
+    ...(p.unsends ? { unsends: true } : {}),
   };
 }
 

@@ -9,9 +9,9 @@
 
 import { randomBytes } from "node:crypto";
 import { signEvent, sqlite } from "../../src/index.ts";
-import type { Agent, Channel, Database, EventSink, Incoming, Outbound, Tool } from "../../src/index.ts";
+import type { Agent, Channel, Database, EventSink, Incoming, Outbound, SendReceipt, Tool } from "../../src/index.ts";
 import { LEASE_MS } from "../../src/conversation.ts";
-import type { BusinessCommand, BusinessOutbound, Command, Receipt, StepAnswer } from "./protocol.ts";
+import { outboundReceipt, type BusinessCommand, type BusinessOutbound, type Command, type Receipt, type StepAnswer } from "./protocol.ts";
 
 /** What a business run's agent must do: a Flow Framework Agent. */
 export type BusinessAgent = Pick<Agent, "channels" | "channel" | "message" | "reacted" | "nudge" | "reach" | "runDue" | "conversation" | "fetch" | "resume" | "runner"> & Partial<Pick<Agent, "seedHistory">>;
@@ -66,7 +66,7 @@ interface Run {
   conversationId: string;
   /** The cloud's conversation: the run's key. */
   cloudId: string;
-  deliveries: Set<Promise<void>>;
+  deliveries: Set<Promise<unknown>>;
   sent: number;
 }
 
@@ -113,9 +113,12 @@ export function businessRuns(ctx: BusinessContext) {
     const alive = <T>(work: () => Promise<T>): Promise<T> => (life.dead ? Promise.reject(new Error("the agent's process died")) : work());
     // The run's events and tool calls are the cloud's conversation, whatever the agent calls it.
     const events: EventSink = Object.assign((event: Parameters<EventSink>[0]) => void (life.dead || ctx.events({ ...event, conversationId: cloudId })), { context: true });
+    // A tool run for real is the agent's own object, as in production, so buildAgent knows its own
+    // tools by identity (t === myTool). A dead agent's conversation is closed (its tools' signal
+    // aborted), its store and sends refused, as a crashed process. Simulated ones ask the cloud.
     const tools = ctx.tunnelTools.map((t): Tool => {
-      const own = run.real.has(t.name) ? ctx.realTools.find((r) => r.name === t.name)! : t;
-      return { ...own, run: (input: unknown, context: Parameters<Tool["run"]>[1]) => alive(async () => own.run(input, own === t ? { ...context, conversationId: cloudId } : context)) } as Tool;
+      if (run.real.has(t.name)) return ctx.realTools.find((r) => r.name === t.name)!;
+      return { ...t, run: (input: unknown, context: Parameters<Tool["run"]>[1]) => alive(async () => t.run(input, { ...context, conversationId: cloudId })) } as Tool;
     });
     const channels = ctx.sessionAgent.channels().map(({ name }): Channel => {
       const own = ctx.sessionAgent.channel(name)!;
@@ -184,14 +187,17 @@ export function businessRuns(ctx: BusinessContext) {
     if (runs.get(run.cloudId) === run) await settle(run).catch(() => {});
   };
 
-  const deliver = (run: Run, cloudId: string, address: string, outbound: Outbound): Promise<void> => {
+  const deliver = (run: Run, cloudId: string, address: string, outbound: Outbound): Promise<SendReceipt | undefined> => {
     if (address !== run.address) {
       ctx.log(`${cloudId}: the agent sent to ${address}, not the run's person; the cloud does not see it`);
       ctx.sent?.(cloudId, outbound);
-      return Promise.resolve();
+      return Promise.resolve(undefined);
     }
     const body: BusinessOutbound = { conversationId: cloudId, outbound, at: run.clock };
-    const delivery = ctx.post("outbound", body, `outbound:${cloudId}:b${++run.sent}`, "outbound delivery").then(() => void ctx.sent?.(cloudId, outbound));
+    const delivery = ctx.post("outbound", body, `outbound:${cloudId}:b${++run.sent}`, "outbound delivery").then((answer) => {
+      ctx.sent?.(cloudId, outbound);
+      return outboundReceipt(answer);
+    });
     run.deliveries.add(delivery);
     const done = () => void run.deliveries.delete(delivery);
     delivery.then(done, done);

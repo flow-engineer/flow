@@ -39,6 +39,7 @@ export { jsonlSink, type EventSink, type FlowEvent, type ChinwagEvent } from "./
 export { choosePort, markRunning } from "./local.ts";
 export { flowModel, flowModelURL, flowTranscribe, openAICompatible, type FlowTranscribeOptions, type OpenAICompatibleOptions } from "./model.ts";
 export { Store, type StoreApi } from "./store.ts";
+export { WAKE_UP_LIMITS, type WakeUp, type WakeUpInput, type WakeUpResult, type WakeUps } from "./schedules.ts";
 export { RECORD_LIMITS, type ExportedRecord, type RecordCollection, type RecordCursor, type RecordEntry, type Records, type RecordScalar, type RecordValue } from "./records.ts";
 export type { AgentFiles } from "./skills.ts";
 export type { TracesOptions } from "./traces.ts";

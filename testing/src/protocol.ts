@@ -5,7 +5,8 @@
 //   POST /api/files                    { files: UploadFile[] }   upload the files the cloud lacks
 //   GET  /api/sessions/:id/stream      server-sent Commands     the person's side, cloud → agent
 //        Last-Event-ID: N                                    a resume: the commands after N
-//   POST /api/sessions/:id/outbound    { conversationId, outbound } → { ok } | 409 { error }
+//   POST /api/sessions/:id/outbound    { conversationId, outbound } → { ok, messageId? } | 409 { error }
+//        messageId: the simulator's id for the message (a1, a2, ...), which an edit or unsend outbound names
 //   POST /api/sessions/:id/tool-calls  ToolCallRequest → ToolCallResult   held open while the tool is simulated
 //   POST /api/sessions/:id/events      { seq, events: FlowEvent[] }
 //
@@ -46,7 +47,13 @@
 // The open goes to the cloud's front door; every later call goes to Opened.tunnel (else the same
 // address) and carries `authorization: Bearer <token>` from Opened.
 
-import type { Attachment, ChannelInfo, ChannelSummary, Incoming, Outbound, Template, ToolSpec } from "../../src/index.ts";
+import type { Attachment, ChannelInfo, ChannelSummary, Incoming, Outbound, SendReceipt, Template, ToolSpec } from "../../src/index.ts";
+
+/** What the cloud's answer to an outbound tells the agent: the message's id, when it gave one (an older cloud does not). */
+export function outboundReceipt(answer: unknown): SendReceipt | undefined {
+  const messageId = (answer as { messageId?: unknown } | null)?.messageId;
+  return typeof messageId === "string" && messageId ? { status: "sent", messageId } : undefined;
+}
 
 /** What a run came to: passed or failed says something about the agent; credit (a model or the
  * workspace's test budget refused for credit) and infra (the cloud could not play or judge it) never count as failures. */

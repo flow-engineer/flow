@@ -7,10 +7,10 @@ import { readFile } from "node:fs/promises";
 import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { basename, relative, resolve } from "node:path";
-import { toSpec, type Agent, type Incoming, type EventSink, type Outbound, type FlowEvent, type Tool } from "../../src/index.ts";
+import { toSpec, type Agent, type Incoming, type EventSink, type Outbound, type SendReceipt, type FlowEvent, type Tool } from "../../src/index.ts";
 import { PROFILE_TOOL, profileTool } from "../../src/conversation.ts";
 import { STAND_IN } from "../../src/tools.ts";
-import type { Command, Opened, WireIncoming, OpenSession, Receipt, RunKey, RunSummary, SessionLimits, SessionSummary, ToolCallRequest, ToolCallResult } from "./protocol.ts";
+import { outboundReceipt, type Command, type Opened, type WireIncoming, type OpenSession, type Receipt, type RunKey, type RunSummary, type SessionLimits, type SessionSummary, type ToolCallRequest, type ToolCallResult } from "./protocol.ts";
 import { mimeOf, parseScenario, parseToolFile, suiteHash, type SuiteFile } from "./suite.ts";
 import { businessRuns, type BusinessAgent, type BusinessBuild } from "./business.ts";
 
@@ -551,14 +551,17 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       // Not async: register the promise during receive(), before its fire-and-forget
       // interceptor returns null. Each command owns its deliveries, even in a burst.
       let outboundIndex = 0;
-      const deliver = (outbound: Outbound): Promise<void> => {
+      const deliver = (outbound: Outbound): Promise<SendReceipt | undefined> => {
         const index = outboundIndex++;
         const delivery = postRetry(`${session}/outbound`, { conversationId: command.conversationId, outbound }, auth, controller.signal, log, postTimeoutMs, {
           mode: idempotent ? "idempotent" : "outbound",
           key: `outbound:${command.conversationId}:${command.messageId}:${index}`,
           budgetMs: retryBudgetMs,
           what: "outbound delivery",
-        }).then(() => void sendPath.delivered(command.conversationId, outbound));
+        }).then((answer) => {
+          sendPath.delivered(command.conversationId, outbound);
+          return outboundReceipt(answer);
+        });
         deliveries.push(delivery);
         // Keep the rejection for the normal conversation's delivery recovery, but
         // attach a handler immediately for fire-and-forget interceptor sends too.
