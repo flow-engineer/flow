@@ -1,13 +1,15 @@
-// covers: src/records.ts src/store.ts src/agent.ts src/tools.ts
+// covers: src/records.ts src/store.ts src/agent.ts src/tools.ts testing/src/records.ts testing/src/cli.ts
 // The agent's records behave the same on every store: SQLite in memory and in a file, Postgres (when
 // FLOW_TEST_POSTGRES_URL names a throwaway database and the `pg` package is installed), and a store
 // reached over JSON, as Flow's hosting forwards each Store call to its store service. Each test
 // runs once per store, on agent ids of its own, so a shared database needs no cleanup.
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { z } from "zod";
 import { createAgent, postgres, RECORD_LIMITS, sqlite, Store, tool, type Agent, type Database, type ExportedRecord, type PostgresPool, type StoreApi } from "../src/index.ts";
@@ -220,4 +222,30 @@ test("a tool's context.records is the agent's records", async () => {
   await agent.conversation("c1")!.whenIdle();
   const [entry] = await agent.records.query("questions", { seller: "phone:+15550100002", status: "waiting" });
   assert.deepEqual(entry.value, { listing: "L9", buyer: "chat:c1", seller: "phone:+15550100002", status: "waiting" });
+});
+
+test("flow records export prints every record of the agent in the folder as JSON Lines, with no model key", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "flow-records-cli-"));
+  mkdirSync(join(dir, "src"));
+  const path = join(dir, "agent.db");
+  const framework = fileURLToPath(new URL("../src/index.ts", import.meta.url));
+  writeFileSync(join(dir, "src", "agent.ts"), `
+import { createAgent, sqlite } from ${JSON.stringify(framework)};
+export function buildAgent({ model, events = [] } = {}) {
+  return createAgent({ files: { "AGENTS.md": "Test." }, model, events, database: sqlite(${JSON.stringify(path)}), records: ${JSON.stringify(COLLECTIONS)} });
+}
+`);
+  const agent = createAgent({ files: { "AGENTS.md": "Test." }, model: noModel, records: COLLECTIONS, scheduleCheckMs: 0, database: sqlite(path) });
+  await agent.records.put("questions", "q1", question(1));
+  await agent.records.put("notes", "n1", { about: "key:7", text: "prefers mornings" });
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url)), "records", "export"], { cwd: dir, env: { PATH: process.env.PATH } });
+  let out = "";
+  let err = "";
+  child.stdout.on("data", (c) => { out += c; });
+  child.stderr.on("data", (c) => { err += c; });
+  const code = await new Promise((done) => child.on("close", done));
+  assert.equal(code, 0, err);
+  const lines = out.trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(lines.map((r) => [r.collection, r.id, r.value]).sort(), [["notes", "n1", { about: "key:7", text: "prefers mornings" }], ["questions", "q1", question(1)]]);
+  assert.match(err, /Exported 2 records\./);
 });

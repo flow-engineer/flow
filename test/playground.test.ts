@@ -1,10 +1,11 @@
-// covers: src/agent.ts src/store.ts src/conversation.ts
+// covers: src/agent.ts src/store.ts src/conversation.ts simulators/src/server.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { z } from "zod";
-import { sqlite, tool, type Database, type Outbound } from "../src/index.ts";
+import { createAgent, sqlite, tool, type Database, type Outbound } from "../src/index.ts";
 import { Store } from "../src/store.ts";
-import { WEB_APP, WHATSAPP, call, multi, respond, users } from "./helpers.ts";
+import { simulators } from "../simulators/src/index.ts";
+import { WEB_APP, WHATSAPP, call, multi, respond, scriptedModel, users } from "./helpers.ts";
 
 const SAM = { name: "Sam", phone: "+15555550101" };
 const NOON_NY = Date.UTC(2026, 9, 12, 16);
@@ -281,4 +282,19 @@ test("a test person's tools get the key resolve gives their real number, on any 
   (await h.nextCall(3)).answer(respond());
   await h.agent.conversation(a!.conversationId)!.whenIdle();
   assert.deepEqual(seen, ["mbr_sam", "mbr_sam"]);
+});
+
+// The Person panel shows one person's state; the agent's records are its own, across people.
+test("the playground lists the agent's records", async () => {
+  const agent = createAgent({ files: { "AGENTS.md": "A test agent." }, model: scriptedModel().model, database: sqlite(), testPeople: [SAM], scheduleCheckMs: 0, records: { questions: { people: ["buyer"], fields: ["status"] } } });
+  const value = { buyer: `phone:${SAM.phone}`, status: "waiting", text: "Is parking included?" };
+  await agent.records.put("questions", "q1", value);
+  const server = await simulators().listen(agent, 0);
+  try {
+    const { records, more } = await (await fetch(`${server.url}/api/records`)).json();
+    assert.deepEqual(records.map((r: { collection: string; id: string; value: unknown }) => [r.collection, r.id, r.value]), [["questions", "q1", value]]);
+    assert.equal(more, false);
+  } finally {
+    await server.close();
+  }
 });

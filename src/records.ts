@@ -43,7 +43,7 @@ export interface RecordCollection {
   fields?: string[];
 }
 
-/** A record's value: a plain JSON object (no Dates, Maps or class instances; times as milliseconds or ISO text). */
+/** A record's value as it comes back: a plain JSON object (no Dates, Maps or class instances; times as milliseconds or ISO text). */
 export type RecordValue = Record<string, unknown>;
 
 /** What a declared field is compared with: equality only. */
@@ -68,7 +68,7 @@ export type RecordCursor = Pick<RecordEntry, "id" | "createdAt">;
 /** The agent's records: `context.records` in a tool, `agent.records` everywhere else. */
 export interface Records {
   /** Keeps `value` under `id` in a declared collection, replacing what was there. */
-  put(collection: string, id: string, value: RecordValue): Promise<void>;
+  put(collection: string, id: string, value: object): Promise<void>;
   /** The value under `id`, or null. */
   get<T = RecordValue>(collection: string, id: string): Promise<T | null>;
   /**
@@ -228,9 +228,9 @@ export function recordsOf(store: StoreApi, collections: Record<string, RecordCol
       const { fields, people } = collection(name);
       checkId(id);
       recordJson(name, value);
-      recordIndex(name, value, fields, people);
+      recordIndex(name, value as RecordValue, fields, people);
       await ready();
-      if (!(await store.putRecord(name, id, value, fields, people))) {
+      if (!(await store.putRecord(name, id, value as RecordValue, fields, people))) {
         refuse(`this agent keeps ${RECORD_LIMITS.perAgent} records already, the most it may: delete ones it no longer needs (agent.records.delete), or keep this data in your own database`);
       }
     },

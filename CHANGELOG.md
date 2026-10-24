@@ -2,6 +2,35 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased (0.6.0: Store migration 10 needs a new minor, so Flow's hosting runs it first)
+
+### Changes
+
+- **The agent's own records.** `createAgent({ records: { questions: { people: ["buyer", "seller"],
+  fields: ["listing", "status"] } } })` declares collections of small JSON documents the agent keeps
+  across days and people, in the same store as its conversations: `context.records` in a tool,
+  `agent.records` elsewhere, with `put`, `get`, `query` (equality on declared fields, oldest first,
+  pages of up to 100), `delete`, `forgetPerson` and `export`. They behave the same on SQLite,
+  Postgres, the playground and Flow's hosting, per agent and environment. `agent.forgetPerson`
+  also deletes the records that name the person in a `people` field. Limits in `RECORD_LIMITS`:
+  64 KB a record, 10,000 an agent, 20 collections, 8 declared fields each. If anything other than
+  the agent reads the data, it belongs in your own database ([docs/agents.md](docs/agents.md#the-agents-own-records)).
+- **`flow records export`** prints every record of the agent in the folder (the store its
+  `buildAgent` opens) as JSON Lines.
+- `mcpServer({ records: agent.records })` gives tools served over MCP the same records.
+- The playground shows the agent's records.
+- Store migration 10 adds the tables `records` and `record_index`; it runs on the agent's first
+  start, as every migration does, and changes no existing table.
+
+### Migration notes
+
+- **`ToolContext` has a new field, `records`.** Flow Framework fills it for every tool call. Code that
+  builds a `ToolContext` itself (a unit test calling a tool's `run`) adds it: `records: agent.records`.
+- **`StoreApi` has the record methods** (`putRecord`, `getRecord`, `queryRecords`, `deleteRecord`,
+  `forgetRecords`, `exportRecords`). A store of your own that forwards each call to a `Store` (as
+  Flow's hosting does) forwards them too; a hosted agent on 0.6 deploys once Flow's hosting runs
+  0.6 (until then `flow deploy` refuses it, as for any newer line).
+
 ## 0.5.2 (2026-10-24)
 
 ### Changes

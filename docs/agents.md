@@ -220,6 +220,52 @@ agent's own wording checked against the template's values. The envelope, signing
 mounting sample are in `docs/events.md` in the package
 (https://github.com/flow-engineer/flow/blob/main/docs/events.md).
 
+## The agent's own records
+
+What the agent must remember across days and people, and nothing else reads (a buyer's question
+relayed to a seller, waiting for the answer), it keeps as records: small JSON documents in
+collections declared on `createAgent`, in the same store as its conversations. They survive
+restarts and deploys, and behave the same in the playground and the test cloud (each with an empty
+store of its own), self-hosted (the agent's SQLite or Postgres) and on Flow's hosting, per agent
+and per environment.
+
+```ts
+const agent = createAgent({
+  // ...
+  records: { questions: { people: ["buyer", "seller"], fields: ["listing", "status"] } },
+});
+
+// In a tool: context.records. Outside a turn (a route, beforeSend, intercept): agent.records.
+await context.records.put("questions", id, { listing, buyer: context.person, seller, status: "waiting", askedAt: Date.now() });
+await context.records.get("questions", id);                              // the value, or null
+await context.records.query("questions", { seller, status: "waiting" }); // [{ id, value, createdAt, updatedAt }]
+await context.records.delete("questions", id);
+```
+
+**What goes where: if anything other than the agent reads it, it belongs in your own database.**
+Records are the agent's working memory: read by id, or matched by equality on the fields a
+collection declares (`people` and `fields`), oldest first (by when each was first put, then id),
+50 at a time (`{ limit, after }`: up to 100, `after` the last entry of the page before). No
+ranges, sorting, joins, search or transactions across records; a put replaces the whole value.
+
+- `people` are the top-level fields that hold a person, as a string: their `context.person`
+  (`phone:+15550100100`, `key:<your id>`, `<channel>:<address>`). `agent.forgetPerson` deletes,
+  with everything else about them, every record that names them there (by that id, their
+  conversation id, any identity as `<channel>:<address>`, or their number in E.164);
+  `agent.records.forgetPerson(person)` does it for someone who never wrote.
+- Values are plain JSON: no Dates (a time is milliseconds or ISO text), NaN, Maps or class
+  instances; keys whose value is undefined are left out. A declared field holds a string (at most
+  256 characters), a number, a boolean or null; `1` and `"1"` differ.
+- Limits (`RECORD_LIMITS`): 64 KB a record as JSON, 10,000 records an agent (per environment), 20
+  collections, 8 declared fields each, ids of at most 128 characters. A put past one is refused
+  saying what to change.
+- `npx @flow-engineer/flow records export` prints every record of the agent in the folder (the
+  store its `buildAgent` opens) as JSON Lines; in code, `for await (const r of
+  agent.records.export())`. Put them into another store with `agent.records.put(r.collection,
+  r.id, r.value)`.
+- A follow-up at a time is not a record: `agent.nudge({ to, prompt, at })` gives the agent a turn
+  then, and that turn reads the records.
+
 ## Shared test numbers and privacy
 
 The free trial runs on Flow's shared Telegram bot, WhatsApp number and iMessage line. Sending an
