@@ -91,3 +91,14 @@ test("imessageStyles gives the plain text and its styled ranges in UTF-16 offset
     assert.deepEqual(styles(md), [], md);
   }
 });
+
+// Telegram counts a parse_mode text's length after parsing (V0's rule), so a Markdown text the send
+// tool let through (at most TELEGRAM.maxLength) must never parse longer than it was written.
+test("telegramHTML's text, as Telegram parses it, is never longer than the Markdown", () => {
+  const parsed = (html: string) => html.replace(/<[^>]+>/g, "").replace(/&(lt|gt|amp|#34|#39);/g, "x");
+  const escaped = `<&>"'`.repeat(820).slice(0, 4096);
+  for (const md of [...CASES.map(([, input]) => input), escaped, `**${"a".repeat(4092)}**`, `[${"a".repeat(2000)}](https://${"b".repeat(2000)}.example)`]) {
+    assert.ok(parsed(telegramHTML(md)).length <= md.length, md.slice(0, 40));
+  }
+  assert.ok(telegramHTML(escaped).length > 4096); // longer than the limit only before parsing
+});
