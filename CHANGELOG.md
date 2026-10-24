@@ -2,7 +2,7 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## Unreleased (0.6.0: Store migration 10 needs a new minor, so Flow's hosting runs it first)
+## 0.6.0 (2026-10-24)
 
 ### Changes
 
