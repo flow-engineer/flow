@@ -21,7 +21,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
     "Choose". WhatsApp's own marks (`*bold*`) go as written, as before.
   - iMessage: text is now Markdown, sent as iMessage's own styles (`imessage.styles`: bold, italic,
     underline, strikethrough). `IMESSAGE.formatting` is `"markdown"`, so the agent is told Markdown
-    works there.
+    works there, and so is the iMessage platform `flow test` plays (`x-flow-platforms` in
+    `spec/agent-endpoint.openapi.yaml`).
   - A message the business starts (a nudge, a scheduled text) goes with `link_preview: false` on
     every channel, not only WhatsApp.
 - Typing sends `{}` and nothing when the agent stops typing: no channel clears the indicator on
