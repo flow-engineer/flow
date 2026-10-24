@@ -122,7 +122,7 @@ export function buildAgent(options: { model?: Model; events?: EventSink[]; tools
 ```
 
 Other `createAgent` options: `files` replaces `dir` on hosts with no file system (the folder's
-text by path: `{ "AGENTS.md": ..., "skills/<name>/SKILL.md": ... }`); `profile({ conversationId, person, channel })` is what the business knows about
+text by path: `{ "AGENTS.md": ..., "skills/<name>/SKILL.md": ... }`; a `dir` with no readable `AGENTS.md` throws, naming the path); `profile({ conversationId, person, channel })` is what the business knows about
 the person, offered as the built-in tool `get_user_profile` and run only when the agent calls it (put
 lookups here, not in `context`); `context(conversationId)` adds small facts to the system prompt at
 every turn, before every reply, so it must not call APIs; Flow Framework already tells the agent the time; `intercept(conversationId, text, message)` answers a

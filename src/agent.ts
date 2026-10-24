@@ -417,7 +417,7 @@ export class Agent {
     this.runner = `${options.runner ?? process.env.FLOW_RUNNER ?? hostname()}:${randomUUID().slice(0, 8)}`;
     const emit = emitter(sinks, this.runner);
     if ((options.dir === undefined) === (options.files === undefined)) throw new Error("flow: give an agent exactly one of dir or files");
-    const files = options.files ?? readAgentFolder(options.dir!);
+    const files = options.files ?? readAgentFolder(options.dir!, { prompt: true });
     const skills = loadSkills(files);
     // The test cloud's stand-in for get_user_profile counts only for an agent with a profile.
     const tools = (options.tools ?? []).filter((t) => options.profile || !(t as { [STAND_IN]?: boolean })[STAND_IN]);
