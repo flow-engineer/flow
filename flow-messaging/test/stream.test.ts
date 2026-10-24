@@ -44,7 +44,7 @@ test("with no webhook secret the agent takes events from the stream: the key as 
   const turn = await live.nextCall(0);
   assert.equal(lastUser(turn.request.messages), "[msg_1] hi from my phone");
   turn.answer(respond(call("send_telegram", { text: "Hi!" })));
-  assert.deepEqual((await flow.request(post("/v0/conversations/conv_tg/basic"))).body.content, { kind: "basic", text: "Hi!", format: "markdown" });
+  assert.deepEqual((await flow.request(post("/v0/conversations/conv_tg/basic"))).body, { text: "Hi!" });
   await live.agent.conversation(live.events[0]!.conversationId)!.whenIdle();
   assert.equal(readFileSync(cursorFile, "utf8").trim(), hello.id);
   await live.handle.close();

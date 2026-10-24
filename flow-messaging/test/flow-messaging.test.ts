@@ -443,7 +443,7 @@ test("a 422 unsupported_content reaches the agent saying what the channel does n
   (await live.nextCall(0)).answer(respond(call("send_sms", { text: "Hello" })));
   const next = await live.nextCall(1);
   assert.equal(lastUser(next.request.messages), '[Not delivered] "Hello": unsupported_content (no_mms, param media, on sms): This number cannot send media. It will fail again: don\'t resend it.');
-  next.answer(respond());
+  next.answer(respond(call("send_sms", { text: "ok" })));
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 
   const channel = flowMessaging({ apiKey: "fk_test_key", baseUrl: flow.url }).whatsapp({ sender: "snd_WA" });
