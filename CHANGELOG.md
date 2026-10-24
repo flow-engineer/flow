@@ -2,7 +2,7 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## Unreleased
+## 0.5.3 (2026-10-24)
 
 ### Changes
 
@@ -11,8 +11,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   their first message would, then sends the template: the way WhatsApp lets a business message a
   number first. The number is read as inbound numbers are (E.164; `defaultCountryCode` on phone
   channels other than WhatsApp) and must look like one (7 to 15 digits; on WhatsApp written in full,
-  with `+` or `00`, or as WhatsApp writes it, digits with the country code: a national
-  `"(555) 010-0177"` is refused `unknown_person`, never read as another country's), so their reply lands in
+  with `+` or `00`: a national `"(555) 010-0177"` or bare `"5550100177"` is refused `unknown_person`,
+  never read as another country's), so their reply lands in
   the same conversation, and a number that is already someone (they wrote on SMS) joins that
   person, their STOP and no-contact rules included. Text and prompt nudges to someone who never
   wrote are still refused `unknown_person`, as is a template on SMS. Declared-template checks,
@@ -21,7 +21,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   (`recordNudge(input, { via: "playground" })`).
 - **A nudge finds the person however the business writes their number.** On a phone channel,
   `"+1 (555) 010-0177"` finds the person who wrote from `"15550100177"` (also when `resolve` keys
-  them), and when one number is written two ways there (the business's, the provider's) the nudge
+  them; on WhatsApp the number is in full, or as WhatsApp writes it), and `agent.contact(to)` finds
+  them the same way. When one number is written two ways there (the business's, the provider's) the nudge
   goes where they last wrote from, with that identity's window. Scheduled messages pick that
   identity too. A test person's playground identity never takes a business's nudge from their real
   phone's, nor the Person panel's from the playground.
