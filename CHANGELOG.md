@@ -36,6 +36,33 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - iMessage group conversations are passed over, with one warning. The agent never answers in a
   group, and no typing or read receipt goes to one. Before, their events failed, and Flow
   delivered them again.
+- **Edits and unsends.** On channels that have them (Telegram and iMessage on Flow Messaging, a
+  custom UI with the new `editMessage` / `unsendMessage`) the agent is offered `edit_message`
+  (`{ message_id, text }`) and `unsend_message` (`{ message_id }`), as `react` is offered only where
+  reactions exist; WhatsApp and SMS offer neither. The send tool's result there names the message
+  (`{"delivered":true,"channel":"imessage","message_id":"msg_..."}`), read back from the history
+  after a restart. An edit's text passes `beforeSend` (`context.edit` names the message) and the
+  content rules like any send. On Flow Messaging an edit is `PATCH /v0/messages/{id}` (the new text
+  styled as a send's: Telegram's HTML, iMessage's styles) and an unsend `DELETE /v0/messages/{id}`.
+  Flow refuses a late or unsupported one when it is made (`422 unsupported_content`, with
+  `edit_window_closed`, `unsend_window_closed`, `first_message_not_editable` or `not_on_sms`), and
+  the tool's result is that refusal with Flow's message, which states the limit (`Not edited:
+  unsupported_content (edit_window_closed, on imessage): iMessage allows edits within 15 minutes of
+  sending; ...`). Nothing is sent instead: the agent writes its own correction if it wants one.
+  Flow Framework sets no time limits of its own. One the channel refuses after Flow took it comes
+  as Not delivered (`edit of msg_...: <text>`, `unsend of msg_...`). New `ChannelInfo.edits` /
+  `unsends`, `Outbound` `{ type: "edit", messageId, text }` / `{ type: "unsend", messageId }`, events
+  `message.edited` and `message.unsent`, transcript entries `edit` and `unsend`.
+- **Sends return the platform's message id.** `SendReceipt.messageId`: Flow Messaging's sends
+  resolve with it (`msg_...`; a carousel sent in parts, its first message's), and so can any
+  provider's; `message.out` carries it as `messageId`, and a sent nudge's `NudgeResult.messageId`
+  (a prompt nudge's: the agent's first message) when this process sent it. That id is what
+  `PATCH` and `DELETE /v0/messages/{id}` take, for an agent's own code.
+- The playground, `flow chat` and the test cloud's simulators play edits and unsends: their sends
+  resolve with their ids (`a1`, `a2`, ...), the thread shows the message edited or gone (lines
+  `edit` and `unsend`), a platform without them refuses them with its error, and `flow show` prints
+  them. The cloud's answer to an outbound may carry `messageId` (an older cloud's does not, and its
+  runs offer no edits).
 
 ### Migration notes
 
@@ -61,6 +88,11 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   text first. Before, they started the conversation.
 - **A WhatsApp carousel no longer quotes the message it replies to** (V0's carousel has no
   `reply_to`).
+- **`Outbound` has two more members, `edit` and `unsend`.** They go only to channels whose info
+  says `edits` / `unsends`, so a hand-written channel is never sent one. TypeScript code that
+  narrows `Outbound` by what it is not (`Exclude<...>`, or an exhaustive `switch` with a `never`
+  check) handles the two (or ignores them, as for `typing`).
+- **`PlaygroundSink` may return a `SendReceipt`.** A sink that returns nothing keeps working unchanged.
 
 ## 0.6.0 (2026-10-24)
 

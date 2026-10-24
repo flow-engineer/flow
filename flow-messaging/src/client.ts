@@ -85,6 +85,15 @@ export class Client {
     return this.request<T>("POST", path, body, idempotencyKey, tries);
   }
 
+  /** PATCH and DELETE change what is there, so a repeat is safe: no Idempotency-Key. */
+  patch<T>(path: string, body: unknown): Promise<T> {
+    return this.request<T>("PATCH", path, body);
+  }
+
+  delete<T>(path: string): Promise<T> {
+    return this.request<T>("DELETE", path);
+  }
+
   private async request<T>(method: string, path: string, body?: unknown, idempotencyKey?: string, tries = TRIES): Promise<T> {
     if (!this.apiKey) throw new Error("set FLOW_MESSAGING_KEY (or pass apiKey) to reach Flow Messaging");
     const headers: Record<string, string> = { authorization: `Bearer ${this.apiKey}`, "flow-version": API_VERSION };

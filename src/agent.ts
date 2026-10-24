@@ -27,7 +27,7 @@ import { Store, type ConversationRow, type EventStateStore, type IdentityRow, ty
 import { clock, quietUntil, validZone } from "./time.ts";
 import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } from "./tools.ts";
 import { traces, tracesFromEnv, type Traces, type TracesOptions } from "./traces.ts";
-import type { BeforeSend, ChannelInfo, Deliver, Incoming, Model, Outbound, Template, TemplateDefinition, Transcribe } from "./types.ts";
+import type { BeforeSend, ChannelInfo, Deliver, Incoming, Model, Outbound, SendReceipt, Template, TemplateDefinition, Transcribe } from "./types.ts";
 
 /** What a host supplies to an agent: `createAgent({ ..., host })`. */
 export interface HostOptions {
@@ -252,8 +252,8 @@ export interface TestPerson {
   phone: string;
 }
 
-/** Where the playground shows what the agent sends to a test person who wrote from it. */
-export type PlaygroundSink = (delivery: { conversationId: string; person: TestPerson & { key?: string; visitor?: string }; channel: string; outbound: Outbound }) => Promise<void> | void;
+/** Where the playground shows what the agent sends to a test person who wrote from it; it may resolve with a receipt (the message's id, for edits), as a channel's send does. */
+export type PlaygroundSink = (delivery: { conversationId: string; person: TestPerson & { key?: string; visitor?: string }; channel: string; outbound: Outbound }) => Promise<void | SendReceipt> | void | SendReceipt;
 
 export interface AgentStatus {
   busy: boolean;
@@ -306,6 +306,12 @@ export interface NudgeResult {
    */
   status: NudgeStatus;
   reason?: string;
+  /**
+   * sent: the platform's id for the message (SendReceipt.messageId; for a prompt nudge, the agent's
+   * first message), when the channel gave one and this process sent it. What PATCH or DELETE
+   * /v0/messages/{id} take on Flow Messaging.
+   */
+  messageId?: string;
 }
 
 export type NudgeStatus = "sent" | "silent" | "dropped" | "refused" | "failed" | "scheduled" | "held" | "expired";
@@ -355,6 +361,8 @@ export interface NudgeState {
   id: string;
   status: NudgeStatus | "queued";
   reason?: string;
+  /** As NudgeResult's. */
+  messageId?: string;
 }
 
 const NO_EXTRAS: ChannelInfo = { reactions: false, status: false };
@@ -465,7 +473,7 @@ export class Agent {
       windowClosed: (nudge, to) => this.windowClosed(nudge, to),
       tagChannels: (options.channels ?? []).length > 1,
       links: (id) => this.links(id),
-      settle: (target, status, reason) => this.settle(target, status, reason),
+      settle: (target, status, reason, messageId) => this.settle(target, status, reason, messageId),
     };
     const every = options.scheduleCheckMs ?? 5_000;
     if (every > 0) setInterval(() => void this.runDue().catch((error) => console.warn("flow: scheduled messages:", error)), every).unref();
@@ -1425,11 +1433,11 @@ export class Agent {
     return this.channelsByName.get(channel)?.info ?? this.conversations.get(conversationId)?.channelInfo(channel) ?? NO_EXTRAS;
   }
 
-  private async settle(target: { run?: string; nudge?: string }, status: string, reason?: string): Promise<void> {
+  private async settle(target: { run?: string; nudge?: string }, status: string, reason?: string, messageId?: string): Promise<void> {
     if (target.run) await this.store.settleRun(target.run, status, reason);
     if (target.nudge) {
       await this.store.settleNudge(target.nudge, status, reason);
-      this.release(target.nudge, this.result(target.nudge, status, reason));
+      this.release(target.nudge, { ...this.result(target.nudge, status, reason), ...(messageId ? { messageId } : {}) });
     }
   }
 

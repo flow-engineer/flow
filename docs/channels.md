@@ -52,12 +52,14 @@ Your own web or mobile chat. `name` is the channel's name. `provider` (a `Custom
 | `sendMessage(to, message)` | Sends one message: the [Message](#message) fields plus your params by name |
 | `params?` | Extra fields on this channel's send tool, as zod schemas: `{ app_link: z.string().describe("...") }`. The agent may fill each one (they are always optional, an empty value is left out), and `sendMessage` gets them as they are. Describe each one: the description is what the agent reads |
 | `instructions?` | Your guidance for the agent on this channel, such as when to fill your params |
-| `info?` | What your UI can show (a `ChannelInfo` without `reactions`, `status` and `readReceipts`, which come from the methods below). Default: Markdown, no buttons. See [ChannelInfo](#channelinfo) |
+| `info?` | What your UI can show (a `ChannelInfo` without `reactions`, `status`, `readReceipts`, `edits` and `unsends`, which come from the methods below). Default: Markdown, no buttons. See [ChannelInfo](#channelinfo) |
 | `sendCarousel?(to, carousel)` | A carousel, when `info.carousels` is set; otherwise the cards go one by one through `sendMessage` |
 | `react?(to, messageId, emoji)` | Reactions |
 | `typing?(to, on)` | The typing indicator |
 | `markRead?(to, messageIds)` | Read receipts |
 | `status?(to, text \| null)` | A short line of what the agent is doing, in your loading indicator; `null` clears it |
+| `editMessage?(to, messageId, text)` | New text for a message the agent sent, by the `messageId` your `sendMessage` resolved with (`{ status: "sent", messageId }`). With it the agent is offered `edit_message`; reject to refuse an edit, and the reason goes to the agent |
+| `unsendMessage?(to, messageId)` | Takes back a message the agent sent, by that id. With it the agent is offered `unsend_message` |
 
 ## Flow Messaging: `fm.whatsapp()`, `fm.telegram()`, `fm.imessage()`, `fm.sms()`
 
@@ -111,3 +113,4 @@ What a channel can show; Flow Framework offers the agent only what is set, and f
 | `platform` | `whatsapp`, `telegram`, `imessage` or `sms`: whose content rules (`CONTENT_LIMITS`) every send is checked against |
 | `replyWindowHours` | The business may write first only this long after the person's last message |
 | `reactions`, `status`, `readReceipts` | Set from the provider's methods |
+| `edits`, `unsends` | The agent can change or take back a message it sent (`edit_message`, `unsend_message`, by the id its send's result gave). Telegram and iMessage on Flow Messaging have both; a custom UI sets them from `editMessage` and `unsendMessage`; WhatsApp and SMS have neither. The platform decides how late either may come, and nothing is sent in place of one it refuses: the refusal goes back to the agent as its tool result. Flow Messaging refuses a late or unsupported one when it is made (`422 unsupported_content` with `edit_window_closed`, `unsend_window_closed`, `first_message_not_editable` or `not_on_sms`, its message stating the limit) |

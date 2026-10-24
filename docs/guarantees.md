@@ -21,7 +21,12 @@ A send may resolve with a receipt (`SendReceipt`) saying how far the message got
 `waitFor: "queued"`), or `unconfirmed`. `unconfirmed` means no signal came within the provider's
 wait (Flow Messaging's `waitTimeoutMs`, 30 seconds by default): the message may still arrive and is
 **never sent again**; the agent emits `message.slow` (with `channel`, `origin`, `text`, `waitedMs`)
-and carries on. A send that resolves with nothing counts as accepted.
+and carries on. A send that resolves with nothing counts as accepted. A receipt may also carry the
+platform's `messageId` (Flow Messaging's `msg_...`): it is on `message.out`, and on channels with
+`edits` or `unsends` the agent's send result names it, so `edit_message` and `unsend_message` can.
+An edit passes `beforeSend` and the content rules like any send. An edit or unsend resolves once
+the platform accepted the call (Flow Messaging's `200`) and rejects when it refuses it then (a
+`422` past the channel's limit); one the channel refuses later reaches the agent as Not delivered.
 
 What follows from it:
 

@@ -52,6 +52,9 @@ export async function fakeFlow() {
       const kind = into ? into[2]!.replace("-", "_") : content.kind;
       return { status: 202, body: { id: `msg_out${++sent}`, conversation: into?.[1] ?? "conv_started", direction: "out", status: "sent", content: { ...content, kind } } };
     }
+    // An edit shows the message with its new content; an unsend, the message as it is (unsent once the channel removed it).
+    if (r.method === "PATCH" && r.path.startsWith("/v0/messages/")) return { status: 200, body: { id, conversation: "conv_tg", direction: "out", status: "sent", content: { kind: "basic", ...r.body } } };
+    if (r.method === "DELETE" && r.path.startsWith("/v0/messages/")) return { status: 200, body: { id, conversation: "conv_tg", direction: "out", status: "sent", content: { kind: "basic", text: "" } } };
     return notFound();
   }
   const notFound = () => ({ status: 404, body: { error: { type: "not_found", message: "No such object.", hint: "", doc_url: "" } } });

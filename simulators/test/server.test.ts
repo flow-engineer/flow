@@ -764,3 +764,51 @@ test("each message carries what the platform's API carried: WhatsApp's Graph req
     await server.close();
   }
 });
+
+test("on iMessage the agent's sends resolve with the playground's ids, its edits and unsends show as lines naming them, also after a restart", async () => {
+  const path = join(mkdtempSync(join(tmpdir(), "flow-play-")), "flow.db");
+  const first = multi({ channels: { imessage: { info: IMESSAGE } }, testPeople: [SAM], database: sqlite(path) });
+  await first.agent.resume();
+  const server = await simulators().listen(first.agent, 0);
+  const said = async (url: string) =>
+    ((await (await fetch(`${url}/api/transcript?channel=imessage&person=${encodeURIComponent(SAM.phone)}`)).json()) as { lines: Line[] }).lines.flatMap((l) =>
+      l.kind === "out" ? [["out", l.id, l.text]] : l.kind === "edit" ? [["edit", l.messageId, l.text]] : l.kind === "unsend" ? [["unsend", l.messageId]] : [],
+    );
+  const expected = [["out", "a1", "Top bid ₹47,133"], ["out", "a2", "Bid?"], ["edit", "a1", "Top bid ₹39,500"], ["unsend", "a2"], ["out", "a3", "Corrected above."]];
+  try {
+    const post = (text: string) => fetch(`${server.url}/api/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "imessage", person: SAM.phone, text }) });
+    assert.equal((await post("top bid?")).status, 202);
+    (await first.nextCall(0)).answer(respond(call("send_imessage", { text: "Top bid ₹47,133" }), call("send_imessage", { text: "Bid?" })));
+    const id = (await first.agent.testConversation(SAM.phone))!;
+    await first.agent.conversation(id)!.whenIdle();
+    assert.equal((await post("hm")).status, 202);
+    (await first.nextCall(1)).answer(respond(call("edit_message", { message_id: "a1", text: "Top bid ₹39,500" }), call("unsend_message", { message_id: "a2" }), call("send_imessage", { text: "Corrected above." })));
+    await first.agent.conversation(id)!.whenIdle();
+    assert.deepEqual(await said(server.url), expected);
+  } finally {
+    await server.close();
+  }
+  const again = multi({ channels: { imessage: { info: IMESSAGE } }, testPeople: [SAM], database: sqlite(path), dir: first.dir });
+  await again.agent.resume();
+  const restarted = await simulators().listen(again.agent, 0);
+  try {
+    assert.deepEqual(await said(restarted.url), expected);
+  } finally {
+    await restarted.close();
+  }
+});
+
+test("the test cloud's simulators refuse an edit where the platform has none, or of a message that is not the agent's, and say so in the thread", async () => {
+  const { fake, server, send, lines } = await start();
+  try {
+    await send("whatsapp", "hi");
+    assert.deepEqual(await fake.deliver!({ type: "message", text: "Hello" }), { status: "sent", messageId: "a1" });
+    assert.throws(() => fake.deliver!({ type: "edit", messageId: "a1", text: "Hi" }), /WhatsApp messages cannot be edited/);
+    await send("telegram", "hi");
+    assert.throws(() => fake.deliver!({ type: "unsend", messageId: "m1" }), /there is no message m1 of the agent's to unsend/);
+    assert.deepEqual((await lines("telegram")).filter((l) => l.kind === "undelivered").map((l) => (l as { text: string }).text), ["unsend m1"]);
+    assert.equal((await lines("whatsapp")).filter((l) => l.kind === "edit").length, 0);
+  } finally {
+    await server.close();
+  }
+});

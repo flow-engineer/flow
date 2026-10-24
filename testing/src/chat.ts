@@ -66,7 +66,14 @@ export async function chatCli(args: string[], input: NodeJS.ReadableStream = pro
   if (!person) return fail("no_test_people", `${values.person ? `${values.person} is not one of the agent's testPeople` : "the agent has no testPeople"}; declare them in createAgent({ testPeople: [{ name, phone }] }).`);
   if (!channel) return fail("no_channel", `${values.channel ? `no channel named ${values.channel}` : "the agent has no channels"}; it has ${agent.channels().map((c) => c.name).join(", ") || "none"}.`);
 
-  agent.attachPlayground(({ outbound }) => print(outbound, channel.name, json));
+  // On a channel with edits or unsends the agent's messages get ids (a1, a2, ...), so it can name one to change.
+  const ids = channel.info.edits || channel.info.unsends;
+  let sent = 0;
+  agent.attachPlayground(({ outbound }) => {
+    const id = ids && (outbound.type === "message" || outbound.type === "carousel" || outbound.type === "template") ? `a${++sent}` : undefined;
+    print(outbound, channel.name, json, id);
+    return id ? { status: "sent" as const, messageId: id } : undefined;
+  });
   turns.push((event) => {
     if (event.type === "model.error") console.error(`flow chat: the model failed: ${String(event.error ?? event.message ?? "error")}`);
   });
@@ -94,11 +101,13 @@ export async function chatCli(args: string[], input: NodeJS.ReadableStream = pro
 
 const photoText = (image: Photo) => ("url" in image ? image.url : image.fileId);
 
-/** One thing the agent sent, as a person would read it (or one JSON line). */
-function print(outbound: Outbound, channel: string, json: boolean): void {
+/** One thing the agent sent, as a person would read it (or one JSON line); `id` is the message's own. */
+function print(outbound: Outbound, channel: string, json: boolean, id?: string): void {
   if (outbound.type === "typing" || outbound.type === "status" || outbound.type === "read") return;
-  if (json) return void process.stdout.write(`${JSON.stringify({ channel, ...outbound })}\n`);
+  if (json) return void process.stdout.write(`${JSON.stringify({ channel, ...outbound, ...(id ? { id } : {}) })}\n`);
   if (outbound.type === "reaction") return void process.stdout.write(`agent reacted ${outbound.emoji}\n`);
+  if (outbound.type === "edit") return void process.stdout.write(`agent edited a message: ${outbound.text}\n`);
+  if (outbound.type === "unsend") return void process.stdout.write("agent unsent a message\n");
   if (outbound.type === "template") return void process.stdout.write(`agent: [template ${outbound.name}]\n`);
   if (outbound.type === "carousel") {
     const cards = outbound.cards.map((c) => `[card ${photoText(c.image)}${c.text ? ` ${c.text}` : ""}${c.link ? ` [${c.link.label}: ${c.link.url}]` : ""}${c.buttons ? ` ${c.buttons.map((b) => `[${replyButton(b).label}]`).join(" ")}` : ""}]`);

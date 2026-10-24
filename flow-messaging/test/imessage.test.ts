@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, fitMessage, sqlite, type Database, type FlowEvent } from "../../src/index.ts";
+import { createAgent, fitMessage, sqlite, type ChatMessage, type Database, type FlowEvent } from "../../src/index.ts";
 import { call, respond, scriptedModel, users } from "./helpers.ts";
 import { fakeFlow, sign, SECRET, type Recorded } from "./fake.ts";
 import { flowMessaging, IMESSAGE } from "../src/index.ts";
@@ -78,6 +78,57 @@ test("an iMessage message reaches the agent by its sender, and the reply (its Ma
   assert.deepEqual((await flow.request(post("/v0/conversations/conv_im/typing"))).body, {});
   assert.equal(flow.sends("/v0/messages").length, 0, "a reply never starts a new conversation");
   await live.agent.conversation(live.events[0]!.conversationId)!.whenIdle();
+});
+
+test("on iMessage the agent fixes a wrong bid by edit_message (its Markdown as iMessage's styles); an edit or unsend Flow refuses at the call (too late, the first message, a message that went by SMS) goes back to the model with Flow's reason, and nothing is sent instead", async (t) => {
+  const flow = await fakeFlow();
+  const live = await imessageAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_im = { id: "ct_im", channel: "imessage", address: { handle: "+15550100100", phone: "+15550100100" } };
+  const results = (r: { request: { messages: ChatMessage[] } }) => r.request.messages.flatMap((m) => (m.role === "tool" ? [m.content] : []));
+
+  await live.deliver(received("msg_1", "Top bid on the Polo?"));
+  const first = await live.nextCall(0);
+  assert.deepEqual(first.request.tools.map((x) => x.name).filter((name) => name === "edit_message" || name === "unsend_message"), ["edit_message", "unsend_message"], "iMessage offers both tools");
+  first.answer(respond(call("send_imessage", { text: "Top bid ₹47,133" }), call("send_imessage", { text: "Want to bid?" }), call("send_imessage", { text: "Ends at 6pm." })));
+  await live.agent.conversation(live.events[0]!.conversationId)!.whenIdle();
+  const sent = flow.sends("/v0/conversations/conv_im/basic").map((r) => r.body.text);
+  assert.deepEqual(sent, ["Top bid ₹47,133", "Want to bid?", "Ends at 6pm."]);
+
+  await live.deliver(received("msg_2", "sure?"));
+  const second = await live.nextCall(1);
+  assert.deepEqual(results(second).slice(-3).map((r) => JSON.parse(r).message_id), ["msg_out1", "msg_out2", "msg_out3"], "each send's result names its Flow message");
+  const refuse = (method: string, id: string, error: object) => flow.queued.push({ match: (r) => r.method === method && r.path === `/v0/messages/${id}`, status: 422, body: { error: { type: "unsupported_content", channel: "imessage", hint: "Send a new message instead.", doc_url: "", ...error } } });
+  refuse("PATCH", "msg_out2", { channel_code: "edit_window_closed", message: "iMessage allows edits within 15 minutes of sending; this message was sent 22 minutes ago." });
+  refuse("DELETE", "msg_out2", { channel_code: "unsend_window_closed", message: "iMessage allows unsends within 2 minutes of sending; this message was sent 6 minutes ago." });
+  refuse("PATCH", "msg_out3", { channel_code: "first_message_not_editable", message: "iMessage cannot edit the message that started the conversation." });
+  refuse("DELETE", "msg_out3", { channel_code: "not_on_sms", message: "This message went by SMS, which has no unsend." });
+  second.answer(
+    respond(
+      call("edit_message", { message_id: "msg_out1", text: "Top bid **₹39,500**" }),
+      call("edit_message", { message_id: "msg_out2", text: "Bid now?" }),
+      call("unsend_message", { message_id: "msg_out2" }),
+      call("edit_message", { message_id: "msg_out3", text: "Ends at 7pm." }),
+      call("unsend_message", { message_id: "msg_out3" }),
+    ),
+  );
+  const third = await live.nextCall(2);
+  assert.deepEqual(results(third).slice(-5), [
+    JSON.stringify({ edited: true, channel: "imessage", message_id: "msg_out1" }),
+    "Not edited: unsupported_content (edit_window_closed, on imessage): iMessage allows edits within 15 minutes of sending; this message was sent 22 minutes ago.",
+    "Not unsent: unsupported_content (unsend_window_closed, on imessage): iMessage allows unsends within 2 minutes of sending; this message was sent 6 minutes ago.",
+    "Not edited: unsupported_content (first_message_not_editable, on imessage): iMessage cannot edit the message that started the conversation.",
+    "Not unsent: unsupported_content (not_on_sms, on imessage): This message went by SMS, which has no unsend.",
+  ]);
+  assert.deepEqual((await flow.request((r) => r.method === "PATCH" && r.path === "/v0/messages/msg_out1")).body, { text: "Top bid ₹39,500", imessage: { styles: [{ start: 8, length: 7, style: "bold" }] } });
+  third.answer(respond(call("send_imessage", { text: "Correction: the Polo ends at 7pm." })));
+  await live.agent.conversation(live.events[0]!.conversationId)!.whenIdle();
+  assert.deepEqual(flow.sends("/v0/conversations/conv_im/basic").map((r) => r.body.text), [...sent, "Correction: the Polo ends at 7pm."], "a refusal sends nothing in its place: the agent writes its own correction");
+  assert.deepEqual(
+    live.events.filter((e) => e.type === "message.edited" || e.type === "message.unsent").map((e) => [e.type, e.messageId]),
+    [["message.edited", "msg_out1"]],
+    "only the edit Flow took is an event",
+  );
 });
 
 test("after a restart, a nudge to someone on iMessage starts from the line's sender (FLOW_MESSAGING_IMESSAGE_SENDER), to their email handle", async (t) => {

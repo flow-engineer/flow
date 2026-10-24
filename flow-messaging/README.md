@@ -152,6 +152,17 @@ adapter picks the kind each channel takes:
 - Quotes (`reply_to`), reactions (tapbacks on iMessage), typing (`{}`: it clears itself when the next
   message goes, so nothing is sent when the agent stops typing), and read receipts (WhatsApp up to
   the message read; iMessage marks the whole conversation).
+- Edits and unsends (Telegram, iMessage): the agent's `edit_message` is `PATCH /v0/messages/{id}`
+  with the new text styled as a send's would be (`telegram.parse_mode` HTML, `imessage.styles`), its
+  `unsend_message` `DELETE /v0/messages/{id}`, by the id its send resolved with
+  (`SendReceipt.messageId`). How late each may come is Flow's and the channel's rule, checked by Flow
+  when the call is made: a refusal (`422 unsupported_content`, with `channel_code`
+  `edit_window_closed`, `unsend_window_closed`, `first_message_not_editable` or `not_on_sms`, and
+  Flow's message stating the limit) goes back to the agent as its tool result, such as `Not edited:
+  unsupported_content (edit_window_closed, on imessage): iMessage allows edits within 15 minutes of
+  sending; ...`, and nothing is sent instead. One the channel refuses after Flow took it comes later
+  as `message.failed` for a message of kind `edit` or `unsend`, told to the agent as Not delivered
+  (`edit of msg_...: <text>`). WhatsApp and SMS have neither, so the agent is not offered them.
 - WhatsApp templates (`template`), by name or `tpl_` ID, with their header (text, or media by URL or
   file ID), body values (`{{1}}`, `{{2}}`, ...) and button values (URL suffixes, quick-reply payloads).
 - A message the business starts (a nudge, a scheduled text) goes with `link_preview: false`.
@@ -169,7 +180,7 @@ older API gets the older shape (`content.type`); both read the same.
   or row's id and its label. A quick reply's payload is its ID.
 - Quotes, read from Flow.
 - Reactions to the agent's messages.
-- Late failures (`message.failed`), told to the agent as "Not delivered".
+- Late failures (`message.failed`), told to the agent as "Not delivered" (an edit's or unsend's as `edit of msg_...`, `unsend of msg_...`).
 - Photos, voice notes, audio and documents, as attachments. Their bytes are fetched from
   `GET /v0/files/{id}` only when the agent can use them. A voice note Flow already transcribed
   arrives as its transcript.

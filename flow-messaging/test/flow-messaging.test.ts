@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { sqlite } from "../../src/index.ts";
+import { sqlite, type ChatMessage } from "../../src/index.ts";
 import { call, respond, users } from "./helpers.ts";
 import { fakeFlow, liveAgent, received, event, sign, SECRET, type Recorded } from "./fake.ts";
 import { flowMessaging } from "../src/index.ts";
@@ -243,7 +243,50 @@ test("failures reach the agent as Not delivered: a permanent refusal once, untri
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
-test("after a restart, a nudge with no known Flow conversation starts one from the channel's sender (Telegram, Markdown)", async (t) => {
+test("on Telegram a send resolves with Flow's message id, which the agent edits (PATCH /v0/messages/{id}) and unsends (DELETE) by; an edit Flow refuses at the call goes back to it as Flow's error", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_tg = { address: { telegram_user_id: "777" } };
+  const tools = (r: { request: { messages: ChatMessage[] } }) => r.request.messages.flatMap((m) => (m.role === "tool" ? [m.content] : []));
+
+  await live.deliver(received(TG, "msg_1", { kind: "basic", text: "top bid?" }));
+  (await live.nextCall(0)).answer(respond(call("send_telegram", { text: "Top bid ₹47,133" }), call("send_telegram", { text: "Bid?" })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+  await live.deliver(received(TG, "msg_2", { kind: "basic", text: "hm" }));
+  const second = await live.nextCall(1);
+  assert.deepEqual(tools(second).slice(-2).map((r) => JSON.parse(r).message_id), ["msg_out1", "msg_out2"]);
+  flow.queued.push({ match: (r) => r.method === "PATCH" && r.path === "/v0/messages/msg_out2", status: 422, body: { error: { type: "unsupported_content", param: "kind", channel: "telegram", message: "This message can no longer be edited.", hint: "", doc_url: "" } } });
+  second.answer(respond(call("edit_message", { message_id: "msg_out1", text: "Top bid **₹39,500**" }), call("edit_message", { message_id: "msg_out2", text: "Bid now?" }), call("unsend_message", { message_id: "msg_out2" })));
+  const third = await live.nextCall(2);
+  assert.deepEqual(tools(third).slice(-3), [
+    JSON.stringify({ edited: true, channel: "telegram", message_id: "msg_out1" }),
+    "Not edited: unsupported_content (param kind, on telegram): This message can no longer be edited.",
+    JSON.stringify({ unsent: true, channel: "telegram", message_id: "msg_out2" }),
+  ]);
+  // The new text goes as a send's would: the agent's Markdown as Telegram's HTML.
+  assert.deepEqual((await flow.request((r) => r.method === "PATCH" && r.path === "/v0/messages/msg_out1")).body, { text: "Top bid <b>₹39,500</b>", telegram: { parse_mode: "HTML" } });
+  const unsend = await flow.request((r) => r.method === "DELETE" && r.path === "/v0/messages/msg_out2");
+  assert.equal(unsend.body, undefined, "an unsend has no body");
+  third.answer(respond(call("send_telegram", { text: "Corrected above." })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+
+  // An edit Flow took that the channel refused later (a message of kind edit) comes back as what it was.
+  const failed = { id: "msg_e1", conversation: "conv_tg", direction: "out", status: "failed", content: { kind: "edit", message_id: "msg_out1", text: "Top bid <b>₹39,500</b>", telegram: { parse_mode: "HTML" } }, error: { type: "channel_error", message: "Telegram refused the edit." } };
+  await live.deliver(event("message.failed", TG, { message: failed }));
+  const told = await live.nextCall(3);
+  assert.equal(lastUser(told.request.messages), "[Not delivered] \"edit of msg_out1: Top bid <b>₹39,500</b>\": channel_error: Telegram refused the edit. It will fail again: don't resend it.");
+  told.answer(respond(call("send_telegram", { text: "Top bid is ₹39,500." })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+  // So does an unsend the channel refused.
+  await live.deliver(event("message.failed", TG, { message: { id: "msg_u1", conversation: "conv_tg", direction: "out", status: "failed", content: { kind: "unsend", message_id: "msg_out2" }, error: { type: "unsupported_content", channel_code: "unsend_window_closed", message: "Telegram allows unsends within 48 hours of sending." } } }));
+  const toldUnsend = await live.nextCall(4);
+  assert.match(lastUser(toldUnsend.request.messages), /^\[Not delivered\] "unsend of msg_out2": unsupported_content \(unsend_window_closed\): Telegram allows unsends within 48 hours of sending\./);
+  toldUnsend.answer(respond(call("send_telegram", { text: "Sorry, that last one stays." })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+});
+
+test("after a restart, a nudge with no known Flow conversation starts one from the channel's sender (Telegram, Markdown); a sent nudge gives the message's id", async (t) => {
   const flow = await fakeFlow();
   const database = join(mkdtempSync(join(tmpdir(), "flow-fm-db-")), "agent.db");
   flow.contacts.ct_tg = { address: { telegram_user_id: "777", username: "maya" } };
@@ -255,9 +298,14 @@ test("after a restart, a nudge with no known Flow conversation starts one from t
 
   const after = await liveAgent(flow, { database: sqlite(database) });
   t.after(() => (flow.close(), after.close()));
-  assert.equal((await after.agent.nudge({ to: { channel: "telegram", address: "777" }, text: "Your table is **ready**" })).status, "sent");
+  const nudged = await after.agent.nudge({ to: { channel: "telegram", address: "777" }, text: "Your table is **ready**" });
+  assert.deepEqual([nudged.status, nudged.messageId], ["sent", "msg_out2"], "a sent nudge names the message Flow sent");
   // A start is a basic message with where it goes; the agent's Markdown goes as Telegram's HTML.
   assert.deepEqual((await flow.request(post("/v0/messages"))).body, { sender: "snd_TG", to: { telegram_user_id: "777" }, kind: "basic", text: "Your table is <b>ready</b>", telegram: { parse_mode: "HTML" } });
+  // A prompt nudge names the agent's first message.
+  const prompted = after.agent.nudge({ to: { channel: "telegram", address: "777" }, prompt: "Their table is ready" });
+  (await after.nextCall(0)).answer(respond(call("send_telegram", { text: "Your table is ready!" }), call("send_telegram", { text: "See you soon." })));
+  assert.deepEqual([(await prompted).status, (await prompted).messageId], ["sent", "msg_out3"]);
 });
 
 test("the key and base URL come from FLOW_MESSAGING_KEY and FLOW_MESSAGING_BASE_URL, as in Flow's SDKs, else the older names", async (t) => {

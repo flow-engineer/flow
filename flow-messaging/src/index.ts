@@ -109,7 +109,8 @@ export interface StreamHandle {
 /**
  * Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos (one with
  * buttons is one message), carousels (their text, then one message per card: its photo, text and
- * buttons), Markdown (sent as Telegram's HTML), no read receipts for bots.
+ * buttons), Markdown (sent as Telegram's HTML), edits and unsends (Flow refuses an unsend past 48
+ * hours, and the agent is told), no read receipts for bots.
  */
 export const TELEGRAM: ChannelInfo = {
   platform: "telegram",
@@ -125,14 +126,17 @@ export const TELEGRAM: ChannelInfo = {
   carousels: WHATSAPP_CAROUSELS,
   readReceipts: false,
   templates: false,
+  edits: true,
+  unsends: true,
 };
 
 /**
  * iMessage as Flow sends it: text up to 9999 characters, its Markdown sent as iMessage's own styles
  * (bold, italic, underline, strikethrough), photos, inline replies, tapbacks (other emoji go as emoji
- * reactions), typing and read receipts (the whole conversation). No buttons, lists or templates. No
- * reply window is set: the line only answers people who wrote to it, and a send it will not deliver
- * comes back as Not delivered (outside_window).
+ * reactions), typing and read receipts (the whole conversation), edits and unsends (Flow refuses one
+ * that comes too late, and the agent is told). No buttons, lists or templates. No reply window is
+ * set: the line only answers people who wrote to it, and a send it will not deliver comes back as
+ * Not delivered (outside_window).
  */
 export const IMESSAGE: ChannelInfo = {
   platform: "imessage",
@@ -144,6 +148,8 @@ export const IMESSAGE: ChannelInfo = {
   images: { captionMax: 1024 },
   readReceipts: true,
   templates: false,
+  edits: true,
+  unsends: true,
 };
 
 /** WhatsApp's most reply buttons in one message; more choices go as a list. */
@@ -289,7 +295,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * past the wait it resolves "unconfirmed" (the message may still go, and is never sent again).
    */
   function arrived(route: Route, message: FlowMessage): Promise<SendReceipt> {
-    if (waitFor === "queued" || !message.id) return Promise.resolve({ status: "queued" });
+    if (waitFor === "queued" || !message.id) return Promise.resolve({ status: "queued", ...(message.id ? { messageId: message.id } : {}) });
     const started = Date.now();
     const target = waitFor === "delivered" && route.kind !== "telegram" ? "delivered" : "sent";
     return new Promise<SendReceipt>((resolve, reject) => {
@@ -302,7 +308,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         clearTimeout(poll);
         waiting.delete(message.id);
         if (outcome instanceof Error) reject(outcome);
-        else resolve({ status: outcome, waitedMs: Date.now() - started });
+        else resolve({ status: outcome, waitedMs: Date.now() - started, messageId: message.id });
       };
       const take = (status: string | undefined, error?: FlowMessage["error"]): boolean => {
         if (done || !status) return done;
@@ -335,6 +341,21 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       };
       poll = setTimeout(readBack, delay);
     });
+  }
+
+  /**
+   * An edit or unsend: resolves once Flow took it, rejects with Flow's reason. A late or unsupported
+   * one is refused at the call (`422 unsupported_content`: `edit_window_closed`, `unsend_window_closed`,
+   * `first_message_not_editable`, `not_on_sms`, or `param` `kind` on a channel without them), and the
+   * agent is told `unsupported_content (edit_window_closed): <Flow's message, with the limit>`.
+   */
+  async function change(call: () => Promise<unknown>): Promise<void> {
+    try {
+      await call();
+    } catch (error) {
+      if (!(error instanceof FlowMessagingError)) throw error;
+      throw new Error(`${detailed({ type: error.type, channelCode: error.channelCode, param: error.param, channel: error.channel })}: ${error.message}`);
+    }
   }
 
   /**
@@ -436,6 +457,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       sendCarousel: (to: string, carousel: Carousel) =>
         route.kind === "telegram" ? telegramCarousel(route, to, carousel) : send(route, to, carouselOf(carousel), carousel.replyTo, carousel.idempotencyKey),
       react: async (to: string, messageId: string, emoji: string) => void (await send(route, to, { kind: "reaction", body: { message_id: messageId, emoji } }, messageId)),
+      // An edit or unsend Flow refuses (too late, or a channel without them) rejects with its reason, for the agent.
+      editMessage: (to: string, messageId: string, text: string) => change(() => client.patch(`/v0/messages/${idSegment("msg", messageId)}`, styled(route.kind, text))),
+      unsendMessage: (to: string, messageId: string) => change(() => client.delete(`/v0/messages/${idSegment("msg", messageId)}`)),
       // The indicator clears itself when the next message goes: there is nothing to send for "off".
       typing: async (to: string, on: boolean) => (on ? courtesy(route, to, "typing", {}) : undefined),
       // iMessage marks the whole conversation read, and refuses `up_to`.
@@ -517,12 +541,17 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
             return (async () => {
               const receipts: SendReceipt[] = [];
               for (const m of carouselMessages(info, carousel)) receipts.push(await p.sendMessage(to, m));
-              // The carousel got as far as its least far card.
-              return receipts.find((r) => r.status === "unconfirmed") ?? receipts.find((r) => r.status === "queued") ?? receipts.find((r) => r.status === "sent") ?? receipts[0];
+              // The carousel got as far as its least far card; its id is its first message's.
+              const least = receipts.find((r) => r.status === "unconfirmed") ?? receipts.find((r) => r.status === "queued") ?? receipts.find((r) => r.status === "sent") ?? receipts[0];
+              return least && { ...least, messageId: receipts[0]!.messageId };
             })();
           }
           case "reaction":
             return p.react(to, outbound.messageId, outbound.emoji);
+          case "edit":
+            return p.editMessage(to, outbound.messageId, outbound.text);
+          case "unsend":
+            return p.unsendMessage(to, outbound.messageId);
           case "typing":
             return p.typing(to, outbound.on);
           case "read":
@@ -650,7 +679,10 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       if (target?.fromAgent) agent.reacted(conversationId, event.data.emoji, target.text);
     } else if (event.type === "message.failed" && event.data?.message) {
       const m = event.data.message;
-      const text = textOf(m.content);
+      // An edit or unsend Flow took and the channel then refused (it waited behind earlier messages past the limit, say): told as what it was.
+      const c = kindOf(m.content);
+      const target = typeof c.message_id === "string" ? c.message_id : "";
+      const text = c.kind === "edit" ? `edit of ${target}: ${textOf(c)}` : c.kind === "unsend" ? `unsend of ${target}` : textOf(m.content);
       const type = m.error?.type ?? "channel_error";
       if (text) agent.undelivered(conversationId, text, reason({ type, channelCode: m.error?.channel_code, param: m.error?.param, channel: m.error?.channel, message: m.error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" }));
     }
@@ -929,9 +961,14 @@ function templateParams(t: Template): Record<string, unknown> {
  * type and whether to resend. A 422 unsupported_content says what the channel does not take
  * (`param`), where (`channel`) and why (`channel_code`, such as group_unsupported or not_on_sms).
  */
-function reason(e: { type: string; channelCode?: string; param?: string; channel?: string; message: string; retryable: boolean }): string {
+/** An error's type with its channel code (and, for unsupported content, what was refused and where): `unsupported_content (param kind, on whatsapp)`. */
+function detailed(e: { type: string; channelCode?: string; param?: string; channel?: string }): string {
   const detail = [e.channelCode, ...(e.type === "unsupported_content" ? [e.param && `param ${e.param}`, e.channel && `on ${e.channel}`] : [])].filter(Boolean);
-  const what = detail.length ? `${e.type} (${detail.join(", ")})` : e.type;
+  return detail.length ? `${e.type} (${detail.join(", ")})` : e.type;
+}
+
+function reason(e: { type: string; channelCode?: string; param?: string; channel?: string; message: string; retryable: boolean }): string {
+  const what = detailed(e);
   if (e.type === "outside_window" && e.channelCode === "quiet_hours") return `${what}: it is night where they are; send it later`;
   if (e.type === "outside_window") return "outside_window";
   if (e.channelCode === "channel_timeout_unknown_outcome") return `${what}: it may have arrived; ask them before sending it again`;

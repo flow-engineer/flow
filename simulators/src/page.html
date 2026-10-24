@@ -177,6 +177,8 @@
   .ghost[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
   .sysnote { align-self: center; font-size: 11.5px; padding: 4px 10px; border-radius: 8px; margin: 6px 0; max-width: 90%; text-align: center; }
   .sysnote.bad { background: #fdecea; color: var(--bad); }
+  .edited { font-size: 11px; opacity: .6; margin: 2px 6px 0; }
+  .row.unsent .bubble { font-style: italic; opacity: .55; }
   .dots { display: inline-flex; gap: 4px; padding: 11px 13px; border-radius: 18px; align-self: flex-start; align-items: center; margin-top: 8px; }
   .dots i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .4; animation: blink 1.2s infinite; }
   .dots i:nth-child(2) { animation-delay: .2s; } .dots i:nth-child(3) { animation-delay: .4s; }
@@ -1310,6 +1312,29 @@
     row.classList.add("reacted");
   }
 
+  /** The agent edited one of its messages: it shows the new text, marked edited, as the platform shows it. */
+  function editMessage(line) {
+    const row = rows.get(line.messageId);
+    if (!row) return;
+    row.dataset.text = line.text;
+    const body = row.querySelector(".body");
+    if (body) body.innerHTML = textHtml(line.text);
+    if (!row.querySelector(".edited")) row.appendChild(make("div", "edited", "Edited"));
+  }
+
+  /** The agent took back one of its messages: gone from the chat, with a line where it was. */
+  function unsendMessage(line) {
+    const row = rows.get(line.messageId);
+    if (!row) return;
+    rows.delete(line.messageId);
+    row.classList.add("unsent");
+    row.querySelector(".actions")?.remove();
+    row.querySelector(".edited")?.remove();
+    const b = row.querySelector(".bubble");
+    if (b) b.replaceChildren(document.createTextNode(current.id === "imessage" ? `${title} unsent a message` : "This message was deleted"));
+    for (const extra of row.querySelectorAll(".bubble ~ *")) extra.remove();
+  }
+
   function markRead(ids, at) {
     for (const id of ids) {
       const row = rows.get(id);
@@ -1433,6 +1458,8 @@
     else if (line.kind === "out") { addMessage(line); if (!line.carrier) onSeen("message", line.at); }
     else if (line.kind === "reaction") { addReaction(line); if (line.by === "agent") onSeen("reaction", line.at); }
     else if (line.kind === "read") markRead(line.messageIds, line.at);
+    else if (line.kind === "edit") editMessage(line);
+    else if (line.kind === "unsend") unsendMessage(line);
     else if (line.kind === "undelivered") sysnote(`Not delivered: “${line.text.slice(0, 60)}” (${line.reason})`, true);
   }
 
@@ -1449,6 +1476,8 @@
     else if (e.type === "message.in") { text = `in [${e.messageId}]: ${e.text}`; }
     else if (e.type === "message.out") { text = `out: ${e.text}` + (e.buttons ? ` [${e.buttons.map((b) => (typeof b === "string" ? b : b.label)).join(" | ")}]` : "") + (e.list ? ` [list: ${e.list.rows.length} rows]` : "") + (e.link ? ` [link: ${e.link.label} → ${e.link.url}]` : "") + (e.image ? ` [image: ${e.image.url || e.image.fileId}]` : "") + (e.carousel ? ` [carousel: ${e.carousel.length} cards]` : "") + (e.fields ? ` [${Object.keys(e.fields).join(", ")}]` : ""); }
     else if (e.type === "reaction") { text = `reacted ${e.emoji} to ${e.messageId}`; }
+    else if (e.type === "message.edited") { text = `edited ${e.messageId}: ${e.text}`; }
+    else if (e.type === "message.unsent") { text = `unsent ${e.messageId}`; }
     else if (e.type === "reaction.in") { text = `they reacted ${e.emoji}`; }
     else if (e.type === "status") { text = `status: ${e.text}`; }
     else if (e.type === "text.hidden") { text = `(not shown) ${e.text}`; }
