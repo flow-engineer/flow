@@ -2,24 +2,62 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## 0.6.0 (unreleased)
+## 0.7.0 (2026-10-24)
 
 ### Changes
 
+- **The Flow Messaging adapter (`@flow-engineer/flow/flow-messaging`) speaks Flow Messaging's V0
+  API:** every call goes to `/v0/...`, and each kind of message goes to its own endpoint
+  (`POST /v0/conversations/{id}/basic`, `/buttons`, `/list`, `/carousel`, `/template`, `/reaction`,
+  `/typing`, `/read`). V0 sends exactly what it is given or refuses it (`422 unsupported_content`);
+  it converts nothing. So the adapter now does each channel's conversions itself:
+  - Telegram: the agent's Markdown goes as Telegram's HTML (`telegram.parse_mode: "HTML"`),
+    rendered by the same rules Flow Messaging used, so it looks the same as before. A carousel goes
+    as its text, then one message per card in order: the card's photo with its text as caption and
+    its buttons or link under it (a card with neither is its photo alone).
+  - WhatsApp: a list goes as a WhatsApp `list` with the agent's own label (before, every list
+    opened with "Choose"). Row titles now take WhatsApp's 24 characters (they were cut to 20), and
+    row descriptions are shown (they were dropped). More than 3 buttons also go as a list, under
+    "Choose". WhatsApp's own marks (`*bold*`) go as written, as before.
+  - iMessage: text is now Markdown, sent as iMessage's own styles (`imessage.styles`: bold, italic,
+    underline, strikethrough). `IMESSAGE.formatting` is `"markdown"`, so the agent is told Markdown
+    works there, and so is the iMessage platform `flow test` plays (`x-flow-platforms` in
+    `spec/agent-endpoint.openapi.yaml`).
+  - A message the business starts (a nudge, a scheduled text) goes with `link_preview: false` on
+    every channel, not only WhatsApp.
+- Typing sends `{}` and nothing when the agent stops typing: no channel clears the indicator on
+  request, and it clears itself when the next message goes. iMessage read receipts mark the whole
+  conversation (Flow refuses `up_to` there).
+- Events are read in both shapes: the V0 one (`content.kind`) and the older one (`content.type`),
+  which an app Flow still serves through its bridge to the older API gets.
+- A `422 unsupported_content` reaches the agent saying what the channel does not take, on which
+  channel and why, for example `unsupported_content (no_mms, param media, on sms): ...`, with
+  "don't resend it". `FlowMessagingError` has two new fields, `param` and `channel`.
+- iMessage group conversations are passed over, with one warning. The agent never answers in a
+  group, and no typing or read receipt goes to one. Before, their events failed, and Flow
+  delivered them again.
 - **Edits and unsends.** On channels that have them (Telegram and iMessage on Flow Messaging, a
   custom UI with the new `editMessage` / `unsendMessage`) the agent is offered `edit_message`
   (`{ message_id, text }`) and `unsend_message` (`{ message_id }`), as `react` is offered only where
   reactions exist; WhatsApp and SMS offer neither. The send tool's result there names the message
   (`{"delivered":true,"channel":"imessage","message_id":"msg_..."}`), read back from the history
   after a restart. An edit's text passes `beforeSend` (`context.edit` names the message) and the
-  content rules like any send. When the platform refuses one (too late, say), the tool's result is
-  its error (`Not edited: <type>: <message>`), and nothing is sent instead. New `ChannelInfo.edits` /
+  content rules like any send. On Flow Messaging an edit is `PATCH /v0/messages/{id}` (the new text
+  styled as a send's: Telegram's HTML, iMessage's styles) and an unsend `DELETE /v0/messages/{id}`.
+  Flow refuses a late or unsupported one when it is made (`422 unsupported_content`, with
+  `edit_window_closed`, `unsend_window_closed`, `first_message_not_editable` or `not_on_sms`), and
+  the tool's result is that refusal with Flow's message, which states the limit (`Not edited:
+  unsupported_content (edit_window_closed, on imessage): iMessage allows edits within 15 minutes of
+  sending; ...`). Nothing is sent instead: the agent writes its own correction if it wants one.
+  Flow Framework sets no time limits of its own. One the channel refuses after Flow took it comes
+  as Not delivered (`edit of msg_...: <text>`, `unsend of msg_...`). New `ChannelInfo.edits` /
   `unsends`, `Outbound` `{ type: "edit", messageId, text }` / `{ type: "unsend", messageId }`, events
   `message.edited` and `message.unsent`, transcript entries `edit` and `unsend`.
 - **Sends return the platform's message id.** `SendReceipt.messageId`: Flow Messaging's sends
-  resolve with it (`msg_...`; a carousel sent card by card, its first message's), and so can any
+  resolve with it (`msg_...`; a carousel sent in parts, its first message's), and so can any
   provider's; `message.out` carries it as `messageId`, and a sent nudge's `NudgeResult.messageId`
-  (a prompt nudge's: the agent's first message) when this process sent it.
+  (a prompt nudge's: the agent's first message) when this process sent it. That id is what
+  `PATCH` and `DELETE /v0/messages/{id}` take, for an agent's own code.
 - The playground, `flow chat` and the test cloud's simulators play edits and unsends: their sends
   resolve with their ids (`a1`, `a2`, ...), the thread shows the message edited or gone (lines
   `edit` and `unsend`), a platform without them refuses them with its error, and `flow show` prints
@@ -28,16 +66,204 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
+- **The Flow Messaging adapter needs Flow Messaging's V0 API.** 0.7 calls `/v0`, so upgrade once
+  Flow Messaging serves V0. Versions before 0.7 call the older `/v1` API. That keeps working only
+  while Flow serves your app through its bridge to the older API, and Flow switches you off the
+  bridge once you upgrade. To move, bump `@flow-engineer/flow`. The adapter's options, channels and
+  exports are unchanged. Code of your own that calls Flow Messaging beside the adapter (`POST
+  /v1/conversations/{id}/messages` with `content`) moves to the per-kind endpoints: see Flow
+  Messaging's migration guide.
+- **iMessage text is Markdown now.** An agent's iMessage replies are read as Markdown and sent with
+  iMessage's styles, and the agent is told Markdown works there. `**6pm**` used to show as written;
+  now it shows as bold "6pm". An agent whose own instructions said to write plain text on iMessage
+  can drop that line. To keep text exactly as written, escape the marks (`\*`).
+- **A Telegram carousel card with buttons needs a text.** Flow sends a card's buttons under its
+  text, and V0 takes no buttons message without one. A carousel with such a card is refused before
+  anything is sent, and the agent is told which card. Before, Flow sent the photo and the buttons
+  with no caption.
+- **A first message to someone with no conversation yet is text or a template.** When the adapter
+  knows no conversation (a nudge, or a send after a restart before the person writes), V0 starts
+  one only with a text or a template. A link still goes, as its text with the URL on a line after it.
+  Buttons, a list or a carousel are refused before anything is sent, and the reason says to send a
+  text first. Before, they started the conversation.
+- **A WhatsApp carousel no longer quotes the message it replies to** (V0's carousel has no
+  `reply_to`).
 - **`Outbound` has two more members, `edit` and `unsend`.** They go only to channels whose info
   says `edits` / `unsends`, so a hand-written channel is never sent one. TypeScript code that
   narrows `Outbound` by what it is not (`Exclude<...>`, or an exhaustive `switch` with a `never`
   check) handles the two (or ignores them, as for `typing`).
 - **`PlaygroundSink` may return a `SendReceipt`.** A sink that returns nothing keeps working unchanged.
 
-## 0.5.0 (unreleased)
+## 0.6.0 (2026-10-24)
 
 ### Changes
 
+- **The agent's own records.** `createAgent({ records: { questions: { people: ["buyer", "seller"],
+  fields: ["listing", "status"] } } })` declares collections of small JSON documents the agent keeps
+  across days and people, in the same store as its conversations: `context.records` in a tool,
+  `agent.records` elsewhere, with `put`, `get`, `query` (equality on declared fields, oldest first,
+  pages of up to 100), `delete`, `forgetPerson` and `export`. They behave the same on SQLite,
+  Postgres, the playground and Flow's hosting, per agent and environment. `agent.forgetPerson`
+  also deletes the records that name the person in a `people` field (by their person key,
+  conversation id, any identity, or their number on a phone channel, whatever their key), and a
+  tool of theirs still running then can no longer put one. A field added to a collection's
+  `people` or `fields` is indexed for the records already kept when the agent next starts, so
+  `query` and forgetting find them; the store keeps every field declared for a collection, so an
+  older declaration on the same store (a deploy's old revision) takes nothing away and its puts
+  index the newer fields too. Limits in `RECORD_LIMITS`: 64 KB a record, 10,000 an agent
+  (new records put at the same moment may pass it by up to as many as are put at once), 20
+  collections, 8 declared fields each. If anything other than the agent reads the data, it
+  belongs in your own database ([docs/agents.md](docs/agents.md#the-agents-own-records)).
+- **`flow records export`** prints every record of the agent in the folder (the store its
+  `buildAgent` opens) as JSON Lines.
+- `mcpServer({ records: agent.records })` gives tools served over MCP the same records.
+- **`context.events`: a tool's own agent's business events side.** Once `events.attach(agent)` has
+  run, every tool call of that agent has its `flowEvents` as `context.events` (`agent.events` for
+  code outside a turn: routes, beforeSend, intercept, context), so a tool watches, mutes or takes
+  back a topic for the conversation's person in the state of the agent it runs for
+  (`context.events.watch({ address, topic })`, `mute`, `notInterested`, `stopped`, `remember`),
+  never through a module variable. Two agents in one process (two test runs, a deploy's overlap)
+  each see only their own, when each has its own `flowEvents` (made inside `buildAgent`). It is not
+  `createAgent`'s `events` (trace sinks). Absent when no events side is attached; over MCP,
+  `mcpServer({ businessEvents: events })` gives it. An agent with its own watch fields reads
+  it as `context.events as FlowEvents<MyWatch> | undefined` ([docs/events.md](docs/events.md#watches-raise-a-message)).
+- **A tool `flow test` runs for real (`tools: { real: [...] }`) is the agent's own object again.**
+  From 0.4.9 to 0.5.3 a business run handed `buildAgent` a copy of it (`{ ...tool, run }`), so code
+  that knew its own tool by identity (`t === myTool`, to swap in one that keeps this agent's
+  state) no longer matched, and what the tool kept went to module-shared state instead of the
+  run's agent: the scenario sent nothing, with no error. `buildAgent` now gets the very object
+  it exports, as in production. The tools the cloud simulates are still stand-ins of their own
+  (same name, description and input), never `===` the agent's.
+- The playground's Records tab, for an agent that declares collections, shows its newest 200
+  records, newest first, with each collection's count and how many older ones are not shown.
+- Store migration 10 adds the tables `records`, `record_index` and `record_collections` (per
+  collection, every field declared on the store and the fields its records are indexed for); it runs on the agent's first start, as every
+  migration does, and changes no existing table.
+- The `zod` dependency is `^4.6.6` (was `^4.6.5`): zod before 4.6.6 could exhaust memory on an
+  oversized input to a constrained collection (GHSA-mrhx-c7xc-m3w5).
+
+### Migration notes
+
+- **`ToolContext` has a new field, `records`.** Flow Framework fills it for every tool call. Code that
+  builds a `ToolContext` itself (a unit test calling a tool's `run`) adds it: `records: agent.records`.
+- **`StoreApi` has the record methods** (`putRecord`, `getRecord`, `queryRecords`, `deleteRecord`,
+  `forgetRecords`, `exportRecords`, `reindexRecords`). A store of your own that forwards each call to a `Store` (as
+  Flow's hosting does) forwards them too; a hosted agent on 0.6 deploys once Flow's hosting runs
+  0.6 (until then `flow deploy` refuses it, as for any newer line).
+- **An agent takes one events side.** `events.attach(agent)` with a second, different `flowEvents`
+  on an agent that already has one now throws (they overwrote each other's state already, as
+  0.5.0's notes say): mount one. Attaching the same one again changes nothing. One `flowEvents`
+  attached to a second agent is no longer the first one's (`agent.events` undefined there): a
+  module that builds several agents (`buildAgent`) makes one per agent.
+- **From 0.4.9 to 0.5.3, `flow test` gave `buildAgent` copies of the tools it runs for real.** An
+  agent that worked around it (matching its tool by name or schema rather than `t === myTool`, or
+  routing its tool's run to the agent whose conversation it is) keeps working; the workaround can
+  go now. A tool that needs its agent's events state can read `context.events` instead of
+  `buildAgent` swapping in a copy bound to that state. On 0.4.9 to 0.5.3, a scenario with
+  `tools: { real: [...] }` whose tool keeps per-agent state that way may have passed or failed for
+  that reason alone: run it again on 0.6.
+
+## 0.5.3 (2026-10-24)
+
+### Changes
+
+- **A template nudge reaches someone who never wrote.** `agent.nudge({ to: { channel, address }, template })`
+  on a phone channel that sends templates (WhatsApp) makes the person and their conversation, as
+  their first message would, then sends the template: the way WhatsApp lets a business message a
+  number first. The number is read as inbound numbers are (E.164; `defaultCountryCode` on phone
+  channels other than WhatsApp) and must look like one (7 to 15 digits; on WhatsApp written in full,
+  with `+` or `00`: a national `"(555) 010-0177"` or bare `"5550100177"` is refused `unknown_person`,
+  never read as another country's), so their reply lands in
+  the same conversation, and a number that is already someone (they wrote on SMS) joins that
+  person, their STOP and no-contact rules included. Text and prompt nudges to someone who never
+  wrote are still refused `unknown_person`, as is a template on SMS. Declared-template checks,
+  idempotency keys and quiet hours work as before. In the playground, the Person panel's template
+  to a test person who has not written shows in their thread, never through the provider
+  (`recordNudge(input, { via: "playground" })`).
+- **A nudge finds the person however the business writes their number.** On a phone channel,
+  `"+1 (555) 010-0177"` finds the person who wrote from `"15550100177"` (also when `resolve` keys
+  them; on WhatsApp the number is in full, or as WhatsApp writes it), and `agent.contact(to)` finds
+  them the same way. When one number is written two ways there (the business's, the provider's) the nudge
+  goes where they last wrote from, with that identity's window. Scheduled messages pick that
+  identity too. A test person's playground identity never takes a business's nudge from their real
+  phone's, nor the Person panel's from the playground.
+- **A scheduled prompt nudge due past the WhatsApp window goes as one sent now would.** With a
+  `fallbackTemplate`, `nudge({ prompt, at })` that comes due after their 24-hour window closed is
+  no longer skipped: the agent is told the window is closed and may send a template that says it
+  (`send_template`); otherwise the fallback goes, `template.missing` says what wanted one, and the
+  nudge is held until they reply. The run is recorded `skipped`, its reason naming the nudge it
+  went on as (`outside_window: went on as nudge n_...`); read that nudge's state for how it ended. Without a
+  `fallbackTemplate`, and for scheduled text, it is skipped `outside_window` as before.
+
+### Migration notes
+
+- **A template nudge to an unknown number is sent, not refused.** An agent that relied on
+  `unknown_person` to never template a stranger checks first: `if (!(await agent.contact(to))) return;`
+  before `agent.nudge({ to, template })`. `agent.reach(to)` before a template is no longer needed.
+- **Scheduled prompt nudges past the window now run when the agent has a `fallbackTemplate`.**
+  Before, they were skipped `outside_window`. A message that must not go past the window is
+  scheduled as `text`, which is still skipped there.
+
+## 0.5.2 (2026-10-24)
+
+### Changes
+
+- **`skill` lists skills and reads only the ones requested.** `skill` or `skill list` prints names
+  and descriptions; `skill get <name> [name...]` reads selected workflows or the generated
+  `<cli-name>-cli` guide. `--json` returns named records; `--write <dir>` exports selected SKILL.md
+  files. Batch reads share one MCP connection.
+- MCP advertises skill summaries on the existing `read_skill` descriptor, without exposing bodies
+  during discovery or adding another tool. Older servers still supply names from `read_skill`'s
+  schema. The generated CLI guide includes handwritten commands and maps MCP tool names to commands.
+
+### Migration notes
+
+- **Bare `skill` now lists summaries instead of printing the whole CLI guide.** Use
+  `skill get <cli-name>-cli` for the previous content. `skill --write <dir>` keeps exporting the
+  generated guide unchanged in purpose. Deploy the updated MCP server to include workflow
+  descriptions in listings; older servers list names with empty descriptions. Skill definitions
+  and the `read_skill` request format do not change.
+
+## 0.5.1 (2026-10-24)
+
+### Changes
+
+- **Generated CLIs use cached MCP definitions immediately and refresh in the background.** The cache
+  keeps tools and the server's name/version per endpoint, client and credentials. Background refresh
+  runs at most every five minutes; version changes detected before a tool call refresh immediately.
+  Unknown commands/arguments refresh and reparse once; server argument errors refresh definitions
+  without replaying a tool request. `--refresh-tools` forces discovery; `discoveryCache: false`
+  disables caching and `{ maxAgeMs }` changes the background interval. Embedded CLIs can schedule
+  refreshes with `CliIO.background`. Handwritten commands work without discovery and take precedence
+  over derived names. MCP-backed commands still execute on the server.
+
+### Migration notes
+
+- **CLI tool discovery is cached by default.** Cached commands load immediately and refresh in the
+  background. To keep discovery on every invocation, set `discoveryCache: false` in `defineCli`.
+  `--refresh-tools` fetches current definitions on demand. The MCP server must still be deployed;
+  tool implementations continue to run there. No changes to tool definitions are needed.
+
+## 0.5.0 (2026-10-23)
+
+### Changes
+
+- **The API may change until 1.0, with a migration note every time.** [docs/stability.md](docs/stability.md)
+  lists what freezes at 1.0; [docs/releasing.md](docs/releasing.md) is the release checklist.
+  New guides: [docs/channels.md](docs/channels.md) (every channel's options and params) and
+  [docs/patterns.md](docs/patterns.md) (patterns that worked). The README is rewritten around one
+  codebase for every interface: MCP server, plugin, CLI and messaging agent.
+- **`flow deploy` checks hosting's Flow Framework release line first.** An agent on a newer
+  major.minor than hosting runs (from `package-lock.json`) is refused before anything is sent. A
+  cloud that does not say which release it runs deploys as before.
+- **`flow inspect <url>`** tests any MCP server as a host does (`tools`, `call`, `auth`,
+  `resources`, `prompts`), and `flow setup` checks the agent's own MCP server.
+- **The simulators look and behave like the real apps**: WhatsApp's bubbles, ticks, reply buttons,
+  lists and carousels; Telegram's keyboards; iMessage's tapbacks and Delivered/Read; photos,
+  documents and voice notes; Debug shows each platform's own payloads.
+- **The free trial counts people.** `flow setup`, `link` and `status` print the trial as people per
+  channel (`3 of 25 people, 2 waiting for a place`); an older cloud's answer still prints messages
+  used.
 - **Delivery guarantees, written down and checked.** [docs/guarantees.md](docs/guarantees.md) says
   what `send()` resolving means, what is ordered, and where messages are sent once or at least once.
   `npm run test:conformance` runs every channel adapter Flow Framework ships through those
@@ -136,7 +362,15 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   (`history.trimmed`). To keep the old behaviour: `createAgent({ history: { maxTokens: 50_000 } })`
   (or `Math.floor(contextTokens * 0.6)`).
 - **A new event type, `history.reset`.** An event sink that switches on event types sees it. A
-  custom `StoreApi` passes inbox payloads through unchanged; nothing to do.
+  custom `StoreApi` passes inbox payloads through unchanged; nothing to do. The same goes for
+  `message.slow` (a send whose provider gave up waiting; it is never sent again).
+- **`POST /v1/events` may answer 503.** It answers 202 only once the event is recorded. A system
+  that sends business events retries a 503 with the same event id (taken once).
+- **`flow deploy` may refuse a newer release line.** Once Flow's hosting says which Flow Framework
+  it runs, an agent on a newer major.minor (0.5.x against hosting's 0.4.x) is refused before
+  anything is sent: stay on the line hosting runs until it moves.
+- **The free trial line is worded in people.** `flow setup`, `link` and `status` print
+  `3 of 25 people, 2 waiting for a place` instead of messages used; scripts read `--json`.
 - **Chinwag names renamed, the old ones still read for now.** `spec/agent-endpoint.openapi.yaml`'s
   platform table is `x-flow-platforms`; `x-chinwag-platforms` is kept beside it as the same table,
   deprecated, and goes in 0.6: code that reads it from the package reads `x-flow-platforms`.

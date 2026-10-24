@@ -47,10 +47,15 @@ function flowRig(kind: Kind, signal: Signal): () => Promise<Rig> {
     const flow = await fakeFlow();
     const sender = `snd_${kind}`;
     const stub = { message: async () => null, reacted: async () => {}, undelivered: () => {} } as never;
-    const fm = flowMessaging({ apiKey: "fk_test_key", webhookSecret: signal === "webhook" ? SECRET : "", baseUrl: flow.url, waitTimeoutMs: 20_000 });
+    const fm = flowMessaging({ apiKey: "fk_test_key", webhookSecret: SECRET, baseUrl: flow.url, waitTimeoutMs: 20_000 });
     const channel = fm[kind]({ sender });
-    const isSend = (r: Recorded) => r.method === "POST" && (r.path === "/v1/messages" || /^\/v1\/conversations\/[^/]+\/messages$/.test(r.path));
-    for (let i = 1; i <= 20; i++) flow.queued.push({ match: isSend, status: 202, body: { id: `msg_c${i}`, conversation: "conv_c", direction: "out", status: "queued", content: { type: "text", text: "" } } });
+    const isSend = (r: Recorded) => r.method === "POST" && (r.path === "/v0/messages" || /^\/v0\/conversations\/[^/]+\/(basic|buttons|list|carousel|template)$/.test(r.path));
+    for (let i = 1; i <= 20; i++) flow.queued.push({ match: isSend, status: 202, body: { id: `msg_c${i}`, conversation: "conv_c", direction: "out", status: "queued", content: { kind: "basic", text: "" } } });
+
+    // The person wrote first, so every send goes into their conversation: V0 starts one only with a basic message or a template.
+    flow.contacts.ct_c = { id: "ct_c", address: kind === "telegram" ? { telegram_user_id: ADDRESS[kind] } : { phone: ADDRESS[kind] } };
+    const hello = JSON.stringify({ id: "evt_c0", type: "message.received", created_at: new Date().toISOString(), app: "app_test", livemode: false, conversation: { id: "conv_c", type: "direct", channel: kind, sender, contact: "ct_c" }, data: { message: { id: "msg_in", conversation: "conv_c", direction: "in", status: "received", content: { kind: "basic", text: "hi" } } } });
+    await fm.receive(stub, { body: hello, headers: { "flow-signature": sign(hello) } });
 
     let hook: ReturnType<typeof createServer> | undefined;
     let post: (body: object) => Promise<void> = async () => {};
@@ -73,7 +78,7 @@ function flowRig(kind: Kind, signal: Signal): () => Promise<Rig> {
 
     let events = 0;
     const status = async (id: string, type: "sent" | "failed", reason?: string) => {
-      const message = { id, conversation: "conv_c", direction: "out", status: type, content: { type: "text", text: "" }, ...(reason ? { error: { type: "channel_error", message: reason } } : {}) };
+      const message = { id, conversation: "conv_c", direction: "out", status: type, content: { kind: "basic", text: "" }, ...(reason ? { error: { type: "channel_error", message: reason } } : {}) };
       if (signal === "read back") return void (flow.messages[id] = message);
       const now = new Date().toISOString();
       await post({ id: `evt_c${++events}`, type: `message.${type}`, created_at: now, app: "app_test", livemode: false, conversation: { id: "conv_c", channel: kind, sender, contact: "ct_c" }, data: { message } });
@@ -83,15 +88,16 @@ function flowRig(kind: Kind, signal: Signal): () => Promise<Rig> {
       await flow.request(() => sends().length > n);
       const r = sends()[n]!;
       const id = `msg_c${n + 1}`;
-      const content = r.body.content as { text?: string; caption?: string };
+      // V0 takes a kind's fields at the top of the body: a basic message's text is also a photo's caption.
       const key = r.headers["idempotency-key"];
-      return { text: content.text ?? content.caption ?? "", idempotencyKey: typeof key === "string" ? key : undefined, accept: () => status(id, "sent"), refuse: (reason) => status(id, "failed", reason) };
+      return { text: (r.body as { text?: string }).text ?? "", idempotencyKey: typeof key === "string" ? key : undefined, accept: () => status(id, "sent"), refuse: (reason) => status(id, "failed", reason) };
     }
     return {
       channel,
       to: ADDRESS[kind],
       arrival,
       count: () => sends().length,
+      ...(kind === "telegram" ? { carouselParts: (carousel: { cards: unknown[] }) => 1 + carousel.cards.length } : {}),
       close: async () => {
         await stream?.close();
         hook?.close();

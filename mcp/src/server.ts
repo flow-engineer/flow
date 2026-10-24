@@ -22,8 +22,10 @@ import {
   type AuthInfo,
   type CallToolResult,
 } from "@modelcontextprotocol/server";
+import type { FlowEvents } from "../../src/business-events/engine.ts";
 import { emitter, type EventSink } from "../../src/events.ts";
-import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, type AgentFiles } from "../../src/skills.ts";
+import { unavailableRecords, type Records } from "../../src/records.ts";
+import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, SKILLS_META, type AgentFiles } from "../../src/skills.ts";
 import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
 import { render, toolContext, type CredentialProvider, type Tool, type ToolContext } from "../../src/tools.ts";
 import { describe, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
@@ -63,6 +65,10 @@ export interface McpServerOptions {
   auth?: McpAuth;
   /** Backend access by verified account, separate from the bearer token issued for this MCP resource. */
   credentials?: CredentialProvider;
+  /** The agent's records (`agent.records`), for tools that use `context.records`. Without them, such a tool's call fails saying so. */
+  records?: Records;
+  /** The agent's business events side (its `flowEvents`, or `agent.events` once attached: read here once), as the tools' `context.events`. Without it, `context.events` is absent. */
+  businessEvents?: FlowEvents;
   /** Where the endpoint is mounted (default "/mcp"). */
   path?: string;
   /** Native plugins deliver skills themselves. Default: tools only at `${path}/plugin`. */
@@ -95,6 +101,8 @@ export interface McpServerHandle {
 
 const LOCAL = new Set(localhostAllowedHostnames());
 
+const NO_RECORDS = unavailableRecords("give mcpServer({ records: agent.records })");
+
 export function mcpServer(options: McpServerOptions): McpServerHandle {
   if (options.dir !== undefined && options.files !== undefined) throw new Error("@flow-engineer/flow/mcp: give dir or files, not both");
   const skills = options.dir !== undefined || options.files !== undefined ? loadSkills(options.files ?? readAgentFolder(options.dir!)) : [];
@@ -103,7 +111,11 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   if (problems.length) throw new Error(`@flow-engineer/flow/mcp: these tools cannot be served as declared:\n- ${problems.join("\n- ")}`);
   const scopes = options.auth?.scopes;
   const byName = new Map(tools.map((t) => [t.name, t]));
-  const descriptors = tools.map((t) => (options.descriptor ? options.descriptor(t, describe(t, scopes)) : describe(t, scopes)));
+  const descriptors = tools.map(t => {
+    const generated = describe(t, scopes);
+    if (t.name === "read_skill" && skills.length) generated._meta[SKILLS_META] = skills.map(({ name, description }) => ({ name, description }));
+    return options.descriptor ? options.descriptor(t, generated) : generated;
+  });
   const path = options.path ?? "/mcp";
   const pluginPath = options.plugin === false ? undefined : options.plugin?.path ?? `${path}/plugin`;
   for (const endpoint of [path, pluginPath].filter((p): p is string => p !== undefined)) {
@@ -153,6 +165,8 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         // CLI retries can preserve a call key; other hosts get one per request.
         idempotencyKey: typeof sentKey === "string" && sentKey.length > 0 && sentKey.length <= 256 ? sentKey : randomUUID(),
         signal: ctx.mcpReq?.signal ?? new AbortController().signal,
+        records: options.records ?? NO_RECORDS,
+        ...(options.businessEvents ? { events: options.businessEvents } : {}),
       }, (ctx.http?.authInfo?.extra?.credentials as CredentialProvider | undefined) ?? options.credentials);
       const started = Date.now();
       emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input: parsed.data, ...detail });

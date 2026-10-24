@@ -516,6 +516,32 @@ test("WhatsApp shows a declared template as WhatsApp would, and one not declared
   }
 });
 
+test("the Person panel's template reaches a test person who never wrote, in the playground and not the provider; their reply joins it", async () => {
+  const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true, kind: "whatsapp" } }, testPeople: [SAM], database: sqlite() });
+  await h.agent.resume();
+  const server = await simulators().listen(h.agent, 0);
+  const post = (path: string, body: object) => fetch(server.url + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "whatsapp", person: SAM.phone, ...body }) });
+  const where = `channel=whatsapp&person=${encodeURIComponent(SAM.phone)}`;
+  try {
+    assert.equal((await (await post("/api/nudge", { kind: "text", text: "hi" })).json()).reason, "unknown_person");
+    assert.equal((await post("/api/nudge", { kind: "template", template: "welcome", body: ["Sam"], idempotency_key: "welcome-sam" })).status, 202);
+    // The same key again gets the first one's outcome, once it is settled.
+    assert.equal((await h.agent.nudge({ to: { channel: "whatsapp", address: SAM.phone }, template: { name: "welcome", body: ["Sam"] }, idempotencyKey: "welcome-sam" })).status, "sent");
+    assert.deepEqual(h.out, [], "nothing went to the provider");
+    assert.ok(((await (await fetch(`${server.url}/api/person?${where}`)).json()) as { contact: unknown }).contact, "they are a person now");
+
+    const id = (await h.agent.testConversation(SAM.phone))!;
+    assert.equal((await post("/api/messages", { text: "hello?" })).status, 202);
+    (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Hi Sam!" })));
+    await h.agent.conversation(id)!.whenIdle();
+    assert.equal(await h.agent.testConversation(SAM.phone), id);
+    const { lines } = (await (await fetch(`${server.url}/api/transcript?${where}`)).json()) as { lines: Line[] };
+    assert.deepEqual(lines.flatMap((l) => (l.kind === "in" ? [["in", l.text]] : l.kind === "out" ? [["out", l.template?.name ?? l.text]] : [])), [["out", "welcome"], ["in", "hello?"], ["out", "Hi Sam!"]]);
+  } finally {
+    await server.close();
+  }
+});
+
 test("a turn's model error is printed on the terminal and reaches the playground's trace with its text", async () => {
   const dir = mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");

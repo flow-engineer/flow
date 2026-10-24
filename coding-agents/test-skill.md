@@ -124,7 +124,7 @@ opening:
   - nudge: { prompt: "Tell them the listing ends soon." }   # or text, or template: { name, body: [...] }
     at: 2026-10-21T15:00         # moves the clock first: a date and time, HH:MM (the next one), or {{now ...}}
 max_turns: 1                     # 1: no turns played after the opening
-tools: { real: [keep_me_posted] }  # their own code runs, for state the agent keeps itself
+tools: { real: [keep_me_posted] }  # their own code runs (the very tool objects), for state the agent keeps itself
 expect:
   sent:                          # what went out, in order (other sends may come between)
     - { at: "23:30", template: outbid }

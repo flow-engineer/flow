@@ -35,16 +35,16 @@ test("with no webhook secret the agent takes events from the stream: the key as 
 
   const first = await flow.stream(0);
   assert.deepEqual(first.protocols, ["flow", "flow.key.fk_test_key"]);
-  assert.equal(first.url.pathname, "/v1/stream");
+  assert.equal(first.url.pathname, "/v0/stream");
   assert.equal(first.url.searchParams.get("after"), null);
   assert.deepEqual(first.url.searchParams.getAll("type"), ["message.received", "message.failed", "reaction.added", "contact.deleted", "message.sent"]);
 
-  const hello = received(TG, "msg_1", { type: "text", text: "hi from my phone" });
+  const hello = received(TG, "msg_1", { kind: "basic", text: "hi from my phone" });
   first.send({ type: "event", event: hello });
   const turn = await live.nextCall(0);
   assert.equal(lastUser(turn.request.messages), "[msg_1] hi from my phone");
   turn.answer(respond(call("send_telegram", { text: "Hi!" })));
-  assert.deepEqual((await flow.request(post("/v1/conversations/conv_tg/messages"))).body.content, { type: "text", text: "Hi!", format: "markdown" });
+  assert.deepEqual((await flow.request(post("/v0/conversations/conv_tg/basic"))).body, { text: "Hi!" });
   await live.agent.conversation(live.events[0]!.conversationId)!.whenIdle();
   assert.equal(readFileSync(cursorFile, "utf8").trim(), hello.id);
   await live.handle.close();
@@ -62,11 +62,11 @@ test("a reconnect frame, a dropped socket and a failed event each reconnect from
   const live = streamAgent(flow);
   t.after(() => live.handle.close());
 
-  const one = received(TG, "msg_1", { type: "text", text: "one" });
+  const one = received(TG, "msg_1", { kind: "basic", text: "one" });
   const first = await flow.stream(0);
   first.send({ type: "event", event: one });
   (await live.nextCall(0)).answer(respond(call("send_telegram", { text: "got one" })));
-  await flow.request(post("/v1/conversations/conv_tg/messages"));
+  await flow.request(post("/v0/conversations/conv_tg/basic"));
   await live.agent.conversation(live.events[0]!.conversationId)!.whenIdle();
 
   // Flow is restarting: it says reconnect, then closes with 1012.
@@ -82,8 +82,8 @@ test("a reconnect frame, a dropped socket and a failed event each reconnect from
   assert.equal(third.url.searchParams.get("after"), one.id);
 
   // The contact lookup fails once: the event is not acknowledged, and comes again on the next connection.
-  const two = received({ id: "conv_tg2", channel: "telegram", contact: "ct_new" }, "msg_2", { type: "text", text: "two" });
-  flow.queued.push({ match: (r) => r.method === "GET" && r.path === "/v1/contacts/ct_new", status: 404, body: { error: { type: "not_found", message: "No such object." } } });
+  const two = received({ id: "conv_tg2", channel: "telegram", contact: "ct_new" }, "msg_2", { kind: "basic", text: "two" });
+  flow.queued.push({ match: (r) => r.method === "GET" && r.path === "/v0/contacts/ct_new", status: 404, body: { error: { type: "not_found", message: "No such object." } } });
   third.send({ type: "event", event: two });
   const fourth = await flow.stream(3);
   assert.equal(fourth.url.searchParams.get("after"), one.id);

@@ -12,6 +12,9 @@ export interface Skill {
   body: string;
 }
 
+/** Structured skill discovery on the MCP read_skill descriptor, without loading skill bodies. */
+export const SKILLS_META = "flow.engineer/skills";
+
 function frontmatter(text: string): { fields: Record<string, string>; body: string } {
   const match = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text);
   if (!match) return { fields: {}, body: text };
@@ -26,10 +29,23 @@ function frontmatter(text: string): { fields: Record<string, string>; body: stri
 /** An agent's folder as text: AGENTS.md and skills/<name>/SKILL.md, by their paths in it. */
 export type AgentFiles = Record<string, string>;
 
-export function readAgentFolder(dir: string): AgentFiles {
+/**
+ * With `prompt` (createAgent), throws, naming the path, when the folder or its AGENTS.md can't be
+ * read: the agent would otherwise run with no prompt. Readers that want only the skills (an MCP
+ * server, `flow plugin`, `flow check`) take a folder without AGENTS.md as before.
+ */
+export function readAgentFolder(dir: string, { prompt = false }: { prompt?: boolean } = {}): AgentFiles {
   const files: AgentFiles = {};
   const agents = join(dir, "AGENTS.md");
-  if (existsSync(agents)) files["AGENTS.md"] = readFileSync(agents, "utf8");
+  if (prompt) {
+    try {
+      files["AGENTS.md"] = readFileSync(agents, "utf8");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const where = existsSync(dir) ? `${dir} has no AGENTS.md` : `${dir} does not exist`;
+      throw new Error(`flow: can't read the agent's prompt: ${code === "ENOENT" ? where : `${agents}: ${code ?? (error as Error).message}`}. Check createAgent's dir; on a host with no file system (a bundle, an edge runtime), pass files instead.`, { cause: error });
+    }
+  } else if (existsSync(agents)) files["AGENTS.md"] = readFileSync(agents, "utf8");
   const root = join(dir, "skills");
   if (!existsSync(root)) return files;
   for (const entry of readdirSync(root, { withFileTypes: true })) {

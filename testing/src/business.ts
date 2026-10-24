@@ -113,9 +113,12 @@ export function businessRuns(ctx: BusinessContext) {
     const alive = <T>(work: () => Promise<T>): Promise<T> => (life.dead ? Promise.reject(new Error("the agent's process died")) : work());
     // The run's events and tool calls are the cloud's conversation, whatever the agent calls it.
     const events: EventSink = Object.assign((event: Parameters<EventSink>[0]) => void (life.dead || ctx.events({ ...event, conversationId: cloudId })), { context: true });
+    // A tool run for real is the agent's own object, as in production, so buildAgent knows its own
+    // tools by identity (t === myTool). A dead agent's conversation is closed (its tools' signal
+    // aborted), its store and sends refused, as a crashed process. Simulated ones ask the cloud.
     const tools = ctx.tunnelTools.map((t): Tool => {
-      const own = run.real.has(t.name) ? ctx.realTools.find((r) => r.name === t.name)! : t;
-      return { ...own, run: (input: unknown, context: Parameters<Tool["run"]>[1]) => alive(async () => own.run(input, own === t ? { ...context, conversationId: cloudId } : context)) } as Tool;
+      if (run.real.has(t.name)) return ctx.realTools.find((r) => r.name === t.name)!;
+      return { ...t, run: (input: unknown, context: Parameters<Tool["run"]>[1]) => alive(async () => t.run(input, { ...context, conversationId: cloudId })) } as Tool;
     });
     const channels = ctx.sessionAgent.channels().map(({ name }): Channel => {
       const own = ctx.sessionAgent.channel(name)!;

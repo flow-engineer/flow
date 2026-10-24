@@ -38,6 +38,21 @@ export const findSlots = tool({
   `phone:<E.164>` (`phone:+15550100100`), else `<channel>:<address>`. To look the person up in the
   owner's backend use `context.key`: exactly what `resolve` returned (`customer-7`), or null when
   they are known only by phone or channel.
+- What the agent itself must remember across days and people, and nothing else reads (a question
+  waiting for a seller's answer), goes in `context.records` (`put`, `get`, `query`, `delete`),
+  in collections declared on `createAgent({ records })`, with each field that holds a person in
+  `people` so forgetting them deletes it (a put after they were forgotten is refused). If anything
+  other than the agent reads it, it belongs in the owner's database, through a tool.
+  docs/agents.md, "The agent's own records".
+- A tool that keeps what the person asked to be told about (business events: `flowEvents`) saves
+  it in `context.events`, its own agent's events side (`context.events.watch({ address:
+  context.address, topic })`, `mute`, `notInterested`), never in a module variable: the same tool
+  object serves every agent in the process, each `flow test` run included, as long as `buildAgent`
+  makes a `flowEvents` per agent. Absent when no events side is attached. docs/events.md, "Watches
+  raise a message".
+- Never tell your own tools apart by a copy: `buildAgent` gets the very objects your module
+  exports (in `flow test`'s real runs too), so `t === myTool` holds; the tools the test cloud
+  simulates are stand-ins with the same name, never `===` yours.
 - A tool that changes something (books, pays, sends) passes `context.idempotencyKey` to its backend:
   it is the same for the same input in the same turn, also when the turn runs again after a
   restart, so the booking happens once. `context.callId` is the model's id for the call;

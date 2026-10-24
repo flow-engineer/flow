@@ -1,4 +1,4 @@
-// covers: mcp/src/server.ts mcp/src/describe.ts src/skills.ts src/tools.ts
+// covers: mcp/src/server.ts mcp/src/describe.ts src/skills.ts src/tools.ts src/records.ts
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { after, test } from "node:test";
@@ -7,7 +7,7 @@ import { isSpecType } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { tools as cafeTools } from "../examples/cafe/src/tools.ts";
 import { mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
-import { tool, type ToolContext } from "../src/index.ts";
+import { createAgent, flowEvents, tool, type ToolContext } from "../src/index.ts";
 
 const servers: Server[] = [];
 after(() => servers.forEach((s) => s.close()));
@@ -147,10 +147,37 @@ test("a tool that throws is an isError result, and output is checked and sent as
   await c.close();
 });
 
+test("a served tool's context.records is the records given to mcpServer; without them its call says how to give them", async () => {
+  const agent = createAgent({ files: { "AGENTS.md": "Test." }, model: { complete: () => Promise.reject(new Error("no model")) }, records: { notes: { people: ["about"] } }, scheduleCheckMs: 0 });
+  const note = tool({ name: "note", description: "Keeps a note.", input: z.object({ text: z.string() }), signIn: "none", run: async ({ text }, context) => (await context.records.put("notes", "n1", { about: context.person, text }), { kept: true }) });
+  const served = await client(await serve({ name: "cafe", version: "1", tools: [note], records: agent.records }));
+  assert.equal((await served.callTool({ name: "note", arguments: { text: "oat milk" } })).isError, undefined);
+  assert.equal((await agent.records.get<{ text: string }>("notes", "n1"))?.text, "oat milk");
+  const without = await client(await serve({ name: "cafe", version: "1", tools: [note] }));
+  assert.match(JSON.stringify(await without.callTool({ name: "note", arguments: { text: "x" } })), /not available here: give mcpServer\(\{ records: agent\.records \}\)/);
+  await served.close();
+  await without.close();
+});
+
+test("a served tool's context.events is the events side given to mcpServer, and absent without one", async () => {
+  const events = flowEvents({ catalog: {}, log: () => {} });
+  const watch = tool({ name: "watch", description: "Watches a topic.", input: z.object({ topic: z.string() }), signIn: "none", run: ({ topic }, context) => context.events?.watch({ address: "+15550100100", topic }).outcome ?? "no events side" });
+  const served = await client(await serve({ name: "cafe", version: "1", tools: [watch], businessEvents: events }));
+  assert.match(JSON.stringify(await served.callTool({ name: "watch", arguments: { topic: "order:1" } })), /saved/);
+  assert.deepEqual(events.state.watches.map((w) => w.topic), ["order:1"]);
+  const without = await client(await serve({ name: "cafe", version: "1", tools: [watch] }));
+  assert.match(JSON.stringify(await without.callTool({ name: "watch", arguments: { topic: "order:2" } })), /no events side/);
+  await served.close();
+  await without.close();
+});
+
 test("skills are listed in the instructions and read with read_skill", async () => {
   const files = { "AGENTS.md": "# Pip\nThe chat agent's prompt.", "skills/allergens/SKILL.md": "---\nname: allergens\ndescription: questions about allergies\n---\nNever say an item is safe." };
   const c = await client(await serve({ name: "cafe", version: "1", tools: [], files }));
   assert.equal(c.getInstructions(), "This server's skills are rules for one kind of request each. Read a skill with read_skill before doing what it covers.\n- allergens: questions about allergies");
+  const descriptor = (await c.listTools()).tools.find(t => t.name === "read_skill")!;
+  assert.deepEqual(descriptor._meta?.["flow.engineer/skills"], [{ name: "allergens", description: "questions about allergies" }]);
+  assert.ok(!JSON.stringify(descriptor).includes("Never say an item is safe"), "discovery carries summaries, not skill bodies");
   const read = await c.callTool({ name: "read_skill", arguments: { name: "allergens" } });
   assert.deepEqual(read.content, [{ type: "text", text: "Never say an item is safe." }]);
   await c.close();

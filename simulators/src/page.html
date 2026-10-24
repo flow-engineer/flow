@@ -414,7 +414,7 @@
   .sidetabs button[aria-selected="true"] { background: var(--bg); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
   .sidetabs .dot { position: absolute; top: 6px; right: 8px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
   .side > .pane { flex: 1; }
-  #pPerson { overflow-y: auto; }
+  #pPerson, #pRecords { overflow-y: auto; }
   .sec { padding: 14px 16px; border-bottom: 1px solid var(--line); display: grid; gap: 10px; }
   .sec:last-child { border-bottom: 0; }
   .sec .label { font-size: 12px; font-weight: 600; color: var(--ink); }
@@ -448,6 +448,10 @@
   .items .tag.held { color: #b35c00; }
   .items .what { white-space: pre-wrap; }
   .items li.empty { border-style: dashed; color: var(--quiet); }
+  .items pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg); padding: 6px 8px; border-radius: 6px; }
+  .items details summary { margin-bottom: 4px; }
+  /* A record's id is up to 128 characters with no spaces: it wraps, so it never widens the page. */
+  #pRecords .items li, #pRecords .row2 b { min-width: 0; overflow-wrap: anywhere; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; display: flex; flex-direction: column; min-height: 0; }
   .card h2 { font-size: 13px; margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; }
   .card h2 span { font-weight: 400; color: var(--quiet); }
@@ -537,6 +541,7 @@
       <button type="button" role="tab" data-pane="pPerson" id="tabPerson" hidden>Person</button>
       <button type="button" role="tab" data-pane="pTurns">Turns</button>
       <button type="button" role="tab" data-pane="pTrace">Trace <span class="dot" id="traceDot" hidden></span></button>
+      <button type="button" role="tab" data-pane="pRecords" id="tabRecords" hidden>Records</button>
     </nav>
     <section class="card pane" id="pPerson" role="tabpanel" hidden>
       <div class="sec now">
@@ -607,6 +612,10 @@
     <section class="card pane" id="pTrace" role="tabpanel" hidden>
       <h2>Trace</h2>
       <div class="log" id="log"></div>
+    </section>
+    <section class="card pane" id="pRecords" role="tabpanel" hidden>
+      <h2>The agent's records <span id="recordsNote"></span></h2>
+      <div id="records"></div>
     </section>
   </div>
 </main>
@@ -1473,7 +1482,7 @@
     else if (e.type === "status") { text = `status: ${e.text}`; }
     else if (e.type === "text.hidden") { text = `(not shown) ${e.text}`; }
     else if (e.type === "skill.loaded") { text = `loaded skill ${e.skill}`; }
-    else if (e.type === "turn.end") { text = `turn done in ${e.ms} ms`; }
+    else if (e.type === "turn.end") { text = `turn done in ${e.ms} ms`; refreshRecords(); }
     else if (e.type === "tool.start") { text = `${e.tool} started`; }
     else if (e.type === "message.undelivered") { tag = "not delivered"; cls = "bad"; text = e.reason; }
     // In the thread too, so it shows with Debug off; handle() shows each numbered event once.
@@ -1795,11 +1804,12 @@
     for (const b of document.querySelectorAll(".sidetabs button")) b.setAttribute("aria-selected", String(b.dataset.pane === id));
     for (const pane of document.querySelectorAll(".pane")) pane.hidden = pane.id !== id;
     if (id === "pTrace") $("traceDot").hidden = true;
+    if (id === "pRecords") refreshRecords();
     remember("chinwag.pane", id);
   }
   for (const b of document.querySelectorAll(".sidetabs button")) b.addEventListener("click", () => showPane(b.dataset.pane));
 
-  let panel = { person: false, nudge: false, clock: false };
+  let panel = { person: false, nudge: false, clock: false, records: false };
   let templates = [];
   let quietEndsAt = null;
   let nudgeKind = "prompt";
@@ -1826,7 +1836,7 @@
     markUnread(lastOut);
     const zone = contact?.timeZone;
     $("theirTime").textContent = zone ? at(now, zone) : at(now);
-    $("theirZone").textContent = !contact ? "They have not written to the agent yet, so nudges to them are refused (unknown_person)."
+    $("theirZone").textContent = !contact ? "They have not written to the agent yet: only a template reaches them (text and prompt nudges are refused, unknown_person)."
       : zone ? `${city(zone)} time, set by ${contact.timeZoneSource === "person" ? "them" : "the business"}`
       : "Your time: their time zone is not known, so quiet hours don't apply to them";
     const pill = $("quietPill");
@@ -1856,6 +1866,55 @@
     if (!list.length) { const li = document.createElement("li"); li.className = "empty"; li.textContent = "Nothing scheduled or held."; list.push(li); }
     $("waiting").replaceChildren(...list);
     $("toQuietEnd").disabled = !quietEndsAt;
+  }
+  // The agent's records (every person's, read only), by collection, newest first: on opening the
+  // pane and after each turn. The server sends the newest 200 and each collection's true count.
+  async function refreshRecords() {
+    if (!PLAY || !panel.records || $("pRecords").hidden) return;
+    const res = await fetch(BASE + "/api/records");
+    if (!res.ok) return;
+    const { records, counts, older } = await res.json();
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    $("recordsNote").textContent = older ? `the newest ${records.length} of ${total}` : total ? String(total) : "";
+    if (!total) {
+      $("records").replaceChildren(make("div", "sec dim", "No records yet. A tool makes one with context.records.put(collection, id, value)."));
+      return;
+    }
+    // A record opened stays open when the list is drawn again.
+    const opened = new Set([...$("records").querySelectorAll("details[open]")].map((d) => d.dataset.key));
+    const byCollection = new Map();
+    for (const r of records) byCollection.set(r.collection, [...(byCollection.get(r.collection) ?? []), r]);
+    const sections = [];
+    for (const [name, count] of Object.entries(counts)) {
+      if (!count) continue;
+      const rows = byCollection.get(name) ?? [];
+      const sec = make("div", "sec");
+      const label = make("div", "label", name);
+      label.appendChild(make("span", "hint", `${count} record${count === 1 ? "" : "s"}`));
+      const list = make("ul", "items");
+      for (const r of rows) {
+        const li = make("li");
+        const head = make("div", "row2");
+        head.append(make("b", "", r.id), make("span", "dim", `updated ${at(r.updatedAt)}`));
+        const json = make("pre", "", JSON.stringify(r.value, null, 2));
+        // A long value folds, so one record does not push the rest out of sight.
+        if (json.textContent.split("\n").length > 8 || json.textContent.length > 600) {
+          const d = make("details");
+          d.dataset.key = `${name}\u0000${r.id}`;
+          d.open = opened.has(d.dataset.key);
+          d.append(make("summary", "", short(JSON.stringify(r.value), 80)), json);
+          li.append(head, d);
+        } else li.append(head, json);
+        list.appendChild(li);
+      }
+      if (count > rows.length) {
+        const n = count - rows.length;
+        list.appendChild(make("li", "empty", `${n} older record${n === 1 ? "" : "s"} not shown (flow records export lists every one)`));
+      }
+      sec.append(label, list);
+      sections.push(sec);
+    }
+    $("records").replaceChildren(...sections);
   }
   // A new message on a channel not shown: a badge on its tab, until it is opened.
   function markUnread(lastOut) {
@@ -1944,6 +2003,7 @@
       $("who").addEventListener("change", () => { person = $("who").value; remember("chinwag.person", person); setPlatform(current.channel); });
       for (const c of channels) tabFor(c.name, c.name, c.platform);
       setUpPersonPanel();
+      $("tabRecords").hidden = !panel.records;
       const saved = recall("chinwag.pane");
       showPane(saved && !document.querySelector(`[data-pane="${saved}"]`)?.hidden ? saved : panel.person ? "pPerson" : "pTrace");
     } else {

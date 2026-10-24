@@ -1,10 +1,11 @@
-// covers: src/agent.ts src/store.ts src/conversation.ts
+// covers: src/agent.ts src/store.ts src/conversation.ts simulators/src/server.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { z } from "zod";
-import { sqlite, tool, type Database, type Outbound } from "../src/index.ts";
+import { createAgent, sqlite, tool, type Database, type Outbound } from "../src/index.ts";
 import { Store } from "../src/store.ts";
-import { WEB_APP, WHATSAPP, call, multi, respond, users } from "./helpers.ts";
+import { simulators } from "../simulators/src/index.ts";
+import { WEB_APP, WHATSAPP, call, multi, respond, scriptedModel, users } from "./helpers.ts";
 
 const SAM = { name: "Sam", phone: "+15555550101" };
 const NOON_NY = Date.UTC(2026, 9, 12, 16);
@@ -281,4 +282,27 @@ test("a test person's tools get the key resolve gives their real number, on any 
   (await h.nextCall(3)).answer(respond());
   await h.agent.conversation(a!.conversationId)!.whenIdle();
   assert.deepEqual(seen, ["mbr_sam", "mbr_sam"]);
+});
+
+// The Person panel shows one person's state; the agent's records are its own, across people.
+test("the playground lists the agent's newest 200 records with each collection's true count, and has no Records tab without collections", async () => {
+  const records = { questions: { people: ["buyer"], fields: ["status"] }, listings: {} };
+  const agent = createAgent({ files: { "AGENTS.md": "A test agent." }, model: scriptedModel().model, database: sqlite(), testPeople: [SAM], scheduleCheckMs: 0, records });
+  for (let n = 0; n < 205; n++) await agent.records.put("questions", `q${String(n).padStart(3, "0")}`, { buyer: `phone:${SAM.phone}`, status: "waiting", n });
+  await agent.records.put("listings", "flat-12", { city: "Pune" });
+  const bare = createAgent({ files: { "AGENTS.md": "A test agent." }, model: scriptedModel().model, database: sqlite(), testPeople: [SAM], scheduleCheckMs: 0 });
+  const server = await simulators().listen(agent, 0);
+  const without = await simulators().listen(bare, 0);
+  try {
+    const shown = await (await fetch(`${server.url}/api/records`)).json();
+    const ids: string[] = shown.records.map((r: { id: string }) => r.id);
+    assert.deepEqual([ids.length, ids.includes("flat-12"), ids.includes("q204"), ids.includes("q005"), ids.includes("q006")], [200, true, true, false, true], "the newest 200: the oldest 6 left out");
+    assert.ok(ids.indexOf("q204") < ids.indexOf("q006"), "newest first");
+    assert.deepEqual([shown.counts, shown.older], [{ questions: 205, listings: 1 }, 6]);
+    assert.equal((await (await fetch(`${server.url}/api/platforms`)).json()).panel.records, true);
+    assert.equal((await (await fetch(`${without.url}/api/platforms`)).json()).panel.records, false, "an agent that declares no collections");
+  } finally {
+    await server.close();
+    await without.close();
+  }
 });
