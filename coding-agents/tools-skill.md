@@ -84,6 +84,7 @@ export const placeOrder = tool({
   description: "Place a confirmed pickup order. Returns the order number and when it will be ready.",
   input: z.object({ name: z.string(), items: z.array(item) }),
   output: z.object({ order_id: z.string(), ready_by: z.string() }),  // the result's shape
+  format: (o) => `**Order ${o.order_id}** is ready by ${o.ready_by}.`, // optional: the result for people
   status: { running: "Placing your order…", done: "Order placed" },  // at most 64 characters each
   signIn: "required",                              // "required" (default) | "optional" | "none"
   hints: { readOnly: false, destructive: false, idempotent: false, openWorld: false },
@@ -93,6 +94,10 @@ export const placeOrder = tool({
 
 - `output`: over MCP the result is checked against it and sent as structured content, and the CLI
   shows its fields with `--json` and `--fields`. Give it whenever the result has a fixed shape.
+- `format` (needs `output`): the result as Markdown for people, made from the checked output. Over
+  MCP it is the result's text and the CLI prints it, while structured content, `--json` and
+  `--fields` keep the data; chats are not changed by it. Hosts may show their model only this text,
+  so keep every id and URL a next call needs. If it throws, the result goes out as JSON.
 - `signIn`: "none" for what anyone may do signed out (the menu, opening hours), "optional" for what
   works either way and does more signed in, "required" (the default) for everything about a
   person's own account. It applies only where sign-in is set up (the `flow-framework-auth` skill).
@@ -105,8 +110,8 @@ export const placeOrder = tool({
 - `flow check` (from the agent's folder) refuses what cannot be served exactly: a name outside
   1 to 128 of `A-Z a-z 0-9 _ - .`, an empty description, a description naming a chat-only tool
   (`send_*`, `share_updates`, `load_skill`), an input that is not a `z.object`, an input or output
-  with no exact JSON Schema (`z.date()`, transforms; use an ISO string), `readOnly` with
-  `destructive`, or a status line over 64 characters.
+  with no exact JSON Schema (`z.date()`, transforms; use an ISO string), `format` without `output`,
+  `readOnly` with `destructive`, or a status line over 64 characters.
 
 ## Tools from another MCP server
 

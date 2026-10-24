@@ -607,6 +607,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
 - Installed, it is the organization's own command: `"bin": { "acme": "src/cli.ts" }` in its package
   (node runs `.ts` files outside `node_modules`; publish a compiled `.js` bin to npm). While building
   it, run it with `npm run cli -- order -h`: npm takes flags before `--` as its own.
+- A tool with `format` prints its own text; `--json`, `--fields`, `columns` and `view` show its data.
 - Every tool command takes `--json` and `--fields a,b`; one that changes things takes `--dry-run`; one
   that may delete or overwrite asks first in a terminal and needs `--yes` without one. Exit codes: 0
   done, 1 the tool failed, 2 wrong command or arguments (with the help to read), 3 sign-in needed, 4

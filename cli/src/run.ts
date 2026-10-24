@@ -17,6 +17,7 @@ import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHt
 import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
 import { configDir, isSignedIn, signIn, signOut, storedProvider } from "./auth.ts";
 import { SKILLS_META } from "../../src/skills.ts";
+import { FORMATTED } from "../../src/tools.ts";
 import {
   BUILT_IN,
   commandTable,
@@ -554,6 +555,9 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
         throw needsSignIn(error) ? explain(config, "", error) : (badArguments(config, c.words, error, (field) => (args.includes(field) ? `<${field}>` : `--${flagName(field)}`)) ?? error);
       });
       if (result.isError) throw new CliExit(EXIT.failed, textOf(result.content as Block[]) || `${tool.name} failed.`);
+      // The tool's own text, unless the person asked for data or the CLI file chose what to show.
+      const formatted = (result._meta as Record<string, unknown> | undefined)?.[FORMATTED] === true && !parsed.json && !parsed.fields && !settings?.columns && !settings?.view;
+      if (formatted) return void io.write(`${textOf(result.content as Block[]).replace(/\n*$/, "")}\n`);
       io.write(`${render(valueOf(result), { json: Boolean(parsed.json), fields: parsed.fields as string[] | undefined, columns: settings?.columns, view: settings?.view })}\n`);
     },
   });

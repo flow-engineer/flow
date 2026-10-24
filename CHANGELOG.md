@@ -2,6 +2,22 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **A tool's own text for people.** `tool({ output, format: (result) => markdown })` makes the
+  result readable where people see it: over MCP the text is the result's `content` (structured
+  content still carries the data), and the CLI prints it by default. `--json`, `--fields` and a
+  CLI file's `columns` or `view` still show the data. `format` runs on the checked output; if it
+  throws, the result goes out as JSON, still a success, and `tool.end` carries `formatError`.
+  Chats are unchanged: the model there still reads the data. `flow check` refuses `format`
+  without `output`.
+
+### Migration notes
+
+None. A CLI on an older Flow Framework ignores the text and keeps showing the data as before.
+
 ## 0.6.0 (2026-10-24)
 
 ### Changes

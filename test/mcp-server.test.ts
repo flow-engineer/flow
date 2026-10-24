@@ -147,6 +147,20 @@ test("a tool that throws is an isError result, and output is checked and sent as
   await c.close();
 });
 
+test("a tool's format is the result's text beside its structured content; a format that throws sends JSON, still a success", async () => {
+  const events: unknown[] = [];
+  const order = z.object({ order_id: z.string() });
+  const formatted = tool({ name: "formatted", description: "Places.", input: z.object({}), output: order, signIn: "none", run: () => ({ order_id: "BL-1" }), format: (o) => `**Order ${o.order_id}** placed` });
+  const broken = tool({ name: "broken", description: "Places.", input: z.object({}), output: order, signIn: "none", run: () => ({ order_id: "BL-2" }), format: () => { throw new Error("no template"); } });
+  const c = await client(await serve({ name: "cafe", version: "1", tools: [formatted, broken], events: [e => { events.push(e); }] }));
+
+  assert.deepEqual(await c.callTool({ name: "formatted", arguments: {} }), { content: [{ type: "text", text: "**Order BL-1** placed" }], structuredContent: { order_id: "BL-1" }, _meta: { "chinwag/formatted": true } });
+  assert.deepEqual(await c.callTool({ name: "broken", arguments: {} }), { content: [{ type: "text", text: '{"order_id":"BL-2"}' }], structuredContent: { order_id: "BL-2" } });
+  const ended = events.filter((e): e is { type: string; ok: boolean; formatError?: string } => (e as { type: string }).type === "tool.end");
+  assert.deepEqual(ended.map(({ ok, formatError }) => ({ ok, formatError })), [{ ok: true, formatError: undefined }, { ok: true, formatError: "no template" }]);
+  await c.close();
+});
+
 test("a served tool's context.records is the records given to mcpServer; without them its call says how to give them", async () => {
   const agent = createAgent({ files: { "AGENTS.md": "Test." }, model: { complete: () => Promise.reject(new Error("no model")) }, records: { notes: { people: ["about"] } }, scheduleCheckMs: 0 });
   const note = tool({ name: "note", description: "Keeps a note.", input: z.object({ text: z.string() }), signIn: "none", run: async ({ text }, context) => (await context.records.put("notes", "n1", { about: context.person, text }), { kept: true }) });
@@ -174,6 +188,8 @@ test("skills are listed in the instructions and read with read_skill", async () 
 test("a tool that cannot be described exactly is refused when the server is made", () => {
   const dated = tool({ name: "book", description: "Book.", input: z.object({ when: z.date() }), run: () => "ok" });
   assert.throws(() => mcpServer({ name: "x", version: "1", tools: [dated] }), /input has no exact JSON Schema/);
+  const unshaped = tool({ name: "place", description: "Place.", input: z.object({}), run: () => "ok", format: () => "Placed" });
+  assert.throws(() => mcpServer({ name: "x", version: "1", tools: [unshaped] }), /format needs output/);
 });
 
 // Plugin skills are native files; a host must not also receive their MCP copy.

@@ -106,6 +106,7 @@ export function toolProblems(tool: Tool): string[] {
       problems.push(`${at}: output has no exact JSON Schema (${(error as Error).message})`);
     }
   }
+  if (tool.format && !tool.output) problems.push(`${at}: format needs output, the schema of the data it formats`);
   if (tool.hints?.readOnly && tool.hints.destructive) problems.push(`${at}: hints say readOnly and destructive; a tool that changes nothing destroys nothing`);
   for (const key of ["running", "done"] as const) {
     const line = tool.status?.[key];
