@@ -5,9 +5,9 @@ import { call, respond, users } from "./helpers.ts";
 import { event, fakeFlow, liveAgent, received, type Recorded } from "./fake.ts";
 
 const WA = { id: "conv_wa", channel: "whatsapp", contact: "ct_maya" } as const;
-const PATH = "/v1/conversations/conv_wa/messages";
+const PATH = "/v0/conversations/conv_wa/basic";
 const post = (r: Recorded) => r.method === "POST" && r.path === PATH;
-const outbound = (id: string, status: string, extra: object = {}) => ({ id, conversation: "conv_wa", direction: "out", status, content: { type: "text", text: "x" }, ...extra });
+const outbound = (id: string, status: string, extra: object = {}) => ({ id, conversation: "conv_wa", direction: "out", status, content: { kind: "basic", text: "x" }, ...extra });
 
 /** An agent on Flow's WhatsApp whose first reply Flow answers 202 queued, as msg_w1. */
 async function waiting(t: { after(fn: () => void): void }, messaging: NonNullable<Parameters<typeof liveAgent>[1]>["messaging"] = {}) {
@@ -16,7 +16,7 @@ async function waiting(t: { after(fn: () => void): void }, messaging: NonNullabl
   t.after(() => (flow.close(), live.close()));
   flow.contacts.ct_maya = { address: { phone: "+15550100100" } };
   flow.queued.push({ match: post, status: 202, body: outbound("msg_w1", "queued") });
-  await live.deliver(received(WA, "msg_1", { type: "text", text: "hi" }));
+  await live.deliver(received(WA, "msg_1", { kind: "basic", text: "hi" }));
   const id = live.events[0]!.conversationId;
   const outs = () => live.events.filter((e) => e.type === "message.out").length;
   return { flow, live, id, outs };
@@ -41,7 +41,7 @@ test("a message.sent heard before Flow's 202 came back settles its send at once"
   (await live.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Hello" })));
   await live.agent.conversation(id)!.whenIdle();
   assert.equal(outs(), 1);
-  assert.equal(flow.requests.filter((r) => r.method === "GET" && r.path.startsWith("/v1/messages/")).length, 0, "nothing read back");
+  assert.equal(flow.requests.filter((r) => r.method === "GET" && r.path.startsWith("/v0/messages/")).length, 0, "nothing read back");
 });
 
 test("with no signal within waitTimeoutMs the send goes on as message.slow and is never posted again", async (t) => {

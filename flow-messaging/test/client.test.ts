@@ -16,7 +16,7 @@ test("a file id from an event must look like Flow's before the key is sent to it
   assert.equal(flow.requests.length, 0, "nothing was sent for a refused id");
 
   assert.deepEqual([...(await client.download("file_01JB8ZE5N7Q9S1V3X5Z7B9D1E3"))], [1, 2, 3]);
-  assert.equal(flow.requests[0]!.path, "/v1/files/file_01JB8ZE5N7Q9S1V3X5Z7B9D1E3");
+  assert.equal(flow.requests[0]!.path, "/v0/files/file_01JB8ZE5N7Q9S1V3X5Z7B9D1E3");
   assert.equal(flow.requests[0]!.headers.authorization, "Bearer fk_test_key");
 });
 

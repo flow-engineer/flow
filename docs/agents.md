@@ -208,7 +208,7 @@ place frees up. An older flow.engineer counts messages instead (`3 of 300 messag
 ## Messages the business starts
 
 A nudge, a scheduled message or any turn the person did not start goes with link previews off
-(`preview: false` on the message; Flow Messaging's WhatsApp `preview_url: false`): on WhatsApp a
+(`preview: false` on the message; Flow Messaging's `link_preview: false`): on WhatsApp a
 preview card's title becomes the phone's notification instead of the message's text. For a call to
 action use `link` (`agent.nudge({ to, text, link: { label, url } })`, or the agent's send with
 `link`), not a URL in the text.
