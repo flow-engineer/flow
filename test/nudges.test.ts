@@ -150,7 +150,7 @@ test("a template to someone who never wrote makes them a person: their reply joi
   await assert.rejects(h.agent.nudge({ to, template: { name: "order_shipped", body: ["Ana"] } }), /takes 2 body values, got 1/);
   assert.equal(await h.agent.contact(to), null, "none of them made a person");
   // A national number on WhatsApp (read with no defaultCountryCode) would be another country's: refused.
-  for (const address of ["(555) 010-0177", "07700 900123"]) {
+  for (const address of ["(555) 010-0177", "07700 900123", "5550100177"]) {
     assert.deepEqual(await h.agent.nudge({ to: { channel: "whatsapp", address }, template: { name: "order_shipped", body: ["Ana", "1042"] } }), { id: "", status: "refused", reason: "unknown_person" });
   }
 
@@ -207,7 +207,9 @@ test("a nudge in another format finds the person their resolve() keys", async ()
   const a = await h.message("whatsapp", "15550100177", "hi");
   (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Hi" })));
   await h.agent.conversation(a!.conversationId)!.whenIdle();
-  assert.equal((await h.agent.nudge({ to: { channel: "whatsapp", address: "+1 (555) 010-0177" }, text: "Your order shipped." })).status, "sent");
+  const to = { channel: "whatsapp", address: "+1 (555) 010-0177" };
+  assert.notEqual(await h.agent.contact(to), null, "contact() finds them as nudge() does");
+  assert.equal((await h.agent.nudge({ to, text: "Your order shipped." })).status, "sent");
   assert.equal(h.out.at(-1)!.address, "15550100177");
 });
 

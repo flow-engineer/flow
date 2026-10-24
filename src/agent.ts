@@ -814,7 +814,9 @@ export class Agent {
       const latest = (wanted.length ? wanted : same).sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))[0];
       if (latest) return latest;
     }
-    if (known || !template || adapter.info.templates === false || !PHONE_NUMBER.test(to.address.trim())) return known;
+    // A new person is made only from a number written in full: bare digits could be a national
+    // number, read as another country's.
+    if (known || !template || adapter.info.templates === false || !PHONE_NUMBER.test(to.address.trim()) || !/^(?:\+|00)/.test(to.address.trim())) return known;
     const identity = await this.conversationFor(adapter, to.channel, phone);
     if (via !== "playground") return identity;
     await this.store.setIdentityVia(to.channel, phone, via);
@@ -984,7 +986,8 @@ export class Agent {
   /** What the business and the person set for someone, by a channel identity they wrote from; null for someone who never wrote. */
   async contact(to: { channel: string; address: string }): Promise<Contact | null> {
     await this.settings.ready;
-    const identity = await this.store.identity(to.channel, to.address);
+    // Found as a nudge finds them, so `if (!(await agent.contact(to))) return;` guards a nudge to that address.
+    const identity = await this.nudgeIdentity(to, false);
     const row = identity && (await this.store.conversation(identity.conversationId));
     if (!row) return null;
     const rules = await this.store.noContact(row.id, this.now());
