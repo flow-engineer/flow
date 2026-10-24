@@ -115,6 +115,28 @@ when the topic closes and it skips the caps. A watch with `urgent: true` ("tell 
 it critical. A message is never lowered. Watches last `watchDays` (30) and end a day after
 `close(topic)`.
 
+A tool saves the watch in its own agent's events side, `context.events` (there once
+`events.attach(agent)` ran), never in a module variable: the same tool object then serves every
+agent in the process (each `flow test` run, both sides of a deploy) with that agent's state.
+
+```ts
+const keepMePosted = tool({
+  name: "keep_me_posted",
+  description: "Save a topic the person asked to be kept posted on, after they said yes.",
+  input: z.object({ topic: z.string(), title: z.string().optional() }),
+  run: ({ topic, title }, context) => {
+    if (!context.events || !context.address) return { saved: false };
+    // The address the events are sent to: on WhatsApp, their number in E.164, as `addressOf` reads it.
+    return { saved: context.events.watch({ address: context.address, topic, title }).outcome };
+  },
+});
+```
+
+`context.events.mute(address, topic)`, `notInterested(address)` and `stopped(address)` work the
+same way. Code outside a turn (a route, `beforeSend`, `intercept`) has it as `agent.events`; tools
+served over MCP get it from `mcpServer({ businessEvents: agent.events })`. With watch fields of your
+own (`flowEvents<MyWatch>(...)`), read it as `context.events as FlowEvents<MyWatch> | undefined`.
+
 ## Wording
 
 Outside WhatsApp's 24-hour window the template goes. Inside it the agent phrases the message to fit
@@ -243,4 +265,5 @@ events.attach(agent);
 ```
 
 The agent then answers `POST /v1/events` through `agent.fetch(request)`, and held sends go out on
-its tick.
+its tick. Attached, the events side is the agent's own (`agent.events`, and `context.events` in its
+tools); an agent takes one, and attaching a second one to it throws.

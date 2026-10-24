@@ -25,6 +25,22 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - **`flow records export`** prints every record of the agent in the folder (the store its
   `buildAgent` opens) as JSON Lines.
 - `mcpServer({ records: agent.records })` gives tools served over MCP the same records.
+- **`context.events`: a tool's own agent's business events side.** Once `events.attach(agent)` has
+  run, every tool call of that agent has its `flowEvents` as `context.events` (`agent.events` for
+  code outside a turn: routes, beforeSend, intercept, context), so a tool watches, mutes or takes
+  back a topic for the conversation's person in the state of the agent it runs for
+  (`context.events.watch({ address, topic })`, `mute`, `notInterested`, `stopped`, `remember`),
+  never through a module variable. Two agents in one process (two test runs, a deploy's overlap)
+  each see only their own. Absent when no events side is attached; over MCP,
+  `mcpServer({ businessEvents: agent.events })` gives it. An agent with its own watch fields reads
+  it as `context.events as FlowEvents<MyWatch> | undefined` ([docs/events.md](docs/events.md#watches-raise-a-message)).
+- **A tool `flow test` runs for real (`tools: { real: [...] }`) is the agent's own object again.**
+  From 0.4.9 to 0.5.3 a business run handed `buildAgent` a copy of it (`{ ...tool, run }`), so code
+  that knew its own tool by identity (`t === myTool`, to swap in one that keeps this agent's
+  state) no longer matched, and what the tool kept went to module-shared state instead of the
+  run's agent: the scenario sent nothing, with no error. `buildAgent` now gets the very object
+  it exports, as in production. The tools the cloud simulates are still stand-ins of their own
+  (same name, description and input), never `===` the agent's.
 - The playground's Records tab, for an agent that declares collections, shows its newest 200
   records, newest first, with each collection's count and how many older ones are not shown.
 - Store migration 10 adds the tables `records`, `record_index` and `record_collections` (per
@@ -39,6 +55,16 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `forgetRecords`, `exportRecords`, `reindexRecords`). A store of your own that forwards each call to a `Store` (as
   Flow's hosting does) forwards them too; a hosted agent on 0.6 deploys once Flow's hosting runs
   0.6 (until then `flow deploy` refuses it, as for any newer line).
+- **An agent takes one events side.** `events.attach(agent)` with a second, different `flowEvents`
+  on an agent that already has one now throws (they overwrote each other's state already, as
+  0.5.0's notes say): mount one. Attaching the same one again changes nothing.
+- **From 0.4.9 to 0.5.3, `flow test` gave `buildAgent` copies of the tools it runs for real.** An
+  agent that worked around it (matching its tool by name or schema rather than `t === myTool`, or
+  routing its tool's run to the agent whose conversation it is) keeps working; the workaround can
+  go now. A tool that needs its agent's events state can read `context.events` instead of
+  `buildAgent` swapping in a copy bound to that state. On 0.4.9 to 0.5.3, a scenario with
+  `tools: { real: [...] }` whose tool keeps per-agent state that way may have passed or failed for
+  that reason alone: run it again on 0.6.
 
 ## 0.5.3 (2026-10-24)
 

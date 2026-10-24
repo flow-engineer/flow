@@ -41,6 +41,7 @@ import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type ContentRefusal } from "./channels.ts";
+import type { FlowEvents } from "./business-events/engine.ts";
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { recordsUntil, type Records } from "./records.ts";
@@ -82,6 +83,8 @@ export interface ConversationSettings {
   store: StoreApi;
   /** The agent's records, for its tools (`context.records`). */
   records: Records;
+  /** The agent's events side once attached, for its tools (`context.events`). */
+  events?: () => FlowEvents | undefined;
   /** Resolves once the store's tables exist. */
   ready: Promise<void>;
   now: () => number;
@@ -1720,7 +1723,9 @@ export class Conversation {
 
     this.settings.emit(this.id, "tool.start", { callId: call.id, tool: call.name, input: parsed.data });
     const key = createHash("sha256").update(`${this.id}\u0000${this.turns}\u0000${call.name}\u0000${input}`).digest("hex").slice(0, 32);
-    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal, records: this.records };
+    // The agent's events side as it is now (attach() may come after createAgent), only when there is one.
+    const events = this.settings.events?.();
+    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal, records: this.records, ...(events ? { events } : {}) };
     const credentials = this.settings.credentialProvider?.(identityContext) ?? this.settings.credentials;
     let context = toolContext(identityContext, credentials);
     let authorize!: () => void;

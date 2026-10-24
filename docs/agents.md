@@ -216,9 +216,11 @@ action use `link` (`agent.nudge({ to, text, link: { label, url } })`, or the age
 When the business's backend should tell people what happened (an order shipped, an item is back),
 mount `flowEvents` instead of writing a route: one signed `POST /v1/events`, each event sent by its
 delivery level (critical at once, standard after quiet hours, optional merged or dropped), with the
-agent's own wording checked against the template's values. The envelope, signing, answers and a
-mounting sample are in `docs/events.md` in the package
-(https://github.com/flow-engineer/flow/blob/main/docs/events.md).
+agent's own wording checked against the template's values. Once `events.attach(agent)` ran, the
+agent's tools reach it as `context.events` (other code as `agent.events`): a tool that keeps what
+a person watches saves it there, in the state of the agent it runs for, never in a module
+variable. The envelope, signing, answers and a mounting sample are in `docs/events.md` in the
+package (https://github.com/flow-engineer/flow/blob/main/docs/events.md).
 
 ## The agent's own records
 
