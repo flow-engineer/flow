@@ -370,3 +370,22 @@ test("an outbound timeout is not sent again", { timeout: 10_000 }, async () => {
     assert.ok(!logs.join("\n").includes("trying again"));
   } finally { cloud.close(); }
 });
+
+test("a send in the cloud resolves with the id the cloud's answer gives (for an edit to name), and with nothing from a cloud that gives none", { timeout: 10_000 }, async () => {
+  let answered = 0;
+  const cloud = await tunnel((path, _body, res) => {
+    if (!path.endsWith("/outbound")) return ok(res);
+    res.writeHead(200, { "content-type": "application/json" }).end(++answered === 1 ? JSON.stringify({ ok: true, messageId: "a1" }) : '{"ok":true}');
+  });
+  const receipts = gate<unknown[]>();
+  try {
+    const running = runInCloud({ cloud: cloud.cloud, name: "test", tools: [], files: [], log: () => {}, build: () => ({ channels: () => [], reacted: () => {}, receive: (_id, _incoming, deliver) => {
+      void (async () => receipts.resolve([await deliver({ type: "message", text: "one" }), await deliver({ type: "message", text: "two" })]))();
+      return "local-id";
+    } }) });
+    (await cloud.connected).write(frame(message("m1")));
+    assert.deepEqual(await receipts.promise, [{ status: "sent", messageId: "a1" }, undefined]);
+    cloud.finish();
+    assert.deepEqual(await running, { runs: [] });
+  } finally { cloud.close(); }
+});

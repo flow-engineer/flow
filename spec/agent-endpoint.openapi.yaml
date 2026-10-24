@@ -38,7 +38,9 @@ info:
 
     A reply that is valid JSON but does not fit the run's platform (buttons on SMS, text over its
     maxLength, an unknown key) is not sent; the run says why and the other replies still go.
-    `x-flow-platforms` below lists what each platform shows.
+    `x-flow-platforms` below lists what each platform shows. Its `edits` and `unsends` say the
+    platform can change or take back a sent message; an endpoint's replies cannot do either in this
+    version.
 servers:
   - url: http://localhost:3000
     description: Wherever your agent listens; `flow test --agent-url` takes the full URL.
@@ -139,11 +141,13 @@ x-flow-platforms: &platforms
     platform: imessage
     reactions: true
     status: false
-    formatting: plain
+    formatting: markdown
     maxLength: 9999
     replies: true
     images: { captionMax: 1024 }
     readReceipts: true
+    edits: true
+    unsends: true
   telegram:
     platform: telegram
     reactions: true
@@ -156,6 +160,8 @@ x-flow-platforms: &platforms
     linkButton: { labelMax: 20 }
     images: { captionMax: 1024 }
     readReceipts: false
+    edits: true
+    unsends: true
   web:
     reactions: true
     status: true

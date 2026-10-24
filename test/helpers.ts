@@ -39,11 +39,13 @@ function isFollowUp(request: ModelRequest): boolean {
   const last = request.messages[i];
   if (!last || last.role !== "assistant" || !last.toolCalls?.length) return false;
   const after = request.messages.slice(i + 1);
-  const talk = (name: string) => name.startsWith("send_") || name === "react" || name === "share_updates";
+  const talk = (name: string) => name.startsWith("send_") || name === "react" || name === "share_updates" || name === "edit_message" || name === "unsend_message";
+  const went = (name: string, content: string) =>
+    name.startsWith("send_") ? content.startsWith('{"delivered":true') : name === "edit_message" ? content.startsWith('{"edited":true') : name === "unsend_message" ? content.startsWith('{"unsent":true') : content === "";
   return (
     last.toolCalls.every((c) => talk(c.name)) &&
     after.length === last.toolCalls.length &&
-    after.every((m, k) => m.role === "tool" && (last.toolCalls![k].name.startsWith("send_") ? m.content.startsWith('{"delivered":true') : m.content === ""))
+    after.every((m, k) => m.role === "tool" && went(last.toolCalls![k].name, m.content))
   );
 }
 
@@ -116,6 +118,7 @@ export function multi(options: {
   profile?: AgentOptions["profile"];
   fallbackTemplate?: AgentOptions["fallbackTemplate"];
   beforeSend?: AgentOptions["beforeSend"];
+  wakeUps?: AgentOptions["wakeUps"];
 }) {
   const dir = options.dir ?? mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
@@ -162,6 +165,7 @@ export function multi(options: {
     profile: options.profile,
     fallbackTemplate: options.fallbackTemplate,
     beforeSend: options.beforeSend,
+    wakeUps: options.wakeUps,
     scheduleCheckMs: 0,
   });
   const texts = (channel?: string) =>

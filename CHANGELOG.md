@@ -2,10 +2,48 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## Unreleased
+## Unreleased (0.8.0: store migration 11 needs a new minor, so Flow's hosting runs it first)
 
 ### Changes
 
+- **The agent can wake itself up.** A wake-up is a row in the agent's store, never a timer in
+  memory: at its time the agent gets a turn in that person's conversation with its note
+  (`[Wake-up you set for yourself, not from the person: <note>]`) and decides what to do: look
+  something up, message them, call a tool, or nothing. It never sends anything by itself. It
+  survives restarts and deploys and runs once with several runners, through the same claim as
+  scheduled messages.
+  - The model gets `wake_me_up({ note, in_minutes | at, key? })` and `cancel_wake_up({ id })`
+    built in, for its own conversation only, and each turn shows it the wake-ups it set there.
+    `createAgent({ wakeUps: false })` takes both tools and that list away; wake-ups set by code
+    still run.
+  - From code: `context.wakeUps` in a tool (`add({ note, inMs | at, key?, respectQuietHours? })`,
+    `cancel(key)`, `list()`), and `agent.wakeUp({ to, ... })`, `agent.cancelWakeUp(key)`,
+    `agent.listWakeUps(to)` elsewhere. One active wake-up per key in a conversation: the same key
+    again returns it (`status: "exists"`). `cancel(key)` cancels the active ones with that key in
+    every conversation, so the seller's answer cancels the reminder set in the buyer's.
+  - It keeps the person's rules: due in their quiet hours it waits for them to end (unless
+    `respectQuietHours: false`). After their STOP or in a pause it still runs, so the agent can do
+    its work (close the question), but its note says so and Flow refuses every send to them in
+    that turn (`Not sent: they texted STOP, ...`), until they write. Past WhatsApp's 24-hour window it still runs, and the agent is told only a template
+    reaches them (`send_template`); no fallback template goes by itself. Found late after
+    downtime, it runs and says when it was due, where a scheduled message is missed.
+  - Limits in `WAKE_UP_LIMITS`: 10 active per person, 10,000 per agent, 90 days ahead, notes of
+    500 characters and keys of 200. The model gets a plain error past one; code gets
+    `{ status: "refused", reason }` at a cap and a throw for a bad time or note.
+  - `agent.forgetPerson` deletes them. `agent.outbox(id)` has a new `wakeUps` list, and the
+    playground's Person tab shows it beside scheduled messages; moving its clock (or a business
+    run's `wait` in `flow test`) brings them due.
+- **`agent.cancelNudge(key)` cancels a nudge sent with `at`**, by its idempotency key, while it is
+  still to come: nothing goes, and its state is `cancelled` (a new `NudgeStatus`, also in
+  `spec/nudges.openapi.yaml`). A nudge that is not waiting to go (it went, or had no `at`) keeps
+  its state, which it returns; null for a key no nudge has. A scheduled nudge's schedule now
+  carries its key; one scheduled before 0.8 has none, so it is not found and goes as planned.
+- Store migration 11 adds the `schedule_key` column to `schedules` (a wake-up's key, a scheduled
+  nudge's idempotency key), a unique index on active schedules' keys per conversation, and an
+  index on each conversation's schedules (every turn now reads its wake-ups). It runs on the
+  agent's first start and changes no existing row.
+- `list_scheduled` and `cancel_scheduled` see only scheduled messages, never the agent's
+  wake-ups; the 10-a-person cap on scheduled messages counts only them.
 - **A tool's own text for people.** `tool({ output, format: (result) => markdown })` makes the
   result readable where people see it: over MCP the text is the result's `content` (structured
   content still carries the data), and the CLI prints it by default, rendered at a terminal by
@@ -27,10 +65,114 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
-None. A CLI on an older Flow Framework ignores the text and keeps showing the data as before.
-A CLI file's own `help` command, like its own `chat`, replaces the CLI's. To
-render the text in a terminal, a CLI's package adds `marked@12.0.2` and `marked-terminal@7.3.0`;
-without them it prints the Markdown as written.
+- **`StoreApi` has three new methods, `addWakeUp`, `cancelWakeUps` and `cancelScheduledNudge`,**
+  and `addSchedule` writes the new `key` field. A store of your own that
+  forwards each call to a `Store` (as Flow's hosting does) forwards them too. A hosted agent on
+  0.8 deploys once Flow's hosting runs 0.8 (until then `flow deploy` refuses it, as for any newer
+  line).
+- **`ScheduleRow` has a new field, `key`, and new values: `mode` `"wake"`, `origin`
+  `"agent"`.** Code that reads `store.schedules(...)` itself and switches on `mode` or `origin`
+  handles them, or leaves out rows with `mode === "wake"`.
+- **Every agent's model is offered two more built-in tools**, `wake_me_up` and `cancel_wake_up`. An
+  agent with a tool of its own by either name renames it, or turns them off with
+  `createAgent({ wakeUps: false })`.
+- **`NudgeStatus` has a new value, `cancelled`.** Code that switches on a nudge's status
+  exhaustively handles it; it comes only from `agent.cancelNudge`.
+- **To render a tool's `format` in a terminal**, a CLI's package adds `marked@12.0.2` and
+  `marked-terminal@7.3.0`; without them it prints the Markdown as written. Nothing else changes.
+- **A CLI file's own `help` command**, like its own `chat`, replaces the CLI's `help <words>`.
+
+## 0.7.0 (2026-10-24)
+
+### Changes
+
+- **The Flow Messaging adapter (`@flow-engineer/flow/flow-messaging`) speaks Flow Messaging's V0
+  API:** every call goes to `/v0/...`, and each kind of message goes to its own endpoint
+  (`POST /v0/conversations/{id}/basic`, `/buttons`, `/list`, `/carousel`, `/template`, `/reaction`,
+  `/typing`, `/read`). V0 sends exactly what it is given or refuses it (`422 unsupported_content`);
+  it converts nothing. So the adapter now does each channel's conversions itself:
+  - Telegram: the agent's Markdown goes as Telegram's HTML (`telegram.parse_mode: "HTML"`),
+    rendered by the same rules Flow Messaging used, so it looks the same as before. A carousel goes
+    as its text, then one message per card in order: the card's photo with its text as caption and
+    its buttons or link under it (a card with neither is its photo alone).
+  - WhatsApp: a list goes as a WhatsApp `list` with the agent's own label (before, every list
+    opened with "Choose"). Row titles now take WhatsApp's 24 characters (they were cut to 20), and
+    row descriptions are shown (they were dropped). More than 3 buttons also go as a list, under
+    "Choose". WhatsApp's own marks (`*bold*`) go as written, as before.
+  - iMessage: text is now Markdown, sent as iMessage's own styles (`imessage.styles`: bold, italic,
+    underline, strikethrough). `IMESSAGE.formatting` is `"markdown"`, so the agent is told Markdown
+    works there, and so is the iMessage platform `flow test` plays (`x-flow-platforms` in
+    `spec/agent-endpoint.openapi.yaml`).
+  - A message the business starts (a nudge, a scheduled text) goes with `link_preview: false` on
+    every channel, not only WhatsApp.
+- Typing sends `{}` and nothing when the agent stops typing: no channel clears the indicator on
+  request, and it clears itself when the next message goes. iMessage read receipts mark the whole
+  conversation (Flow refuses `up_to` there).
+- Events are read in both shapes: the V0 one (`content.kind`) and the older one (`content.type`),
+  which an app Flow still serves through its bridge to the older API gets.
+- A `422 unsupported_content` reaches the agent saying what the channel does not take, on which
+  channel and why, for example `unsupported_content (no_mms, param media, on sms): ...`, with
+  "don't resend it". `FlowMessagingError` has two new fields, `param` and `channel`.
+- iMessage group conversations are passed over, with one warning. The agent never answers in a
+  group, and no typing or read receipt goes to one. Before, their events failed, and Flow
+  delivered them again.
+- **Edits and unsends.** On channels that have them (Telegram and iMessage on Flow Messaging, a
+  custom UI with the new `editMessage` / `unsendMessage`) the agent is offered `edit_message`
+  (`{ message_id, text }`) and `unsend_message` (`{ message_id }`), as `react` is offered only where
+  reactions exist; WhatsApp and SMS offer neither. The send tool's result there names the message
+  (`{"delivered":true,"channel":"imessage","message_id":"msg_..."}`), read back from the history
+  after a restart. An edit's text passes `beforeSend` (`context.edit` names the message) and the
+  content rules like any send. On Flow Messaging an edit is `PATCH /v0/messages/{id}` (the new text
+  styled as a send's: Telegram's HTML, iMessage's styles) and an unsend `DELETE /v0/messages/{id}`.
+  Flow refuses a late or unsupported one when it is made (`422 unsupported_content`, with
+  `edit_window_closed`, `unsend_window_closed`, `first_message_not_editable` or `not_on_sms`), and
+  the tool's result is that refusal with Flow's message, which states the limit (`Not edited:
+  unsupported_content (edit_window_closed, on imessage): iMessage allows edits within 15 minutes of
+  sending; ...`). Nothing is sent instead: the agent writes its own correction if it wants one.
+  Flow Framework sets no time limits of its own. One the channel refuses after Flow took it comes
+  as Not delivered (`edit of msg_...: <text>`, `unsend of msg_...`). New `ChannelInfo.edits` /
+  `unsends`, `Outbound` `{ type: "edit", messageId, text }` / `{ type: "unsend", messageId }`, events
+  `message.edited` and `message.unsent`, transcript entries `edit` and `unsend`.
+- **Sends return the platform's message id.** `SendReceipt.messageId`: Flow Messaging's sends
+  resolve with it (`msg_...`; a carousel sent in parts, its first message's), and so can any
+  provider's; `message.out` carries it as `messageId`, and a sent nudge's `NudgeResult.messageId`
+  (a prompt nudge's: the agent's first message) when this process sent it. That id is what
+  `PATCH` and `DELETE /v0/messages/{id}` take, for an agent's own code.
+- The playground, `flow chat` and the test cloud's simulators play edits and unsends: their sends
+  resolve with their ids (`a1`, `a2`, ...), the thread shows the message edited or gone (lines
+  `edit` and `unsend`), a platform without them refuses them with its error, and `flow show` prints
+  them. The cloud's answer to an outbound may carry `messageId` (an older cloud's does not, and its
+  runs offer no edits).
+
+### Migration notes
+
+- **The Flow Messaging adapter needs Flow Messaging's V0 API.** 0.7 calls `/v0`, so upgrade once
+  Flow Messaging serves V0. Versions before 0.7 call the older `/v1` API. That keeps working only
+  while Flow serves your app through its bridge to the older API, and Flow switches you off the
+  bridge once you upgrade. To move, bump `@flow-engineer/flow`. The adapter's options, channels and
+  exports are unchanged. Code of your own that calls Flow Messaging beside the adapter (`POST
+  /v1/conversations/{id}/messages` with `content`) moves to the per-kind endpoints: see Flow
+  Messaging's migration guide.
+- **iMessage text is Markdown now.** An agent's iMessage replies are read as Markdown and sent with
+  iMessage's styles, and the agent is told Markdown works there. `**6pm**` used to show as written;
+  now it shows as bold "6pm". An agent whose own instructions said to write plain text on iMessage
+  can drop that line. To keep text exactly as written, escape the marks (`\*`).
+- **A Telegram carousel card with buttons needs a text.** Flow sends a card's buttons under its
+  text, and V0 takes no buttons message without one. A carousel with such a card is refused before
+  anything is sent, and the agent is told which card. Before, Flow sent the photo and the buttons
+  with no caption.
+- **A first message to someone with no conversation yet is text or a template.** When the adapter
+  knows no conversation (a nudge, or a send after a restart before the person writes), V0 starts
+  one only with a text or a template. A link still goes, as its text with the URL on a line after it.
+  Buttons, a list or a carousel are refused before anything is sent, and the reason says to send a
+  text first. Before, they started the conversation.
+- **A WhatsApp carousel no longer quotes the message it replies to** (V0's carousel has no
+  `reply_to`).
+- **`Outbound` has two more members, `edit` and `unsend`.** They go only to channels whose info
+  says `edits` / `unsends`, so a hand-written channel is never sent one. TypeScript code that
+  narrows `Outbound` by what it is not (`Exclude<...>`, or an exhaustive `switch` with a `never`
+  check) handles the two (or ignores them, as for `typing`).
+- **`PlaygroundSink` may return a `SendReceipt`.** A sink that returns nothing keeps working unchanged.
 
 ## 0.6.0 (2026-10-24)
 
@@ -55,11 +197,30 @@ without them it prints the Markdown as written.
 - **`flow records export`** prints every record of the agent in the folder (the store its
   `buildAgent` opens) as JSON Lines.
 - `mcpServer({ records: agent.records })` gives tools served over MCP the same records.
+- **`context.events`: a tool's own agent's business events side.** Once `events.attach(agent)` has
+  run, every tool call of that agent has its `flowEvents` as `context.events` (`agent.events` for
+  code outside a turn: routes, beforeSend, intercept, context), so a tool watches, mutes or takes
+  back a topic for the conversation's person in the state of the agent it runs for
+  (`context.events.watch({ address, topic })`, `mute`, `notInterested`, `stopped`, `remember`),
+  never through a module variable. Two agents in one process (two test runs, a deploy's overlap)
+  each see only their own, when each has its own `flowEvents` (made inside `buildAgent`). It is not
+  `createAgent`'s `events` (trace sinks). Absent when no events side is attached; over MCP,
+  `mcpServer({ businessEvents: events })` gives it. An agent with its own watch fields reads
+  it as `context.events as FlowEvents<MyWatch> | undefined` ([docs/events.md](docs/events.md#watches-raise-a-message)).
+- **A tool `flow test` runs for real (`tools: { real: [...] }`) is the agent's own object again.**
+  From 0.4.9 to 0.5.3 a business run handed `buildAgent` a copy of it (`{ ...tool, run }`), so code
+  that knew its own tool by identity (`t === myTool`, to swap in one that keeps this agent's
+  state) no longer matched, and what the tool kept went to module-shared state instead of the
+  run's agent: the scenario sent nothing, with no error. `buildAgent` now gets the very object
+  it exports, as in production. The tools the cloud simulates are still stand-ins of their own
+  (same name, description and input), never `===` the agent's.
 - The playground's Records tab, for an agent that declares collections, shows its newest 200
   records, newest first, with each collection's count and how many older ones are not shown.
 - Store migration 10 adds the tables `records`, `record_index` and `record_collections` (per
   collection, every field declared on the store and the fields its records are indexed for); it runs on the agent's first start, as every
   migration does, and changes no existing table.
+- The `zod` dependency is `^4.6.6` (was `^4.6.5`): zod before 4.6.6 could exhaust memory on an
+  oversized input to a constrained collection (GHSA-mrhx-c7xc-m3w5).
 
 ### Migration notes
 
@@ -69,6 +230,18 @@ without them it prints the Markdown as written.
   `forgetRecords`, `exportRecords`, `reindexRecords`). A store of your own that forwards each call to a `Store` (as
   Flow's hosting does) forwards them too; a hosted agent on 0.6 deploys once Flow's hosting runs
   0.6 (until then `flow deploy` refuses it, as for any newer line).
+- **An agent takes one events side.** `events.attach(agent)` with a second, different `flowEvents`
+  on an agent that already has one now throws (they overwrote each other's state already, as
+  0.5.0's notes say): mount one. Attaching the same one again changes nothing. One `flowEvents`
+  attached to a second agent is no longer the first one's (`agent.events` undefined there): a
+  module that builds several agents (`buildAgent`) makes one per agent.
+- **From 0.4.9 to 0.5.3, `flow test` gave `buildAgent` copies of the tools it runs for real.** An
+  agent that worked around it (matching its tool by name or schema rather than `t === myTool`, or
+  routing its tool's run to the agent whose conversation it is) keeps working; the workaround can
+  go now. A tool that needs its agent's events state can read `context.events` instead of
+  `buildAgent` swapping in a copy bound to that state. On 0.4.9 to 0.5.3, a scenario with
+  `tools: { real: [...] }` whose tool keeps per-agent state that way may have passed or failed for
+  that reason alone: run it again on 0.6.
 
 ## 0.5.3 (2026-10-24)
 

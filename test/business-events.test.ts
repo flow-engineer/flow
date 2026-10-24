@@ -1,4 +1,4 @@
-// covers: src/business-events/engine.ts src/business-events/signature.ts src/business-events/quiet.ts src/business-events/phrasing.ts src/business-events/testlist.ts src/agent.ts src/store.ts
+// covers: src/business-events/engine.ts src/business-events/signature.ts src/business-events/quiet.ts src/business-events/phrasing.ts src/business-events/testlist.ts src/agent.ts src/store.ts src/conversation.ts src/tools.ts
 // Business events: a made-up shop's backend posts signed events; flowEvents answers each request,
 // sends by delivery level (quiet hours, one a day, collapse, cancel, expiry), lets the agent phrase
 // it inside the window (values and link checked), raises what people watch, caps nudges, keeps the
@@ -16,8 +16,10 @@ import {
   quietHoursEnd,
   signEvent,
   sqlite,
+  tool,
   verifyEventSignature,
   whatsapp,
+  z,
   type BusinessEvent,
   type EventCatalog,
   type EventMessage,
@@ -711,6 +713,52 @@ test("mounted on createAgent: a held exact send goes as the template on the agen
   turn.answer(respond(call("send_whatsapp", { text: "It's $5 now." })));
   await h.agent.conversation(h.conversationId)!.whenIdle();
   assert.equal(h.sent.length, before + 1, "the copy itself was never sent");
+});
+
+test("context.events is the tool's own agent's events side: one tool shared by two agents in one process watches in each one's own, agent.events is it, and an agent takes one", async () => {
+  // One module's tool, as an app exports it, given to both agents.
+  const keepPosted = tool({
+    name: "keep_me_posted",
+    description: "Watches a topic for the person.",
+    input: z.object({ topic: z.string() }),
+    run: ({ topic }, context) => context.events?.watch({ address: context.address!, topic }).outcome ?? "no events side",
+  });
+  const start = (topic: string) => {
+    const scripted = scriptedModel();
+    const templates: string[] = [];
+    const events = flowEvents({ secret: SECRET, catalog, now: () => NOON, log: () => {} });
+    const agent = createAgent({ files: { "AGENTS.md": "A shop's agent." }, model: scripted.model, tools: [keepPosted], debounceMs: 0, now: () => NOON, scheduleCheckMs: 0, channels: [whatsapp({ sendMessage: async () => {}, sendTemplate: async (_to, t) => void templates.push(t.name) })], routes: events.routes, onTick: events.onTick });
+    assert.equal(agent.events, undefined, "none before attach");
+    events.attach(agent);
+    const turn = (async () => {
+      const a = await agent.message({ channel: "whatsapp", from: PERSON, message: `tell me about ${topic}` });
+      (await scripted.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Will do." }), call("keep_me_posted", { topic })));
+      const next = await scripted.nextCall(1);
+      next.answer(respond());
+      await agent.conversation(a!.conversationId)!.whenIdle();
+      return next.request.messages.filter((m) => m.role === "tool").map((m) => m.content).at(-1);
+    })();
+    return { agent, events, turn, templates };
+  };
+  const one = start("order:1");
+  const two = start("order:2");
+  assert.deepEqual(await Promise.all([one.turn, two.turn]), ["saved", "saved"]);
+  assert.deepEqual(one.events.state.watches.map((w) => [w.address, w.topic]), [[PERSON, "order:1"]]);
+  assert.deepEqual(two.events.state.watches.map((w) => [w.address, w.topic]), [[PERSON, "order:2"]]);
+  assert.equal(one.agent.events, one.events);
+  one.events.attach(one.agent); // the same one again changes nothing
+  assert.throws(() => two.events.attach(one.agent), /already has an events side/);
+  assert.equal(one.agent.events, one.events);
+  // The refused attach left the second side as it was: it still sends through its own agent.
+  await two.events.schedule({ eventId: "e9", address: PERSON, delivery: "critical", notBefore: NOON, exact: true, message: msg("order_shipped", "Order 9 has shipped.", ["9"]) });
+  assert.deepEqual([one.templates, two.templates], [[], ["order_shipped"]]);
+  // A side attached to another agent is no longer the first one's.
+  const moved = flowEvents({ secret: SECRET, catalog, log: () => {} });
+  const first = createAgent({ files: { "AGENTS.md": "A." }, model: scriptedModel().model, scheduleCheckMs: 0 });
+  const second = createAgent({ files: { "AGENTS.md": "A." }, model: scriptedModel().model, scheduleCheckMs: 0 });
+  moved.attach(first);
+  moved.attach(second);
+  assert.deepEqual([first.events, second.events], [undefined, moved]);
 });
 
 /** An agent on a sqlite file with flowEvents mounted, as after each (re)start; `rules` for flowEvents. */

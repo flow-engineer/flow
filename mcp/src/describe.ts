@@ -25,7 +25,7 @@ export interface Scopes {
 const NAME = /^[A-Za-z0-9_.-]{1,128}$/;
 const STATUS_MAX = 64;
 /** Tools that exist only in a chat: a description naming one points a host at a tool it does not have. */
-export const CHAT_ONLY = /\b(send_[a-z0-9_]+|share_updates|load_skill)\b/;
+export const CHAT_ONLY = /\b(send_[a-z0-9_]+|share_updates|edit_message|unsend_message|load_skill)\b/;
 
 export function signInOf(tool: Tool): SignIn {
   return tool.signIn ?? "required";

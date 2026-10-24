@@ -97,7 +97,9 @@ interface RunRecord {
 type Line =
   | { kind: "in"; id?: string; text?: string; at?: number; attachments?: unknown[] }
   | { kind: "out"; id?: string; text?: string; at?: number; buttons?: unknown; list?: unknown; link?: unknown; image?: unknown; template?: unknown }
-  | { kind: "reaction"; messageId?: string; emoji?: string; at?: number; by?: string };
+  | { kind: "reaction"; messageId?: string; emoji?: string; at?: number; by?: string }
+  | { kind: "edit"; messageId?: string; text?: string; at?: number }
+  | { kind: "unsend"; messageId?: string; at?: number };
 
 /** `flow show`: returns the exit status. */
 export async function showCli(args: string[]): Promise<number> {
@@ -286,6 +288,10 @@ function render(record: RunRecord, runId: string): string[] {
       lines = indent([line.text ?? "", ...extra].filter(Boolean).join(" "), `${t} agent: `, " ".repeat(t.length + 8));
     } else if (line.kind === "reaction") {
       lines = [`${t} ${line.by ?? "someone"} reacted ${line.emoji ?? "?"} to ${line.messageId ?? "a message"}`];
+    } else if (line.kind === "edit") {
+      lines = indent(line.text ?? "", `${t} agent edited ${line.messageId ?? "a message"}: `, " ".repeat(t.length + 8));
+    } else if (line.kind === "unsend") {
+      lines = [`${t} agent unsent ${line.messageId ?? "a message"}`];
     } else continue;
     items.push({ at: line.at ?? Infinity, order: items.length, lines });
   }

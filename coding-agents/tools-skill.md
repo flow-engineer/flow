@@ -31,8 +31,9 @@ export const findSlots = tool({
 - `input` is a zod schema; Flow Framework checks the model's input against it before `run` is called and
   sends the model the error if it doesn't fit.
 - `run` returns any JSON-able value; throw to report a failure (the agent sees `Failed: <message>`).
-- Don't make tools for talking to the person (send_<channel>, react, share_updates), for reminders
-  or scheduled messages, or for opting out of messages: Flow Framework has them.
+- Don't make tools for talking to the person (send_<channel>, react, share_updates, edit_message, unsend_message), for reminders
+  or scheduled messages, for waking the agent later (`wake_me_up`; from a tool, `context.wakeUps`),
+  or for opting out of messages: Flow Framework has them.
 - Key a person's data by `context.person` (who Flow Framework verified they are) or `context.conversationId`,
   never by an id the model passed. `context.person` is `key:<resolve's value>`, else
   `phone:<E.164>` (`phone:+15550100100`), else `<channel>:<address>`. To look the person up in the
@@ -44,6 +45,15 @@ export const findSlots = tool({
   `people` so forgetting them deletes it (a put after they were forgotten is refused). If anything
   other than the agent reads it, it belongs in the owner's database, through a tool.
   docs/agents.md, "The agent's own records".
+- A tool that keeps what the person asked to be told about (business events: `flowEvents`) saves
+  it in `context.events`, its own agent's events side (`context.events.watch({ address:
+  context.address, topic })`, `mute`, `notInterested`), never in a module variable: the same tool
+  object serves every agent in the process, each `flow test` run included, as long as `buildAgent`
+  makes a `flowEvents` per agent. Absent when no events side is attached. docs/events.md, "Watches
+  raise a message".
+- Never tell your own tools apart by a copy: `buildAgent` gets the very objects your module
+  exports (in `flow test`'s real runs too), so `t === myTool` holds; the tools the test cloud
+  simulates are stand-ins with the same name, never `===` yours.
 - A tool that changes something (books, pays, sends) passes `context.idempotencyKey` to its backend:
   it is the same for the same input in the same turn, also when the turn runs again after a
   restart, so the booking happens once. `context.callId` is the model's id for the call;

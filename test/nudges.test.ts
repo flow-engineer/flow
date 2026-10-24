@@ -515,6 +515,24 @@ test("two calls with one idempotency key at once send once, and both get its res
   assert.equal(await h.agent.runDue(), 1, "one schedule, so it goes out once");
 });
 
+test("agent.cancelNudge cancels a scheduled nudge by its key before it goes; one that went, or was never scheduled, keeps its state", async () => {
+  const h = await withSam();
+  const inAnHour = h.clock.now + 3_600_000;
+  const later = await h.agent.nudge({ to: h.to, text: "Your session starts soon.", at: inAnHour, idempotencyKey: "session-1" });
+  await h.agent.nudge({ to: h.to, text: "See you at 5.", at: inAnHour, idempotencyKey: "session-2" });
+  await h.agent.nudge({ to: h.to, text: "Thanks for booking.", idempotencyKey: "booked" });
+  assert.deepEqual(await h.agent.cancelNudge("session-1"), { id: later.id, status: "cancelled" });
+  assert.deepEqual(await h.agent.nudgeState(later.id), { id: later.id, status: "cancelled" });
+  assert.equal((await h.agent.cancelNudge("booked"))?.status, "sent", "it went already");
+  assert.equal(await h.agent.cancelNudge("no-such-key"), null);
+
+  h.clock.now = inAnHour;
+  assert.equal(await h.agent.runDue(), 1, "only the one not cancelled");
+  await h.conversation.whenIdle();
+  assert.deepEqual(h.texts("sms"), ["Hi!", "Thanks for booking.", "See you at 5."]);
+  assert.equal((await h.agent.cancelNudge("session-2"))?.status, "scheduled", "it went: nothing to cancel, its state as it was");
+});
+
 // --- Quiet hours ---
 
 const ELEVEN_PM_NY = Date.UTC(2026, 9, 13, 3);
