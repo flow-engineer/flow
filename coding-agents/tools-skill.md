@@ -111,6 +111,10 @@ export const placeOrder = tool({
 - `signIn`: "none" for what anyone may do signed out (the menu, opening hours), "optional" for what
   works either way and does more signed in, "required" (the default) for everything about a
   person's own account. It applies only where sign-in is set up (the `flow-framework-auth` skill).
+- `mcp: { deferred: true }` keeps a less-used tool behind MCP's `search_tools` and `execute_tool`.
+  Unmarked tools stay upfront. This changes neither chat access nor generated CLI commands.
+  `mcpServer({ deferred: [...] })` replaces the flags for that server; `deferred: []` puts all tools
+  upfront. Read `flow-framework-mcp` (`mcp-skill.md`) for discovery, execution and customization.
 - `hints` describe the tool to hosts, which ask the person before risky calls; nothing enforces
   them. `readOnly` (default false: a tool counts as a write), `destructive` (a write that may delete
   or overwrite; default true for writes), `idempotent` (calling again with the same input changes

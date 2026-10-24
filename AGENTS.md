@@ -58,8 +58,9 @@ across these surfaces. A project can start with any one of them.
   assets remain here for compatibility; they are not a second hand-written website.
 
 ## Coding-agent skills
-- `coding-agents/` teaches coding agents to build on Flow Framework (`skill.md`, with MCP and the CLI),
-  write tools and their test files (`tools-skill.md`), write tests (`test-skill.md`), build the
+- `coding-agents/` starts with project setup and routing (`skill.md`), then loads messaging runtime
+  and operations (`build-agent-skill.md`) or MCP, CLI and plugins (`mcp-skill.md`) for the task. It also
+  teaches agents to write tools and their test files (`tools-skill.md`), write tests (`test-skill.md`), build the
   context pack from an organization's codebase (`context-skill.md`), set up sign-in
   (`auth-skill.md`) and connect a brand's existing login to Flow's OAuth bridge (`oauth-bridge-skill.md`). A change to an API, a file format or a convention they describe updates them
   in the same change.

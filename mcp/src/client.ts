@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
 import { z } from "zod";
 import { INPUT_SCHEMA, type Tool, type ToolHints } from "../../src/tools.ts";
+import { FULL_CATALOG_META } from "./describe.ts";
 
 export interface McpToolsOptions {
   /** The server's name in mcp.lock.json. */
@@ -128,7 +129,7 @@ function connect(options: McpToolsOptions): Connection {
     const tools = new Map<string, McpDescriptor>();
     let cursor: string | undefined;
     do {
-      const page = await c.listTools(cursor ? { cursor } : {});
+      const page = await c.listTools({ ...(cursor ? { cursor } : {}), _meta: { [FULL_CATALOG_META]: true } });
       for (const t of page.tools) tools.set(t.name, stripped(t as unknown as McpDescriptor));
       cursor = page.nextCursor;
     } while (cursor);

@@ -9,6 +9,9 @@ Read the `flow-framework` skill (`skill.md`) first if you haven't. Turn the situ
 `context/examples/` (the `flow-framework-context` skill) into scenarios, and run `npx flow check`
 before the tests when the agent serves MCP or a CLI.
 
+For `buildAgent` and playground setup, read `flow-framework-build-agent` (`build-agent-skill.md`). MCP and CLI
+setup is in `flow-framework-mcp` (`mcp-skill.md`).
+
 A test is a scenario: a situation to put the agent in, played through a platform simulator by a
 model acting as the person, with the agent's tools played by a model from `tests/tools/*.yaml`
 (see the `flow-framework-tools` skill, `tools-skill.md`). At the end, what happened is checked against `expect`.

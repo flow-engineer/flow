@@ -5,6 +5,21 @@ import { z } from "zod";
 import { tool } from "../src/index.ts";
 import { WEB, WEB_APP, WHATSAPP, call, gate, harness, last, multi, respond, say, users } from "./helpers.ts";
 
+// Existing chat tests have no MCP deferral flags and cannot catch an accidental cross-surface filter.
+test("MCP-deferred tools stay directly available to WhatsApp agents", async () => {
+  let ran = false;
+  const lookup = tool({ name: "lookup", description: "Look up a record.", input: z.object({}), signIn: "none", mcp: { deferred: true }, run: () => { ran = true; return "found"; } });
+  const h = multi({ channels: { whatsapp: { info: WHATSAPP } }, tools: [lookup] });
+  const taken = await h.message("whatsapp", "+15555550101", "find my record");
+  const first = await h.nextCall(0);
+  assert.ok(first.request.tools.some(t => t.name === "lookup"));
+  assert.ok(!first.request.tools.some(t => t.name === "search_tools" || t.name === "execute_tool"));
+  first.answer(respond(call("send_whatsapp", { text: "Checking." }), call("lookup")));
+  (await h.nextCall(1)).answer(respond(call("send_whatsapp", { text: "Found it." })));
+  await h.agent.conversation(taken!.conversationId)!.whenIdle();
+  assert.equal(ran, true);
+});
+
 // Other tool tests have no chat auth adapter; MCP tests do not run the chat execution path.
 test("chat refuses protected tools and sends one real login message for parallel calls", async () => {
   let executions = 0, challenges = 0;

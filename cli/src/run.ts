@@ -19,6 +19,7 @@ import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, 
 import { configDir, isSignedIn, signIn, signOut, storedProvider } from "./auth.ts";
 import { SKILLS_META } from "../../src/skills.ts";
 import { FORMATTED } from "../../src/tools.ts";
+import { FULL_CATALOG_META } from "../../mcp/src/describe.ts";
 import {
   BUILT_IN,
   commandTable,
@@ -306,7 +307,7 @@ async function listTools(client: Client): Promise<ToolInfo[]> {
   const tools: ToolInfo[] = [];
   let cursor: string | undefined;
   do {
-    const page = await client.listTools(cursor ? { cursor } : {}, { cacheMode: "refresh" });
+    const page = await client.listTools({ ...(cursor ? { cursor } : {}), _meta: { [FULL_CATALOG_META]: true } }, { cacheMode: "refresh" });
     tools.push(...(page.tools as unknown as ToolInfo[]));
     cursor = page.nextCursor;
   } while (cursor);
