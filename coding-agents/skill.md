@@ -314,7 +314,7 @@ to send, mount `flowEvents({ secret, catalog, timezone })` (from `@flow-engineer
 go on `createAgent`, `events.phrasing.check(address, message)` in `createAgent`'s `beforeSend`
 (return `{ refuse: reason }`), then `events.attach(agent)`. A tool that saves what the person
 watches (or mutes) uses `context.events` (`agent.events` elsewhere), its own agent's events side,
-never a module variable. Each type in the catalog has a delivery level
+never a module variable; make the `flowEvents` inside `buildAgent`, one per agent. Each type in the catalog has a delivery level
 (critical, standard, optional), its template and its values; the guide is `docs/events.md` in the
 package (`../docs/events.md` from this file).
 

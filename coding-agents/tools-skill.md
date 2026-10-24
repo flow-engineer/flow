@@ -47,8 +47,9 @@ export const findSlots = tool({
 - A tool that keeps what the person asked to be told about (business events: `flowEvents`) saves
   it in `context.events`, its own agent's events side (`context.events.watch({ address:
   context.address, topic })`, `mute`, `notInterested`), never in a module variable: the same tool
-  object serves every agent in the process, each `flow test` run included. Absent when no events
-  side is attached. docs/events.md, "Watches raise a message".
+  object serves every agent in the process, each `flow test` run included, as long as `buildAgent`
+  makes a `flowEvents` per agent. Absent when no events side is attached. docs/events.md, "Watches
+  raise a message".
 - Never tell your own tools apart by a copy: `buildAgent` gets the very objects your module
   exports (in `flow test`'s real runs too), so `t === myTool` holds; the tools the test cloud
   simulates are stand-ins with the same name, never `===` yours.

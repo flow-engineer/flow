@@ -776,11 +776,14 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     /**
      * The agent that sends; with `persist`, its database keeps the state (loaded now, before any event
      * is handled). An Agent then has this events side as its own: `context.events` in its tools,
-     * `agent.events` elsewhere. An agent has one: attaching another to it throws.
+     * `agent.events` elsewhere. An agent has one: attaching another to it throws. Attached to another
+     * agent, it is no longer the earlier one's (its `agent.events` is then undefined): make one per agent.
      */
     attach(s: EventSender) {
+      type Owner = { [ATTACH_EVENTS]?: (events: FlowEvents<any>, attached?: boolean) => void };
       // First, so an agent that refuses it (it has another) leaves this side as it was.
-      (s as { [ATTACH_EVENTS]?: (events: FlowEvents<any>) => void })[ATTACH_EVENTS]?.(api);
+      (s as Owner)[ATTACH_EVENTS]?.(api);
+      if (sender && sender !== s) (sender as Owner)[ATTACH_EVENTS]?.(api, false);
       const first = sender === null;
       sender = s;
       const kept = first && persist ? (s.eventStateStore?.() ?? null) : null;

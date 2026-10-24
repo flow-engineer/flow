@@ -67,7 +67,7 @@ export interface McpServerOptions {
   credentials?: CredentialProvider;
   /** The agent's records (`agent.records`), for tools that use `context.records`. Without them, such a tool's call fails saying so. */
   records?: Records;
-  /** The agent's business events side (`agent.events`), as the tools' `context.events`. Without it, `context.events` is absent. */
+  /** The agent's business events side (its `flowEvents`, or `agent.events` once attached: read here once), as the tools' `context.events`. Without it, `context.events` is absent. */
   businessEvents?: FlowEvents;
   /** Where the endpoint is mounted (default "/mcp"). */
   path?: string;

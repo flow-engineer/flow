@@ -31,8 +31,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   back a topic for the conversation's person in the state of the agent it runs for
   (`context.events.watch({ address, topic })`, `mute`, `notInterested`, `stopped`, `remember`),
   never through a module variable. Two agents in one process (two test runs, a deploy's overlap)
-  each see only their own. Absent when no events side is attached; over MCP,
-  `mcpServer({ businessEvents: agent.events })` gives it. An agent with its own watch fields reads
+  each see only their own, when each has its own `flowEvents` (made inside `buildAgent`). It is not
+  `createAgent`'s `events` (trace sinks). Absent when no events side is attached; over MCP,
+  `mcpServer({ businessEvents: events })` gives it. An agent with its own watch fields reads
   it as `context.events as FlowEvents<MyWatch> | undefined` ([docs/events.md](docs/events.md#watches-raise-a-message)).
 - **A tool `flow test` runs for real (`tools: { real: [...] }`) is the agent's own object again.**
   From 0.4.9 to 0.5.3 a business run handed `buildAgent` a copy of it (`{ ...tool, run }`), so code
@@ -57,7 +58,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   0.6 (until then `flow deploy` refuses it, as for any newer line).
 - **An agent takes one events side.** `events.attach(agent)` with a second, different `flowEvents`
   on an agent that already has one now throws (they overwrote each other's state already, as
-  0.5.0's notes say): mount one. Attaching the same one again changes nothing.
+  0.5.0's notes say): mount one. Attaching the same one again changes nothing. One `flowEvents`
+  attached to a second agent is no longer the first one's (`agent.events` undefined there): a
+  module that builds several agents (`buildAgent`) makes one per agent.
 - **From 0.4.9 to 0.5.3, `flow test` gave `buildAgent` copies of the tools it runs for real.** An
   agent that worked around it (matching its tool by name or schema rather than `t === myTool`, or
   routing its tool's run to the agent whose conversation it is) keeps working; the workaround can

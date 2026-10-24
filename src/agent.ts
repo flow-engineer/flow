@@ -1126,8 +1126,12 @@ export class Agent {
     return this.eventsSide;
   }
 
-  /** flowEvents' attach(): this events side is the agent's own. One per agent, as its state is. */
-  [ATTACH_EVENTS](events: FlowEvents<any>): void {
+  /** flowEvents' attach(): this events side is the agent's own (attached false: it moved to another agent). One per agent, as its state is. */
+  [ATTACH_EVENTS](events: FlowEvents<any>, attached = true): void {
+    if (!attached) {
+      if (this.eventsSide === events) this.eventsSide = undefined;
+      return;
+    }
     if (this.eventsSide && this.eventsSide !== events) throw new Error("flow: this agent already has an events side (flowEvents); an agent has one, as its state is one per agent");
     this.eventsSide = events;
   }

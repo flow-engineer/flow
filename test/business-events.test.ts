@@ -725,8 +725,9 @@ test("context.events is the tool's own agent's events side: one tool shared by t
   });
   const start = (topic: string) => {
     const scripted = scriptedModel();
+    const templates: string[] = [];
     const events = flowEvents({ secret: SECRET, catalog, now: () => NOON, log: () => {} });
-    const agent = createAgent({ files: { "AGENTS.md": "A shop's agent." }, model: scripted.model, tools: [keepPosted], debounceMs: 0, now: () => NOON, scheduleCheckMs: 0, channels: [whatsapp({ sendMessage: async () => {} })], routes: events.routes, onTick: events.onTick });
+    const agent = createAgent({ files: { "AGENTS.md": "A shop's agent." }, model: scripted.model, tools: [keepPosted], debounceMs: 0, now: () => NOON, scheduleCheckMs: 0, channels: [whatsapp({ sendMessage: async () => {}, sendTemplate: async (_to, t) => void templates.push(t.name) })], routes: events.routes, onTick: events.onTick });
     assert.equal(agent.events, undefined, "none before attach");
     events.attach(agent);
     const turn = (async () => {
@@ -737,7 +738,7 @@ test("context.events is the tool's own agent's events side: one tool shared by t
       await agent.conversation(a!.conversationId)!.whenIdle();
       return next.request.messages.filter((m) => m.role === "tool").map((m) => m.content).at(-1);
     })();
-    return { agent, events, turn };
+    return { agent, events, turn, templates };
   };
   const one = start("order:1");
   const two = start("order:2");
@@ -748,6 +749,16 @@ test("context.events is the tool's own agent's events side: one tool shared by t
   one.events.attach(one.agent); // the same one again changes nothing
   assert.throws(() => two.events.attach(one.agent), /already has an events side/);
   assert.equal(one.agent.events, one.events);
+  // The refused attach left the second side as it was: it still sends through its own agent.
+  await two.events.schedule({ eventId: "e9", address: PERSON, delivery: "critical", notBefore: NOON, exact: true, message: msg("order_shipped", "Order 9 has shipped.", ["9"]) });
+  assert.deepEqual([one.templates, two.templates], [[], ["order_shipped"]]);
+  // A side attached to another agent is no longer the first one's.
+  const moved = flowEvents({ secret: SECRET, catalog, log: () => {} });
+  const first = createAgent({ files: { "AGENTS.md": "A." }, model: scriptedModel().model, scheduleCheckMs: 0 });
+  const second = createAgent({ files: { "AGENTS.md": "A." }, model: scriptedModel().model, scheduleCheckMs: 0 });
+  moved.attach(first);
+  moved.attach(second);
+  assert.deepEqual([first.events, second.events], [undefined, moved]);
 });
 
 /** An agent on a sqlite file with flowEvents mounted, as after each (re)start; `rules` for flowEvents. */
