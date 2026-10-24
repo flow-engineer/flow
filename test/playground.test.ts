@@ -285,16 +285,24 @@ test("a test person's tools get the key resolve gives their real number, on any 
 });
 
 // The Person panel shows one person's state; the agent's records are its own, across people.
-test("the playground lists the agent's records", async () => {
-  const agent = createAgent({ files: { "AGENTS.md": "A test agent." }, model: scriptedModel().model, database: sqlite(), testPeople: [SAM], scheduleCheckMs: 0, records: { questions: { people: ["buyer"], fields: ["status"] } } });
-  const value = { buyer: `phone:${SAM.phone}`, status: "waiting", text: "Is parking included?" };
-  await agent.records.put("questions", "q1", value);
+test("the playground lists the agent's newest 200 records with each collection's true count, and has no Records tab without collections", async () => {
+  const records = { questions: { people: ["buyer"], fields: ["status"] }, listings: {} };
+  const agent = createAgent({ files: { "AGENTS.md": "A test agent." }, model: scriptedModel().model, database: sqlite(), testPeople: [SAM], scheduleCheckMs: 0, records });
+  for (let n = 0; n < 205; n++) await agent.records.put("questions", `q${String(n).padStart(3, "0")}`, { buyer: `phone:${SAM.phone}`, status: "waiting", n });
+  await agent.records.put("listings", "flat-12", { city: "Pune" });
+  const bare = createAgent({ files: { "AGENTS.md": "A test agent." }, model: scriptedModel().model, database: sqlite(), testPeople: [SAM], scheduleCheckMs: 0 });
   const server = await simulators().listen(agent, 0);
+  const without = await simulators().listen(bare, 0);
   try {
-    const { records, more } = await (await fetch(`${server.url}/api/records`)).json();
-    assert.deepEqual(records.map((r: { collection: string; id: string; value: unknown }) => [r.collection, r.id, r.value]), [["questions", "q1", value]]);
-    assert.equal(more, false);
+    const shown = await (await fetch(`${server.url}/api/records`)).json();
+    const ids: string[] = shown.records.map((r: { id: string }) => r.id);
+    assert.deepEqual([ids.length, ids.includes("flat-12"), ids.includes("q204"), ids.includes("q005"), ids.includes("q006")], [200, true, true, false, true], "the newest 200: the oldest 6 left out");
+    assert.ok(ids.indexOf("q204") < ids.indexOf("q006"), "newest first");
+    assert.deepEqual([shown.counts, shown.older], [{ questions: 205, listings: 1 }, 6]);
+    assert.equal((await (await fetch(`${server.url}/api/platforms`)).json()).panel.records, true);
+    assert.equal((await (await fetch(`${without.url}/api/platforms`)).json()).panel.records, false, "an agent that declares no collections");
   } finally {
     await server.close();
+    await without.close();
   }
 });

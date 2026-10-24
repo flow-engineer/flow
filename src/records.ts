@@ -15,7 +15,10 @@ import type { StoreApi } from "./store.ts";
 export const RECORD_LIMITS = {
   /** One record's value, as JSON (UTF-8 bytes). */
   documentBytes: 65_536,
-  /** Records one agent keeps in one environment, across its collections. */
+  /**
+   * Records one agent keeps in one environment, across its collections. The count takes no lock,
+   * so new records put at the same moment may pass it by up to as many as are put at once.
+   */
   perAgent: 10_000,
   /** The most a query returns at once (`limit`). */
   page: 100,
@@ -67,6 +70,8 @@ export type RecordCursor = Pick<RecordEntry, "id" | "createdAt">;
 
 /** The agent's records: `context.records` in a tool, `agent.records` everywhere else. */
 export interface Records {
+  /** The declared collections' names (`createAgent({ records })`), in the order declared. */
+  readonly collections: string[];
   /** Keeps `value` under `id` in a declared collection, replacing what was there. */
   put(collection: string, id: string, value: object): Promise<void>;
   /** The value under `id`, or null. */
@@ -149,10 +154,11 @@ export function recordJson(collection: string, value: unknown): string {
       return;
     }
     if (Array.isArray(v)) {
-      v.forEach((item, i) => {
-        if (item === undefined) refuse(`${collection}: ${path}[${i}] is undefined, which JSON turns into null; use null`);
-        check(item, `${path}[${i}]`);
-      });
+      // An indexed loop, so a hole ([1, , 3]) is seen: forEach skips it.
+      for (let i = 0; i < v.length; i++) {
+        if (v[i] === undefined) refuse(`${collection}: ${path}[${i}] is undefined, which JSON turns into null; use null`);
+        check(v[i], `${path}[${i}]`);
+      }
       return;
     }
     if (v instanceof Date) refuse(`${collection}: ${path} is a Date; keep a time as milliseconds (Date.now()) or ISO text`);
@@ -179,13 +185,22 @@ export function indexValue(collection: string, field: string, value: unknown, pe
   return JSON.stringify(value);
 }
 
-/** The declared fields of a value, as the store indexes them. */
-export function recordIndex(collection: string, value: RecordValue, fields: string[], people: string[]): Array<{ field: string; value: string; person: boolean }> {
+/**
+ * The declared fields of a value, as the store indexes them. `skipRefused`: a field whose value
+ * the declaration refuses is left out instead (a record kept under an earlier declaration).
+ */
+export function recordIndex(collection: string, value: RecordValue, fields: string[], people: string[], skipRefused = false): Array<{ field: string; value: string; person: boolean }> {
   checkFields(collection, fields, people);
   const index: Array<{ field: string; value: string; person: boolean }> = [];
   for (const [list, person] of [[people, true], [fields, false]] as const) {
     for (const field of list) {
-      const v = indexValue(collection, field, value[field], person);
+      let v: string | null;
+      try {
+        v = indexValue(collection, field, value[field], person);
+      } catch (error) {
+        if (!skipRefused) throw error;
+        v = null;
+      }
       if (v !== null) index.push({ field, value: v, person });
     }
   }
@@ -210,11 +225,44 @@ export function checkPage(limit: unknown, after: unknown): { limit: number; afte
   if (typeof n !== "number" || !Number.isInteger(n) || n < 1 || n > RECORD_LIMITS.page) refuse(`limit is a whole number from 1 to ${RECORD_LIMITS.page}, not ${JSON.stringify(limit)}`);
   if (after === undefined || after === null) return { limit: n as number, after: null };
   const a = after as Partial<RecordCursor>;
-  if (typeof a !== "object" || typeof a.id !== "string" || typeof a.createdAt !== "number") refuse("after is the last entry of the page before (its id and createdAt)");
+  if (typeof a !== "object" || typeof a.id !== "string" || !Number.isSafeInteger(a.createdAt)) refuse("after is the last entry of the page before (its id and createdAt)");
   return { limit: n as number, after: { id: a.id!, createdAt: a.createdAt! } };
 }
 
-/** The agent's records over its store; `ready` resolves once the store's tables exist. */
+/**
+ * Indexes the records already kept again where a collection's declaration changed since they were
+ * indexed (a field added to `people` or `fields`), so query finds them and forgetting a person
+ * deletes them: what the agent's start waits for, once the store's tables exist.
+ */
+export async function indexDeclared(store: StoreApi, collections: Record<string, RecordCollection> | undefined): Promise<void> {
+  for (const [name, { fields, people }] of declareCollections(collections)) {
+    let after: string | null = null;
+    do after = await store.reindexRecords(name, fields, people, after);
+    while (after !== null);
+  }
+}
+
+/**
+ * The records as one conversation's tools have them: once `closed()` gives a reason (its person was
+ * forgotten), a put is refused saying so; each put under way is in `running` until it ends, so
+ * forgetting the person waits for it and deletes what it wrote.
+ */
+export function recordsUntil(records: Records, closed: () => string | null, running: Set<Promise<unknown>>): Records {
+  return {
+    ...records,
+    put(collection, id, value) {
+      const why = closed();
+      if (why) return Promise.reject(new Error(`flow: records: not kept: ${why}`));
+      const put = records.put(collection, id, value);
+      const done = put.then(() => undefined, () => undefined);
+      running.add(done);
+      void done.then(() => running.delete(done));
+      return put;
+    },
+  };
+}
+
+/** The agent's records over its store; `ready` resolves once the store's tables exist and are indexed as declared. */
 export function recordsOf(store: StoreApi, collections: Record<string, RecordCollection> | undefined, ready: () => Promise<void>): Records {
   const declared = declareCollections(collections);
   const collection = (name: unknown) => {
@@ -224,6 +272,7 @@ export function recordsOf(store: StoreApi, collections: Record<string, RecordCol
     return found!;
   };
   return {
+    collections: [...declared.keys()],
     async put(name, id, value) {
       const { fields, people } = collection(name);
       checkId(id);
@@ -274,5 +323,5 @@ export function recordsOf(store: StoreApi, collections: Record<string, RecordCol
 /** Records where there are none to reach (an MCP server not given `records`): every call says how to give them. */
 export function unavailableRecords(how: string): Records {
   const no = async (): Promise<never> => refuse(`not available here: ${how}`);
-  return { put: no, get: no, query: no, delete: no, forgetPerson: no, export: () => ({ [Symbol.asyncIterator]: () => ({ next: no }) }) };
+  return { collections: [], put: no, get: no, query: no, delete: no, forgetPerson: no, export: () => ({ [Symbol.asyncIterator]: () => ({ next: no }) }) };
 }

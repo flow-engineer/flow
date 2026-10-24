@@ -5,7 +5,7 @@
 // carries the agent's id, so one database can hold several agents.
 
 import type { Database, Row } from "./db.ts";
-import { checkCollection, checkId, checkPage, checkWhere, RECORD_LIMITS, recordIndex, recordJson, type ExportedRecord, type RecordEntry, type RecordScalar, type RecordValue } from "./records.ts";
+import { checkCollection, checkFields, checkId, checkPage, checkWhere, RECORD_LIMITS, recordIndex, recordJson, type ExportedRecord, type RecordEntry, type RecordScalar, type RecordValue } from "./records.ts";
 import type { ChatMessage } from "./types.ts";
 
 /**
@@ -105,8 +105,9 @@ const MIGRATIONS: Array<(t: Types) => string> = [
   (t) => `CREATE TABLE event_state (agent_id TEXT NOT NULL, state TEXT NOT NULL, saved_at ${t.int} NOT NULL, PRIMARY KEY (agent_id));
    CREATE TABLE event_seen (agent_id TEXT NOT NULL, id TEXT NOT NULL, at ${t.int} NOT NULL, body TEXT, PRIMARY KEY (agent_id, id));
    CREATE INDEX event_seen_at ON event_seen (agent_id, at)`,
-  // The agent's own records (records.ts): one JSON document per collection and id, and each declared
-  // field's value as JSON text, for equality queries and for finding the records that name a person.
+  // The agent's own records (records.ts): one JSON document per collection and id, each declared
+  // field's value as JSON text, for equality queries and for finding the records that name a person,
+  // and each collection's declaration as last indexed, so a changed one is indexed again at start.
   (t) => `CREATE TABLE records (
      agent_id TEXT NOT NULL, collection ${t.key} NOT NULL, id ${t.key} NOT NULL, doc TEXT NOT NULL,
      created_at ${t.int} NOT NULL, updated_at ${t.int} NOT NULL,
@@ -118,7 +119,10 @@ const MIGRATIONS: Array<(t: Types) => string> = [
      person INTEGER NOT NULL DEFAULT 0,
      PRIMARY KEY (agent_id, collection, id, field));
    CREATE INDEX record_index_value ON record_index (agent_id, collection, field, value);
-   CREATE INDEX record_index_person ON record_index (agent_id, person, value)`,
+   CREATE INDEX record_index_person ON record_index (agent_id, person, value);
+   CREATE TABLE record_collections (
+     agent_id TEXT NOT NULL, collection ${t.key} NOT NULL, declaration TEXT NOT NULL,
+     PRIMARY KEY (agent_id, collection))`,
 ];
 
 /** Quiet hours, "HH:MM" to "HH:MM" in the person's own time; they may wrap midnight. */
@@ -358,7 +362,9 @@ export class Store {
    * Deletes everything kept about one person: their conversation, identities, history, inbox,
    * background tools, schedules and their runs, nudges, no-contact rules, and the agent's records
    * that name them in a person field (by their person key, conversation id, `<channel>:<address>`
-   * of any identity, or their phone number in E.164).
+   * of any identity, or, when their person key is a phone number, that number in E.164). Which
+   * identities are phone numbers the store cannot tell: Agent.forgetPerson deletes the records
+   * naming those (forgetRecords) first.
    */
   async forgetPerson(conversationId: string): Promise<void> {
     const scope = [this.agentId, conversationId];
@@ -670,7 +676,8 @@ export class Store {
   }
 
   // The agent's own records (records.ts). Every value is checked here too: the store may be a
-  // service whose callers send anything.
+  // service whose callers send anything. Every write takes the record's row in `records` before its
+  // rows in `record_index`, so a put and a delete of one record never wait on each other in a circle.
 
   /**
    * Keeps `value` under `id` in `collection`, replacing what was there (its createdAt stays), with
@@ -734,16 +741,55 @@ export class Store {
     checkCollection(collection);
     checkId(id);
     const key = [this.agentId, collection, id];
-    return this.db.transaction(async (tx) => {
-      await tx.run("DELETE FROM record_index WHERE agent_id = ? AND collection = ? AND id = ?", key);
-      return (await tx.run("DELETE FROM records WHERE agent_id = ? AND collection = ? AND id = ?", key)) > 0;
-    });
+    return this.db.transaction((tx) => deleteRecordIn(tx, key));
   }
 
   /** Deletes every record that holds one of `people` in a person field; resolves to how many. */
   async forgetRecords(people: string[]): Promise<number> {
     if (!Array.isArray(people) || people.some((p) => typeof p !== "string")) throw new Error("flow: records: forgetRecords takes a list of people");
     return this.db.transaction((tx) => deleteNaming(tx, this.agentId, people));
+  }
+
+  /**
+   * Indexes `collection`'s records again under this declaration, when it is not the one they were
+   * last indexed under (a field added to `people` or `fields` since): one page of records after the
+   * id `after` (null: from the first) per call, each record locked as a put locks it. Resolves to the
+   * last id done, to be passed as `after` next; or null once every record is done, and only then is
+   * the declaration kept, so a start cut off midway does it all again. A stored value the declaration
+   * refuses (a person field holding a number) is kept, with that field left out of the index.
+   */
+  async reindexRecords(collection: string, fields: string[], people: string[], after: string | null): Promise<string | null> {
+    checkCollection(collection);
+    checkFields(collection, fields, people);
+    const declaration = JSON.stringify({ people: [...people].sort(), fields: [...fields].sort() });
+    const scope = [this.agentId, collection];
+    if (after === null) {
+      const [kept] = await this.db.query("SELECT declaration FROM record_collections WHERE agent_id = ? AND collection = ?", scope);
+      if (kept?.declaration === declaration) return null;
+    } else checkId(after);
+    const ids = await this.db.query(
+      `SELECT id FROM records WHERE agent_id = ? AND collection = ?${after === null ? "" : " AND id > ?"} ORDER BY id LIMIT ?`,
+      [...scope, ...(after === null ? [] : [after]), REINDEX_PAGE],
+    );
+    const lock = this.db.dialect === "postgres" ? " FOR UPDATE" : "";
+    for (const { id } of ids) {
+      const key = [...scope, String(id)];
+      await this.db.transaction(async (tx) => {
+        const [row] = await tx.query(`SELECT doc FROM records WHERE agent_id = ? AND collection = ? AND id = ?${lock}`, key);
+        await tx.run("DELETE FROM record_index WHERE agent_id = ? AND collection = ? AND id = ?", key);
+        if (!row) return; // deleted since the page was read
+        const value = parse<RecordValue>(row.doc, {});
+        for (const i of recordIndex(collection, value, fields, people, true)) {
+          await tx.run("INSERT INTO record_index (agent_id, collection, id, field, value, person) VALUES (?, ?, ?, ?, ?, ?)", [...key, i.field, i.value, i.person ? 1 : 0]);
+        }
+      });
+    }
+    if (ids.length === REINDEX_PAGE) return String(ids.at(-1)!.id);
+    await this.db.run(
+      "INSERT INTO record_collections (agent_id, collection, declaration) VALUES (?, ?, ?) ON CONFLICT (agent_id, collection) DO UPDATE SET declaration = excluded.declaration",
+      [...scope, declaration],
+    );
+    return null;
   }
 
   /**
@@ -764,6 +810,16 @@ export class Store {
   }
 }
 
+/** How many records reindexRecords does per call. */
+const REINDEX_PAGE = 100;
+
+/** Deletes one record, its row first and then its index rows (the order a put takes them); false when there was none. */
+async function deleteRecordIn(tx: Omit<Database, "transaction">, key: unknown[]): Promise<boolean> {
+  const gone = (await tx.run("DELETE FROM records WHERE agent_id = ? AND collection = ? AND id = ?", key)) > 0;
+  await tx.run("DELETE FROM record_index WHERE agent_id = ? AND collection = ? AND id = ?", key);
+  return gone;
+}
+
 /** Deletes the records that hold one of `names` in a person field, inside `tx`; resolves to how many. */
 async function deleteNaming(tx: Omit<Database, "transaction">, agentId: string, names: string[]): Promise<number> {
   const values = [...new Set(names)].filter(Boolean).map((name) => JSON.stringify(name));
@@ -772,11 +828,11 @@ async function deleteNaming(tx: Omit<Database, "transaction">, agentId: string, 
     `SELECT DISTINCT collection, id FROM record_index WHERE agent_id = ? AND person = 1 AND value IN (${values.map(() => "?").join(", ")})`,
     [agentId, ...values],
   );
-  for (const r of named) {
-    await tx.run("DELETE FROM record_index WHERE agent_id = ? AND collection = ? AND id = ?", [agentId, r.collection, r.id]);
-    await tx.run("DELETE FROM records WHERE agent_id = ? AND collection = ? AND id = ?", [agentId, r.collection, r.id]);
-  }
-  return named.length;
+  // One order for every caller, so two forgettings that share records take them in the same order.
+  const keys = named.map((r) => [String(r.collection), String(r.id)]).sort(([c1, i1], [c2, i2]) => (c1 === c2 ? (i1 < i2 ? -1 : 1) : c1 < c2 ? -1 : 1));
+  let deleted = 0;
+  for (const [collection, id] of keys) if (await deleteRecordIn(tx, [agentId, collection, id])) deleted++;
+  return deleted;
 }
 
 function recordOf(r: Row): RecordEntry {

@@ -448,6 +448,8 @@
   .items li.empty { border-style: dashed; color: var(--quiet); }
   .items pre { margin: 0; white-space: pre-wrap; word-break: break-word; font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--bg); padding: 6px 8px; border-radius: 6px; }
   .items details summary { margin-bottom: 4px; }
+  /* A record's id is up to 128 characters with no spaces: it wraps, so it never widens the page. */
+  #pRecords .items li, #pRecords .row2 b { min-width: 0; overflow-wrap: anywhere; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; display: flex; flex-direction: column; min-height: 0; }
   .card h2 { font-size: 13px; margin: 0; padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; }
   .card h2 span { font-weight: 400; color: var(--quiet); }
@@ -1836,24 +1838,30 @@
     $("waiting").replaceChildren(...list);
     $("toQuietEnd").disabled = !quietEndsAt;
   }
-  // The agent's records (every person's, read only), by collection: on opening the pane and after each turn.
+  // The agent's records (every person's, read only), by collection, newest first: on opening the
+  // pane and after each turn. The server sends the newest 200 and each collection's true count.
   async function refreshRecords() {
     if (!PLAY || !panel.records || $("pRecords").hidden) return;
     const res = await fetch(BASE + "/api/records");
     if (!res.ok) return;
-    const { records, more } = await res.json();
-    $("recordsNote").textContent = more ? `the oldest ${records.length}` : records.length ? String(records.length) : "";
-    if (!records.length) {
+    const { records, counts, older } = await res.json();
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    $("recordsNote").textContent = older ? `the newest ${records.length} of ${total}` : total ? String(total) : "";
+    if (!total) {
       $("records").replaceChildren(make("div", "sec dim", "No records yet. A tool makes one with context.records.put(collection, id, value)."));
       return;
     }
+    // A record opened stays open when the list is drawn again.
+    const opened = new Set([...$("records").querySelectorAll("details[open]")].map((d) => d.dataset.key));
     const byCollection = new Map();
     for (const r of records) byCollection.set(r.collection, [...(byCollection.get(r.collection) ?? []), r]);
     const sections = [];
-    for (const [name, rows] of byCollection) {
+    for (const [name, count] of Object.entries(counts)) {
+      if (!count) continue;
+      const rows = byCollection.get(name) ?? [];
       const sec = make("div", "sec");
       const label = make("div", "label", name);
-      label.appendChild(make("span", "hint", `${rows.length} record${rows.length === 1 ? "" : "s"}`));
+      label.appendChild(make("span", "hint", `${count} record${count === 1 ? "" : "s"}`));
       const list = make("ul", "items");
       for (const r of rows) {
         const li = make("li");
@@ -1861,12 +1869,18 @@
         head.append(make("b", "", r.id), make("span", "dim", `updated ${at(r.updatedAt)}`));
         const json = make("pre", "", JSON.stringify(r.value, null, 2));
         // A long value folds, so one record does not push the rest out of sight.
-        if (json.textContent.split("\n").length > 8) {
+        if (json.textContent.split("\n").length > 8 || json.textContent.length > 600) {
           const d = make("details");
+          d.dataset.key = `${name}\u0000${r.id}`;
+          d.open = opened.has(d.dataset.key);
           d.append(make("summary", "", short(JSON.stringify(r.value), 80)), json);
           li.append(head, d);
         } else li.append(head, json);
         list.appendChild(li);
+      }
+      if (count > rows.length) {
+        const n = count - rows.length;
+        list.appendChild(make("li", "empty", `${n} older record${n === 1 ? "" : "s"} not shown (flow records export lists every one)`));
       }
       sec.append(label, list);
       sections.push(sec);

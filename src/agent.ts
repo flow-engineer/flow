@@ -19,7 +19,7 @@ import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, typ
 import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
-import { recordsOf, type RecordCollection, type Records } from "./records.ts";
+import { indexDeclared, recordsOf, type RecordCollection, type Records } from "./records.ts";
 import { businessSchedule, claimDue, summary } from "./schedules.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
 import { Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
@@ -448,7 +448,8 @@ export class Agent {
       away: (conversation, again) => this.away(conversation, again),
       store: this.store,
       records: this.records,
-      ready: this.store.migrate(),
+      // The records kept under an earlier declaration are indexed under this one before anything runs.
+      ready: this.store.migrate().then(() => indexDeclared(this.store, options.records)),
       now: this.now,
       timeZone: options.timeZone,
       quietHours: options.quietHours,
@@ -685,8 +686,17 @@ export class Agent {
       this.conversations.delete(conversationId);
       await resident.stored();
     }
-    for (const i of await this.store.identities(conversationId)) this.via.delete(viaKey(i.channel, i.address));
+    const identities = await this.store.identities(conversationId);
+    for (const i of identities) this.via.delete(viaKey(i.channel, i.address));
     this.rows.delete(conversationId);
+    // Records may name them by their number (phone:<E.164>, or bare) whatever their person key is:
+    // the store cannot tell which channels' addresses are numbers, so those are deleted here, first.
+    const numbers = identities.flatMap((i) => {
+      const adapter = this.channelsByName.get(i.channel);
+      const phone = adapter?.phone ? normalizePhone(i.address, adapter.kind === "whatsapp" ? undefined : this.countryCode) : "";
+      return phone ? [`phone:${phone}`, phone] : [];
+    });
+    if (numbers.length) await this.store.forgetRecords(numbers);
     await this.store.forgetPerson(conversationId);
   }
 

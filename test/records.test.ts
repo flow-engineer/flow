@@ -1,4 +1,4 @@
-// covers: src/records.ts src/store.ts src/agent.ts src/tools.ts testing/src/records.ts testing/src/cli.ts
+// covers: src/records.ts src/store.ts src/agent.ts src/conversation.ts src/tools.ts testing/src/records.ts testing/src/cli.ts
 // The agent's records behave the same on every store: SQLite in memory and in a file, Postgres (when
 // FLOW_TEST_POSTGRES_URL names a throwaway database and the `pg` package is installed), and a store
 // reached over JSON, as Flow's hosting forwards each Store call to its store service. Each test
@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 import { z } from "zod";
 import { createAgent, postgres, RECORD_LIMITS, sqlite, Store, tool, type Agent, type Database, type ExportedRecord, type PostgresPool, type StoreApi } from "../src/index.ts";
-import { call, respond, say, scriptedModel } from "./helpers.ts";
+import { call, gate, respond, say, scriptedModel, SMS, WHATSAPP } from "./helpers.ts";
 
 const COLLECTIONS = {
   questions: { people: ["buyer", "seller"], fields: ["listing", "status"] },
@@ -130,10 +130,13 @@ for (const backend of backends) {
     await refused(records.put("questions", "", {}), /a record's id is text of 1 to 128 characters/);
     await refused(records.put("questions", "q1", { askedAt: new Date() }), /value\.askedAt is a Date; keep a time as milliseconds/);
     await refused(records.put("questions", "q1", { tags: [1, undefined] }), /value\.tags\[1\] is undefined/);
+    // eslint-disable-next-line no-sparse-arrays
+    await refused(records.put("questions", "q1", { tags: [1, , 3] }), /value\.tags\[1\] is undefined/);
     await refused(records.put("questions", "q1", { price: Number.NaN }), /value\.price is NaN/);
     await refused(records.put("questions", "q1", { seller: { phone: "+15550100002" } }), /questions\.seller holds a person, so it is a string/);
     await refused(records.put("questions", "q1", { status: ["waiting"] }), /questions\.status is declared, so it is a string, number, boolean or null/);
     await refused(records.put("questions", "q1", { text: "x".repeat(RECORD_LIMITS.documentBytes) }), /a record is at most 64 KB as JSON, and this one is 65 KB/);
+    for (const createdAt of [1.5, Number.NaN]) await refused(records.query("questions", {}, { after: { id: "q1", createdAt } }), /after is the last entry of the page before/);
     assert.throws(() => createAgent({ files: { "AGENTS.md": "Test." }, model: noModel, records: { a: { people: ["x"], fields: ["x"] } } }), /a declares a field twice/);
     assert.throws(() => createAgent({ files: { "AGENTS.md": "Test." }, model: noModel, records: { a: { fields: ["a", "b", "c", "d", "e", "f", "g", "h", "i"] } } }), /at most 8/);
 
@@ -167,6 +170,29 @@ for (const backend of backends) {
     // A seller who never wrote has no conversation: they are forgotten by the value the records hold.
     assert.equal(await agent.records.forgetPerson("phone:+15550100002"), 2, "every record naming the seller");
     assert.deepEqual(await agent.records.query("questions", { seller: "phone:+15550100002" }), []);
+  });
+
+  test(`${backend.name}: a put, a delete and a forgetting of one record at the same time all finish, leaving no index row without its record`, async () => {
+    const { records, id } = agentOn(backend);
+    for (let n = 0; n < 20; n++) {
+      await records.put("questions", "q1", question(n));
+      const results = await Promise.allSettled([records.put("questions", "q1", question(n, { status: "answered" })), records.delete("questions", "q1"), records.forgetPerson("phone:+15550100001")]);
+      assert.deepEqual(results.flatMap((r) => (r.status === "rejected" ? [String(r.reason)] : [])), [], `round ${n}`);
+    }
+    const [{ n }] = await backend.db.query("SELECT count(*) AS n FROM record_index i WHERE i.agent_id = ? AND NOT EXISTS (SELECT 1 FROM records r WHERE r.agent_id = i.agent_id AND r.collection = i.collection AND r.id = i.id)", [id]);
+    assert.equal(Number(n), 0);
+  });
+
+  test(`${backend.name}: a field added to a collection's people is indexed at the next start for the records already kept, so query finds them and forgetting deletes them`, async () => {
+    const id = `agt_${randomUUID().slice(0, 8)}/production`;
+    const build = (records: Record<string, { people?: string[]; fields?: string[] }>) => createAgent({ files: { "AGENTS.md": "Test." }, model: noModel, records, scheduleCheckMs: 0, store: backend.store(id) });
+    const before = build({ notes: { fields: ["status"] } });
+    for (let n = 0; n < 120; n++) await before.records.put("notes", `n${String(n).padStart(3, "0")}`, { about: "phone:+15550100001", status: "open", n }); // past one page
+    await before.records.put("notes", "a-number", { about: 7, status: "open" });
+    const after = build({ notes: { people: ["about"], fields: ["status"] } });
+    assert.equal((await after.records.query("notes", { about: "phone:+15550100001" }, { limit: 100 })).length, 100);
+    assert.equal(await after.records.forgetPerson("phone:+15550100001"), 120);
+    assert.deepEqual((await after.records.query("notes")).map((e) => e.id), ["a-number"], "a value the new declaration refuses is kept, left out of the index");
   });
 
   test(`${backend.name}: export returns every record of every collection, oldest first, past one page`, async () => {
@@ -222,6 +248,55 @@ test("a tool's context.records is the agent's records", async () => {
   await agent.conversation("c1")!.whenIdle();
   const [entry] = await agent.records.query("questions", { seller: "phone:+15550100002", status: "waiting" });
   assert.deepEqual(entry.value, { listing: "L9", buyer: "chat:c1", seller: "phone:+15550100002", status: "waiting" });
+});
+
+test("a tool still running when its person is forgotten keeps no record", async () => {
+  const started = gate();
+  const release = gate();
+  const finished = gate<string>();
+  const ask = tool({
+    name: "ask_seller",
+    description: "Relay a buyer's question to the seller.",
+    input: z.object({ listing: z.string() }),
+    run: async ({ listing }, context) => {
+      started.open();
+      await release.promise;
+      try {
+        await context.records.put("questions", listing, { listing, buyer: context.person, status: "waiting" });
+        finished.open("kept");
+      } catch (error) {
+        finished.open((error as Error).message);
+      }
+      return {};
+    },
+  });
+  const h = scriptedModel();
+  const agent = createAgent({ files: { "AGENTS.md": "Test." }, model: h.model, tools: [ask], records: COLLECTIONS, scheduleCheckMs: 0, debounceMs: 0 });
+  agent.receive("c1", "is the bike still for sale?", () => {});
+  (await h.nextCall(0)).answer(respond(say("I'll ask the seller."), call("ask_seller", { listing: "L9" })));
+  await started.promise;
+  await agent.forgetPerson("c1");
+  release.open();
+  assert.match(await finished.promise, /^flow: records: not kept: the person was forgotten/);
+  assert.deepEqual(await agent.records.query("questions"), []);
+});
+
+test("forgetting a person signed in with a key deletes the records naming their number on a phone channel", async () => {
+  const store = new Store(sqlite(), "default");
+  const channels = [{ name: "whatsapp", kind: "whatsapp" as const, info: WHATSAPP, phone: true, send: () => {} }, { name: "sms", kind: "sms" as const, info: SMS, phone: true, send: () => {} }];
+  const agent = createAgent({ files: { "AGENTS.md": "Test." }, model: noModel, records: COLLECTIONS, scheduleCheckMs: 0, store, channels, defaultCountryCode: "+44" });
+  await store.migrate();
+  await store.createConversation("p_k", "key:cust-7");
+  await store.addIdentity("p_k", "whatsapp", "15550100002", "resolver"); // WhatsApp's digits, international
+  await store.addIdentity("p_k", "sms", "07700900123", "resolver"); // national, in the agent's country
+  await agent.records.put("questions", "prefixed", question(1, { seller: "phone:+15550100002" }));
+  await agent.records.put("questions", "bare", question(2, { seller: "+15550100002" }));
+  await agent.records.put("notes", "sms", { about: "phone:+447700900123" });
+  await agent.records.put("notes", "someone-else", { about: "phone:+15550100003" });
+  await agent.forgetPerson("p_k");
+  const left: string[] = [];
+  for await (const r of agent.records.export()) left.push(r.id);
+  assert.deepEqual(left, ["someone-else"]);
 });
 
 test("flow records export prints every record of the agent in the folder as JSON Lines, with no model key", async () => {

@@ -12,22 +12,29 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `agent.records` elsewhere, with `put`, `get`, `query` (equality on declared fields, oldest first,
   pages of up to 100), `delete`, `forgetPerson` and `export`. They behave the same on SQLite,
   Postgres, the playground and Flow's hosting, per agent and environment. `agent.forgetPerson`
-  also deletes the records that name the person in a `people` field. Limits in `RECORD_LIMITS`:
-  64 KB a record, 10,000 an agent, 20 collections, 8 declared fields each. If anything other than
-  the agent reads the data, it belongs in your own database ([docs/agents.md](docs/agents.md#the-agents-own-records)).
+  also deletes the records that name the person in a `people` field (by their person key,
+  conversation id, any identity, or their number on a phone channel, whatever their key), and a
+  tool of theirs still running then can no longer put one. A field added to a collection's
+  `people` or `fields` is indexed for the records already kept when the agent next starts, so
+  `query` and forgetting find them. Limits in `RECORD_LIMITS`: 64 KB a record, 10,000 an agent
+  (new records put at the same moment may pass it by up to as many as are put at once), 20
+  collections, 8 declared fields each. If anything other than the agent reads the data, it
+  belongs in your own database ([docs/agents.md](docs/agents.md#the-agents-own-records)).
 - **`flow records export`** prints every record of the agent in the folder (the store its
   `buildAgent` opens) as JSON Lines.
 - `mcpServer({ records: agent.records })` gives tools served over MCP the same records.
-- The playground shows the agent's records.
-- Store migration 10 adds the tables `records` and `record_index`; it runs on the agent's first
-  start, as every migration does, and changes no existing table.
+- The playground's Records tab, for an agent that declares collections, shows its newest 200
+  records, newest first, with each collection's count and how many older ones are not shown.
+- Store migration 10 adds the tables `records`, `record_index` and `record_collections` (each
+  collection's declaration as last indexed); it runs on the agent's first start, as every
+  migration does, and changes no existing table.
 
 ### Migration notes
 
 - **`ToolContext` has a new field, `records`.** Flow Framework fills it for every tool call. Code that
   builds a `ToolContext` itself (a unit test calling a tool's `run`) adds it: `records: agent.records`.
 - **`StoreApi` has the record methods** (`putRecord`, `getRecord`, `queryRecords`, `deleteRecord`,
-  `forgetRecords`, `exportRecords`). A store of your own that forwards each call to a `Store` (as
+  `forgetRecords`, `exportRecords`, `reindexRecords`). A store of your own that forwards each call to a `Store` (as
   Flow's hosting does) forwards them too; a hosted agent on 0.6 deploys once Flow's hosting runs
   0.6 (until then `flow deploy` refuses it, as for any newer line).
 

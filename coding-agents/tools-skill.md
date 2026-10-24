@@ -41,8 +41,9 @@ export const findSlots = tool({
 - What the agent itself must remember across days and people, and nothing else reads (a question
   waiting for a seller's answer), goes in `context.records` (`put`, `get`, `query`, `delete`),
   in collections declared on `createAgent({ records })`, with each field that holds a person in
-  `people` so forgetting them deletes it. If anything other than the agent reads it, it belongs in
-  the owner's database, through a tool. docs/agents.md, "The agent's own records".
+  `people` so forgetting them deletes it (a put after they were forgotten is refused). If anything
+  other than the agent reads it, it belongs in the owner's database, through a tool.
+  docs/agents.md, "The agent's own records".
 - A tool that changes something (books, pays, sends) passes `context.idempotencyKey` to its backend:
   it is the same for the same input in the same turn, also when the turn runs again after a
   restart, so the booking happens once. `context.callId` is the model's id for the call;

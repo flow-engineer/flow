@@ -251,18 +251,27 @@ ranges, sorting, joins, search or transactions across records; a put replaces th
 - `people` are the top-level fields that hold a person, as a string: their `context.person`
   (`phone:+15550100100`, `key:<your id>`, `<channel>:<address>`). `agent.forgetPerson` deletes,
   with everything else about them, every record that names them there (by that id, their
-  conversation id, any identity as `<channel>:<address>`, or their number in E.164);
-  `agent.records.forgetPerson(person)` does it for someone who never wrote.
+  conversation id, any identity as `<channel>:<address>`, or their number in E.164 on a phone
+  channel, also when their key is `key:...`; never a bare chat id, which another channel may
+  use); `agent.records.forgetPerson(person)` does it for someone who never wrote. A tool of
+  theirs still running when they are forgotten cannot put a record after it: the put is refused
+  saying they were forgotten.
+- A field added to a collection's `people` or `fields` counts for the records already kept from
+  the agent's next start: it indexes them again before anything runs, so `query` and forgetting
+  find them. A value the new declaration refuses (a person field holding a number) is kept, left
+  out of the index.
 - Values are plain JSON: no Dates (a time is milliseconds or ISO text), NaN, Maps or class
   instances; keys whose value is undefined are left out. A declared field holds a string (at most
   256 characters), a number, a boolean or null; `1` and `"1"` differ.
 - Limits (`RECORD_LIMITS`): 64 KB a record as JSON, 10,000 records an agent (per environment), 20
   collections, 8 declared fields each, ids of at most 128 characters. A put past one is refused
-  saying what to change.
+  saying what to change. The count of records takes no lock, so new ones put at the same moment
+  may pass 10,000 by up to as many as are put at once.
 - `npx @flow-engineer/flow records export` prints every record of the agent in the folder (the
   store its `buildAgent` opens) as JSON Lines; in code, `for await (const r of
   agent.records.export())`. Put them into another store with `agent.records.put(r.collection,
-  r.id, r.value)`.
+  r.id, r.value)`: each gets a new `createdAt` and `updatedAt` there (the time of that put), so
+  put them oldest first, as export gives them, to keep their order.
 - A follow-up at a time is not a record: `agent.nudge({ to, prompt, at })` gives the agent a turn
   then, and that turn reads the records.
 
