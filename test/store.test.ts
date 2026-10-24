@@ -10,7 +10,7 @@ import { LEASE_MS } from "../src/conversation.ts";
 import { SMS, WHATSAPP, call, gate, last, multi, respond, scriptedModel, users } from "./helpers.ts";
 
 const CHANNELS = { sms: { info: SMS, phone: true } };
-const file = () => join(mkdtempSync(join(tmpdir(), "flow-db-")), "chinwag.db");
+const file = () => join(mkdtempSync(join(tmpdir(), "flow-db-")), "flow.db");
 /** The clock of a process started after one that died mid-turn, once the dead one's lease ran out. */
 const leaseOver = () => Date.now() + LEASE_MS;
 

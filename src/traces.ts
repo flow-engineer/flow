@@ -16,6 +16,8 @@
 // The resource's `chinwag.run_kind` is then "test" (else "production") and each turn's root span
 // names the session (`chinwag.test.session`), so the endpoint keeps test traces apart from real
 // conversations and links them to their test run.
+// These two keep Chinwag's names on purpose: Flow's observe reads run attributes only as chinwag.*,
+// so a flow.* spelling waits until it reads that too.
 
 import { randomBytes } from "node:crypto";
 import type { EventSink, FlowEvent } from "./events.ts";

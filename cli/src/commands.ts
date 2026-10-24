@@ -51,8 +51,10 @@ export interface CliConfig {
   agent?: string;
   /** The variable a token is read from for CI and agents (default <NAME>_TOKEN). */
   tokenEnv?: string;
-  /** Override the local credential/conversation directory, e.g. for an isolated embedded session. */
+  /** Override the local credential/conversation/discovery directory, e.g. for an isolated embedded session. */
   directory?: string;
+  /** Use cached tools immediately; revalidate in the background every five minutes. false disables caching. */
+  discoveryCache?: false | { maxAgeMs?: number };
   description?: string;
   /** Commands by their words ("order place"): the first words are groups. Tools no command names keep their own name. */
   commands?: Record<string, CommandConfig>;
@@ -76,6 +78,7 @@ export interface ToolInfo {
   inputSchema: { properties?: Record<string, JsonSchema>; required?: string[]; [key: string]: unknown };
   outputSchema?: JsonSchema;
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
+  _meta?: Record<string, unknown>;
 }
 
 export interface JsonSchema {
@@ -131,7 +134,8 @@ export function commandTable(config: CliConfig, tools: ToolInfo[]): Command[] {
     if (c.alias) commands.push({ words: c.alias.trim().split(/\s+/), summary: `Same as ${words}`, tool, config: c });
   }
   for (const tool of tools) {
-    if (!named.has(tool.name) && !HOST_ONLY.has(tool.name)) commands.push({ words: [derivedName(tool.name)], summary: tool.title ?? tool.name, tool });
+    const name = derivedName(tool.name);
+    if (!named.has(tool.name) && !HOST_ONLY.has(tool.name) && !commands.some(c => c.words.join(" ") === name)) commands.push({ words: [name], summary: tool.title ?? tool.name, tool });
   }
   return commands;
 }
@@ -191,6 +195,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
   }
   for (const t of tools) {
     if (named.has(t.name) || HOST_ONLY.has(t.name)) continue;
+    if (Object.entries(config.commands ?? {}).some(([w, c]) => w.trim() === derivedName(t.name) && isCustom(c))) continue;
     claim(derivedName(t.name), `tool ${t.name}`);
     if (config.commands) warnings.push(`tool ${t.name} has no command in the CLI file; it is reachable as "${derivedName(t.name)}"`);
   }
@@ -218,6 +223,8 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     `Run \`${name} <command> --json\` and read the JSON; never parse the human output. \`--fields a,b\` keeps only those fields.`,
     "Commands that change things accept `--dry-run` (shows the call, sends nothing) and, when they may delete or overwrite, need `--yes` without a terminal.",
     `Sign in once with \`${name} auth login\`, or set ${tokenEnvOf(config)} in CI.`,
+    "Tool definitions may be cached; add `--refresh-tools` to fetch current commands and schemas.",
+    `List workflow summaries with \`${name} skill list\`; read selected instructions with \`${name} skill get <name> [name...]\` before doing what they cover.`,
     "",
     "Exit codes: 0 done, 1 the tool failed (its message on stderr), 2 wrong command or arguments, 3 sign-in needed, 4 needs --yes, 5 the server could not be reached.",
     "",
@@ -229,9 +236,13 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     "## Commands",
   ];
   for (const c of commandTable(config, tools)) {
-    if (!c.tool) continue;
+    if (!c.tool) {
+      if (c.config && isCustom(c.config)) lines.push("", `### ${name} ${c.words.join(" ")}`, "", c.config.command.brief, "", `Run \`${name} ${c.words.join(" ")} --help\` for its arguments and flags.`);
+      continue;
+    }
     lines.push("", `### ${name} ${c.words.join(" ")}`, "", c.summary);
     if (c.tool) {
+      lines.push("", `MCP tool: \`${c.tool.name}\``);
       if (c.tool.description && c.tool.description !== c.summary) lines.push("", c.tool.description);
       const args = c.config && !isCustom(c.config) ? (c.config.args ?? []) : [];
       const flags = flagList(c.tool, args);

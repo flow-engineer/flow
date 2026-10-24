@@ -1,6 +1,6 @@
 // covers: testing/src/check.ts testing/src/plugin.ts mcp/src/describe.ts cli/src/commands.ts
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -93,6 +93,18 @@ test("plugins preserve skill bytes and assets, use native transports, and detect
   assert.match(pluginProblems(dir, out).join(), /stale/);
   rmSync(asset);
   writePlugins(dir, "http://127.0.0.1:8795/mcp", out);
+  assert.deepEqual(pluginProblems(dir, out), []);
+});
+
+// The stamp was .chinwag-skills.json before 0.5: plugins written then still check, and are moved over.
+test("plugins stamped under the old name still check, and the next write renames the stamp", () => {
+  const dir = agentFolder(listOrders, undefined, "Check the order first.");
+  const out = join(dir, "plugins");
+  writePlugins(dir, "http://127.0.0.1:8795/mcp", out);
+  renameSync(join(out, ".flow-skills.json"), join(out, ".chinwag-skills.json"));
+  assert.deepEqual(pluginProblems(dir, out), []);
+  writePlugins(dir, "http://127.0.0.1:8795/mcp", out);
+  assert.ok(existsSync(join(out, ".flow-skills.json")) && !existsSync(join(out, ".chinwag-skills.json")));
   assert.deepEqual(pluginProblems(dir, out), []);
 });
 

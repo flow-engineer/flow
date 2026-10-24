@@ -8,6 +8,7 @@ import { sqlite, type Database } from "../src/index.ts";
 import { Store } from "../src/store.ts";
 import { claimDue, scheduleTools } from "../src/schedules.ts";
 import { SMS, call, last, multi, respond } from "./helpers.ts";
+import { unavailableRecords } from "../src/records.ts";
 
 const CHANNELS = { sms: { info: SMS, phone: true } };
 const NOON_NY = Date.UTC(2026, 9, 12, 16);
@@ -48,7 +49,7 @@ test("a schedule that comes due becomes a turn, and its message goes out", async
 });
 
 test("two runners claim a due run only once", async () => {
-  const path = join(mkdtempSync(join(tmpdir(), "flow-db-")), "chinwag.db");
+  const path = join(mkdtempSync(join(tmpdir(), "flow-db-")), "flow.db");
   const h = await withSam(sqlite(path));
   await h.store.addSchedule({ id: "s1", conversationId: h.conversationId, channel: "sms", instruction: "check in", fixedText: false, mode: "message", rule: { repeat: "daily", time: "11:00" }, timeZone: "America/New_York", nextRunAt: NOON_NY - 60_000, maxRuns: null, endsOn: null, origin: "person" });
   const other = multi({ channels: CHANNELS, database: sqlite(path), now: () => h.clock.now, dir: h.dir });
@@ -117,7 +118,7 @@ test("the scheduling tool refuses what would go wrong, with a reason the agent c
   let zone: string | null = null;
   const scope = { store, conversationId: "c1", channel: () => "sms", now: () => NOON_NY, personZone: () => zone, setPersonZone: async (z: string) => void (zone = z), agentZone: "America/New_York" };
   const [schedule] = scheduleTools(scope);
-  const run = (input: Record<string, unknown>) => Promise.resolve(schedule.run(schedule.input.parse(input), { conversationId: "c1", person: "p", key: null, channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal })) as Promise<Record<string, any>>;
+  const run = (input: Record<string, unknown>) => Promise.resolve(schedule.run(schedule.input.parse(input), { conversationId: "c1", person: "p", key: null, channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal, records: unavailableRecords("a test") })) as Promise<Record<string, any>>;
   const daily = { message: "check in", repeat: "daily", time: "09:00" };
 
   assert.match((await run(daily)).error, /^timezone_needed/, "no zone known: ask their city, never take the business's");

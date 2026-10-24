@@ -28,7 +28,7 @@ read or print it), and the agent calls models through Flow with it on $2 of Flow
 at the provider: `OPENROUTER_API_KEY` at https://openrouter.ai/keys,
 `OPENAI_API_KEY` at https://platform.openai.com/api-keys, `ANTHROPIC_API_KEY` at
 https://console.anthropic.com/settings/keys, or `GEMINI_API_KEY` at https://aistudio.google.com/apikey.
-The first one with a value is used, and `CAFE_MODEL` sets the café's model id. Then `npm start`
+The first one with a value is used, and `MODEL` sets the model id. Then `npm start`
 opens the playground; `npm run typecheck` checks the types.
 
 Inside a clone of Flow Framework itself, `npm run new -- <name>` copies the café to `agents/<name>/`
@@ -36,6 +36,38 @@ instead (git-ignored, so it never collides with a pull). Its imports of `../../.
 `../../../simulators/src/` stay as they are, so changes to Flow Framework show at once; the key goes in
 `agents/<name>/.env`. The snippets below import `@flow-engineer/flow` and `@flow-engineer/flow/simulators`; in a clone's
 agent, keep its relative imports.
+
+## Names
+
+Before `new` or `init`, ask the owner what people should call the agent (the machine name follows
+from it unless they want another), and tell them where people see each name:
+
+- **`name`**, the machine name (`skycast-agent`: lowercase letters, digits and dashes). `flow new
+  <name>` takes it; `flow init --name <name>` too, else it is `--display-name` in lowercase and
+  dashes, else the folder's name. People see it as:
+  - the CLI command they type (package.json's `bin` key), in its help and every hint it prints
+    (`skycast-agent auth login`), and as the speaker in `skycast-agent chat`;
+  - the CLI's variables `SKYCAST_AGENT_SERVER` and `SKYCAST_AGENT_TOKEN`, and its folder
+    `~/.config/skycast-agent/`;
+  - the CLI's sign-in: it registers itself with the login server as "skycast-agent CLI", which a
+    consent screen may show, and the browser page after sign-in says "go back to skycast-agent";
+  - the MCP server's own name (`serverInfo.name`), which hosts that show a server's name show, and
+    the name in the `claude mcp add` line `npm run mcp` prints, which Claude Code lists (in Claude's
+    and ChatGPT's connector settings the person types a name of their own);
+  - the plugins `flow plugin` makes: the plugin's name and its MCP server's (`--name` overrides),
+    with package.json's `description` as the plugin's description.
+- **`displayName`**, what people call the agent (`Skycast`): `--display-name`. People see it as:
+  - the message their phone sends to reach it, `Hi Skycast (ref <code>)`, filled in by the link
+    `link` prints and by its /try page;
+  - the name the agent gives itself in chats, from its prompt `agent/AGENTS.md`.
+  The owner also sees it on the playground and in what `npm start` and `npm run mcp` print.
+
+Both live in `package.json` and nowhere else in the code: `src/name.ts` reads them for `src/cli.ts`,
+`src/mcp.ts` and `src/main.ts`. To rename the agent, change `name` and the `bin` key to the same
+new name; to change the display name, run `npx @flow-engineer/flow link --display-name "<name>"`,
+which changes `displayName` and the name in `agent/AGENTS.md`. Flow's account knows the agent by
+`name` once `link` or `setup` ran: a new `name` is a new agent there while the keys already in
+`.env` stay the old one's, so rename before the first `link` when you can.
 
 ## Layout
 
@@ -46,6 +78,7 @@ my-agent/
   src/tools.ts                 the agent's tools (see tools-skill.md)
   src/agent.ts                 buildAgent(): the one place the agent is built
   src/main.ts                  runs it in the playground
+  src/name.ts                  the agent's names, read from package.json (see "Names")
   src/mcp.ts                   optional: the tools as an MCP server (below)
   src/cli.ts                   optional: the CLI file, for the organization's command line (below)
   context/                     optional: the context pack the tools are written from (context-skill.md)
@@ -104,7 +137,8 @@ agent serves beside its chat, such as a business's event push, answered by `agen
 (and by the test cloud with a test's events); `onTick(now)` is work of your own on the agent's clock
 (held sends, reminders timed from your data), run with each check for due scheduled messages.
 `agent.reach({ channel, address })` makes the conversation of someone the business may message
-before they have written; until they write, only a template reaches them on WhatsApp.
+before they have written; until they write, only a template reaches them on WhatsApp. A template
+nudge does this itself (below), so `reach` is for opening the conversation without sending.
 
 Models are reached through any OpenAI-compatible API. `openAICompatible()` with no key reads the
 first of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` and
@@ -129,7 +163,9 @@ is a definition in its own file; Flow Framework knows the platform (WhatsApp's l
 provider only says how to send:
 
 ```ts
-// src/channels/whatsapp.ts: one sendMessage, plus whatever else your provider can do
+// src/channels/whatsapp.ts: one sendMessage, plus whatever else your provider can do.
+// sendMessage resolves only once your API accepted the message, and throws when it refused it
+// (never earlier: the next message waits for it). docs/guarantees.md
 export const wa = whatsapp({
   sendMessage: (to, m) => api.send(to, m),        // m: { text, replyTo?, buttons?: (label | { id, label })[], list?, link?, image? }
   react: (to, id, emoji) => api.react(to, id, emoji),
@@ -143,7 +179,7 @@ export const app = customUI("app", {
   sendMessage: (to, m) => myApp.push(to, m),      // m.text, m.app_link
 });
 
-createAgent({ ..., channels: [wa, sms(twilioLike), app], database: sqlite("data/chinwag.db"),
+createAgent({ ..., channels: [wa, sms(twilioLike), app], database: sqlite("data/flow.db"),
   resolve: ({ channel, address }) => members.idFor(channel, address), timeZone: "America/New_York" });
 // A person's time zone is never guessed from timeZone (the business's): set it when you know it,
 // agent.setTimeZone({ to, timeZone }) or peopleHandler over HTTP; else the agent asks them.
@@ -151,6 +187,9 @@ await agent.resume();                     // a durable database: always before t
 await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" });
 ```
 
+- The agent's own records (`createAgent({ records })`, `context.records`, `agent.records`) live
+  in the same database or store, so they move with it; keep them small (docs/agents.md, "The
+  agent's own records").
 - Several processes or machines need Postgres, not a SQLite file: `database: postgres(pool)`
   with the app's own node-postgres `Pool` (Flow Framework adds no Postgres dependency). An agent that must
   not hold database credentials gets `store` instead of `database`: any object with Store's
@@ -192,6 +231,13 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   playground and the test cloud never call it, and what you change there is not what the
   transcript and the judge see. What `beforeSend` returns is what is checked, sent and recorded
   (`message.out`, the history, the transcript); a refusal is a `message.refused` event.
+- Common checks are ready-made: `beforeSend: guards(oncePerChat("I'm an AI assistant."), noRepeats(),
+  linkAllowlist(["example.com"]), noWriteButtons(["pay", "confirm order"]))`. Write your own beside
+  them as plain functions; `context.sent` is what was already sent, read from the stored history.
+- When a conversation starts over for the business (a new order, a new case), call
+  `agent.resetHistory({ to, note })`: the model then sees only what comes after, with your note.
+  Nothing is deleted. A long chat is also cut to `history.maxTokens` (default 24,000, or 60% of the
+  model's `contextTokens` when less).
 - `instructions` (on `customUI`, and in `whatsapp()`'s and `sms()`'s options) is your guidance for
   the agent on that channel, in its prompt only while the person uses it. Data a param carries,
   such as a link, comes from your tools' results: a tool that has a screen returns its link
@@ -241,11 +287,15 @@ and QUIT, as some US carrier rules expect; `keywords: { stop: [...] }` sets your
 Messages the business starts are nudges: `agent.nudge({ to: { channel, address }, text })` sends
 as written; `prompt` instead lets the agent write it (or decide not to); `template` sends a
 WhatsApp template you already set up. Pass `idempotencyKey` when your system may retry, and `at`
-to send later. Prefer `prompt`; use `text` only when the wording must be exact. Outside WhatsApp's
+to send later. Prefer `prompt`; use `text` only when the wording must be exact. `to` is someone
+who has written on that channel (`unknown_person` otherwise); a phone number is read as their
+messages' are, so any format of it finds them. Only a template reaches someone who never wrote: on
+WhatsApp it makes them a person (the number in full, with its country code), and their reply joins
+that conversation. Outside WhatsApp's
 24-hour window only templates go out: declare a `fallbackTemplate` ("You have a new message. Reply to
 see it.", no values) so a nudge is held until they reply instead of refused (`outside_window`); the
 agent may send a fitting template itself (`send_template`), and `template.missing` events say which
-messages want one. Held nudges (quiet hours, a closed window) settle as `held`, then `sent` or `expired`.
+messages want one. A prompt nudge with `at` that comes due past the window does the same. Held nudges (quiet hours, a closed window) settle as `held`, then `sent` or `expired`.
 For a call to action use `link` (`text` with `link: { label, url }`, or the agent's send with
 `link`), never a URL in the text: what the business starts goes with link previews off, since on
 WhatsApp a preview card's title becomes the phone's notification instead of the message.
@@ -262,7 +312,9 @@ When the backend posts what happened (an order shipped, an item is back in stock
 to send, mount `flowEvents({ secret, catalog, timezone })` (from `@flow-engineer/flow`): its
 `routes` (`POST /v1/events`, signed with `Flow-Signature`), `onTick` and `context(conversationId)`
 go on `createAgent`, `events.phrasing.check(address, message)` in `createAgent`'s `beforeSend`
-(return `{ refuse: reason }`), then `events.attach(agent)`. Each type in the catalog has a delivery level
+(return `{ refuse: reason }`), then `events.attach(agent)`. A tool that saves what the person
+watches (or mutes) uses `context.events` (`agent.events` elsewhere), its own agent's events side,
+never a module variable; make the `flowEvents` inside `buildAgent`, one per agent. Each type in the catalog has a delivery level
 (critical, standard, optional), its template and its values; the guide is `docs/events.md` in the
 package (`../docs/events.md` from this file).
 
@@ -364,7 +416,8 @@ and every simulated message is logged with the person, channel, time and address
 
 To chat with the agent from the owner's phone, with no tunnel and no key made by hand, run these
 from the agent's folder (`npx @flow-engineer/flow init --display-name "<name>"` makes a starter in
-an empty one: first ask the owner what people should call their agent, such as "FlatX agent"; the
+an empty one, named `flatx-agent` after it unless `--name` says otherwise: first ask the owner what
+people should call their agent, such as "FlatX agent" (see "Names"); the
 phone's first message is `Hi FlatX agent (ref <code>)`, and `package.json`'s `displayName` keeps it;
 `link --display-name "<name>"` renames it later, in `package.json` and `agent/AGENTS.md`).
 Only `chat` reads stdin; `init` asks for the name only in a terminal, and nothing else asks for input.
@@ -432,7 +485,9 @@ printf '%s' "$VALUE" | npx @flow-engineer/flow deploy secret NAME --env producti
 ```
 
 Promote, or `deploy --env production`, only when the owner says so. A refused deploy lists the
-hosting lint's findings (`deploy.findings`): fix the errors and deploy again. One `deploy` is the whole first deploy: there is no
+hosting lint's findings (`deploy.findings`): fix the errors and deploy again. An agent locked to a
+newer Flow Framework release line than hosting runs is refused before anything is sent
+(`error.code` `chinwag_too_new`): run its `next` (pin the version hosting runs) and deploy again. One `deploy` is the whole first deploy: there is no
 separate secrets step (it sends only new or changed `.env` values each time; promote sends them to
 production). Commit first, or the version reads `<sha>+dirty`. Stop the laptop's `npm start` once the deployed one is live: two copies on one key
 both answer every message.
@@ -560,12 +615,28 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   needs `--yes`, 5 the server could not be reached. `--server <url>` and `--token <token>` work on
   every command. `acme auth login` signs in on the organization's own login (tokens in
   `~/.config/acme/`, mode 600), `ACME_TOKEN` is for CI, `acme tools` lists every tool and schema, and
-  `acme skill --write ~/.claude/skills` installs the CLI's SKILL.md, made from the tools and the CLI
-  file, for coding agents. For any MCP server without a CLI file, `npx @flow-engineer/flow cli --server <url> -h`.
+  `acme skill list` (or bare `skill`) lists the generated `acme-cli` guide and workflow skill names
+  and descriptions. `acme skill get booking refunds` reads only those skills; `--json` returns an
+  array of `{ name, description, content }`. `skill get acme-cli` reads the CLI guide, including
+  handwritten commands and MCP-tool-to-command mappings. `skill get <names...> --write <dir>` exports
+  selected SKILL.md files; `skill --write <dir>` keeps exporting the generated guide. Listings use
+  `read_skill` descriptor metadata (`flow.engineer/skills`); older MCP servers supply names with
+  empty descriptions. Workflow bodies are fetched through `read_skill` only when selected.
+  For any MCP server without a CLI file, `npx @flow-engineer/flow cli --server <url> -h`.
 - `npx @flow-engineer/flow check` checks the CLI file against the tools: a command naming a tool that does not
   exist, an `args` field the input lacks, a `columns` or `view` field the output lacks, two commands
   with one name, a word that is both a command and a group, or one of the CLI's own words (`auth`,
   `tools`, `skill`) is an error; a tool no command names is a warning (it keeps its own name).
+- MCP-backed commands need a shipped MCP server. Cached definitions (including server name/version)
+  load immediately, with background refresh every five minutes, scoped to endpoint, client and
+  credentials in the CLI's config directory (`directory` overrides it). Version changes detected
+  on connection refresh before a call. Unknown commands/arguments refresh and reparse once; server
+  argument errors refresh help without replaying the request. `--refresh-tools` forces discovery.
+  Set `discoveryCache: false` to disable caching or `{ maxAgeMs: 60_000 }` for a one-minute background
+  interval. Handwritten commands and their help need no discovery; their bodies are never replayed,
+  and their names override derived commands. Only explicit `this.cli.call` reaches MCP. Results and
+  credentials are never stored in the discovery cache. A custom command declaring its own
+  `--refresh-tools` flag keeps that flag; use `tools --refresh-tools` to force framework discovery.
 
 
 ### Native plugins and standalone MCP

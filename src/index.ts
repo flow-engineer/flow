@@ -30,6 +30,7 @@ export {
   type WhatsAppFeature,
   type WhatsAppProvider,
 } from "./channels.ts";
+export { guards, linkAllowlist, noRepeats, noWriteButtons, oncePerChat, type GuardOptions, type Match } from "./guards.ts";
 export { Conversation, type Profile, type TranscriptEntry } from "./conversation.ts";
 export { nudgeHandler, peopleHandler, type NudgeHandlerOptions, type PeopleHandlerOptions } from "./http.ts";
 export { sqlite, type Database } from "./db.ts";
@@ -38,9 +39,10 @@ export { jsonlSink, type EventSink, type FlowEvent, type ChinwagEvent } from "./
 export { choosePort, markRunning } from "./local.ts";
 export { flowModel, flowModelURL, flowTranscribe, openAICompatible, type FlowTranscribeOptions, type OpenAICompatibleOptions } from "./model.ts";
 export { Store, type StoreApi } from "./store.ts";
+export { RECORD_LIMITS, type ExportedRecord, type RecordCollection, type RecordCursor, type RecordEntry, type Records, type RecordScalar, type RecordValue } from "./records.ts";
 export type { AgentFiles } from "./skills.ts";
 export type { TracesOptions } from "./traces.ts";
 export { tool, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Credentials, type SignIn, type Tool, type ToolContext, type ToolHints } from "./tools.ts";
-export type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, ListRow, Media, Model, ModelRequest, ModelResponse, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, Template, TemplateButton, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
+export type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, ListRow, Media, Model, ModelRequest, ModelResponse, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateButton, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 export { z } from "zod";
 export * from "./business-events/index.ts";

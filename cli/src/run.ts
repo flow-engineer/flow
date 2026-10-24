@@ -7,12 +7,16 @@
 // the CLI file (commands.ts).
 
 import { runTerminal } from "./terminal.ts";
-import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
-import { Client, InsufficientScopeError, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider } from "@modelcontextprotocol/client";
-import { buildApplication, buildCommand, buildRouteMap, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
-import { isSignedIn, signIn, signOut, storedProvider } from "./auth.ts";
+import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider, type Tool as McpTool } from "@modelcontextprotocol/client";
+import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
+import { configDir, isSignedIn, signIn, signOut, storedProvider } from "./auth.ts";
+import { SKILLS_META } from "../../src/skills.ts";
 import {
   BUILT_IN,
   commandTable,
@@ -35,8 +39,10 @@ export const EXIT = { ok: 0, failed: 1, usage: 2, signIn: 3, approval: 4, unreac
 export interface CliIO {
   /** An embedded client's environment; omitted uses the local process environment. */
   env?: Record<string, string | undefined>;
-  /** Cancels an embedded sign-in or terminal request when its session ends. */
+  /** Cancels embedded sign-in, terminal requests and discovery refreshes when the session ends. */
   signal?: AbortSignal;
+  /** Schedule discovery work without delaying output. Omitted uses a detached, bounded refresh process. */
+  background?: (work: () => Promise<void>) => void;
   /** Write to stdout as is. */
   write(text: string): void;
   /** Write to stderr as is. */
@@ -84,16 +90,25 @@ class CliExit extends Error {
   }
 }
 
+/** Reparse a generated command before its first call when discovery changed its schema. */
+class CliReparse extends Error {}
+
 /** Takes `--server` and `--token` out before the commands are known (they decide which commands exist). */
-function connectionFlags(argv: string[]): { rest: string[]; server?: string; token?: string } {
+function connectionFlags(config: CliConfig, argv: string[]): { rest: string[]; server?: string; token?: string; refresh: boolean } {
   const rest: string[] = [];
   const found: Record<string, string> = {};
+  let refresh = false;
   for (let i = 0; i < argv.length; i++) {
     const m = /^--(server|token)(?:=(.*))?$/.exec(argv[i]!);
     if (!m) rest.push(argv[i]!);
     else found[m[1]!] = m[2] ?? argv[++i] ?? "";
   }
-  return { rest, server: found.server, token: found.token };
+  const command = findCommand(commandTable(config, []), rest.filter(w => w !== "--refresh-tools"))?.command.config;
+  // A handwritten command can own this flag too; framework defaults must not consume it.
+  if (!(command && isCustom(command) && command.command.usesFlag("refresh-tools", "original"))) {
+    for (let i = rest.length - 1; i >= 0; i--) if (rest[i] === "--refresh-tools") { rest.splice(i, 1); refresh = true; }
+  }
+  return { rest, server: found.server, token: found.token, refresh };
 }
 
 function callMeta(config: CliConfig, command: string): Record<string, string> {
@@ -112,73 +127,141 @@ function noServer(config: CliConfig): string {
 export async function runCli(config: CliConfig, argv: string[], io: CliIO = processIO()): Promise<number> {
   io.signal?.throwIfAborted();
   const env = io.env ?? process.env;
-  const name = config.name;
-  const { rest, server: given, token: givenToken } = connectionFlags(argv);
+  const { rest, server: given, token: givenToken, refresh } = connectionFlags(config, argv);
   const server = given ?? config.server ?? env[envName(config, "SERVER")];
   const token = givenToken ?? env[tokenEnvOf(config)];
   if (rest[0] === "chat" && !config.commands?.[rest[0]]) return runTerminal(config, server, token, rest, io);
+  const local = findCommand(commandTable(config, []), rest);
+  const custom = Boolean(local?.command.config && isCustom(local.command.config));
+  const prefix = rest.filter(w => w !== "--help" && w !== "-h").join(" ");
+  const children = Object.entries(config.commands ?? {}).filter(([words]) => words.startsWith(`${prefix} `));
+  const localOnly = custom || Boolean(prefix && children.length && children.every(([, command]) => isCustom(command)));
   const asksHelp = rest.length === 0 || rest[0] === "-h" || rest[0] === "--help";
 
   let client: Client | undefined;
+  let connecting: Promise<Client> | undefined;
   let tools: ToolInfo[] = [];
+  let cached: Discovery | undefined;
+  let recoveredCall = false;
+  let file: string | undefined;
   let problem: CliExit | undefined;
-  if (server && rest[0] !== "auth") {
+  const getClient = async (): Promise<Client> => {
+    if (!server) throw new CliExit(EXIT.unreachable, noServer(config));
+    if (client) return client;
+    connecting ??= connect(config, server, token, io.signal).then(connected => client = connected).catch(error => {
+      connecting = undefined;
+      throw explain(config, server, error);
+    });
+    return connecting;
+  };
+  const discover = async (): Promise<boolean> => {
+    const before = JSON.stringify(tools);
+    const started = Date.now();
+    const connected = await getClient();
+    const current = await listTools(connected);
+    io.signal?.throwIfAborted();
+    tools = current;
+    cached = undefined;
+    // Connecting can refresh OAuth tokens; do not reuse another credential's cache entry.
+    file = await discoveryFile(config, server!, token);
+    writeDiscovery(file, { format: 2, at: started, server: serverVersion(connected), tools });
+    return before !== JSON.stringify(tools);
+  };
+  if (server && rest[0] !== "auth" && (!localOnly || refresh)) {
     try {
-      client = await connect(config, server, token, io.signal);
+      file = await discoveryFile(config, server, token);
+      cached = refresh ? undefined : readDiscovery(file);
+      if (cached) tools = cached.tools;
+      else await discover();
       io.signal?.throwIfAborted();
-      tools = await listTools(client);
     } catch (error) {
-      await client?.close(); client = undefined;
-      problem = explain(config, server, error);
+      await client?.close(); client = undefined; connecting = undefined;
+      problem = error instanceof CliExit ? error : explain(config, server, error);
     }
   }
   if (io.signal?.aborted) { await client?.close(); return EXIT.failed; }
-  if (problem && !asksHelp) {
-    io.writeError(`${problem.message}\n`);
-    return problem.code;
-  }
+  if (problem && !asksHelp) { io.writeError(`${problem.message}\n`); return problem.code; }
 
-  const stricliProcess = {
-    stdout: { write: (text: string) => io.write(text) },
-    stderr: { write: (text: string) => io.writeError(text) },
-    env: { ...env, ...(env.NO_COLOR ? { STRICLI_NO_COLOR: "1" } : {}) },
-    exitCode: undefined as number | string | null | undefined,
+  // A connected server's version is available without another tools/list. Refresh before a
+  // generated call if it changed, then rebuild its parser and approval flags before sending it.
+  const prepare = async (tool: ToolInfo) => {
+    const connected = await getClient();
+    if (cached && JSON.stringify(cached.server) !== JSON.stringify(serverVersion(connected))) await discover();
+    if (JSON.stringify(tools.find(t => t.name === tool.name)) !== JSON.stringify(tool)) throw new CliReparse();
   };
-  const context: CliContext = {
-    process: stricliProcess,
-    cli: {
-      call: async (tool, input) => {
-        if (!client) throw new CliExit(EXIT.unreachable, noServer(config));
-        return valueOf(await client.callTool({ name: tool, arguments: input, _meta: callMeta(config, findCommand(commandTable(config, tools), rest)?.command.words.join(" ") ?? "custom") }));
-      },
-      print: (value, options = {}) => io.write(`${render(value, options)}\n`),
-    },
+  const call = async (tool: string, input: Record<string, unknown>, command: string) => {
+    const connected = await getClient();
+    try {
+      return await connected.callTool({ name: tool, arguments: input, _meta: callMeta(config, command) }, { toolDefinition: tools.find(t => t.name === tool) as McpTool | undefined });
+    } catch (error) {
+      // A tool request has already been sent. Refresh the help, but never replay a call:
+      // third-party servers and custom commands can have side effects before reporting errors.
+      if (!recoveredCall && error instanceof ProtocolError && error.code === ProtocolErrorCode.InvalidParams) {
+        recoveredCall = true;
+        try { await discover(); } catch {}
+      }
+      throw error;
+    }
   };
-
   const disconnect = () => { void client?.close(); };
   io.signal?.addEventListener("abort", disconnect, { once: true });
   try {
-    const app = buildApplication(routes(config, server, tools, client, io), {
-      name,
-      scanner: { caseStyle: "original" },
-      // A CliExit is a message for the person (sign in, --yes, the tool's own error): one line, no stack.
-      localization: { text: { ...text_en, exceptionWhileRunningCommand(exc, ansiColor) { return exc instanceof CliExit ? exc.message : text_en.exceptionWhileRunningCommand.call(this, exc, ansiColor); } } },
-      determineExitCode: (error) => (error instanceof CliExit ? error.code : needsSignIn(error) ? EXIT.signIn : EXIT.failed),
-    });
-    await runStricli(app, rest, { ...context, process: stricliProcess });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let out = "", err = "", executing = false, reparse = false;
+      const output: CliIO = { ...io,
+        write: text => { if (executing && !reparse) io.write(text); else out += text; },
+        writeError: text => { if (executing && !reparse) io.writeError(text); else err += text; },
+      };
+      const stricliProcess = {
+        stdout: { write: (text: string) => output.write(text) },
+        stderr: { write: (text: string) => output.writeError(text) },
+        env: { ...env, ...(env.NO_COLOR ? { STRICLI_NO_COLOR: "1" } : {}) },
+        exitCode: undefined as number | string | null | undefined,
+      };
+      const context: CliContext = { process: stricliProcess, cli: {
+        call: async (tool, input) => valueOf(await call(tool, input, findCommand(commandTable(config, tools), rest)?.command.words.join(" ") ?? "custom")),
+        print: (value, options = {}) => output.write(`${render(value, options)}\n`),
+      } };
+      const refused = (error: unknown) => badArguments(config, wordsKnown(rest.filter(w => !w.startsWith("-")), config, tools), error, field => field);
+      const app = buildApplication(routes(config, server, tools, async tool => {
+        try { await prepare(tool); }
+        catch (error) { if (error instanceof CliReparse) reparse = true; throw error; }
+      }, call, output, async () => { await discover(); return tools; }), {
+        name: config.name,
+        scanner: { caseStyle: "original" },
+        localization: { text: { ...text_en, exceptionWhileParsingArguments(exc, ansiColor) {
+          executing = false;
+          return text_en.exceptionWhileParsingArguments.call(this, exc, ansiColor);
+        }, exceptionWhileRunningCommand(exc, ansiColor) {
+          return exc instanceof CliReparse ? "" : exc instanceof CliExit ? exc.message : refused(exc)?.message ?? text_en.exceptionWhileRunningCommand.call(this, exc, ansiColor);
+        } } },
+        determineExitCode: error => error instanceof CliReparse ? EXIT.usage : error instanceof CliExit ? error.code : needsSignIn(error) ? EXIT.signIn : refused(error) ? EXIT.usage : EXIT.failed,
+      });
+      await runStricli({ ...app, integrations: { ...app.integrations, output: { hooks: { "command:start"() {
+        io.write(out); io.writeError(err); out = ""; err = ""; executing = true;
+      } } } } }, rest, context);
+      const code = Number(stricliProcess.exitCode ?? 0);
+      const parseFailure = code === ExitCode.UnknownCommand || code === ExitCode.InvalidArgument;
+      if (attempt === 0 && (reparse || (cached && parseFailure && !custom))) {
+        try { if (reparse || await discover()) continue; } catch {}
+      }
+      io.write(out); io.writeError(err);
+      if (problem) io.writeError(`\n${problem.message}\n`);
+      if (code < 0) {
+        const words = rest.filter(w => !w.startsWith("-"));
+        io.writeError(`Run \`${[config.name, ...wordsKnown(words, config, tools)].join(" ")} --help\` to see how to use it.\n`);
+        return EXIT.usage;
+      }
+      return code;
+    }
+    return EXIT.usage;
   } finally {
     io.signal?.removeEventListener("abort", disconnect);
     await client?.close();
+    if (cached && file && server && !io.signal?.aborted && Date.now() - (cached.checkedAt ?? cached.at) >= ((config.discoveryCache || {}).maxAgeMs ?? 5 * 60_000)) {
+      backgroundDiscovery(config, server, token, file, io);
+    }
   }
-  if (problem) io.writeError(`\n${problem.message}\n`);
-  const code = Number(stricliProcess.exitCode ?? 0);
-  if (code < 0) {
-    // Stricli's own: an unknown command or a wrong argument. Point at the help of what was typed.
-    const words = rest.filter((w) => !w.startsWith("-"));
-    io.writeError(`Run \`${[name, ...wordsKnown(words, config, tools)].join(" ")} --help\` to see how to use it.\n`);
-    return EXIT.usage;
-  }
-  return code;
 }
 
 /** The words of the command line that name a group or command, for the help hint. */
@@ -196,10 +279,14 @@ function wordsKnown(words: string[], config: CliConfig, tools: ToolInfo[]): stri
 async function connect(config: CliConfig, server: string, token: string | undefined, signal?: AbortSignal): Promise<Client> {
   const provider: AuthProvider | OAuthClientProvider | undefined = token ? { token: async () => token } : isSignedIn(config, server) ? storedProvider(config, server, undefined, signal) : undefined;
   const client = new Client({ name: `${config.name}-cli`, version: config.version ?? "1" });
+  const abort = () => { void client.close(); };
+  signal?.addEventListener("abort", abort, { once: true });
   try {
-    await client.connect(new StreamableHTTPClientTransport(new URL(server), provider ? { authProvider: provider } : {}));
+    signal?.throwIfAborted();
+    await client.connect(new StreamableHTTPClientTransport(new URL(server), provider ? { authProvider: provider } : {}), { signal });
     signal?.throwIfAborted();
   } catch (error) { await client.close(); throw error; }
+  finally { signal?.removeEventListener("abort", abort); }
   return client;
 }
 
@@ -207,11 +294,126 @@ async function listTools(client: Client): Promise<ToolInfo[]> {
   const tools: ToolInfo[] = [];
   let cursor: string | undefined;
   do {
-    const page = await client.listTools(cursor ? { cursor } : {});
+    const page = await client.listTools(cursor ? { cursor } : {}, { cacheMode: "refresh" });
     tools.push(...(page.tools as unknown as ToolInfo[]));
     cursor = page.nextCursor;
   } while (cursor);
   return tools;
+}
+
+interface Discovery {
+  format: 2;
+  at: number;
+  checkedAt?: number;
+  server?: { name: string; version: string };
+  tools: ToolInfo[];
+}
+
+function serverVersion(client: Client): Discovery["server"] {
+  const version = client.getServerVersion();
+  return version ? { name: version.name, version: version.version } : undefined;
+}
+
+/** Cache descriptors only, never credentials or tool results. Separate files avoid lost updates. */
+async function discoveryFile(config: CliConfig, server: string, token: string | undefined): Promise<string | undefined> {
+  if (config.discoveryCache === false) return undefined;
+  const credentials = token ? { token } : await storedProvider(config, server).tokens();
+  const key = createHash("sha256").update(JSON.stringify([server, config.name, config.version ?? "1", config.clientId, config.clientMetadataUrl, credentials ?? null])).digest("hex");
+  return join(configDir(config), "discovery", `${key}.json`);
+}
+
+function readDiscovery(file: string | undefined): Discovery | undefined {
+  if (!file) return undefined;
+  try {
+    const saved = JSON.parse(readFileSync(file, "utf8"));
+    if (saved.format !== 2 || !Number.isFinite(saved.at) || saved.at > Date.now() || !Array.isArray(saved.tools)) return undefined;
+    if (saved.checkedAt !== undefined && (!Number.isFinite(saved.checkedAt) || saved.checkedAt > Date.now())) return undefined;
+    if (saved.server !== undefined && (typeof saved.server?.name !== "string" || typeof saved.server?.version !== "string")) return undefined;
+    if (!saved.tools.every((t: ToolInfo) => t && typeof t.name === "string" && t.inputSchema && typeof t.inputSchema === "object" && !Array.isArray(t.inputSchema))) return undefined;
+    return saved;
+  } catch { return undefined; }
+}
+
+function writeDiscovery(file: string | undefined, saved: Discovery): void {
+  if (!file) return;
+  const temp = `${file}.${randomUUID()}.tmp`;
+  try {
+    // A slower background request must not replace a newer foreground snapshot.
+    if ((readDiscovery(file)?.at ?? 0) > saved.at) return;
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(temp, JSON.stringify(saved), { mode: 0o600 });
+    renameSync(temp, file);
+  } catch {
+    // A read-only or full config directory must not stop the CLI working.
+  } finally { try { rmSync(temp, { force: true }); } catch {} }
+}
+
+const REFRESH_TIMEOUT_MS = 15_000;
+const REFRESH_ARG = "--flow-refresh-discovery";
+
+function backgroundDiscovery(config: CliConfig, server: string, token: string | undefined, file: string, io: CliIO): void {
+  const lock = `${file}.refresh`;
+  const release = () => { try { rmSync(lock, { recursive: true, force: true }); } catch {} };
+  try {
+    try { if (Date.now() - statSync(lock).mtimeMs > REFRESH_TIMEOUT_MS * 2) release(); } catch {}
+    mkdirSync(lock, { mode: 0o700 });
+  } catch { return; } // Another invocation is refreshing, or caching is unavailable.
+  const saved = readDiscovery(file);
+  if (saved) writeDiscovery(file, { ...saved, checkedAt: Date.now() });
+  const work = async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REFRESH_TIMEOUT_MS);
+    let client: Client | undefined;
+    const signal = io.signal ? AbortSignal.any([io.signal, controller.signal]) : controller.signal;
+    const abort = () => { void client?.close().catch(() => {}); };
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      const started = Date.now();
+      signal.throwIfAborted();
+      client = await connect(config, server, token, signal);
+      const tools = await listTools(client);
+      signal.throwIfAborted();
+      writeDiscovery(await discoveryFile(config, server, token), { format: 2, at: started, server: serverVersion(client), tools });
+    } catch {
+      // Background failures leave the last usable snapshot intact and never pollute output.
+    } finally {
+      clearTimeout(timeout); signal.removeEventListener("abort", abort);
+      try { await client?.close(); } catch {}
+      release();
+    }
+  };
+  if (io.background) {
+    try { io.background(work); } catch { release(); }
+    return;
+  }
+  // Installed bins commonly use process.exit(await runCli(...)). A promise in that process
+  // would be killed. The worker receives secrets through stdin, never command-line arguments.
+  try {
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), REFRESH_ARG], { detached: true, stdio: ["pipe", "ignore", "ignore"] });
+    child.on("error", release);
+    child.stdin.on("error", () => {});
+    child.stdin.end(JSON.stringify({ config: { name: config.name, version: config.version, directory: configDir(config), clientId: config.clientId, clientMetadataUrl: config.clientMetadataUrl }, server, token, file }));
+    child.unref();
+  } catch { release(); }
+}
+
+// Internal worker entry point; importing the CLI never launches it.
+if (process.argv[2] === REFRESH_ARG && process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+  let file: string | undefined;
+  const release = () => { if (file) { try { rmSync(`${file}.refresh`, { recursive: true, force: true }); } catch {} } };
+  process.once("exit", release);
+  const timeout = setTimeout(() => process.exit(0), REFRESH_TIMEOUT_MS);
+  let client: Client | undefined;
+  try {
+    let input = "";
+    for await (const chunk of process.stdin) input += chunk;
+    const job = JSON.parse(input) as { config: CliConfig; server: string; token?: string; file: string };
+    file = job.file;
+    const started = Date.now();
+    client = await connect(job.config, job.server, job.token);
+    const tools = await listTools(client);
+    writeDiscovery(await discoveryFile(job.config, job.server, job.token), { format: 2, at: started, server: serverVersion(client), tools });
+  } catch {} finally { await client?.close(); clearTimeout(timeout); release(); }
 }
 
 /** Why the server could not be used, as one line and an exit code. */
@@ -220,6 +422,32 @@ function explain(config: CliConfig, server: string, error: unknown): CliExit {
   const status = error instanceof SdkHttpError ? (error.data as { status?: number } | undefined)?.status : undefined;
   const why = short((error as Error).message);
   return new CliExit(EXIT.unreachable, status ? `${server} answered ${status}, not as an MCP server: is this its /mcp address? (${why})` : `Could not reach ${server}: ${why}`);
+}
+
+/**
+ * The server refused the arguments (its schema can be stricter than the flags: a maximum, a pattern):
+ * a usage error, one line per field and the command's help, never the protocol error's stack.
+ */
+function badArguments(config: CliConfig, words: string[], error: unknown, label: (field: string) => string): CliExit | undefined {
+  if (!(error instanceof ProtocolError) || error.code !== ProtocolErrorCode.InvalidParams) return undefined;
+  const lines = issuesIn(error.message, label) ?? [short(error.message.replace(/^MCP error -?\d+:\s*/, ""))];
+  return new CliExit(EXIT.usage, `${lines.join("\n")}\nRun \`${[config.name, ...words].join(" ")} --help\` to see how to use it.`);
+}
+
+/** The schema's issues in a server's message (a JSON list of { path, message }), as "<field>: <what is wrong>". */
+function issuesIn(message: string, label: (field: string) => string): string[] | undefined {
+  const start = message.indexOf("[");
+  if (start < 0) return undefined;
+  try {
+    const issues = JSON.parse(message.slice(start)) as { path?: (string | number)[]; message?: string }[];
+    if (!Array.isArray(issues) || !issues.length || !issues.every((i) => typeof i?.message === "string")) return undefined;
+    return issues.map(({ path = [], message }) => {
+      const [field, ...rest] = path.map(String);
+      return field === undefined ? message! : `${[label(field), ...rest].join(".")}: ${message}`;
+    });
+  } catch {
+    return undefined;
+  }
 }
 
 /** A server's error as one short line: a web page answering instead of an MCP server is not printed whole. */
@@ -236,9 +464,10 @@ function needsSignIn(error: unknown): boolean {
 }
 
 type Target = StricliCommand<CliContext> | RouteMap<CliContext>;
+type ToolCall = (tool: string, input: Record<string, unknown>, command: string) => ReturnType<Client["callTool"]>;
 
 /** The command tree: groups from the commands' words, then the CLI's own commands. */
-function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[], client: Client | undefined, io: CliIO): RouteMap<CliContext> {
+function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[], prepare: (tool: ToolInfo) => Promise<void>, call: ToolCall, io: CliIO, refresh: () => Promise<ToolInfo[]>): RouteMap<CliContext> {
   interface Node {
     command?: StricliCommand<CliContext>;
     children: Map<string, Node>;
@@ -250,7 +479,7 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
       if (!node.children.has(word)) node.children.set(word, { children: new Map() });
       node = node.children.get(word)!;
     }
-    node.command = c.config && isCustom(c.config) ? c.config.command : toolCommand(config, c, client, io);
+    node.command = c.config && isCustom(c.config) ? c.config.command : toolCommand(config, c, prepare, call, io);
   }
   const build = (node: Node, path: string[]): Record<string, Target> => {
     const out: Record<string, Target> = {};
@@ -271,16 +500,16 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
   return buildRouteMap({
     routes: { ...top,
       chat: top.chat ?? buildCommand({ docs: { brief: "Chat with the agent in a terminal (chat --help)" }, parameters: {}, func() {} }),
-      tools: toolsCommand(tools, io), skill: skillCommand(config, tools, io), auth: authRoutes(config, server, io) },
-    docs: { brief: config.description ?? config.name, fullDescription: `${config.description ?? config.name}\n\n${notice}\n--server <url> and --token <token> work on every command.` },
+      tools: toolsCommand(tools, io), skill: skillCommand(config, tools, call, io, server ? refresh : undefined), auth: authRoutes(config, server, io) },
+    docs: { brief: config.description ?? config.name, fullDescription: `${config.description ?? config.name}\n\n${notice}\n--server <url>, --token <token> and --refresh-tools (bypass discovery cache) work on every command.` },
   });
 }
 
 /** Flags the CLI puts on tool commands itself. */
-const OWN_FLAGS = ["json", "fields", "dry-run", "yes"];
+const OWN_FLAGS = ["json", "fields", "dry-run", "yes", "refresh-tools"];
 
 /** A tool as a Stricli command: its input as flags (and the CLI file's positional arguments). */
-function toolCommand(config: CliConfig, c: Command, client: Client | undefined, io: CliIO): StricliCommand<CliContext> {
+function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) => Promise<void>, call: ToolCall, io: CliIO): StricliCommand<CliContext> {
   const tool = c.tool!;
   const settings = c.config && !isCustom(c.config) ? c.config : undefined;
   const args = settings?.args ?? [];
@@ -316,13 +545,13 @@ function toolCommand(config: CliConfig, c: Command, client: Client | undefined, 
       });
       for (const [key, field] of byFlag) if (parsed[key] !== undefined) input[field] = parsed[key];
       if (writes && parsed["dry-run"]) return void io.write(`${JSON.stringify({ dryRun: true, tool: tool.name, arguments: input }, null, parsed.json ? undefined : 2)}\n`);
+      await prepare(tool);
       if (destructive && !parsed.yes) {
         if (!io.interactive) throw new CliExit(EXIT.approval, `${usage} may delete or overwrite: run it again with --yes.`);
         if (!(await io.confirm(`${usage} may delete or overwrite. Go ahead?`))) throw new CliExit(EXIT.approval, "Stopped; nothing was sent.");
       }
-      if (!client) throw new CliExit(EXIT.unreachable, noServer(config));
-      const result = await client.callTool({ name: tool.name, arguments: input, _meta: callMeta(config, c.words.join(" ")) }).catch((error: unknown) => {
-        throw needsSignIn(error) ? explain(config, "", error) : error;
+      const result = await call(tool.name, input, c.words.join(" ")).catch((error: unknown) => {
+        throw needsSignIn(error) ? explain(config, "", error) : (badArguments(config, c.words, error, (field) => (args.includes(field) ? `<${field}>` : `--${flagName(field)}`)) ?? error);
       });
       if (result.isError) throw new CliExit(EXIT.failed, textOf(result.content as Block[]) || `${tool.name} failed.`);
       io.write(`${render(valueOf(result), { json: Boolean(parsed.json), fields: parsed.fields as string[] | undefined, columns: settings?.columns, view: settings?.view })}\n`);
@@ -386,19 +615,85 @@ function toolsCommand(tools: ToolInfo[], io: CliIO): StricliCommand<CliContext> 
   });
 }
 
-function skillCommand(config: CliConfig, tools: ToolInfo[], io: CliIO): StricliCommand<CliContext> {
-  return buildCommand<{ write?: string }, [], CliContext>({
-    docs: { brief: "This CLI's SKILL.md for coding agents", fullDescription: "Every command, flag, JSON shape and exit code, for Claude Code, Codex or Cursor. --write puts it in <dir>/<name>-cli/SKILL.md." },
-    parameters: { flags: { write: { kind: "parsed", parse: String, brief: "Write it into this skills folder", placeholder: "dir", optional: true } } },
-    async func(flags) {
-      const text = skillFile(config, tools);
-      if (!flags.write) return void io.write(text);
-      const { mkdirSync, writeFileSync } = await import("node:fs");
-      const { join } = await import("node:path");
-      const folder = join(flags.write, `${config.name}-cli`);
-      mkdirSync(folder, { recursive: true });
-      writeFileSync(join(folder, "SKILL.md"), text);
-      io.writeError(`Wrote ${join(folder, "SKILL.md")}\n`);
+interface CliSkill {
+  name: string;
+  description: string;
+  reader?: string;
+}
+
+/** Handwritten workflows and the generated CLI guide share discovery, not their full bodies. */
+function skillCatalog(config: CliConfig, tools: ToolInfo[]): CliSkill[] {
+  const reader = tools.find(t => Array.isArray(t._meta?.[SKILLS_META])) ?? tools.find(t => t.name === "read_skill");
+  const entries = new Map<string, CliSkill>();
+  if (reader) {
+    const given = reader._meta?.[SKILLS_META];
+    const summaries = Array.isArray(given) ? given : (reader.inputSchema.properties?.name?.enum ?? []).map(name => ({ name, description: "" }));
+    for (const item of summaries) {
+      if (!item || typeof item.name !== "string" || !item.name || entries.has(item.name)) continue;
+      entries.set(item.name, { name: item.name, description: typeof item.description === "string" ? item.description : "", reader: reader.name });
+    }
+  }
+  const name = `${config.name}-cli`;
+  // An authored skill may replace the generated entry, just as authored commands replace defaults.
+  if (!entries.has(name)) entries.set(name, { name, description: `How to use the ${config.name} command line` });
+  return [...entries.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function skillCommand(config: CliConfig, tools: ToolInfo[], call: ToolCall, io: CliIO, refresh?: () => Promise<ToolInfo[]>): StricliCommand<CliContext> {
+  const usage = `${config.name} skill list | ${config.name} skill get <name> [name...] [--json] [--write <dir>]`;
+  return buildCommand<{ write?: string; json?: boolean }, string[], CliContext>({
+    docs: { brief: "List skills or read selected skills", fullDescription: `${usage}\n\nWith no arguments, list names and descriptions. The generated CLI guide is ${config.name}-cli. --write with no action keeps exporting that guide.` },
+    parameters: {
+      flags: {
+        json: { kind: "boolean", brief: "Print named skill records as JSON", optional: true, withNegated: false },
+        write: { kind: "parsed", parse: String, brief: "Write selected skills into this skills folder", placeholder: "dir", optional: true },
+      },
+      positional: { kind: "array", parameter: { brief: "list, or get followed by one or more skill names", placeholder: "action/name", parse: String } },
+    },
+    async func(flags, ...words) {
+      const legacy = words.length === 0 && flags.write !== undefined;
+      const action = words.shift() ?? "list";
+      const names = legacy ? [`${config.name}-cli`] : [...new Set(words)];
+      if ((action !== "list" && action !== "get") || (!legacy && action === "list" && (names.length > 0 || flags.write !== undefined)) || (action === "get" && names.length === 0)) {
+        throw new CliExit(EXIT.usage, `Usage: ${usage}`);
+      }
+      let current = tools;
+      let catalog = skillCatalog(config, current);
+      if (!legacy && action === "list") {
+        const summaries = catalog.map(({ name, description }) => ({ name, description }));
+        if (flags.json) return void io.write(`${JSON.stringify(summaries)}\n`);
+        const width = Math.max(...summaries.map(s => s.name.length));
+        return void io.write(`${summaries.map(s => `${s.name.padEnd(width)}  ${s.description}`.trimEnd()).join("\n")}\n`);
+      }
+      if (!legacy && names.some(name => !catalog.some(s => s.name === name)) && refresh) {
+        current = await refresh();
+        catalog = skillCatalog(config, current);
+      }
+      const missing = names.filter(name => !catalog.some(s => s.name === name));
+      if (!legacy && missing.length) throw new CliExit(EXIT.usage, `No skill named ${missing.join(", ")}. Run \`${config.name} skill list\` to see available skills.`);
+      const selected = legacy ? [{ name: `${config.name}-cli`, description: `How to use the ${config.name} command line` }] : names.map(name => catalog.find(s => s.name === name)!);
+      if (flags.write) {
+        for (const { name } of selected) {
+          if (name !== basename(name) || name === "." || name === ".." || /[\\:]/.test(name)) throw new CliExit(EXIT.usage, `Cannot write skill ${JSON.stringify(name)}: its name must be a single folder name.`);
+        }
+      }
+      const records = await Promise.all(selected.map(async skill => {
+        if (!skill.reader) return { name: skill.name, description: skill.description, content: skillFile(config, current) };
+        const result = await call(skill.reader, { name: skill.name }, `skill get ${names.join(" ")}`);
+        if (result.isError) throw new CliExit(EXIT.failed, textOf(result.content as Block[]) || `Could not read skill ${skill.name}.`);
+        const body = textOf(result.content as Block[]);
+        return { name: skill.name, description: skill.description, content: `---\nname: ${skill.name}\ndescription: ${skill.description}\n---\n\n${body}\n` };
+      }));
+      if (flags.write) {
+        for (const { name, content } of records) {
+          const folder = join(flags.write, name);
+          mkdirSync(folder, { recursive: true });
+          writeFileSync(join(folder, "SKILL.md"), content);
+          io.writeError(`Wrote ${join(folder, "SKILL.md")}\n`);
+        }
+      }
+      if (flags.json) io.write(`${JSON.stringify(records)}\n`);
+      else if (!flags.write) io.write(records.length === 1 ? records[0]!.content : records.map(s => `# Skill: ${s.name}\n\n${s.content}`).join("\n"));
     },
   });
 }

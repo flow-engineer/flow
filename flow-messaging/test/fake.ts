@@ -1,7 +1,7 @@
-// A fake Flow Messaging for the tests: answers the calls the channels make as the spec shapes them
-// (files by their bytes),
-// records every request, and signs events the way Flow does before posting them to a webhook. Its
-// /v1/stream is a minimal WebSocket server (text and close frames) the tests drive frame by frame.
+// A fake Flow Messaging for the tests: answers the calls the channels make as the V0 spec shapes them
+// (one endpoint per message kind, files by their bytes), records every request, and signs events the
+// way Flow does before posting them to a webhook. Its /v0/stream is a minimal WebSocket server (text
+// and close frames) the tests drive frame by frame.
 
 import { createHash, createHmac } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgent, type Database, type FlowEvent } from "../../src/index.ts";
 import { scriptedModel } from "./helpers.ts";
-import { flowMessaging } from "../src/index.ts";
+import { flowMessaging, type FlowMessagingOptions } from "../src/index.ts";
 
 export const SECRET = "whsec_test";
 export const SENDERS = { whatsapp: "snd_WA", telegram: "snd_TG", sms: "snd_SMS" };
@@ -40,14 +40,18 @@ export async function fakeFlow() {
 
   function defaults(r: Recorded): { status: number; body: unknown } {
     const id = r.path.split("/")[3]?.split("?")[0];
-    if (r.method === "GET" && r.path.startsWith("/v1/contacts/")) return contacts[id] ? { status: 200, body: contacts[id] } : notFound();
-    if (r.method === "GET" && r.path.startsWith("/v1/messages/")) return messages[id] ? { status: 200, body: messages[id] } : notFound();
-    if (r.method === "GET" && r.path.startsWith("/v1/templates")) return { status: 200, body: { data: templates, has_more: false } };
-    const into = r.path.match(/^\/v1\/conversations\/([^/]+)\/messages$/)?.[1];
-    if (r.method === "POST" && (into || r.path === "/v1/messages")) {
-      return { status: 202, body: { id: `msg_out${++sent}`, conversation: into ?? "conv_started", direction: "out", status: "queued", content: r.body.content } };
+    if (r.method === "GET" && r.path.startsWith("/v0/contacts/")) return contacts[id] ? { status: 200, body: contacts[id] } : notFound();
+    if (r.method === "GET" && r.path.startsWith("/v0/messages/")) return messages[id] ? { status: 200, body: messages[id] } : notFound();
+    if (r.method === "GET" && r.path.startsWith("/v0/templates")) return { status: 200, body: { data: templates, has_more: false } };
+    const action = r.path.match(/^\/v0\/conversations\/([^/]+)\/(typing|read)$/);
+    if (r.method === "POST" && action) return { status: 202, body: { conversation: action[1], action: action[2] } };
+    const into = r.path.match(/^\/v0\/conversations\/([^/]+)\/(basic|voice|buttons|list|carousel|template|contact-card|location|effect|reaction)$/);
+    if (r.method === "POST" && (into || r.path === "/v0/messages")) {
+      // The channel took it by the time Flow answered; a test of the wait for message.sent queues a "queued" answer.
+      const { sender: _sender, to: _to, consent: _consent, ...content } = r.body ?? {};
+      const kind = into ? into[2]!.replace("-", "_") : content.kind;
+      return { status: 202, body: { id: `msg_out${++sent}`, conversation: into?.[1] ?? "conv_started", direction: "out", status: "sent", content: { ...content, kind } } };
     }
-    if (r.method === "POST" && /\/(typing|read)$/.test(r.path)) return { status: 202, body: { conversation: r.path.split("/")[3], action: "read" } };
     return notFound();
   }
   const notFound = () => ({ status: 404, body: { error: { type: "not_found", message: "No such object.", hint: "", doc_url: "" } } });
@@ -57,7 +61,7 @@ export async function fakeFlow() {
     for await (const chunk of req) raw += chunk;
     const r: Recorded = { method: req.method!, path: req.url!, headers: req.headers, body: raw ? JSON.parse(raw) : undefined };
     requests.push(r);
-    const file = r.method === "GET" && r.path.match(/^\/v1\/files\/([^/]+)$/)?.[1];
+    const file = r.method === "GET" && r.path.match(/^\/v0\/files\/([^/]+)$/)?.[1];
     if (file && files[file]) return void res.writeHead(200, { "content-type": "application/octet-stream" }).end(files[file]);
     const i = queued.findIndex((q) => q.match(r));
     const answer = i >= 0 ? queued.splice(i, 1)[0] : defaults(r);
@@ -109,11 +113,13 @@ export async function fakeFlow() {
     }
   }
   const sends = (path: string) => requests.filter((r) => r.method === "POST" && r.path === path);
+  /** Every send into a conversation (any kind's endpoint), in order. */
+  const into = (conversation: string) => requests.filter((r) => r.method === "POST" && r.path.startsWith(`/v0/conversations/${conversation}/`) && !/\/(typing|read)$/.test(r.path));
 
-  return { url, requests, queued, contacts, messages, templates, files, request, sends, streams, stream, close: () => server.close() };
+  return { url, requests, queued, contacts, messages, templates, files, request, sends, into, streams, stream, close: () => server.close() };
 }
 
-/** One client on the fake /v1/stream. */
+/** One client on the fake /v0/stream. */
 export interface FakeStream {
   url: URL;
   protocols: string[];
@@ -135,12 +141,12 @@ function gateOf() {
 }
 
 /** An agent on the three Flow channels, with its webhook served, driven by a scripted model. */
-export async function liveAgent(flow: { url: string }, options: { database?: Database } = {}) {
+export async function liveAgent(flow: { url: string }, options: { database?: Database; messaging?: Pick<FlowMessagingOptions, "waitFor" | "waitTimeoutMs"> } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "flow-fm-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const events: FlowEvent[] = [];
-  const fm = flowMessaging({ apiKey: "fk_test_key", webhookSecret: SECRET, baseUrl: flow.url });
+  const fm = flowMessaging({ apiKey: "fk_test_key", webhookSecret: SECRET, baseUrl: flow.url, ...options.messaging });
   const agent = createAgent({
     dir,
     model: scripted.model,

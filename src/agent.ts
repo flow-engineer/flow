@@ -15,13 +15,15 @@
 
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
+import { ATTACH_EVENTS, type FlowEvents } from "./business-events/engine.ts";
 import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
-import { Conversation, PROFILE_TOOL, profileTool, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
+import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
+import { indexDeclared, recordsOf, type RecordCollection, type Records } from "./records.ts";
 import { businessSchedule, claimDue, summary } from "./schedules.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
-import { Store, type ConversationRow, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
+import { Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
 import { clock, quietUntil, validZone } from "./time.ts";
 import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } from "./tools.ts";
 import { traces, tracesFromEnv, type Traces, type TracesOptions } from "./traces.ts";
@@ -113,9 +115,9 @@ export interface AgentOptions {
   maxSteps?: number;
   /**
    * How much of a long conversation each model call carries. The latest messages are kept, older
-   * ones are left out (the agent is told so). `maxTokens` is the whole call's budget, roughly: default 60% of the model's
-   * `contextTokens` when it gives one, else 50,000. A tool result is cut to `toolResultChars`
-   * characters (default 12,000).
+   * ones are left out (the agent is told so). `maxTokens` is the whole call's budget, roughly: default
+   * 24,000, or 60% of the model's `contextTokens` when that is less. A tool result is cut to
+   * `toolResultChars` characters (default 12,000). `agent.resetHistory` starts it again from a point.
    */
   history?: { maxTokens?: number; toolResultChars?: number };
   events?: EventSink[];
@@ -129,6 +131,18 @@ export interface AgentOptions {
    * the store's to know.
    */
   store?: StoreApi;
+  /**
+   * The agent's own records, by collection: small JSON documents it keeps across days and people
+   * (a question waiting for a seller's answer), in the same store as its conversations, so they
+   * survive restarts and deploys. `people` names the top-level fields that hold a person (their
+   * `context.person`): forgetting that person deletes the record. `people` and `fields` are what
+   * `query` may match on, by equality. Tools reach them as `context.records`, other code as
+   * `agent.records`. Keep them small (64 KB a record, 10,000 an agent): if anything other than the
+   * agent reads the data, it belongs in your own database.
+   *
+   *   records: { questions: { people: ["buyer", "seller"], fields: ["listing", "status"] } }
+   */
+  records?: Record<string, RecordCollection>;
   /** The channels people reach the agent on: whatsapp(...), sms(...), customUI(...), each with its own name. */
   channels?: Channel[];
   /**
@@ -160,7 +174,8 @@ export interface AgentOptions {
    * recorded, so the events, the history, the transcript and the test cloud's judge see what went. A
    * refused send of the agent's goes back to it, with your reason, to fix; a scheduled message or
    * nudge it refuses is settled refused. Use it rather than wrapping a channel's send, which the
-   * playground and the test cloud never call.
+   * playground and the test cloud never call. `guards(...)` composes ready-made checks (oncePerChat,
+   * noRepeats, linkAllowlist, noWriteButtons) with your own.
    */
   beforeSend?: BeforeSend;
   /**
@@ -258,7 +273,10 @@ export interface ReceiveOptions {
 }
 
 export interface NudgeInput {
-  /** The person, by a channel identity they have written from. */
+  /**
+   * The person, by a channel identity they have written from (on a phone channel, their number in
+   * any format). A template also goes to a number that never wrote, which makes them a person.
+   */
   to: { channel: string; address: string };
   /** Sent as written, with no model call. */
   text?: string;
@@ -266,7 +284,7 @@ export interface NudgeInput {
   link?: { label: string; url: string };
   /** The agent gets a turn with this note and writes the message itself, or sends nothing. */
   prompt?: string;
-  /** A template the owner already set up with the channel, sent as is (also outside WhatsApp's window). */
+  /** A template the owner already set up with the channel, sent as is (also outside WhatsApp's window, and to someone who never wrote). */
   template?: Template;
   /** Send it later, at this time (ms since the epoch), as a scheduled message. */
   at?: number;
@@ -349,6 +367,9 @@ export class Agent {
   private readonly options: AgentOptions;
   private readonly settings: ConversationSettings;
   private readonly store: StoreApi;
+  /** The agent's own records (`createAgent({ records })`), for code outside a turn: routes, beforeSend, intercept. Tools have them as `context.records`. */
+  readonly records: Records;
+  private eventsSide: FlowEvents | undefined;
   /** This process among the agent's runners (`runner`). */
   readonly runner: string;
   private readonly startedAt = Date.now();
@@ -404,6 +425,7 @@ export class Agent {
     if (skills.length && !options.inlineSkills) tools.push(skillTool(skills, (id, name) => emit(id, "skill.loaded", { skill: name })));
     if (options.store && (options.database || options.id)) throw new Error("flow: give an agent a store or a database (and id), not both");
     this.store = options.store ?? new Store(options.database ?? sqlite(), options.id ?? "default");
+    this.records = recordsOf(this.store, options.records, () => this.settings.ready);
     this.settings = {
       model: options.model,
       transcribe: options.transcribe,
@@ -419,7 +441,7 @@ export class Agent {
       partialAfterMs: options.partialAfterMs ?? 5_000,
       debounceMs: options.debounceMs ?? 300,
       maxSteps: options.maxSteps ?? 8,
-      historyTokens: options.history?.maxTokens ?? (options.model.contextTokens ? Math.floor(options.model.contextTokens * 0.6) : 50_000),
+      historyTokens: options.history?.maxTokens ?? defaultHistoryTokens(options.model.contextTokens),
       toolResultChars: options.history?.toolResultChars ?? 12_000,
       maxRestarts: Number.POSITIVE_INFINITY,
       talk: {
@@ -430,7 +452,10 @@ export class Agent {
       runner: this.runner,
       away: (conversation, again) => this.away(conversation, again),
       store: this.store,
-      ready: this.store.migrate(),
+      records: this.records,
+      events: () => this.eventsSide,
+      // The records kept under an earlier declaration are indexed under this one before anything runs.
+      ready: this.store.migrate().then(() => indexDeclared(this.store, options.records)),
       now: this.now,
       timeZone: options.timeZone,
       quietHours: options.quietHours,
@@ -655,8 +680,9 @@ export class Agent {
 
   /**
    * Forgets a person: a turn in progress stops, and everything kept about them goes (history,
-   * inbox, background tools, schedules and their runs, nudges, no-contact rules, identities and
-   * the conversation). Their next message starts from nothing.
+   * inbox, background tools, schedules and their runs, nudges, no-contact rules, identities, the
+   * conversation, and the records naming them in a person field). Their next message starts from
+   * nothing. For someone with no conversation who is named in records: `agent.records.forgetPerson`.
    */
   async forgetPerson(conversationId: string): Promise<void> {
     await this.settings.ready;
@@ -666,8 +692,17 @@ export class Agent {
       this.conversations.delete(conversationId);
       await resident.stored();
     }
-    for (const i of await this.store.identities(conversationId)) this.via.delete(viaKey(i.channel, i.address));
+    const identities = await this.store.identities(conversationId);
+    for (const i of identities) this.via.delete(viaKey(i.channel, i.address));
     this.rows.delete(conversationId);
+    // Records may name them by their number (phone:<E.164>, or bare) whatever their person key is:
+    // the store cannot tell which channels' addresses are numbers, so those are deleted here, first.
+    const numbers = identities.flatMap((i) => {
+      const adapter = this.channelsByName.get(i.channel);
+      const phone = adapter?.phone ? normalizePhone(i.address, adapter.kind === "whatsapp" ? undefined : this.countryCode) : "";
+      return phone ? [`phone:${phone}`, phone] : [];
+    });
+    if (numbers.length) await this.store.forgetRecords(numbers);
     await this.store.forgetPerson(conversationId);
   }
 
@@ -774,6 +809,50 @@ export class Agent {
     const id = row.id;
     await this.store.addIdentity(id, channel, address, verifiedBy);
     return { channel, address, conversationId: id, verifiedBy, lastMessageAt: null, via: "provider" };
+  }
+
+  /**
+   * Who a nudge goes to: the identity they wrote from. On a phone channel the number is read as
+   * their messages' are, so "+1 555 010 0100" finds the "15550100100" they wrote from, and of the
+   * ways one number is written there the one they last wrote from wins. For a template on a phone
+   * channel that sends them, someone who never wrote is made a person now, as their first message
+   * would make them (by their number in E.164), so their reply lands in the same conversation.
+   * Null: unknown_person.
+   */
+  private async nudgeIdentity(to: { channel: string; address: string }, template: boolean, via?: Via): Promise<IdentityRow | null> {
+    const known = await this.store.identity(to.channel, to.address);
+    const adapter = this.channelsByName.get(to.channel);
+    if (!adapter?.phone) return known;
+    const whatsapp = adapter.kind === "whatsapp";
+    // WhatsApp's numbers are read with no defaultCountryCode, so a business's number counts only
+    // when it is written in full (+ or 00) or as the provider writes it (digits, no leading 0):
+    // "(555) 010-0177" would read as +55 and reach someone else.
+    if (whatsapp && !/^(?:\+|00|[1-9]\d{6,14}$)/.test(to.address.trim())) return known;
+    const read = (address: string) => normalizePhone(address, whatsapp ? undefined : this.countryCode);
+    const phone = read(to.address);
+    if (!phone) return known;
+    const byKey = async () => {
+      const owner = await this.options.resolve?.({ channel: to.channel, address: phone, phone });
+      return (await this.store.conversationByKey(owner ? `key:${owner}` : `phone:${phone}`))?.id;
+    };
+    const conversationId = known?.conversationId ?? (await this.store.identity(to.channel, phone))?.conversationId
+      ?? (whatsapp ? (await this.store.identity(to.channel, phone.slice(1)))?.conversationId : undefined) ?? (await byKey());
+    if (conversationId) {
+      const same = (await this.store.identities(conversationId)).filter((i) => i.channel === to.channel && read(i.address) === phone);
+      // A test person's playground identity and their real phone's share the number: a business's
+      // nudge goes to the provider's, the Person panel's to the playground's, while there is one.
+      const wanted = same.filter((i) => i.via === (via ?? "provider"));
+      const latest = (wanted.length ? wanted : same).sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))[0];
+      if (latest) return latest;
+    }
+    // A new person is made only from a number written in full: bare digits could be a national
+    // number, read as another country's.
+    if (known || !template || adapter.info.templates === false || !PHONE_NUMBER.test(to.address.trim()) || !/^(?:\+|00)/.test(to.address.trim())) return known;
+    const identity = await this.conversationFor(adapter, to.channel, phone);
+    if (via !== "playground") return identity;
+    await this.store.setIdentityVia(to.channel, phone, via);
+    this.via.set(viaKey(to.channel, phone), via);
+    return { ...identity, via };
   }
 
   /**
@@ -902,6 +981,24 @@ export class Agent {
   }
 
   /**
+   * Starts the history the model is sent again from now, for someone by a channel identity they have
+   * written from (a new order, a new case, a day later): later calls carry only what comes after,
+   * with `note`, the app's short summary of what came before, if given. Nothing is deleted: the
+   * transcript, the events and the guards' record of what was sent keep all of it. The person's
+   * messages that are not answered yet stay. It does not start a turn; it is a `history.reset` event
+   * when the next one reads it. Refused (unknown_person) for someone who never wrote.
+   */
+  async resetHistory(input: { to: { channel: string; address: string }; note?: string }): Promise<{ status: "reset" } | { status: "refused"; reason: "unknown_person" }> {
+    await this.settings.ready;
+    const identity = await this.store.identity(input.to.channel, input.to.address);
+    if (!identity) return { status: "refused", reason: "unknown_person" };
+    const resident = this.conversations.get(identity.conversationId);
+    if (resident) await resident.resetHistory(input.note);
+    else await this.store.addInbox(identity.conversationId, "note", { text: resetLine(input.note), wait: true, reset: true });
+    return { status: "reset" };
+  }
+
+  /**
    * Their own quiet hours, as the business knows them: `{ from, to }`, "off" for none, or null to go
    * back to the agent's. Refused (unknown_person) for someone who never wrote.
    */
@@ -920,7 +1017,8 @@ export class Agent {
   /** What the business and the person set for someone, by a channel identity they wrote from; null for someone who never wrote. */
   async contact(to: { channel: string; address: string }): Promise<Contact | null> {
     await this.settings.ready;
-    const identity = await this.store.identity(to.channel, to.address);
+    // Found as a nudge finds them, so `if (!(await agent.contact(to))) return;` guards a nudge to that address.
+    const identity = await this.nudgeIdentity(to, false);
     const row = identity && (await this.store.conversation(identity.conversationId));
     if (!row) return null;
     const rules = await this.store.noContact(row.id, this.now());
@@ -1004,6 +1102,63 @@ export class Agent {
     return { conversationId: identity.conversationId };
   }
 
+  /**
+   * Starts a conversation from an earlier one, as if it had been said: the person's messages and the
+   * agent's, oldest first, written into its history with no model call and nothing sent. The test
+   * cloud's seeded history (a scenario's `history`); `channelName` as receive() takes it. Only a
+   * conversation with no history yet.
+   */
+  async seedHistory(conversationId: string, messages: Array<{ from: "person" | "agent"; text: string }>, options: { channelName?: string } = {}): Promise<void> {
+    this.mustBeResumed();
+    const name = options.channelName ?? "chat";
+    const isNew = !this.conversations.has(conversationId) && !this.rows.has(conversationId);
+    const conversation = this.open(conversationId, `${name}:${conversationId}`);
+    if (isNew) conversation.persist(() => this.store.addIdentity(conversationId, name, conversationId, "channel"));
+    await conversation.seed(messages, name);
+  }
+
+  /**
+   * The agent's own business events side (`flowEvents`), once `events.attach(agent)` ran; undefined
+   * before. For code outside a turn: routes, beforeSend, intercept, context. Tools have it as
+   * `context.events`.
+   */
+  get events(): FlowEvents | undefined {
+    return this.eventsSide;
+  }
+
+  /** flowEvents' attach(): this events side is the agent's own (attached false: it moved to another agent). One per agent, as its state is. */
+  [ATTACH_EVENTS](events: FlowEvents<any>, attached = true): void {
+    if (!attached) {
+      if (this.eventsSide === events) this.eventsSide = undefined;
+      return;
+    }
+    if (this.eventsSide && this.eventsSide !== events) throw new Error("flow: this agent already has an events side (flowEvents); an agent has one, as its state is one per agent");
+    this.eventsSide = events;
+  }
+
+  /**
+   * Where flowEvents (business events) keeps its send state, so a restart does not forget it; its
+   * attach() asks. null when the database does not survive a restart or the store cannot hold it.
+   */
+  eventStateStore(): EventStateStore | null {
+    const store = this.store;
+    if (!store.durable || !store.loadEventState || !store.takeEvents || !store.saveEventState) return null;
+    return {
+      loadEventState: async () => {
+        await this.settings.ready;
+        return store.loadEventState!();
+      },
+      takeEvents: async (...args) => {
+        await this.settings.ready;
+        return store.takeEvents!(...args);
+      },
+      saveEventState: async (...args) => {
+        await this.settings.ready;
+        return store.saveEventState!(...args);
+      },
+    };
+  }
+
   /** A channel the agent was given, by name, as it was given (the test cloud plays a copy of it). */
   channel(name: string): Channel | undefined {
     return this.channelsByName.get(name);
@@ -1024,13 +1179,16 @@ export class Agent {
   /**
    * Records a nudge and resolves at once, without waiting for its send or turn: `queued`, or what
    * was decided as it was recorded (dropped, refused, scheduled). The same idempotency key gets the
-   * first nudge's state now. `nudgeState(id)` reads it later.
+   * first nudge's state now. `nudgeState(id)` reads it later. A template to someone who never wrote
+   * on a phone channel makes them a person, as their first message would; `via: "playground"` (the
+   * simulators' Person panel) makes that person the playground's, so what goes to them shows there.
    */
-  async recordNudge(input: NudgeInput): Promise<NudgeState> {
+  async recordNudge(input: NudgeInput, options: { via?: Via } = {}): Promise<NudgeState> {
     await this.settings.ready;
     const kinds = [input.text, input.prompt, input.template].filter((v) => v !== undefined).length;
     if (kinds !== 1) throw new Error("flow: a nudge has exactly one of text, prompt or template");
     if (input.link && (input.text === undefined || input.at !== undefined)) throw new Error("flow: a nudge's link goes with text, sent now (not with `at`)");
+    if (input.template && input.at !== undefined) throw new Error("flow: a template nudge cannot be scheduled yet");
     // A declared template whose values don't fit it never goes: Meta would refuse it, the playground would show nonsense.
     const declared = input.template && declaredTemplate(this.options.templates, input.template);
     if (declared) fillTemplate(declared, input.template!);
@@ -1038,8 +1196,9 @@ export class Agent {
       const earlier = await this.store.nudgeByKey(input.idempotencyKey);
       if (earlier) return this.result(earlier.id, earlier.status, earlier.reason);
     }
-    const identity = await this.store.identity(input.to.channel, input.to.address);
+    const identity = await this.nudgeIdentity(input.to, input.template !== undefined, options.via);
     if (!identity) return { id: "", status: "refused", reason: "unknown_person" };
+    const to = { channel: input.to.channel, address: identity.address };
     const id = `n_${randomUUID().slice(0, 8)}`;
     const conversationId = identity.conversationId;
     const record = { id, conversationId, channel: input.to.channel, idempotencyKey: input.idempotencyKey ?? null, reason: null };
@@ -1060,13 +1219,12 @@ export class Agent {
       return settledAs({ ...record, body: input.template ? { template: input.template } : { text: input.text, prompt: input.prompt }, status: "dropped", reason });
     }
     if (input.at !== undefined) {
-      if (input.template) throw new Error("flow: a template nudge cannot be scheduled yet");
       const zone = (await this.store.conversation(conversationId))?.timeZone ?? this.options.timeZone ?? "UTC";
       const schedule = businessSchedule(conversationId, input.to.channel, input.at, zone, { text: input.text, prompt: input.prompt }, input.respectQuietHours !== false);
       const added = await add({ ...record, body: { text: input.text, prompt: input.prompt, at: input.at }, status: "scheduled" }, schedule);
       return typeof added === "number" ? { id, status: "scheduled" } : added;
     }
-    const body = { address: input.to.address, ...(input.template ? { template: input.template } : input.text !== undefined ? { text: input.text, ...(input.link ? { link: input.link } : {}) } : { prompt: input.prompt }) };
+    const body = { address: to.address, ...(input.template ? { template: input.template } : input.text !== undefined ? { text: input.text, ...(input.link ? { link: input.link } : {}) } : { prompt: input.prompt }) };
     const now = this.now();
     const quietEnds = input.respectQuietHours === false ? null : await this.quietEnd(conversationId, now);
     if (quietEnds !== null) {
@@ -1080,7 +1238,7 @@ export class Agent {
         // Exact wording: it waits for their reply, and the fallback tells them something is waiting.
         const added = await add({ ...record, body: { ...body, expiresAt: input.expiresAt ?? now + DAY_MS }, status: "held", reason: "window_closed" });
         if (typeof added !== "number") return added;
-        await this.sendFallback(conversationId, input.to, id, body);
+        await this.sendFallback(conversationId, to, id, body);
         return { id, status: "held", reason: "window_closed" };
       }
       // A prompt nudge: the agent may find a template that says it; else the fallback (windowClosed below).
@@ -1129,9 +1287,22 @@ export class Agent {
     const queued = await claimDue(this.store, now, (s) => this.quietEnd(s.conversationId, now), async (s) => {
       const stop = s.origin === "person" ? await this.stopOf(s.conversationId) : await this.blockOf(s.conversationId);
       if (stop) return `no-contact rule ${stop.id}: ${stop.rule}`;
-      const identity = (await this.store.identities(s.conversationId)).find((i) => i.channel === s.channel);
+      // The identity on that channel they last wrote from (a template may have made another for the
+      // same number); for the business's messages, the provider's over a test person's playground one.
+      const onChannel = (await this.store.identities(s.conversationId)).filter((i) => i.channel === s.channel);
+      const provider = s.origin === "person" ? [] : onChannel.filter((i) => i.via === "provider");
+      const identity = (provider.length ? provider : onChannel).sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))[0];
       if (!identity) return `no way to reach them on ${s.channel}`;
-      return windowClosed({ info: this.infoOf(s.channel, s.conversationId), lastMessageAt: identity.lastMessageAt }, now) ? "outside_window" : null;
+      if (!windowClosed({ info: this.infoOf(s.channel, s.conversationId), lastMessageAt: identity.lastMessageAt }, now)) return null;
+      // The business's prompt, due past their window: it goes on as that prompt nudge sent now, so the
+      // agent may send a template that says it, else the fallback goes and it waits for their reply.
+      if (s.origin === "api" && !s.fixedText && this.options.fallbackTemplate) {
+        // Recorded under a key of its own, so a second runner's tick finds the same nudge. A failure
+        // skips this one as before, never the rest of the tick's due messages.
+        const nudge = await this.recordNudge({ to: { channel: s.channel, address: identity.address }, prompt: s.instruction, idempotencyKey: `due:${s.id}:${s.nextRunAt}`, respectQuietHours: false }).catch(() => null);
+        return nudge?.id ? `outside_window: went on as nudge ${nudge.id}, as if sent now` : "outside_window";
+      }
+      return "outside_window";
     });
     // Awaited, so a caller that then waits for the conversation (a test moving the clock) sees the turn.
     await Promise.all(queued.map((q) => this.wake(q.conversationId, q.inbox)));
@@ -1329,7 +1500,14 @@ export function createAgent(options: AgentOptions): Agent {
 }
 
 const DAY_MS = 24 * 60 * 60_000;
+/** A number as a business writes one: 7 to 15 digits, with an optional + or 00 and spaces, dots, dashes or brackets. */
+const PHONE_NUMBER = /^(?:\+|00)?(?:[\s().-]*\d){7,15}[\s().-]*$/;
 export const DEFAULT_QUIET_HOURS: QuietHours = { from: "22:00", to: "07:00" };
+
+/** The history budget when the agent gives none: 24,000 tokens, or 60% of the model's window when that is less. */
+export function defaultHistoryTokens(contextTokens?: number): number {
+  return contextTokens ? Math.min(24_000, Math.floor(contextTokens * 0.6)) : 24_000;
+}
 
 function validQuietHours(q: unknown): q is QuietHours {
   const v = q as QuietHours;

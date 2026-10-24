@@ -11,16 +11,29 @@
 // copy (`sentBy`: the business sent it itself) is never sent: it is the agent's context and counts
 // as already told. Sends go through the agent's nudge(), so STOP and the no-contact rules apply.
 //
+// The state (event ids taken, held sends, caps, watches, what was told) is kept in the attached
+// agent's database when it survives a restart: loaded on attach (the route waits for it), saved after
+// each change in the same order as the work. An event is recorded before the route answers 202 and
+// marked done with the save that holds what it changed, so one taken but not processed when the
+// agent stopped is processed after the restart (its sends keep their idempotency keys). Only what a
+// rule still reads is saved (told and optional sends a day, nudges a week, copies their days); event
+// ids are kept 30 days. One events side per agent, on one runner at a time, as the state is held in
+// memory between saves. Attached, it is that agent's own: its tools reach it as `context.events`,
+// other code as `agent.events`, so a tool never needs a module variable to find its agent's state.
+//
 // What an app's events mean (its catalog, its templates and wording, its own rules) stays in the
 // app: `catalog` names every type it accepts, `rules` and `onEvent` decide the rest.
 
 import type { NudgeInput, NudgeResult } from "../agent.ts";
+import type { EventStateStore } from "../store.ts";
 import type { Template } from "../types.ts";
 import { createPhrasing, type Phrasing } from "./phrasing.ts";
 import { quietHoursEnd, type EventQuietHours } from "./quiet.ts";
 import { verifyEventSignature } from "./signature.ts";
 
 const DAY = 24 * 3_600_000;
+/** How long a taken event id is kept, so the same id again is not processed twice. */
+const SEEN_MS = 30 * DAY;
 
 export type DeliveryLevel = "critical" | "standard" | "optional";
 export const DELIVERY_LEVELS: readonly DeliveryLevel[] = ["critical", "standard", "optional"];
@@ -169,10 +182,18 @@ export function createEventState<W extends Watch = Watch>() {
 
 export type EventState<W extends Watch = Watch> = ReturnType<typeof createEventState<W>>;
 
+/**
+ * How attach() tells an Agent that this events side is its own (`context.events`, `agent.events`).
+ * Symbol.for, so an agent and an engine from two copies of the package still find each other.
+ */
+export const ATTACH_EVENTS: unique symbol = Symbol.for("flow.attachEvents");
+
 /** What sends: the agent (its nudge, and reach for copies). */
 export interface EventSender {
   nudge(input: NudgeInput): Promise<NudgeResult>;
   reach?(to: { channel: string; address: string }): Promise<{ conversationId: string }>;
+  /** Where the state is kept across restarts (the agent's database); null: in memory only. */
+  eventStateStore?(): EventStateStore | null;
 }
 
 export interface FlowEventsOptions<W extends Watch = Watch> {
@@ -193,7 +214,14 @@ export interface FlowEventsOptions<W extends Watch = Watch> {
   caps?: { perDay: number; perKeyPerDay: number; perWeek: number };
   /** How long a watch lasts. Default 30. */
   watchDays?: number;
+  /** Your own state object, to share it. Then you keep it across restarts, unless `persist` is true. */
   state?: EventState<W>;
+  /**
+   * Keep the state in the attached agent's database, so a restart neither processes an event id
+   * again, nor forgets held sends, caps or what was told. Only when that database survives a restart
+   * (an in-memory one: as before). Default true, false when you pass your own `state`.
+   */
+  persist?: boolean;
   /** Who may post copies (`sentBy`); none: sentBy is refused. */
   sentBy?: string | string[];
   /** The business's name in log reasons ("Acme"). Default the first sentBy, else "the business". */
@@ -307,6 +335,126 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     chain = chain.then(work).catch((error) => console.error(`${logName}:`, error));
     return chain;
   };
+
+  // Kept across restarts: the store, set on attach once its state loaded; what was saved last.
+  const persist = options.persist ?? options.state === undefined;
+  let store: EventStateStore | null = null;
+  let loaded: Promise<unknown> = Promise.resolve();
+  let lastSaved: string | null = null;
+  let saveQueued = false;
+  let lastTaken = 0;
+  /** Events processed since the last save: marked done with the snapshot that holds what they changed. */
+  const done: string[] = [];
+  /** Taken before the load, and found among the saved ones: taken before the restart, processed from there. */
+  const takenBefore = new Set<string>();
+
+  async function load(kept: EventStateStore) {
+    let saved: Awaited<ReturnType<EventStateStore["loadEventState"]>>;
+    try {
+      saved = await kept.loadEventState();
+    } catch (error) {
+      // Saving over a state that could not be read would lose it: this run stays in memory.
+      console.error(`${logName}: the saved state could not be loaded; kept in memory only:`, error);
+      return;
+    }
+    for (const id of saved.seen) {
+      if (state.seen.has(id)) takenBefore.add(id);
+      state.seen.add(id);
+    }
+    if (saved.state) restore(JSON.parse(saved.state));
+    lastSaved = saved.state;
+    store = kept;
+    // Taken before the restart and not processed then: processed now, in the order they came.
+    for (const body of saved.pending) {
+      const e = JSON.parse(body) as BusinessEvent;
+      later(() => processed(e));
+    }
+  }
+
+  /** Processes a taken event; with a store it is marked done in the next save, with what it changed. */
+  async function processed(e: BusinessEvent) {
+    await process(e);
+    if (!store) return;
+    done.push(e.id);
+    changed();
+  }
+
+  /**
+   * Records an event (false: a duplicate id, already taken) and processes it in order, in the
+   * background. `written` settles once it is in the agent's database (at once without one); `key`
+   * is the request's idempotency key, recorded with it. `strict`: not recorded, it is not processed
+   * either (the route answers 503 and forgets it, so the business's retry is taken).
+   */
+  function take(e: BusinessEvent, key?: string, strict = false): { fresh: boolean; written: Promise<void> } {
+    if (state.seen.has(e.id)) return { fresh: false, written: Promise.resolve() };
+    state.seen.add(e.id);
+    if (key) state.seen.add(`key:${key}`);
+    // After the load: an id the saved state already had was taken before the restart.
+    const written = loaded.then(async () => {
+      if (!store || takenBefore.has(e.id)) return;
+      lastTaken = Math.max(now(), lastTaken + 1); // a strict order, for the restart
+      await store.takeEvents([{ id: e.id, body: JSON.stringify(e) }, ...(key ? [{ id: `key:${key}`, body: null }] : [])], lastTaken);
+    });
+    later(async () => {
+      const recorded = await written.then(() => true, () => false);
+      if (strict && !recorded) return;
+      if (takenBefore.delete(e.id)) return;
+      await processed(e);
+    });
+    return { fresh: true, written };
+  }
+
+  /** What a rule still reads, as JSON: told and optional sends a day, nudges a week, copies their days. */
+  function snapshot(t: number): string {
+    const within = (ms: number) => ([, at]: [string, number]) => t - at < ms;
+    return JSON.stringify({
+      v: 1,
+      cancelled: [...state.cancelled],
+      outbox: state.outbox,
+      watches: state.watches,
+      closed: [...state.closed],
+      muted: [...state.muted],
+      nudges: state.nudges.filter((n) => t - n.at < 7 * DAY),
+      optionalLast: [...state.optionalLast].filter(within(DAY)),
+      lastNudged: [...state.lastNudged],
+      copies: [...state.copies].map(([a, list]) => [a, list.filter((c) => t - c.at < copyMs)] as const).filter(([, list]) => list.length),
+      told: [...state.told].filter(within(DAY)),
+      addresses: [...state.addresses],
+    });
+  }
+
+  /** Adds a saved snapshot to the state, in place (a shared state keeps its objects); what is in memory wins. */
+  function restore(saved: any) {
+    for (const id of saved.cancelled ?? []) state.cancelled.add(id);
+    state.outbox.splice(0, 0, ...(saved.outbox ?? []));
+    state.watches.splice(0, 0, ...(saved.watches ?? []));
+    for (const topic of saved.closed ?? []) state.closed.add(topic);
+    for (const key of saved.muted ?? []) state.muted.add(key);
+    state.nudges.splice(0, 0, ...(saved.nudges ?? []));
+    for (const [name, map] of [["optionalLast", state.optionalLast], ["lastNudged", state.lastNudged], ["copies", state.copies], ["told", state.told], ["addresses", state.addresses]] as const) {
+      for (const [k, v] of saved[name] ?? []) if (!(map as Map<string, unknown>).has(k)) (map as Map<string, unknown>).set(k, v);
+    }
+  }
+
+  /** The state changed: saved once the work queued before it is done. */
+  function changed() {
+    if (!store || saveQueued) return;
+    saveQueued = true;
+    later(async () => {
+      saveQueued = false;
+      const t = now();
+      const snap = snapshot(t);
+      const finished = done.splice(0);
+      if (snap === lastSaved && !finished.length) return;
+      try {
+        await store!.saveEventState(snap === lastSaved ? null : snap, finished, t, t - SEEN_MS);
+        lastSaved = snap;
+      } catch (error) {
+        done.push(...finished);
+        throw error;
+      }
+    });
+  }
   const to = (address: string) => ({ channel, address });
   const fieldOf = (e: BusinessEvent, name: "expiresAt" | "collapseKey") => (typeof e[name] === "string" ? e[name] : typeof e.data?.[name] === "string" ? (e.data[name] as string) : undefined);
 
@@ -581,19 +729,28 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     }
     const problem = invalid(body);
     if (problem) return json(400, problem);
-    const key = req.headers.get("idempotency-key");
-    if (key && key !== (body as BusinessEvent).id && state.seen.has(`key:${key}`)) return json(202, { status: "duplicate" });
-    const fresh = accept(body as BusinessEvent);
-    if (key && key !== (body as BusinessEvent).id) state.seen.add(`key:${key}`);
+    await loaded;
+    const header = req.headers.get("idempotency-key");
+    const key = header && header !== (body as BusinessEvent).id ? header : undefined;
+    if (key && state.seen.has(`key:${key}`)) return json(202, { status: "duplicate" });
+    const { fresh, written } = take(body as BusinessEvent, key, true);
+    try {
+      await written;
+    } catch (error) {
+      // Not recorded: forgotten, so the business's retry is taken (with a database that works again).
+      state.seen.delete((body as BusinessEvent).id);
+      if (key) state.seen.delete(`key:${key}`);
+      console.error(`${logName}: the event could not be recorded:`, error);
+      return json(503, { error: "the event could not be recorded; try again" });
+    }
     return json(202, { status: fresh ? "accepted" : "duplicate" });
   }
 
   /** Records an event (false: a duplicate id, already taken) and processes it in order, in the background. */
   function accept(e: BusinessEvent): boolean {
-    if (state.seen.has(e.id)) return false;
-    state.seen.add(e.id);
-    later(() => process(e));
-    return true;
+    const { fresh, written } = take(e);
+    written.catch((error) => console.error(`${logName}: the event could not be recorded; processed in memory only:`, error));
+    return fresh;
   }
 
   /** Held sends that came due, one by one, then the app's onTick. */
@@ -604,6 +761,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
       drop((p) => p.notBefore <= t);
       for (const p of due) await go(p);
       await options.onTick?.(t, api);
+      changed();
     });
   }
 
@@ -615,14 +773,32 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     routes: { "/v1/events": handler } as Record<string, (request: Request) => Promise<Response>>,
     /** For createAgent's `onTick`. */
     onTick: async () => void (await tick()),
+    /**
+     * The agent that sends; with `persist`, its database keeps the state (loaded now, before any event
+     * is handled). An Agent then has this events side as its own: `context.events` in its tools,
+     * `agent.events` elsewhere. An agent has one: attaching another to it throws. Attached to another
+     * agent, it is no longer the earlier one's (its `agent.events` is then undefined): make one per agent.
+     */
     attach(s: EventSender) {
+      type Owner = { [ATTACH_EVENTS]?: (events: FlowEvents<any>, attached?: boolean) => void };
+      // First, so an agent that refuses it (it has another) leaves this side as it was.
+      (s as Owner)[ATTACH_EVENTS]?.(api);
+      if (sender && sender !== s) (sender as Owner)[ATTACH_EVENTS]?.(api, false);
+      const first = sender === null;
       sender = s;
+      const kept = first && persist ? (s.eventStateStore?.() ?? null) : null;
+      if (kept) loaded = later(() => load(kept));
     },
     invalid,
     accept,
     tick,
-    /** Resolves once everything accepted so far is processed. */
-    idle: () => chain.then(() => undefined),
+    /** Resolves once everything accepted so far is processed (also work queued meanwhile, as a restart's events). */
+    async idle() {
+      for (let c = chain; ; c = chain) {
+        await c;
+        if (c === chain) return;
+      }
+    },
     report: (fields: Record<string, unknown>) => report(fields),
     schedule,
     drop,
@@ -645,6 +821,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     watch(w: Omit<W, "id" | "createdAt"> & { createdAt?: number }, same?: (existing: W) => boolean): { outcome: "saved" | "already watching"; watch: W } {
       const watch = { ...w, id: `w_${state.watches.length + 1}`, createdAt: w.createdAt ?? now() } as W;
       const found = state.watches.find((x) => x.address === watch.address && (same ? same(x) : x.topic !== undefined && x.topic === watch.topic));
+      changed();
       if (!found) {
         state.watches.push(watch);
         return { outcome: "saved", watch };
@@ -662,11 +839,13 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
       state.closed.add(topic);
       const dropped = drop((p) => p.topic === topic && !p.sticky && (p.liveOnly === true || (p.delivery !== "critical" && p.raised === undefined)));
       for (const w of state.watches) if (w.topic === topic && w.endedAt === undefined) w.endedAt = now();
+      changed();
       return dropped;
     },
     /** No more nudges to this person about this topic. */
     mute(address: string, topic: string) {
       state.muted.add(`${address} ${topic}`);
+      changed();
     },
     /** "Not interested" on a nudge: that topic is muted, its watch and held nudges go. The topic, or null. */
     notInterested(address: string): string | null {
@@ -675,16 +854,19 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
       state.muted.add(`${address} ${topic}`);
       state.watches.splice(0, state.watches.length, ...state.watches.filter((w) => !(w.address === address && w.topic === topic)));
       drop((p) => p.address === address && p.topic === topic && p.delivery === "nudge");
+      changed();
       return topic;
     },
     /** STOP: their watches end and held nudges go (the agent itself stops every send). */
     stopped(address: string) {
       state.watches.splice(0, state.watches.length, ...state.watches.filter((w) => w.address !== address));
       drop((p) => p.address === address && p.delivery === "nudge");
+      changed();
     },
     /** Which address a conversation is (from tool calls, copies). */
     remember(conversationId: string, address: string) {
       state.addresses.set(conversationId, address);
+      changed();
     },
     /** The note on recent copies for this person; "" when none. */
     copiesNote(address: string): string {

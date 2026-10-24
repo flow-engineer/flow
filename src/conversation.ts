@@ -15,7 +15,8 @@
 //   finished partialAfterMs ago (the finished results go back now), or past its own limit
 //   (deadlineMs). Its result comes back into this chat later; the same call with the same input
 //   while it runs is not run again. Messages go out in the order the agent wrote them, while tools run.
-// - A sent message's result says it was delivered. A reply to the person of only messages, in a turn
+// - A sent message's result says it was delivered, once the channel accepted it: the next message
+//   goes only after that (docs/guarantees.md). A reply to the person of only messages, in a turn
 //   where the agent used no tool, gets one more step (it may have said "getting your plan" and meant
 //   to act next); a second such response ends the turn. A message that fails to arrive comes back to the agent as
 //   a message.
@@ -40,14 +41,16 @@ import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type ContentRefusal } from "./channels.ts";
+import type { FlowEvents } from "./business-events/engine.ts";
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
+import { recordsUntil, type Records } from "./records.ts";
 import { scheduleTools } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
 import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
-import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
+import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 
 export interface ConversationSettings {
   model: Model;
@@ -78,6 +81,10 @@ export interface ConversationSettings {
   talk: TalkSettings;
   emit: Emit;
   store: StoreApi;
+  /** The agent's records, for its tools (`context.records`). */
+  records: Records;
+  /** The agent's events side once attached, for its tools (`context.events`). */
+  events?: () => FlowEvents | undefined;
   /** Resolves once the store's tables exist. */
   ready: Promise<void>;
   now: () => number;
@@ -128,6 +135,12 @@ export const LEASE_MS = 15_000;
 const RENEW_MS = 5_000;
 let leaseWarned = false;
 const EARLIER = "[Chinwag] Older messages of this conversation are no longer shown to you.";
+const RESET = "[Chinwag] The conversation starts again here: earlier messages are no longer shown to you.";
+
+/** A reset marker's line for the model, with the app's short note on what came before. */
+export function resetLine(note?: string): string {
+  return note?.trim() ? `${RESET}\nBefore this: ${note.trim()}` : RESET;
+}
 const NOT_SHOWN = "[Chinwag] You are no longer shown the photos or documents in these messages; ask them to send one again if you need it.";
 
 /** A server-verified auth change: an internal prompt, never a prewritten chat response. */
@@ -214,6 +227,8 @@ interface Note {
   owed?: Owed;
   /** Learned at the next turn, but does not start one (the person's reaction). */
   wait?: boolean;
+  /** A reset marker (agent.resetHistory): the model is sent only what comes after it. */
+  reset?: boolean;
 }
 
 /** Sent without the model: a fixed-text scheduled message, or a text or template nudge. */
@@ -246,6 +261,10 @@ export class Conversation {
   private resultUnsent: false | "background" | "returned" = false;
   /** What the agent has sent in this turn, to tell its own text repeated from something new. */
   private sentThisTurn = new Set<string>();
+  /** The texts sent to the person so far, oldest first: read from the history at the first send, then kept up to date (SendContext.sent). */
+  private sentTexts: string[] | null = null;
+  /** Where this turn's entries start in the history: a reset placed during the turn keeps them. */
+  private turnFrom = 0;
   private direct: Direct[] = [];
   private owed: Owed[] = [];
   /** The person's message ids, and the channel each came on. */
@@ -256,6 +275,12 @@ export class Conversation {
   private turns = 0;
   /** Aborted when the conversation closes: tools' signal. */
   private readonly lifetime = new AbortController();
+  /** Why the conversation was closed (null: open), for a tool's record put that comes after. */
+  private closedWhy: string | null = null;
+  /** The records puts of this conversation's tools still under way: stored() waits for them. */
+  private readonly puts = new Set<Promise<unknown>>();
+  /** The agent's records as this conversation's tools have them (`context.records`): no put once it is closed. */
+  private readonly records: Records;
   private recentChannels: string[] = [];
   private promptDestination?: { channel: string; address?: string };
   private timeZone: string | null = null;
@@ -315,6 +340,7 @@ export class Conversation {
     this.id = id;
     this.personKey = personKey;
     this.settings = settings;
+    this.records = recordsUntil(settings.records, () => this.closedWhy, this.puts);
     if (existing) {
       this.messageCount = existing.messageCount;
       this.turns = existing.turns;
@@ -620,7 +646,7 @@ export class Conversation {
         this.wakeTools?.();
       }
     } else if (row.kind === "note") {
-      this.notes.push({ text: p.text, inbox: row.id, wait: p.wait === true });
+      this.notes.push({ text: p.text, inbox: row.id, wait: p.wait === true, ...(p.reset === true ? { reset: true } : {}) });
     } else if (row.kind === "schedule") {
       if (p.fixed) this.direct.push({ inbox: row.id, channel: p.channel, text: p.text, run: p.run, schedule: p.schedule });
       else this.notes.push({ text: p.text, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel } });
@@ -649,6 +675,11 @@ export class Conversation {
   reacted(emoji: string, toText: string): void {
     this.settings.emit(this.id, "reaction.in", { emoji, toText });
     this.note(`[They reacted ${emoji} to your message: "${clip(toText)}"]`, true);
+  }
+
+  /** agent.resetHistory: the model is sent only what comes after this, from the next turn on. */
+  async resetHistory(note?: string): Promise<void> {
+    await this.note(resetLine(note), true, true);
   }
 
   /** The channel reports, now or later, that a message did not reach the person. */
@@ -696,17 +727,55 @@ export class Conversation {
     await this.writes;
   }
 
-  /** Resolves once everything so far is in the store. */
+  /** Resolves once everything so far is in the store, the tools' record puts under way included. */
   stored(): Promise<void> {
-    return this.writes;
+    return Promise.all([this.writes, ...this.puts]).then(() => undefined);
+  }
+
+  /**
+   * Writes an earlier conversation into this one's history, as if it had been said (a test's seeded
+   * history): the person's messages as theirs, the agent's as sent on `channel`. No model call, no send,
+   * no events. Only a conversation with nothing in its history yet.
+   */
+  async seed(messages: Array<{ from: "person" | "agent"; text: string }>, channel: string): Promise<void> {
+    await this.loaded;
+    if (this.history.length || this.busy) throw new Error("only a conversation with no history yet can be seeded");
+    const tag = this.settings.tagChannels;
+    let group: PersonMessage[] = [];
+    const read = () => {
+      if (!group.length) return;
+      this.history.push({ role: "user", content: group.map((m) => `[${tag ? `${channel} · ` : ""}${m.id}] ${m.text}`).join("\n"), messages: group });
+      group = [];
+    };
+    let n = 0;
+    for (const m of messages) {
+      if (m.from === "person") {
+        // Ids of their own: a provider's (or the test cloud's) message ids, m1 among them, never meet these.
+        const id = `h${++n}`;
+        this.messageIds.set(id, channel);
+        group.push({ id, channel, text: m.text });
+        continue;
+      }
+      read();
+      const callId = `seeded_${randomUUID().slice(0, 8)}`;
+      this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(channel), arguments: JSON.stringify({ text: m.text }) }] });
+      this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel }) });
+    }
+    read();
+    this.recentChannels = [...this.recentChannels, channel].slice(-5);
+    const fields = { recentChannels: this.recentChannels };
+    this.persist(() => this.settings.store.updateConversation(this.id, fields));
+    this.flush();
+    await this.writes;
   }
 
   /**
    * The person was forgotten: a step in flight is cut off, nothing waiting runs, nothing more is
    * sent or kept. Tools already running finish on their own, and their results go nowhere.
    */
-  close(): void {
+  close(why = "the person was forgotten while the tool ran"): void {
     this.closed = true;
+    this.closedWhy = why;
     if (this.renewal) clearInterval(this.renewal);
     this.renewal = null;
     if (this.timer) clearTimeout(this.timer);
@@ -776,7 +845,7 @@ export class Conversation {
     if ((await this.claim()) === "mine") return;
     // This runner stalled past its lease and another took the conversation: it stops here.
     console.warn("flow: runner %s lost conversation %s to another runner; it stops working on it", this.settings.runner, this.id);
-    this.close();
+    this.close("another runner took the conversation while the tool ran");
     this.leave(false);
   }
 
@@ -838,6 +907,7 @@ export class Conversation {
     const history = await store.history(this.id);
     this.saved = history.length;
     this.history.push(...history);
+    this.sentTexts = null;
     const only = [...this.channels.keys()][0] ?? "chat";
     for (const entry of history) {
       if (entry.role !== "user") continue;
@@ -873,14 +943,15 @@ export class Conversation {
     return this.pending.length > 0 || this.notes.some((n) => !n.wait) || this.direct.length > 0;
   }
 
-  private note(text: string, wait = false): void {
-    const item: Note = { text, wait };
+  private note(text: string, wait = false, reset = false): Promise<void> {
+    const item: Note = { text, wait, ...(reset ? { reset } : {}) };
     this.notes.push(item);
-    this.persist(async () => {
-      item.inbox = await this.settings.store.addInbox(this.id, "note", { text, wait });
+    const stored = this.persist(async () => {
+      item.inbox = await this.settings.store.addInbox(this.id, "note", { text, wait, ...(reset ? { reset } : {}) });
       this.knownInbox.add(item.inbox);
     });
     if (!wait && !this.running) this.schedule(0);
+    return stored;
   }
 
   private schedule(delayMs: number): void {
@@ -928,7 +999,7 @@ export class Conversation {
         try {
           await this.sendDirect(next);
         } catch (error) {
-          this.settings.emit(this.id, "model.error", { error: String(error) });
+          this.settings.emit(this.id, "model.error", modelError(error));
           this.settle(next, "failed", errorText(error));
           this.flush([next]);
         }
@@ -947,7 +1018,7 @@ export class Conversation {
    * A turn they did not start (a nudge, a scheduled message, a background result) stays silent.
    */
   private async turnFailed(error: unknown): Promise<void> {
-    this.settings.emit(this.id, "model.error", { error: String(error) });
+    this.settings.emit(this.id, "model.error", modelError(error));
     this.absorb();
     for (const o of this.owed.splice(0)) this.settle(o, "failed", `the agent's turn failed: ${errorText(error)}`);
     this.resultUnsent = false;
@@ -985,7 +1056,8 @@ export class Conversation {
         items.push(note);
         continue;
       }
-      this.history.push({ role: "user", content: note.text });
+      this.history.push({ role: "user", content: note.text, ...(note.reset ? { reset: true as const } : {}) });
+      if (note.reset) this.settings.emit(this.id, "history.reset", { text: note.text });
       if (note.text.startsWith("[Background result:")) this.resultUnsent = "background";
       if (note.owed) this.owed.push(note.owed);
       items.push(note);
@@ -1075,6 +1147,7 @@ export class Conversation {
     this.authBlocked.clear();
     this.authPromptsSent.clear();
     this.persist(() => store.updateConversation(this.id, { turnOpen: true, turns }));
+    this.turnFrom = this.history.length;
     this.absorb();
     // A turn the person started (as against a background result, a scheduled message or a nudge).
     const theirs = this.unanswered.size > 0;
@@ -1375,7 +1448,7 @@ export class Conversation {
   }
 
   private async typing(on: boolean, channel: string): Promise<void> {
-    if (on === this.typingOn.has(channel)) return;
+    if (on === this.typingOn.has(channel) || this.channels.get(channel)?.info.typing === false) return;
     if (on) this.typingOn.add(channel);
     else this.typingOn.delete(channel);
     await this.send(channel, { type: "typing", on });
@@ -1412,7 +1485,7 @@ export class Conversation {
     if (this.settings.beforeSend) {
       let result: Awaited<ReturnType<BeforeSend>>;
       try {
-        result = await this.settings.beforeSend(draft, { conversationId: this.id, channel, info: link.info, address: link.address, origin });
+        result = await this.settings.beforeSend(draft, { conversationId: this.id, channel, info: link.info, address: link.address, origin, sent: [...this.sentSoFar()] });
       } catch (error) {
         return refuse(draft, "beforeSend", `Not sent: beforeSend failed: ${errorText(error)}`);
       }
@@ -1426,12 +1499,24 @@ export class Conversation {
     }
     const refusal = contentRefusal(link.info, outbound);
     if (refusal) return refuse(outbound, "content", contentRefusalText(link.info, refusal), refusal);
+    let receipt: void | SendReceipt;
     try {
-      await link.deliver(outbound);
+      receipt = await link.deliver(outbound);
     } catch (error) {
       return { failure: error instanceof Error ? error.message : String(error) };
     }
+    if (outbound.type !== "template") this.sentSoFar().push(outbound.text);
+    // The channel's wait for its signal ran out: it may still arrive, and is never sent again.
+    if (receipt?.status === "unconfirmed") {
+      this.settings.emit(this.id, "message.slow", { channel, origin, text: outbound.type === "template" ? outbound.name : outbound.text, ...(receipt.waitedMs !== undefined ? { waitedMs: receipt.waitedMs } : {}) });
+    }
     return { sent: outbound };
+  }
+
+  private sentSoFar(): string[] {
+    const only = [...this.channels.keys()][0] ?? "chat";
+    this.sentTexts ??= transcriptOf(this.history.map((entry) => ({ entry, at: 0 })), only).flatMap((e) => (e.kind === "out" && !e.template ? [e.text] : []));
+    return this.sentTexts;
   }
 
   /** A fixed-text scheduled message or a text or template nudge, sent with no model turn. */
@@ -1459,7 +1544,7 @@ export class Conversation {
         covered = check.rule;
       } catch (error) {
         // Not knowing whether a rule covers it, nothing is sent, and the person hears nothing of it.
-        this.settings.emit(this.id, "model.error", { error: String(error), purpose: "no-contact check" });
+        this.settings.emit(this.id, "model.error", { ...modelError(error), purpose: "no-contact check" });
         return settle("failed", `their no-contact rules could not be checked: ${errorText(error)}`);
       }
     }
@@ -1504,26 +1589,47 @@ export class Conversation {
   }
 
   /**
-   * The history the model is sent: all of it while it fits the budget, else the latest entries
-   * that do, from the start of one (never between a call and its result), after a line that says
-   * older ones are left out. The latest turn always goes, however long.
+   * The history the model is sent: what comes after the latest reset marker (agent.resetHistory),
+   * all of it while it fits the budget, else the latest entries that do, from the start of one
+   * (never between a call and its result), after a line that says older ones are left out. The
+   * latest turn always goes, however long, and so do the person's messages a reset came after
+   * before anything was sent back.
    */
   private window(system: string, specs: ToolSpec[]): ChatMessage[] {
     const all = this.history.map(forModel);
+    const from = this.resetFrom();
     let room = this.settings.historyTokens - tokens(system) - tokens(JSON.stringify(specs)) - tokens(EARLIER);
     let start = all.length;
-    for (let i = all.length - 1; i >= 0; i--) {
+    for (let i = all.length - 1; i >= from; i--) {
       room -= size(all[i]);
       if (room < 0) break;
       if (all[i].role === "user") start = i;
     }
-    if (room >= 0) start = 0;
-    else if (start === all.length) start = Math.max(0, all.findLastIndex((m) => m.role === "user"));
+    if (room >= 0) start = from;
+    else if (start === all.length) start = Math.max(from, all.findLastIndex((m) => m.role === "user"));
     if (start !== this.leftOut) {
       this.leftOut = start;
-      if (start) this.settings.emit(this.id, "history.trimmed", { leftOut: start, kept: all.length - start });
+      if (start > from) this.settings.emit(this.id, "history.trimmed", { leftOut: start - from, kept: all.length - start });
     }
-    return start ? [{ role: "user", content: EARLIER }, ...all.slice(start)] : all;
+    return start > from ? [{ role: "user", content: EARLIER }, ...all.slice(start)] : all.slice(from);
+  }
+
+  /**
+   * Where the model's history starts: the latest reset marker, or before it the person's messages
+   * it came after with nothing sent back, or this turn's start when the marker came during it.
+   */
+  private resetFrom(): number {
+    const marker = this.history.findLastIndex((e) => e.role === "user" && e.reset === true);
+    if (marker < 0) return 0;
+    const only = [...this.channels.keys()][0] ?? "chat";
+    let from = marker;
+    for (let i = marker - 1; i >= 0; i--) {
+      const e = this.history[i];
+      if (e.role === "assistant" && e.toolCalls?.some((c) => c.name.startsWith("send_"))) break;
+      if (e.role === "user" && e.reset) break;
+      if (e.role === "user" && personMessages(e, only).length) from = i;
+    }
+    return marker >= this.turnFrom ? Math.min(from, this.turnFrom) : from;
   }
 
   /** A tool result as the history keeps it: cut at toolResultChars, saying so. */
@@ -1617,7 +1723,9 @@ export class Conversation {
 
     this.settings.emit(this.id, "tool.start", { callId: call.id, tool: call.name, input: parsed.data });
     const key = createHash("sha256").update(`${this.id}\u0000${this.turns}\u0000${call.name}\u0000${input}`).digest("hex").slice(0, 32);
-    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal };
+    // The agent's events side as it is now (attach() may come after createAgent), only when there is one.
+    const events = this.settings.events?.();
+    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal, records: this.records, ...(events ? { events } : {}) };
     const credentials = this.settings.credentialProvider?.(identityContext) ?? this.settings.credentials;
     let context = toolContext(identityContext, credentials);
     let authorize!: () => void;
@@ -1907,6 +2015,12 @@ function outDetail(sent: OutboundMessage): Record<string, unknown> {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** A model.error event's details: the error, and the code and HTTP status it carries (Flow's typed errors, a provider's APIError). */
+function modelError(error: unknown): { error: string; code?: string; status?: number } {
+  const { code, status } = (error ?? {}) as { code?: unknown; status?: unknown };
+  return { error: String(error), ...(typeof code === "string" && code ? { code } : {}), ...(typeof status === "number" ? { status } : {}) };
 }
 
 function clip(text: string): string {

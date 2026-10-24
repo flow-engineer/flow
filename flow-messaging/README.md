@@ -1,7 +1,7 @@
 # Flow Messaging channels
 
 Put a Flow Framework (`npm i @flow-engineer/flow`) agent on real WhatsApp, Telegram, iMessage and US SMS
-through [Flow Messaging](https://api.flow.engineer) (API version 2026-11-01). `@flow-engineer/flow/flow-messaging` gives you
+through [Flow Messaging](https://api.flow.engineer) (its V0 API, at `/v0`, version 2026-11-01). `@flow-engineer/flow/flow-messaging` gives you
 channels that send through Flow's senders, and two ways to receive Flow's events: the live event
 stream, an outbound WebSocket that needs no public URL, and a webhook that checks Flow's
 signatures. It needs nothing beyond the framework (it uses `fetch`, Node's `WebSocket` and `node:crypto`).
@@ -22,7 +22,7 @@ Node 22.18 or later. The adapter ships inside `@flow-engineer/flow`; import it f
 Ask the API for a test key. You don't need an account:
 
 ```sh
-curl -X POST https://api.flow.engineer/v1/sandbox/keys
+curl -X POST https://api.flow.engineer/v0/sandbox/keys
 ```
 
 The answer holds your test key (`key`, `fk_test_...`, shown once) and the sandbox senders (`senders`).
@@ -62,7 +62,7 @@ does only that).
 
 ### The event stream
 
-`GET /v1/stream` is a WebSocket the agent opens to Flow, with the key offered as a subprotocol
+`GET /v0/stream` is a WebSocket the agent opens to Flow, with the key offered as a subprotocol
 (Node's `WebSocket` cannot set headers). It asks only for the events the adapter handles and hands
 each, in log order, to the same handler as the webhook.
 
@@ -73,7 +73,7 @@ each, in log order, to the same handler as the webhook.
   24 hours) and a failed event reconnect with `after` set to the last handled event: at once the
   first time, then backing off to 30 s, or after Flow's `retry_after` (too many streams for the
   key, Flow busy). An event that fails 5 times in a row is passed over, so it cannot hold up every
-  later one; it stays in Flow's log (`GET /v1/events`).
+  later one; it stays in Flow's log (`GET /v0/events`).
 - **Offline messages.** With `cursorFile`, the last handled event's ID is kept on disk, so after a
   restart Flow replays everything that came while the agent was stopped, for as long as your plan
   keeps events (30 days by default). Without it, a dropped stream still resumes, but a restart
@@ -95,11 +95,15 @@ const { status, body } = await fm.receive(agent, { body: rawBody, headers: req.h
 Flow posts events to a public HTTPS URL. Create a webhook endpoint for it:
 
 ```sh
-curl https://api.flow.engineer/v1/webhook_endpoints \
+curl https://api.flow.engineer/v0/webhook_endpoints \
   -H "Authorization: Bearer $FLOW_MESSAGING_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://your-agent.example.com/", "events": ["message.received", "message.failed", "reaction.added", "contact.deleted"]}'
+  -d '{"url": "https://your-agent.example.com/", "events": ["message.received", "message.sent", "message.failed", "reaction.added", "contact.deleted"]}'
 ```
+
+`message.sent` lets each send resolve the moment the channel has the message (below); without it a
+send reads its message back instead, which takes up to a second longer. With `waitFor: "delivered"`,
+add `message.delivered`.
 
 The answer holds the signing secret (`secret`, `whsec_...`), shown once. Save it as
 `FLOW_MESSAGING_WEBHOOK_SECRET`.
@@ -115,30 +119,50 @@ On a laptop there is no public URL: use the event stream instead.
 | `FLOW_MESSAGING_TELEGRAM_SENDER`, `FLOW_MESSAGING_WHATSAPP_SENDER`, `FLOW_MESSAGING_IMESSAGE_SENDER`, `FLOW_MESSAGING_SMS_SENDER` | Each channel's sender, `snd_...`. Needed to start conversations (nudges, templates) and to tell senders apart. Replies to people who wrote first work without it. |
 | `FLOW_MESSAGING_BASE_URL` | Optional. Default `https://api.flow.engineer`. |
 
-Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret, baseUrl })`, and
+Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret, baseUrl, waitFor, waitTimeoutMs })`, and
 `fm.telegram({ sender, name, instructions })` (the same for `whatsapp`, `imessage` and `sms`).
 
 ## What it maps
 
 **Out (agent to person):**
 
-- Text: Markdown on Telegram, plain text on WhatsApp, iMessage and SMS.
-- Reply buttons and lists, sent as Flow `buttons`, each with its own id (a button given as a label
-  has the label as its id). WhatsApp shows up to 3 reply buttons, or a list
-  for 4 to 10. Telegram shows an inline keyboard. iMessage has none, so the agent is not offered them.
+Flow Messaging takes each kind of message at its own endpoint (`POST /v0/conversations/{id}/basic`,
+`/buttons`, `/list`, `/carousel`, ...) and sends exactly that, or refuses it: it never converts. The
+adapter picks the kind each channel takes:
+
+- Text (`basic`): the agent's Markdown as Telegram's HTML (`telegram.parse_mode: "HTML"`) on
+  Telegram, and as iMessage's own styles (`imessage.styles`: bold, italic, underline,
+  strikethrough) on iMessage. WhatsApp reads its own marks (`*bold*`) and SMS shows none: there the
+  text goes as written.
+- Reply buttons (`buttons`), each with its own id (a button given as a label has the label as its
+  id). Telegram shows an inline keyboard of up to 10. WhatsApp shows up to 3; a list, or more than 3
+  buttons, goes as a WhatsApp `list` (the list's own label, or "Choose"; row titles up to 24
+  characters, with their descriptions). iMessage has none, so the agent is not offered them.
   The WhatsApp and Telegram channels' `info.buttonIds` is true: a tap comes back with the button's id.
 - A link: one URL button (WhatsApp's call-to-action button); on iMessage, the URL on its own line.
-- A photo (by URL, or a Flow file ID from `POST /v1/files`): a media message with the text as its
-  caption; with buttons or a link, the image header of that same message (on Telegram, one photo
-  with its keyboard).
-- A carousel (WhatsApp and Telegram): Flow `carousel` content, 2 to 10 cards, each a photo, up to 160
-  characters and 1 or 2 reply buttons or one link, the same on every card. WhatsApp shows the cards
-  side by side; Telegram gets them one by one, in order. On iMessage the agent is not offered one.
-- Quotes (`reply_to`), reactions (tapbacks on iMessage), typing, and read receipts (WhatsApp, iMessage).
-- WhatsApp templates, by name or `tpl_` ID, with their header (text, or media by URL or file ID),
-  body values (`{{1}}`, `{{2}}`, ...) and button values (URL suffixes, quick-reply payloads).
+- A photo (by URL, or a Flow file ID from `POST /v0/files`): a `basic` message with the photo as
+  its `media` and the text as its caption; with buttons or a link, the image header of that same
+  message (on Telegram, one photo with its keyboard).
+- A carousel: on WhatsApp a `carousel`, 2 to 10 cards side by side, each a photo, up to 160
+  characters and 1 or 2 reply buttons or one link, the same on every card. Telegram has none, so the
+  adapter sends the carousel's text, then one message per card in order: its photo with the card's
+  text as caption and its buttons or link under it (a card with neither is its photo alone; a card
+  with buttons needs a text). Each part has its own Idempotency-Key, the carousel's plus `:text` or
+  `:card:<i>`. On iMessage the agent is not offered one.
+- Quotes (`reply_to`), reactions (tapbacks on iMessage), typing (`{}`: it clears itself when the next
+  message goes, so nothing is sent when the agent stops typing), and read receipts (WhatsApp up to
+  the message read; iMessage marks the whole conversation).
+- WhatsApp templates (`template`), by name or `tpl_` ID, with their header (text, or media by URL or
+  file ID), body values (`{{1}}`, `{{2}}`, ...) and button values (URL suffixes, quick-reply payloads).
+- A message the business starts (a nudge, a scheduled text) goes with `link_preview: false`.
+- With no conversation known yet (a nudge, or after a restart) the first message starts one
+  (`POST /v0/messages`), which takes text or a template only: a link then goes as its text with the
+  URL on a line after it, and buttons, a list or a carousel need the person to have written first.
 
 **In (person to agent):**
+
+Events come as kind objects (`content.kind`). An app Flow still serves through its bridge to the
+older API gets the older shape (`content.type`); both read the same.
 
 - Text.
 - Taps on buttons, list rows and template quick replies, as a choice: `{ id, title }`, the button's
@@ -147,11 +171,21 @@ Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret
 - Reactions to the agent's messages.
 - Late failures (`message.failed`), told to the agent as "Not delivered".
 - Photos, voice notes, audio and documents, as attachments. Their bytes are fetched from
-  `GET /v1/files/{id}` only when the agent can use them. A voice note Flow already transcribed
+  `GET /v0/files/{id}` only when the agent can use them. A voice note Flow already transcribed
   arrives as its transcript.
 - A video, a file Flow did not keep, a location or a contact card arrives as a note in the text.
 
 ## What it does for you
+
+- **A send resolves once the channel has the message.** Flow answers a send `202` (queued); the
+  channel's send then waits for `message.sent` (from the stream or the webhook, else by reading the
+  message back), so the agent's next message goes only after it, and a `message.failed` comes back
+  to the agent from that send, as Not delivered. `flowMessaging({ waitFor })` changes when a send
+  resolves: `"sent"` (the default), `"delivered"` (the person's device has it, where the channel
+  reports it; Telegram never does, so there it is `"sent"`), or `"queued"` (on the 202, as before
+  0.5.0). `waitTimeoutMs` (default 30,000) is the longest a send waits: past it, it resolves anyway,
+  the agent emits `message.slow`, and the message is never sent again. See
+  [docs/guarantees.md](../docs/guarantees.md).
 
 - Every send carries its own Idempotency-Key. A 429 or 5xx is tried again with the same key after
   a short Retry-After, so a message never goes out twice. A nudge or a scheduled text keeps one key
@@ -159,6 +193,10 @@ Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret
   send it again.
 - Flow's `409 outside_window` becomes the framework's `outside_window`, so the agent knows to send a
   template.
+- A `422 unsupported_content` reaches the agent saying what the channel does not take (`param`),
+  on which channel, and why (`channel_code`, such as `no_mms`), with "don't resend it".
+- iMessage group conversations are passed over (one warning): the agent never answers in a group,
+  and no typing or read receipt goes to one.
 - A permanent refusal (opted out, no consent, ...) reaches the agent once, with "don't resend it".
 - Signatures are checked: HMAC-SHA256, five minutes' tolerance, and any of the secrets you gave.
 - An event Flow delivers twice (or by both the stream and a webhook) reaches the agent once. On the
@@ -184,7 +222,8 @@ opt-in link. Text takes up to 9999 characters; there are no buttons, lists or te
 ## Also exported
 
 - `verifySignature(body, header, secrets)`: checks a `Flow-Signature` header yourself.
-- `FlowMessagingError`: the API's typed error (`status`, `type`, `channelCode`, `retryAfter`).
+- `FlowMessagingError`: the API's typed error (`status`, `type`, `channelCode`, `retryAfter`,
+  `param`, `channel`).
 - `API_VERSION`: the API version every request asks for, `2026-11-01`.
 - `TELEGRAM`, `IMESSAGE`: the Telegram and iMessage channels' limits, as framework `ChannelInfo`s.
 

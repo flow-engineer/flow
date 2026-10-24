@@ -9,6 +9,9 @@ the no-contact rules apply to every one.
 `flowEvents` (from `@flow-engineer/flow`) is the engine. What your events mean (which types exist,
 their templates and wording, your own rules) stays in your app.
 
+Use [`agent.nudge()`](https://docs.flow.engineer/nudges) for a direct follow-up. Use business
+events when your backend publishes a catalog of events with delivery levels, expiry and topic rules.
+
 ## The envelope
 
 ```json
@@ -78,11 +81,11 @@ Sign the exact bytes you send.
 
 | Status | Body | When |
 |---|---|---|
-| 202 | `{"status":"accepted"}` or `{"status":"duplicate"}` | Recorded; processed in order in the background. A duplicate id was already taken. |
+| 202 | `{"status":"accepted"}` or `{"status":"duplicate"}` | Recorded (in the agent's database when it has a durable one); processed in order in the background. A duplicate id was already taken. |
 | 400 | `{"field","error"}` | Malformed; `field` names what is wrong (`data.user.phone`, `type`, a value your message needs). |
 | 401 | `{"error"}` | Bad or missing `Flow-Signature`. |
 | 405 | `{"error"}` | Not a POST. |
-| 503 | `{"error"}` | The agent has no secret configured. |
+| 503 | `{"error"}` | The agent has no secret configured, or the event could not be recorded (retry). |
 
 On a network error, a 429 or a 5xx, retry with the same `id`: the id dedupes, so a retry never
 sends twice. An `Idempotency-Key` header is honoured too.
@@ -111,6 +114,29 @@ your tools), a message about it is raised: an optional one is kept as standard, 
 when the topic closes and it skips the caps. A watch with `urgent: true` ("tell me as soon as") makes
 it critical. A message is never lowered. Watches last `watchDays` (30) and end a day after
 `close(topic)`.
+
+A tool saves the watch in its own agent's events side, `context.events` (there once
+`events.attach(agent)` ran), never in a module variable: the same tool object then serves every
+agent in the process (each `flow test` run, both sides of a deploy) with that agent's state, as long
+as each agent has a `flowEvents` of its own (see "Mount it").
+
+```ts
+const keepMePosted = tool({
+  name: "keep_me_posted",
+  description: "Save a topic the person asked to be kept posted on, after they said yes.",
+  input: z.object({ topic: z.string(), title: z.string().optional() }),
+  run: ({ topic, title }, context) => {
+    if (!context.events || !context.address) return { saved: false };
+    // The address the events are sent to: on WhatsApp, their number in E.164, as `addressOf` reads it.
+    return { saved: context.events.watch({ address: context.address, topic, title }).outcome };
+  },
+});
+```
+
+`context.events.mute(address, topic)`, `notInterested(address)` and `stopped(address)` work the
+same way. Code outside a turn (a route, `beforeSend`, `intercept`) has it as `agent.events`; tools
+served over MCP get it from `mcpServer({ businessEvents: events })` (or `agent.events` after attach). With watch fields of your
+own (`flowEvents<MyWatch>(...)`), read it as `context.events as FlowEvents<MyWatch> | undefined`.
 
 ## Wording
 
@@ -165,7 +191,13 @@ The catalog (each type's level, `message`, `topic`, `liveOnly`), the templates a
 rules: `rules.notification` (return `"handled"` when you sent or dropped it yourself),
 `rules.copy`, `onEvent` and `onTick`.
 
-The engine keeps its state in memory (`createEventState()`); pass your own `state` to keep or share it.
+The engine keeps its state (event ids taken, held sends, caps, watches, what was told) in the
+attached agent's database when that database survives a restart (`sqlite(path)`, `postgres(...)`;
+store migration 9). A restart then neither processes an event id again nor forgets a held send, and
+an event answered 202 but not yet processed when the agent stopped is processed after it; sends keep
+their idempotency keys, so one that went just before a crash is not sent again. With an in-memory
+database, it stays in memory. One events side per agent, on one runner at a time. Pass your own
+`state` (`createEventState()`) to share it: then you keep it, unless you also pass `persist: true`.
 
 ## Mount it
 
@@ -234,4 +266,9 @@ events.attach(agent);
 ```
 
 The agent then answers `POST /v1/events` through `agent.fetch(request)`, and held sends go out on
-its tick.
+its tick. Attached, the events side is the agent's own (`agent.events`, and `context.events` in its
+tools; not `createAgent`'s `events`, which are trace sinks). An agent takes one: attaching a second
+one to it throws, and a side attached to another agent is no longer the first one's. Where one
+module builds several agents (`buildAgent`, called by `flow test` for each run and by a deploy's
+overlap), make the `flowEvents(...)` inside `buildAgent`, one per agent, with the run's
+`options.testing?.eventsSecret` and `now` when given, so each agent's watches, held sends and caps are its own.

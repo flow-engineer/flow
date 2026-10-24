@@ -27,11 +27,13 @@ export interface FlowEvent {
     | "status"
     | "message.undelivered"
     | "message.refused"
+    | "message.slow"
     | "reaction.in"
     | "attachment.failed"
     | "keyword"
     | "message.duplicate"
     | "history.trimmed"
+    | "history.reset"
     | "template.missing";
   conversationId: string;
   at: number;

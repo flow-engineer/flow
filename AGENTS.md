@@ -1,7 +1,9 @@
 # Working on Flow Framework
 
-Flow Framework is a framework for consumer chat agents: agents people reach on WhatsApp, SMS, iMessage,
-Telegram or a web or app chat, that feel like a person texting back.
+Flow Framework lets a product ship to every chat interface from one codebase: messaging agents on
+WhatsApp, SMS, iMessage, Telegram and web or app chat; MCP servers for Claude, ChatGPT and other
+assistants; native plugins; and CLIs for people and coding agents. Tools and skills are shared
+across these surfaces. A project can start with any one of them.
 
 ## Keep it general
 - Nothing specific to one business goes in this repository: no customer names, data, prompts
@@ -17,15 +19,14 @@ Telegram or a web or app chat, that feel like a person texting back.
 - A new dependency or a new file needs a maintainer's yes.
 - Remove what stops being used (scripts, options, tests) in the same change.
 
-## Every change is backward compatible
-- An agent that works on this version keeps working on the next, unchanged: its `src/agent.ts`, the
-  starter files `flow new` copied into it, its test files, its `.env` names, its CLI commands, `--json`
-  fields and exit codes, and what Flow's hosting passes to `buildAgent`. Add an option or field; never
-  rename, remove or change the meaning of one an agent may use.
-- When something has to go, keep the old name working beside the new one (deprecated, saying what
-  replaces it) for at least one minor release, and say so in the release notes and the README.
-- A change that cannot be made compatible needs a maintainer's yes, a minor version bump and a
-  migration note, as the move from chinwag had.
+## Until 1.0 the API may change; every release says how to move
+- The API (exports, options, file formats, the starter files `flow new` copies, `.env` names, CLI
+  commands, `--json` fields and exit codes, and what Flow's hosting passes to `buildAgent`) may change
+  between 0.x releases. It freezes at 1.0.
+- Every release has release notes with migration notes: each breaking change is called out, with
+  what an agent must change to keep working. A change with no note keeps every agent working unchanged.
+- Where it costs little, keep the old name working beside the new one (deprecated, saying what
+  replaces it) for a release, as the move from chinwag did.
 
 ## Tests
 - Each test protects one behaviour. Before adding one, say which behaviour, and why no existing
@@ -41,6 +42,20 @@ Telegram or a web or app chat, that feel like a person texting back.
 - The full suite (`npm test`, at the root, in `simulators/` and in `flow-messaging/`) runs before a change is merged.
 - Tests that call real models (a simulated person, a judge) run only when someone starts them,
   never in CI, and print what they cost.
+
+## Documentation: update it with the code
+
+- Public documentation is maintained in the private GitHub repository **flow-engineer/docs**.
+  Do not create or maintain a separate documentation site in this repository or assume a local
+  checkout location. Follow the docs repository's agent instructions and writing conventions.
+- Every change to a public API, CLI command, configuration, authentication flow, default,
+  limitation or user-visible behavior must include the corresponding update in the docs repository
+  before release. New features need a working example and an expected result. Link the companion
+  documentation change in the implementation PR; explain explicitly when no docs change is needed.
+- Keep documentation concise, accurate and useful to people and coding agents. Check examples
+  against current code, preserve safety rules and limitations, and run the docs repository's checks.
+- Keep package- and service-embedded guidance consistent with the published guides. These runtime
+  assets remain here for compatibility; they are not a second hand-written website.
 
 ## Coding-agent skills
 - `coding-agents/` teaches coding agents to build on Flow Framework (`skill.md`, with MCP and the CLI),

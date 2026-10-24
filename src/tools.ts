@@ -2,6 +2,8 @@
 // in the reply or carries on in the background; tool authors mark nothing.
 
 import { z } from "zod";
+import type { FlowEvents } from "./business-events/engine.ts";
+import type { Records } from "./records.ts";
 import type { ToolSpec } from "./types.ts";
 
 export interface ToolContext {
@@ -31,6 +33,20 @@ export interface ToolContext {
   signal: AbortSignal;
   /** Server-side backend access for this verified person. Never supplied by the model or serialized into history or traces. */
   credentials?: Credentials;
+  /**
+   * The agent's own records (`createAgent({ records })`): small JSON documents that outlive the
+   * conversation, read and written by any person's turn: `agent.records`, except that a put after
+   * this conversation's person was forgotten (the tool still running) is refused.
+   */
+  records: Records;
+  /**
+   * The agent's own business events side (`flowEvents`), once it is attached to this agent
+   * (`events.attach(agent)`): `agent.events`, so a tool watches, mutes or takes back a topic for this
+   * conversation's person in the state of the agent it runs for (`watch`, `mute`, `notInterested`,
+   * `stopped`, `remember`), never a module's. Absent when no events side is attached (or, over MCP,
+   * none was given as mcpServer({ businessEvents: agent.events })).
+   */
+  events?: FlowEvents;
 }
 
 /** A business supplies named backend credentials or clients, resolved afresh for the verified person. */

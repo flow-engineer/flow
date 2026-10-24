@@ -12,6 +12,9 @@ export interface Skill {
   body: string;
 }
 
+/** Structured skill discovery on the MCP read_skill descriptor, without loading skill bodies. */
+export const SKILLS_META = "flow.engineer/skills";
+
 function frontmatter(text: string): { fields: Record<string, string>; body: string } {
   const match = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(text);
   if (!match) return { fields: {}, body: text };

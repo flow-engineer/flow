@@ -1,10 +1,10 @@
 # Flow Framework for coding agents
 
-This guide is at https://flow.engineer/flow-framework/agents.md: that is the link to give.
+The published guide is at https://docs.flow.engineer/agents: that is the link to give.
 
-You are building or changing an agent for a person (the owner) on Flow Framework: a chat agent people
-text on WhatsApp, iMessage, Telegram or SMS, and the same tools as an MCP server (Claude, ChatGPT,
-Cursor, Codex) and a CLI. No tunnel, no public URL, and no key the owner copies by hand.
+You are building or changing a Flow project for a person (the owner): tools and skills exposed
+through an MCP server (Claude, ChatGPT, Cursor, Codex), plugins, a CLI or a messaging agent on
+WhatsApp, iMessage, Telegram, SMS or their own app. Start with the interfaces the owner needs.
 Every command here runs without a terminal and never reads stdin, except `chat`, which reads the
 messages you pipe to it.
 
@@ -27,7 +27,22 @@ When the owner has a product (a codebase), the agent is built from it:
 5. Replace the café with the product: context, tools, `agent/AGENTS.md`, sign-in, then check it
    (`npx @flow-engineer/flow check`, `npm run mcp` with `flow inspect`, and the phone below).
 
-## The flow
+## MCP and CLI first
+
+After creating the project and running `npm install`, start the server with `npm run mcp`.
+In another terminal, use `npm run cli -- --help` and `npm run cli -- menu --json`. The starter
+prints the MCP URL and a command to connect Claude Code. These tool calls need no model key or
+Flow account. Replace the café tools and configure account sign-in when needed.
+
+For remote hosts such as Claude or ChatGPT, expose the server over HTTPS and connect its URL in
+the host. Generating a plugin does not publish it to a directory; follow the host's installation
+or review flow. See [MCP servers](https://docs.flow.engineer/framework/mcp),
+[plugins](https://docs.flow.engineer/plugins) and [CLIs](https://docs.flow.engineer/cli).
+
+## Messaging setup
+
+For phone testing, `link` sets up the keys and an outbound event stream, with no tunnel or public
+URL needed on the developer's laptop. For the chat agent, it can also supply a trial model key.
 
 ```sh
 npx @flow-engineer/flow init --display-name "FlatX agent"   # the starter in this (empty) folder; ask the owner what to call it first
@@ -42,7 +57,8 @@ Before `init` (or `flow new <folder>`), ask the owner what people should call th
 "FlatX agent", and pass it as `--display-name`. It is kept as `displayName` in `package.json`, and
 the message their phone sends to reach the agent is `Hi FlatX agent (ref <code>)`. The name takes the
 starter's (Pip) place in the agent's prompt, `agent/AGENTS.md`, and the playground and MCP server
-read it from `package.json`. To rename an agent made already, `link --display-name "<name>"` (or
+read it from `package.json`. `init` names the package, its CLI command and its MCP server after it
+(`flatx-agent`), or after `--name <name>` when given, else after the folder. To rename an agent made already, `link --display-name "<name>"` (or
 `setup --display-name`) changes both; restart `npm start` after it. Without the flag, `init` asks in
 a terminal and otherwise uses the folder's name in words.
 
@@ -53,7 +69,11 @@ that is taken it prints one line, `Port 8788 is in use. Run: PORT=8798 npm start
 
 ## How the owner tests it
 
-When the owner asks how to test the agent, recommend these, in this order:
+Match the way they test to the interface they are building. For MCP, connect the server in their
+chosen host and try a real product request. For a CLI, show its help and a command that reads data.
+For a plugin, install the generated package in the host and exercise its tools and skills.
+
+For a messaging agent, recommend these, in this order:
 
 1. **The playground in the browser**: `npm start`, then open the link it prints. The test people
    (`testPeople`; Maria, Sam and Priya in the starter) and the channels are side by side, and
@@ -70,7 +90,7 @@ before you hand it back; run them yourself, and do not offer them to the owner a
 - The model key: a provider key is optional. `setup` (which `link` runs; alone it needs `login`
   first) writes `FLOW_KEY`, the agent's one Flow key, into `.env` (printed only as its prefix and
   last 4, `FLOW_KEY=flow_test_…abcd  added`; never read or print its value): with no provider key
-  the agent calls models through Flow with it, on the account's $2 of Flow trial credit (printed as
+  the agent calls models through Flow with it, on the account's \$2 of Flow trial credit (printed as
   `Model: Flow trial credit ($1.87 left)`). The owner may add their own: one of `OPENROUTER_API_KEY`,
   `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY` in `.env` wins over `FLOW_KEY` for the model
   (to switch back, empty that line), and a key they set is never written over. When the credit is
@@ -103,8 +123,8 @@ before you hand it back; run them yourself, and do not offer them to the owner a
 - Texting needs only Flow Messaging's part of setup (and a model key). When setup's answer has it
   (the join code, the Messaging key and senders) but observe's part failed (traces and the test
   cloud: `observe_failed`, or observe's own limit), `link` prints one warning line on stderr,
-  `Traces and tests won't work until .env has FLOW_FRAMEWORK_CLOUD_KEY and FLOW_FRAMEWORK_TRACES_KEY:
-  <the server's reason>. Then: <its next>`, then the link, the channel's trial line and its `Next:`
+  `Traces and tests won't work until .env has FLOW_FRAMEWORK_CLOUD_KEY and FLOW_FRAMEWORK_TRACES_KEY: <the server's reason>. Then: <its next>`,
+  then the link, the channel's trial line and its `Next:`
   as usual, and exits 0; `link --json` has the line in `warnings`, on setup's line and on its own.
   Give it to the owner; `setup` makes the missing keys once it is fixed. Run again, `link` finds
   Messaging's part in `.env` and does not run setup. `setup` on its own still exits 3 for it.
@@ -114,8 +134,8 @@ before you hand it back; run them yourself, and do not offer them to the owner a
 - The starter's `npm start` is on Telegram, plus WhatsApp and iMessage when `.env` has their senders
   (`FLOW_MESSAGING_WHATSAPP_SENDER`, `FLOW_MESSAGING_IMESSAGE_SENDER`), and reads `.env` once.
   `npm start` marks itself running in `.flow/running.json`, so `link` ends with the step that fits:
-  `Next: npm start, then send the link above` when it is not running; when it is, `Next: restart npm
-  start (it runs at <url> and lacks iMessage), then send the link above` if `link` just wrote `.env`
+  `Next: npm start, then send the link above` when it is not running; when it is,
+  `Next: restart npm start (it runs at <url> and lacks iMessage), then send the link above` if `link` just wrote `.env`
   or renamed it, else `Next: send the link above (npm start is running at <url>)` (`link --json`:
   `running`, `false` or `{"url"}`, and `next`). `setup` alone says "If npm start is running, restart it to add
   iMessage."
@@ -133,7 +153,7 @@ before you hand it back; run them yourself, and do not offer them to the owner a
 | 0 | Done | Go on |
 | 1 | Usage, not signed in, not an agent's folder, or a login URL that is not https | Fix the command, or run `next` |
 | 2 | flow.engineer could not be reached, or did not answer in time (`timeout`) | Try again |
-| 3 | Refused: denied, expired, a product failed (for `link`, only when Messaging's part did: observe's alone is exit 0 with a warning), no channel open yet (one closed while others are open is exit 0 with their links), a server with no CLI sign-in (`server_unsupported`), or a free-trial limit (`sandbox_allowance_used`, the iMessage people cap; HTTP 403) | Run `next`; for a trial limit `next` is a sentence: give it to the owner as it is |
+| 3 | Refused: denied, expired, a product failed (for `link`, only when Messaging's part did: observe's alone is exit 0 with a warning), no channel open yet (one closed while others are open is exit 0 with their links), a server with no CLI sign-in (`server_unsupported`), or a free-trial limit (`sandbox_allowance_used`; HTTP 403) | Run `next`; for a trial limit `next` is a sentence: give it to the owner as it is |
 | 4 | Sign-in still waiting for the owner's approval, or flow.engineer asked to wait (`slow_down`, HTTP 429) | Approval: ask the owner to approve, then run `next` (the same code is kept). `slow_down`: wait `retry_after` seconds (printed as `Wait <n> s`), then run `next` |
 
 `login` and `link` wait at most `--timeout` seconds (120 by default) before exit 4, and no single
@@ -160,8 +180,11 @@ flow.engineer may add `warnings` (up to 20 lines) to any setup answer. Each is p
 line on stderr; with `--json` setup's line has `warnings` (an empty list when there are none), and
 an error line has it when there were any. Pass them on to the owner.
 
-`setup` also shows the free trial: messages used per channel, and on iMessage the people it may
-reach (`iMessage: 1 of 2 people`; `trial.imessage.contacts` `{limit, used}` in `--json`).
+`setup` also shows the free trial: the people on each channel and those waiting for a place
+(`free trial: 3 of 25 people, 2 waiting for a place`; `trial.<channel>` `{limit, used, held}` in
+`--json`). A person past the limit is held: their messages are kept and reach the agent once a
+place frees up. An older flow.engineer counts messages instead (`3 of 300 messages used`, no
+`held`), and on iMessage the people it may reach (`iMessage: 1 of 2 people`, `trial.imessage.contacts`).
 
 `chat` exits 1 for anything that stops it before the first message: `no_model_key`, `no_agent`
 (no `src/agent.ts`), `not_built`, `no_test_people`, `no_channel`; with `--json` as
@@ -185,7 +208,7 @@ reach (`iMessage: 1 of 2 people`; `trial.imessage.contacts` `{limit, used}` in `
 ## Messages the business starts
 
 A nudge, a scheduled message or any turn the person did not start goes with link previews off
-(`preview: false` on the message; Flow Messaging's WhatsApp `preview_url: false`): on WhatsApp a
+(`preview: false` on the message; Flow Messaging's `link_preview: false`): on WhatsApp a
 preview card's title becomes the phone's notification instead of the message's text. For a call to
 action use `link` (`agent.nudge({ to, text, link: { label, url } })`, or the agent's send with
 `link`), not a URL in the text.
@@ -193,9 +216,69 @@ action use `link` (`agent.nudge({ to, text, link: { label, url } })`, or the age
 When the business's backend should tell people what happened (an order shipped, an item is back),
 mount `flowEvents` instead of writing a route: one signed `POST /v1/events`, each event sent by its
 delivery level (critical at once, standard after quiet hours, optional merged or dropped), with the
-agent's own wording checked against the template's values. The envelope, signing, answers and a
-mounting sample are in `docs/events.md` in the package
-(https://github.com/flow-engineer/flow/blob/main/docs/events.md).
+agent's own wording checked against the template's values. Once `events.attach(agent)` ran, the
+agent's tools reach it as `context.events` (other code as `agent.events`): a tool that keeps what
+a person watches saves it there, in the state of the agent it runs for, never in a module
+variable. The envelope, signing, answers and a mounting sample are in `docs/events.md` in the
+package (https://github.com/flow-engineer/flow/blob/main/docs/events.md).
+
+## The agent's own records
+
+What the agent must remember across days and people, and nothing else reads (a buyer's question
+relayed to a seller, waiting for the answer), it keeps as records: small JSON documents in
+collections declared on `createAgent`, in the same store as its conversations. They survive
+restarts and deploys, and behave the same in the playground and the test cloud (each with an empty
+store of its own), self-hosted (the agent's SQLite or Postgres) and on Flow's hosting, per agent
+and per environment.
+
+```ts
+const agent = createAgent({
+  // ...
+  records: { questions: { people: ["buyer", "seller"], fields: ["listing", "status"] } },
+});
+
+// In a tool: context.records. Outside a turn (a route, beforeSend, intercept): agent.records.
+await context.records.put("questions", id, { listing, buyer: context.person, seller, status: "waiting", askedAt: Date.now() });
+await context.records.get("questions", id);                              // the value, or null
+await context.records.query("questions", { seller, status: "waiting" }); // [{ id, value, createdAt, updatedAt }]
+await context.records.delete("questions", id);
+```
+
+**What goes where: if anything other than the agent reads it, it belongs in your own database.**
+Records are the agent's working memory: read by id, or matched by equality on the fields a
+collection declares (`people` and `fields`), oldest first (by when each was first put, then id),
+50 at a time (`{ limit, after }`: up to 100, `after` the last entry of the page before). No
+ranges, sorting, joins, search or transactions across records; a put replaces the whole value.
+
+- `people` are the top-level fields that hold a person, as a string: their `context.person`
+  (`phone:+15550100100`, `key:<your id>`, `<channel>:<address>`). `agent.forgetPerson` deletes,
+  with everything else about them, every record that names them there (by that id, their
+  conversation id, any identity as `<channel>:<address>`, or their number in E.164 on a phone
+  channel, also when their key is `key:...`; never a bare chat id, which another channel may
+  use); `agent.records.forgetPerson(person)` does it for someone who never wrote. A tool of
+  theirs still running when they are forgotten cannot put a record after it: the put is refused
+  saying they were forgotten.
+- A field added to a collection's `people` or `fields` counts for the records already kept from
+  the agent's next start: it indexes them again before anything runs, so `query` and forgetting
+  find them. A value the new declaration refuses (a person field holding a number) is kept, left
+  out of the index. The store keeps every field ever declared for a collection and keeps indexing
+  it (a person field if any declaration said so), so an older declaration on the same store (a
+  deploy's old revision, a stale checkout running `flow records export`) takes nothing away, and
+  what it puts is indexed for the newer fields too.
+- Values are plain JSON: no Dates (a time is milliseconds or ISO text), NaN, Maps or class
+  instances; keys whose value is undefined are left out. A declared field holds a string (at most
+  256 characters), a number, a boolean or null; `1` and `"1"` differ.
+- Limits (`RECORD_LIMITS`): 64 KB a record as JSON, 10,000 records an agent (per environment), 20
+  collections, 8 declared fields each, ids of at most 128 characters. A put past one is refused
+  saying what to change. The count of records takes no lock, so new ones put at the same moment
+  may pass 10,000 by up to as many as are put at once.
+- `npx @flow-engineer/flow records export` prints every record of the agent in the folder (the
+  store its `buildAgent` opens) as JSON Lines; in code, `for await (const r of
+  agent.records.export())`. Put them into another store with `agent.records.put(r.collection,
+  r.id, r.value)`: each gets a new `createdAt` and `updatedAt` there (the time of that put), so
+  put them oldest first, as export gives them, to keep their order.
+- A follow-up at a time is not a record: `agent.nudge({ to, prompt, at })` gives the agent a turn
+  then, and that turn reads the records.
 
 ## Shared test numbers and privacy
 
@@ -208,9 +291,11 @@ customers' data: connect your own number for that.
 
 ## Stability
 
-Flow Framework is 0.x. The commands, `--json` fields and exit codes in this guide stay compatible
-within 0.2.x; a breaking change comes with a minor version bump and a note in the release. Pin the
-version in `package.json` for production.
+Flow Framework is 0.x: until 1.0, the commands, `--json` fields and exit codes in this guide (and the
+rest of its API) may change between releases. Every release's notes call out each breaking change
+with a migration note saying what to change. The API freezes at 1.0. Pin the exact version in
+`package.json` for production, and read the notes before you move it. What freezes at 1.0:
+[stability.md](stability.md).
 
 ## Host it
 

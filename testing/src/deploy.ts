@@ -11,7 +11,11 @@
 //
 // The folder is packed without node_modules, .git, .env files and the framework's local results
 // (.flow); its package-lock.json is installed with `npm ci` in the build, and the build runs
-// hosting's lint (its findings are printed here). Nothing here prints a key or a secret's value.
+// hosting's lint (its findings are printed here). Before anything is sent, flow deploy asks the
+// cloud which Flow Framework hosting runs (GET /v1/hosting/framework → { framework: { version } })
+// and refuses an agent locked to a newer release line (major.minor), as hosting's lint would after
+// the upload; a cloud without that route, or any failure to ask, leaves the build to decide.
+// Nothing here prints a key or a secret's value.
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -66,6 +70,10 @@ export const DEPLOY_USAGE = `Usage:
 flow deploy (and deploy promote, for production) sends each non-empty .env value as a secret (the
 same names as secrets --from-env sends) before the service starts, and later only the new or changed ones: .flow/secrets.json keeps a
 hash per name, never a value. It prints names only.
+
+flow deploy first checks that hosting runs the agent's Flow Framework release line (the major.minor
+in package-lock.json, 0.4 for 0.4.11): a newer one is refused before anything is sent. A Flow whose
+cloud does not say which it runs deploys as before, and the build refuses it.
 
 status shows both environments unless --env names one. The last deploy this folder made is kept
 in .flow/deploys.json (never packed).
@@ -153,6 +161,14 @@ class Refused extends Error {
   }
 }
 class Usage extends Error {}
+/** The agent's Flow Framework is newer than hosting's (hosting's own code for it, chinwag_too_new). */
+class TooNew extends Error {
+  readonly next: string;
+  constructor(message: string, next: string) {
+    super(message);
+    this.next = next;
+  }
+}
 /** What this Flow's cloud cannot do yet; the CLI side is ready for when it can. */
 class NotAvailable extends Error {}
 
@@ -274,6 +290,7 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
     return await deploy(ctx, dir, environment, values.version, !values["no-secrets"]);
   } catch (error) {
     if (error instanceof Usage) return fail("usage", error.message, 2);
+    if (error instanceof TooNew) return fail("chinwag_too_new", `Refused: ${error.message}`, 1, error.next);
     if (error instanceof NotAvailable) return fail("not_available", error.message, 1);
     if (error instanceof Refused) return fail(error.code, `Refused: ${error.message}`, 1);
     return fail("network", `Could not reach ${cloud}: ${(error as Error).message}`, 1);
@@ -296,6 +313,7 @@ async function deploy(ctx: Ctx, dir: string, env: string, version: string | unde
   for (const file of ["package.json", "package-lock.json", "src/agent.ts"]) {
     if (!existsSync(join(dir, file))) throw new Usage(`${join(dir, file)} is missing: deploy the agent's folder (npm install makes package-lock.json).`);
   }
+  await frameworkFits(ctx, dir, env);
   if (version === undefined) {
     version = gitVersion(dir);
     if (version?.endsWith("+dirty")) console.error("Warning: deploying uncommitted changes; commit first so the version names what runs.");
@@ -320,6 +338,72 @@ async function deploy(ctx: Ctx, dir: string, env: string, version: string | unde
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+/** The framework packages hosting loads, in its order (hosting's runtime/load.ts). */
+const FRAMEWORKS = ["@flow-engineer/flow", "chinwag"] as const;
+
+/**
+ * The Flow Framework the build will install: the package the agent's package.json depends on (else
+ * the first in its lock), at the version its package-lock.json pins. Undefined when the lock does
+ * not say.
+ */
+export function lockedFramework(dir: string): { package: string; version: string } | undefined {
+  const read = (file: string): Record<string, unknown> => {
+    try {
+      const value = JSON.parse(readFileSync(join(dir, file), "utf8"));
+      return value && typeof value === "object" ? value : {};
+    } catch {
+      return {};
+    }
+  };
+  const declared = (read("package.json").dependencies ?? {}) as Record<string, unknown>;
+  const lock = read("package-lock.json") as { packages?: Record<string, { version?: unknown }>; dependencies?: Record<string, { version?: unknown }> };
+  const locked = (name: string) => {
+    const v = lock.packages?.[`node_modules/${name}`]?.version ?? lock.dependencies?.[name]?.version;
+    return typeof v === "string" && /^\d+\.\d+/.test(v) ? v : undefined;
+  };
+  const order = [...FRAMEWORKS.filter((n) => n in declared), ...FRAMEWORKS.filter((n) => !(n in declared))];
+  for (const name of order) {
+    const version = locked(name);
+    if (version) return { package: name, version };
+    if (name in declared) return undefined;
+  }
+  return undefined;
+}
+
+/** A version's release line as numbers: "0.4.11" → [0, 4]. */
+const releaseLine = (v: string) => v.split(/[.-]/).slice(0, 2).map((n) => Number.parseInt(n, 10) || 0);
+
+/** Whether `a` is on a newer release line (major.minor) than `than`, as hosting's lint decides (0.5.0 against 0.4.11, not 0.4.12). */
+export function newerLine(a: string, than: string): boolean {
+  const [a0, a1] = releaseLine(a);
+  const [b0, b1] = releaseLine(than);
+  return a0! !== b0! ? a0! > b0! : a1! > b1!;
+}
+
+/**
+ * Refuses, before anything is packed or sent, an agent whose locked Flow Framework is on a newer
+ * release line than the one hosting runs. Only when both versions are known: a cloud without
+ * GET /v1/hosting/framework, an answer without a version, or any failure to ask, deploys as before
+ * (the build's lint still refuses it).
+ */
+async function frameworkFits(ctx: Ctx, dir: string, env: string): Promise<void> {
+  const agent = lockedFramework(dir);
+  if (!agent) return;
+  let hosted: unknown;
+  try {
+    hosted = (await ctx.api<{ framework?: { version?: unknown } }>("GET", "/v1/hosting/framework")).framework?.version;
+  } catch {
+    return;
+  }
+  if (typeof hosted !== "string" || !/^\d+\.\d+/.test(hosted)) return;
+  if (!newerLine(agent.version, hosted)) return;
+  const line = releaseLine(hosted).join(".");
+  throw new TooNew(
+    `The agent's package-lock.json pins ${agent.package} ${agent.version}; Flow hosts Flow Framework ${line}.x (${hosted}) today, so ${env} would refuse it after the upload. Nothing was sent.`,
+    `npm install @flow-engineer/flow@${hosted}, then ${RUN} deploy${env === "production" ? " --env production" : ""} (or deploy again once Flow updates)`,
+  );
 }
 
 /**

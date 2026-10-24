@@ -4,16 +4,14 @@
 // stream: an outbound connection, so no public URL or tunnel. It listens on PORT, else 8788 or the
 // next free port above it.
 
-import { readFileSync } from "node:fs";
 import { choosePort, markRunning } from "../../../src/index.ts";
 import { flowMessaging } from "../../../flow-messaging/src/index.ts";
 import { simulators } from "../../../simulators/src/index.ts";
 import { buildAgent } from "./agent.ts";
 import { channelNames } from "./channels.ts";
+import { displayName } from "./name.ts";
 
-// What people call it: package.json's displayName (`npx @flow-engineer/flow link --display-name <name>` changes it).
-const { displayName: name = "your agent" } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { displayName?: string };
-const play = simulators({ title: `${name} · Bean & Leaf` });
+const play = simulators({ title: displayName });
 const fm = process.env.FLOW_MESSAGING_KEY ? flowMessaging() : undefined;
 // Telegram, plus WhatsApp and iMessage when .env names their senders.
 const channels = fm ? fm.channels() : [];
@@ -36,7 +34,7 @@ try {
 const port = Number(new URL(url).port);
 // `npx @flow-engineer/flow link` reads it (.flow/running.json) to say whether to start or restart this.
 markRunning(url);
-console.log(`${name}'s playground: ${url}/`);
+console.log(`${displayName}'s playground: ${url}/`);
 console.log(`Every channel side by side: ${url}/person`);
 if (fm) {
   // Events sent while it was not running come when it starts again (.flow/ keeps the last one handled).

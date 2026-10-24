@@ -1,18 +1,24 @@
-// covers: cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/agent.ts src/channels.ts
+// covers: cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/skills.ts src/agent.ts src/channels.ts
 import assert from "node:assert/strict";
-import { mkdtempSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { createServer, type RequestListener, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { after, test } from "node:test";
 import { z } from "zod";
-import { defineCli, runCli, type CliConfig, type CliIO } from "../cli/src/index.ts";
+import { buildCommand } from "@stricli/core";
+import { cliProblems, defineCli, runCli, type CliConfig, type CliIO } from "../cli/src/index.ts";
+import { signOut, storedProvider } from "../cli/src/auth.ts";
 import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
 import { scriptedModel, respond, call } from "./helpers.ts";
 import { createAgent, tool } from "../src/index.ts";
 
 const servers: Server[] = [];
+const testDirectory = mkdtempSync(join(tmpdir(), "flow-cli-tests-"));
 after(() => servers.forEach((s) => s.close()));
+after(() => rmSync(testDirectory, { recursive: true, force: true }));
 
 async function listen(handler: RequestListener): Promise<string> {
   const http = createServer(handler);
@@ -47,7 +53,7 @@ const orders = [
 const listOrders = tool({
   name: "list_orders",
   description: "Their orders.",
-  input: z.object({ status: z.enum(["ready", "making"]).optional(), limit: z.number().int().optional() }),
+  input: z.object({ status: z.enum(["ready", "making"]).optional(), limit: z.number().int().max(50).optional() }),
   output: z.object({ orders: z.array(z.object({ order_id: z.string(), status: z.string(), total: z.number(), items: z.array(z.string()) })) }),
   signIn: "none",
   hints: { readOnly: true },
@@ -60,6 +66,7 @@ const cancelOrder = tool({ name: "cancel_order", description: "Cancel an order."
 const acme = (server: string): CliConfig =>
   defineCli({
     name: "acme",
+    directory: mkdtempSync(join(testDirectory, "cli-")),
     server,
     commands: {
       "order list": { tool: "list_orders", columns: ["order_id", "status", "total"], alias: "orders" },
@@ -95,6 +102,386 @@ test("a group's help lists its subcommands, and the top level lists groups and c
   assert.doesNotMatch(top.out.slice(top.out.indexOf("COMMANDS")), /\n {2}(list|view) /, "subcommands are not listed at the top");
 });
 
+// The old skill smoke test checked only exit status; it cannot protect selective discovery or multi-skill reads.
+test("skill lists summaries and reads only selected skills, including the generated CLI guide", async () => {
+  const events: any[] = [];
+  let connections = 0;
+  const files = {
+    "AGENTS.md": "Private agent instructions",
+    "skills/booking/SKILL.md": "---\nname: booking\ndescription: Move a booking\n---\nOffer three slots.",
+    "skills/refunds/SKILL.md": "---\nname: refunds\ndescription: Handle a refund\n---\nCheck the refund policy first.",
+  };
+  const handle = mcpServer({ name: "acme", version: "1", tools: [listOrders], files, events: [event => { events.push(event); }] });
+  const server = `${await listen((req, res) => {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => { if (body && JSON.parse(body).method === "initialize") connections++; });
+    void handle.node(req, res);
+  })}/mcp`;
+  const cli = acme(server);
+  cli.commands = {
+    ...cli.commands,
+    "report local": { command: buildCommand({ docs: { brief: "A handwritten report" }, parameters: {}, func() {} }) },
+  };
+  const listed = io();
+  assert.equal(await runCli(cli, ["skill", "list", "--json"], listed.channel), 0);
+  assert.deepEqual(JSON.parse(listed.out), [
+    { name: "acme-cli", description: "How to use the acme command line" },
+    { name: "booking", description: "Move a booking" },
+    { name: "refunds", description: "Handle a refund" },
+  ]);
+  assert.equal(events.filter(e => e.type === "tool.start").length, 0, "listing never reads skill bodies");
+  const defaults = io();
+  assert.equal(await runCli(cli, ["skill"], defaults.channel), 0);
+  assert.match(defaults.out, /booking +Move a booking/);
+  assert.doesNotMatch(defaults.out, /Offer three slots|JSON output schema|order list|Private agent instructions/);
+  const got = io();
+  connections = 0;
+  assert.equal(await runCli(cli, ["skill", "get", "booking", "refunds", "--json"], got.channel), 0);
+  assert.equal(connections, 1, "batch reads share one MCP connection");
+  const records = JSON.parse(got.out);
+  assert.deepEqual(records.map((s: any) => s.name), ["booking", "refunds"]);
+  assert.match(records[0].content, /name: booking[\s\S]*Offer three slots/);
+  assert.match(records[1].content, /Check the refund policy first/);
+  assert.doesNotMatch(got.out, /Private agent instructions|JSON output schema/);
+  assert.deepEqual(events.filter(e => e.type === "tool.start").map(e => e.input.name).sort(), ["booking", "refunds"]);
+  const guide = io();
+  assert.equal(await runCli(cli, ["skill", "get", "acme-cli"], guide.channel), 0);
+  assert.match(guide.out, /name: acme-cli/);
+  assert.match(guide.out, /### acme report local[\s\S]*A handwritten report/);
+  assert.match(guide.out, /acme report local --help/);
+  assert.match(guide.out, /MCP tool: `list_orders`/);
+  assert.equal(events.filter(e => e.type === "tool.start").length, 2, "the generated guide is local");
+  const plain = io();
+  assert.equal(await runCli(cli, ["skill", "get", "refunds", "booking"], plain.channel), 0);
+  assert.match(plain.out, /# Skill: refunds[\s\S]*Check the refund policy first[\s\S]*# Skill: booking[\s\S]*Offer three slots/);
+  const before = events.filter(e => e.type === "tool.start").length;
+  for (const args of [["get"], ["list", "booking"], ["unknown"], ["get", "booking", "missing"]]) {
+    assert.equal(await runCli(cli, ["skill", ...args], io().channel), 2);
+  }
+  assert.equal(events.filter(e => e.type === "tool.start").length, before, "an invalid batch is refused before reading any body");
+  const folder = mkdtempSync(join(testDirectory, "skills-export-"));
+  assert.equal(await runCli(cli, ["skill", "get", "booking", "refunds", "--write", folder], io().channel), 0);
+  assert.deepEqual(readdirSync(folder).sort(), ["booking", "refunds"]);
+  assert.equal(readFileSync(join(folder, "booking", "SKILL.md"), "utf8"), records[0].content);
+  assert.equal(readFileSync(join(folder, "refunds", "SKILL.md"), "utf8"), records[1].content);
+  assert.equal(await runCli(cli, ["skill", "--write", folder], io().channel), 0);
+  assert.match(readFileSync(join(folder, "acme-cli", "SKILL.md"), "utf8"), /### acme order list/);
+});
+
+// New clients must still discover names on older servers, preserve authored overrides, and prevent remote names escaping export folders.
+test("skill supports legacy MCP discovery and authored overrides while refusing unsafe export names", async () => {
+  const cli = acme(await serve({ tools: [], files: {
+    "skills/guide/SKILL.md": "---\nname: acme-cli\ndescription: Our own CLI guide\n---\nUse our custom workflow.",
+    "skills/unsafe/SKILL.md": "---\nname: ../outside\ndescription: Unsafe folder name\n---\nInstructions.",
+  }, descriptor: (_tool, descriptor) => {
+    const _meta = { ...descriptor._meta };
+    delete _meta["flow.engineer/skills"];
+    return { ...descriptor, _meta };
+  } }));
+  const listed = io();
+  assert.equal(await runCli(cli, ["skill", "list", "--json"], listed.channel), 0);
+  assert.deepEqual(JSON.parse(listed.out), [{ name: "../outside", description: "" }, { name: "acme-cli", description: "" }]);
+  const read = io();
+  assert.equal(await runCli(cli, ["skill", "get", "acme-cli"], read.channel), 0);
+  assert.match(read.out, /Use our custom workflow/);
+  assert.doesNotMatch(read.out, /## Commands/);
+  const folder = mkdtempSync(join(testDirectory, "skills-safe-"));
+  const error = io();
+  assert.equal(await runCli(cli, ["skill", "get", "acme-cli", "../outside", "--write", folder], error.channel), 2);
+  assert.match(error.err, /single folder name/);
+  assert.deepEqual(readdirSync(folder), [], "the whole export is validated before any files are written");
+  assert.equal(await runCli(cli, ["skill", "--write", folder], io().channel), 0, "legacy export remains the generated guide");
+  assert.match(readFileSync(join(folder, "acme-cli", "SKILL.md"), "utf8"), /## Commands/);
+});
+
+// A fresh skill may be absent from the cached catalog even when its get invocation parses correctly.
+test("skill get refreshes an unknown cached name before reading it", async () => {
+  let handle = mcpServer({ name: "acme", version: "1", tools: [], files: { "skills/old/SKILL.md": "---\nname: old\ndescription: Old\n---\nOld instructions." } });
+  const server = `${await listen((req, res) => void handle.node(req, res))}/mcp`;
+  const cli = acme(server);
+  assert.equal(await runCli(cli, ["skill", "list"], io().channel), 0);
+  handle = mcpServer({ name: "acme", version: "1", tools: [], files: { "skills/new/SKILL.md": "---\nname: new\ndescription: New\n---\nNew instructions." } });
+  const got = io();
+  assert.equal(await runCli(cli, ["skill", "get", "new"], got.channel), 0);
+  assert.match(got.out, /New instructions/);
+});
+
+// Existing command tests check output, but cannot detect extra connections or tools/list requests.
+test("discovery survives invocations: cached help, tools and dry runs stay offline; calls connect without listing again", async () => {
+  let requests = 0, lists = 0;
+  const handle = mcpServer({ name: "acme", version: "1", tools: [listOrders, cancelOrder] });
+  const server = `${await listen((req, res) => {
+    requests++;
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => { if (body && JSON.parse(body).method === "tools/list") lists++; });
+    void handle.node(req, res);
+  })}/mcp`;
+  const base = acme(server);
+  const cli = { ...base, directory: mkdtempSync(join(testDirectory, "flow-cli-discovery-")), commands: {
+    ...base.commands,
+    local: { command: buildCommand({ docs: { brief: "Local output" }, parameters: {}, func() {} }) },
+    proxy: { command: buildCommand({ docs: { brief: "Custom tool call" }, parameters: {}, async func(this: import("../cli/src/commands.ts").CliContext) { this.cli.print(await this.cli.call("list_orders", {}), { json: true }); } }) },
+  } };
+  assert.equal(await runCli(cli, ["--help"], io().channel), 0);
+  assert.equal(lists, 1);
+  const before = requests;
+  for (const argv of [["--help"], ["order"], ["order", "list", "--help"], ["tools", "--json"], ["skill"], ["local"], ["proxy", "--help"], ["cancel-order", "--order-id", "1", "--dry-run"]]) {
+    assert.equal(await runCli({ ...cli }, argv, io().channel), 0);
+  }
+  assert.equal(requests, before, "a fresh disk cache needs no MCP connection");
+  const result = io();
+  assert.equal(await runCli(cli, ["order", "list", "--json"], result.channel), 0);
+  assert.deepEqual(JSON.parse(result.out), { orders });
+  assert.ok(requests > before, "executing a tool still connects");
+  assert.equal(lists, 1, "execution reuses discovery");
+  const custom = io();
+  assert.equal(await runCli(cli, ["proxy"], custom.channel), 0);
+  assert.deepEqual(JSON.parse(custom.out), { orders });
+  assert.equal(lists, 1, "custom commands also connect lazily without discovery");
+  const http = servers.at(-1)!;
+  await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve()));
+  const offline = io();
+  assert.equal(await runCli(cli, ["order", "list", "-h"], offline.channel), 0);
+  assert.match(offline.out, /--status/);
+  assert.equal(await runCli(cli, ["order", "list"], io().channel), 5, "cached tools do not mask a connection failure");
+});
+
+// No existing test exercises discovery freshness, malformed disk state or optional persistence.
+test("old discovery is used immediately and refreshed in the background; bypass, corruption and disabled persistence fetch directly", async () => {
+  let lists = 0, unavailable = false;
+  const handle = mcpServer({ name: "acme", version: "1", tools: [listOrders] });
+  const server = `${await listen((req, res) => {
+    if (unavailable) { res.writeHead(503).end(); return; }
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => { if (body && JSON.parse(body).method === "tools/list") lists++; });
+    void handle.node(req, res);
+  })}/mcp`;
+  const cli = { ...acme(server), directory: mkdtempSync(join(testDirectory, "flow-cli-discovery-")) };
+  const background: Array<() => Promise<void>> = [];
+  const run = (config: CliConfig = cli, argv = ["tools", "--json"]) => runCli(config, argv, { ...io().channel, background: work => { background.push(work); } });
+  assert.equal(await run(), 0);
+  const file = join(cli.directory, "discovery", readdirSync(join(cli.directory, "discovery"))[0]!);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  const saved = JSON.parse(readFileSync(file, "utf8"));
+  assert.deepEqual(saved.server, { name: "acme", version: "1" });
+  writeFileSync(file, JSON.stringify({ ...saved, at: Date.now() - 5 * 60_000 }));
+  assert.equal(await run(), 0);
+  assert.equal(lists, 1, "old descriptors render immediately without waiting for discovery");
+  assert.equal(background.length, 1);
+  assert.equal(await run(), 0);
+  assert.equal(background.length, 1, "concurrent commands share one refresh lease");
+  await background.shift()!();
+  assert.equal(lists, 2);
+  assert.equal(await run(cli, ["tools", "--refresh-tools", "--json"]), 0);
+  assert.equal(lists, 3);
+  writeFileSync(file, "invalid json");
+  assert.equal(await run(), 0);
+  assert.equal(lists, 4);
+  assert.equal(await run({ ...cli, discoveryCache: { maxAgeMs: 0 } }), 0);
+  assert.equal(lists, 4);
+  await background.shift()!();
+  assert.equal(lists, 5);
+  assert.equal(await run({ ...cli, discoveryCache: false }), 0);
+  assert.equal(await run({ ...cli, discoveryCache: false }), 0);
+  assert.equal(lists, 7);
+  assert.equal(await run({ ...cli, directory: file }), 0, "a config path that cannot be written does not break discovery");
+  assert.equal(lists, 8);
+  const latest = JSON.parse(readFileSync(file, "utf8"));
+  writeFileSync(file, JSON.stringify({ ...latest, at: Date.now() - 5 * 60_000, checkedAt: undefined }));
+  unavailable = true;
+  const offline = io();
+  assert.equal(await runCli(cli, ["tools", "--json"], { ...offline.channel, background: work => { background.push(work); } }), 0);
+  await background.shift()!();
+  assert.equal(offline.err, "", "background failure does not pollute foreground output");
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")).tools, latest.tools, "the last usable definitions survive refresh failure");
+  assert.equal(await run(), 0);
+  assert.equal(background.length, 0, "an unavailable server does not cause a refresh process on every command");
+});
+
+// Cache-hit tests do not exercise recovery before execution when a deployment changes flags or names.
+test("cached parser failures refresh once and run the updated command exactly once", async () => {
+  let calls = 0, lists = 0;
+  let handle = mcpServer({ name: "acme", version: "1", tools: [listOrders] });
+  const server = `${await listen((req, res) => {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => { if (body && JSON.parse(body).method === "tools/list") lists++; });
+    void handle.node(req, res);
+  })}/mcp`;
+  const cli = { ...acme(server), directory: mkdtempSync(join(testDirectory, "flow-cli-recovery-")) };
+  assert.equal(await runCli(cli, ["--help"], io().channel), 0);
+  const updated = tool({ name: "list_orders", description: "Updated orders", input: z.object({ state: z.enum(["done"]) }), signIn: "none", hints: { readOnly: true }, run: input => { calls++; return input; } });
+  // Deliberately keep the version unchanged: parser recovery must not depend on a version bump.
+  handle = mcpServer({ name: "acme", version: "1", tools: [updated] });
+  const output = io();
+  assert.equal(await runCli(cli, ["order", "list", "--state", "done", "--json"], output.channel), 0);
+  assert.deepEqual(JSON.parse(output.out), { state: "done" });
+  assert.equal(output.err, "", "the stale parser's error is never printed");
+  assert.equal(calls, 1);
+  assert.equal(lists, 2);
+  const newTool = tool({ name: "new_tool", description: "New command", input: z.object({}), signIn: "none", hints: { readOnly: true }, run: () => { calls++; return "new"; } });
+  handle = mcpServer({ name: "acme", version: "1", tools: [updated, newTool] });
+  assert.equal(await runCli(cli, ["new-tool"], io().channel), 0);
+  assert.equal(calls, 2);
+  assert.equal(lists, 3);
+  assert.equal(await runCli(cli, ["typo"], io().channel), 2);
+  assert.equal(lists, 4, "a genuine typo refreshes only once");
+  assert.equal(calls, 2);
+});
+
+// A version change can make a previously read-only command destructive; parsing recovery alone cannot protect it.
+test("a changed MCP version refreshes approval flags before any tool call", async () => {
+  let calls = 0;
+  let handle = mcpServer({ name: "acme", version: "1", tools: [getOrder] });
+  const server = `${await listen((req, res) => void handle.node(req, res))}/mcp`;
+  const cli = { ...acme(server), directory: mkdtempSync(join(testDirectory, "flow-cli-version-")) };
+  assert.equal(await runCli(cli, ["--help"], io().channel), 0);
+  handle = mcpServer({ name: "acme", version: "2", tools: [{ ...getOrder, hints: { destructive: true }, run: () => { calls++; return "changed"; } }] });
+  const denied = io();
+  assert.equal(await runCli(cli, ["order", "view", "123"], denied.channel), 4);
+  assert.match(denied.err, /--yes/);
+  assert.equal(calls, 0);
+  assert.equal(await runCli(cli, ["order", "view", "123", "--yes"], io().channel), 0);
+  assert.equal(calls, 1);
+});
+
+// The server can reject arguments after a successful local parse; that must refresh definitions without replaying the request.
+test("server argument errors refresh the cache but never resubmit a tool request", async () => {
+  let requests = 0, calls = 0;
+  let handle = mcpServer({ name: "acme", version: "1", tools: [getOrder] });
+  const server = `${await listen((req, res) => {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => { if (body && JSON.parse(body).method === "tools/call") requests++; });
+    void handle.node(req, res);
+  })}/mcp`;
+  const cli = { ...acme(server), directory: mkdtempSync(join(testDirectory, "flow-cli-rejected-")) };
+  assert.equal(await runCli(cli, ["--help"], io().channel), 0);
+  const updated = { ...getOrder, input: z.object({ order_id: z.string(), region: z.string() }), run: () => { calls++; return "ok"; } };
+  handle = mcpServer({ name: "acme", version: "1", tools: [updated] });
+  const rejected = io();
+  assert.equal(await runCli(cli, ["order", "view", "123"], rejected.channel), 2);
+  assert.match(rejected.err, /--region/);
+  assert.equal(requests, 1);
+  assert.equal(calls, 0);
+  const help = io();
+  assert.equal(await runCli(cli, ["order", "view", "--help"], help.channel), 0);
+  assert.match(help.out, /--region/);
+  assert.equal(await runCli(cli, ["order", "view", "123", "--region", "west"], io().channel), 0);
+  assert.equal(requests, 2);
+  assert.equal(calls, 1);
+});
+
+// Generated commands and cached discovery must not replace, block or replay a team's handwritten commands.
+test("custom commands work without discovery, override derived names and are never replayed on MCP errors", async () => {
+  let localRuns = 0, customRuns = 0, requests = 0, localFlag = false;
+  const cli: CliConfig = { name: "acme", server: "http://127.0.0.1:1/mcp", directory: mkdtempSync(join(testDirectory, "flow-cli-custom-")), commands: {
+    "list-orders": { command: buildCommand<{ "refresh-tools"?: boolean }>({ docs: { brief: "Local command" }, parameters: { flags: { "refresh-tools": { kind: "boolean", brief: "A local flag", optional: true } } }, func(flags) { localRuns++; localFlag = Boolean(flags["refresh-tools"]); } }) },
+    "report show": { command: buildCommand({ docs: { brief: "Local report" }, parameters: {}, func() {} }) },
+    proxy: { command: buildCommand({ docs: { brief: "Custom tool call" }, parameters: {}, async func(this: import("../cli/src/commands.ts").CliContext) { customRuns++; await this.cli.call("get_order", {}); } }) },
+  } };
+  assert.equal(await runCli(cli, ["list-orders"], io().channel), 0, "an unreachable MCP server cannot block a local command");
+  assert.equal(await runCli(cli, ["list-orders", "--help"], io().channel), 0);
+  assert.equal(await runCli(cli, ["list-orders", "--unknown"], io().channel), 2);
+  const group = io();
+  assert.equal(await runCli(cli, ["report", "--help"], group.channel), 0);
+  assert.match(group.out, /Local report/);
+  assert.equal(localRuns, 1);
+  assert.equal(await runCli(cli, ["list-orders", "--refresh-tools"], io().channel), 0, "a custom command can own its flags");
+  assert.equal(localFlag, true);
+  const handle = mcpServer({ name: "acme", version: "1", tools: [listOrders, getOrder] });
+  cli.server = `${await listen((req, res) => {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => { if (body && JSON.parse(body).method === "tools/call") requests++; });
+    void handle.node(req, res);
+  })}/mcp`;
+  assert.equal(await runCli(cli, ["tools"], io().channel), 0);
+  assert.deepEqual(cliProblems(cli, [{ name: "list_orders", inputSchema: {} }]).errors, [], "custom overrides also pass flow check");
+  const help = io();
+  assert.equal(await runCli(cli, ["--help"], help.channel), 0);
+  assert.match(help.out, /list-orders +Local command/);
+  assert.equal(await runCli(cli, ["list-orders"], io().channel), 0);
+  assert.equal(localRuns, 3);
+  assert.equal(await runCli(cli, ["proxy"], io().channel), 2);
+  assert.equal(customRuns, 1);
+  assert.equal(requests, 1);
+});
+
+// An in-process scheduled promise cannot prove refresh survives bins that call process.exit().
+test("detached discovery finishes after the CLI exits and refreshes tools even without a server version bump", async t => {
+  let release!: () => void, arrived!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const started = new Promise<void>(resolve => { arrived = resolve; });
+  let hold = false;
+  let handle = mcpServer({ name: "acme", version: "1", tools: [listOrders] });
+  const server = `${await listen((req, res) => {
+    if (hold) { arrived(); void gate.then(() => handle.node(req, res)); }
+    else void handle.node(req, res);
+  })}/mcp`;
+  t.after(release);
+  const cli = { ...acme(server), directory: mkdtempSync(join(testDirectory, "flow-cli-detached-")) };
+  assert.equal(await runCli(cli, ["--help"], io().channel), 0);
+  const dir = join(cli.directory, "discovery");
+  const file = join(dir, readdirSync(dir)[0]!);
+  const saved = JSON.parse(readFileSync(file, "utf8"));
+  writeFileSync(file, JSON.stringify({ ...saved, at: Date.now() - 5 * 60_000 }));
+  handle = mcpServer({ name: "acme", version: "1", tools: [listOrders, getOrder] });
+  hold = true;
+  const updated = new Promise<void>(resolve => {
+    const watcher = watch(dir, () => {
+      try { if (JSON.parse(readFileSync(file, "utf8")).tools.length === 2) { watcher.close(); resolve(); } } catch {}
+    });
+    t.after(() => watcher.close());
+  });
+  const source = `import { runCli } from ${JSON.stringify(pathToFileURL(join(import.meta.dirname, "../cli/src/run.ts")).href)}; process.exit(await runCli(${JSON.stringify(cli)}, ["--help"]));`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", source], { stdio: "ignore" });
+  const exit = new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("exit", resolve); });
+  assert.equal(await exit, 0, "cached help exits while the MCP server is still gated");
+  await started;
+  release();
+  await updated;
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).tools.length, 2);
+});
+
+// Shared-directory tests above use one server and identity; they cannot catch cross-credential reuse.
+test("discovery is isolated by server, credentials and client version, without storing tokens", async () => {
+  let lists = 0;
+  const handle = mcpServer({ name: "acme", version: "1", tools: [listOrders] });
+  const listener: RequestListener = (req, res) => {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => { if (body && JSON.parse(body).method === "tools/list") lists++; });
+    void handle.node(req, res);
+  };
+  const server = `${await listen(listener)}/mcp`;
+  const cli = { ...acme(server), directory: mkdtempSync(join(testDirectory, "flow-cli-discovery-")) };
+  const run = (args: string[] = [], config: CliConfig = cli) => runCli(config, ["tools", ...args], io().channel);
+  assert.equal(await run(), 0);
+  assert.equal(await run(["--token", "secret-one"]), 0);
+  assert.equal(await run(["--token", "secret-two"]), 0);
+  assert.equal(lists, 3);
+  assert.equal(await run(["--token", "secret-one"]), 0);
+  assert.equal(lists, 3);
+  assert.equal(await run([], { ...cli, version: "2" }), 0);
+  assert.equal(await run(["--server", `${await listen(listener)}/mcp`]), 0);
+  assert.equal(lists, 5);
+  await storedProvider(cli, server).saveTokens({ access_token: "oauth-secret-one", token_type: "Bearer" });
+  assert.equal(await run(), 0);
+  await storedProvider(cli, server).saveTokens({ access_token: "oauth-secret-two", token_type: "Bearer" });
+  assert.equal(await run(), 0);
+  assert.equal(lists, 7, "a different OAuth credential cannot reuse discovery");
+  signOut(cli, server);
+  assert.equal(await run(), 0);
+  assert.equal(lists, 7, "signing out returns to the anonymous discovery cache");
+  const cache = join(cli.directory, "discovery");
+  assert.equal(readdirSync(cache).length, 7);
+  for (const file of readdirSync(cache)) assert.doesNotMatch(file + readFileSync(join(cache, file), "utf8"), /secret-one|secret-two/);
+});
+
 test("a write shows its call with --dry-run, and one that may delete needs --yes without a terminal", async () => {
   cancelled = [];
   const cli = acme(await serve({ tools: [listOrders, getOrder, cancelOrder] }));
@@ -113,7 +500,7 @@ test("a write shows its call with --dry-run, and one that may delete needs --yes
   assert.deepEqual(cancelled, ["BL-1042"]);
 });
 
-test("wrong arguments exit 2 with what is wrong and the help to read, before anything is sent", async () => {
+test("wrong arguments exit 2 with what is wrong and the help to read, also when the server's schema refuses them", async () => {
   const cli = acme(await serve({ tools: [listOrders, getOrder, cancelOrder] }));
   const unknown = io();
   assert.equal(await runCli(cli, ["order", "list", "--colour", "red"], unknown.channel), 2);
@@ -124,6 +511,11 @@ test("wrong arguments exit 2 with what is wrong and the help to read, before any
   assert.match(missing.err, /order_id/);
   const badEnum = io();
   assert.equal(await runCli(cli, ["orders", "--status", "lost"], badEnum.channel), 2);
+  const tooMany = io();
+  assert.equal(await runCli(cli, ["order", "list", "--limit", "500"], tooMany.channel), 2);
+  assert.match(tooMany.err, /^--limit: .*50/m);
+  assert.match(tooMany.err, /Run `acme order list --help`/);
+  assert.doesNotMatch(tooMany.err, /ProtocolError|\n\s+at /);
   const typo = io();
   assert.equal(await runCli(cli, ["ordr"], typo.channel), 2);
   assert.match(typo.err, /did you mean `order`/);
@@ -240,6 +632,10 @@ test("human chat distinguishes input, waiting and agent replies", async (t) => {
   const old = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "chinwag-chat-presentation-"));
   t.after(() => { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; });
+  // styleText colours by process.stdout and the environment, not the io the CLI is given; FORCE_COLOR=0 keeps this plain in any terminal.
+  const oldColor = process.env.FORCE_COLOR;
+  process.env.FORCE_COLOR = "0";
+  t.after(() => { if (oldColor === undefined) delete process.env.FORCE_COLOR; else process.env.FORCE_COLOR = oldColor; });
   let received!: () => void, release!: () => void;
   const requested = new Promise<void>(resolve => { received = resolve; });
   const response = new Promise<void>(resolve => { release = resolve; });
