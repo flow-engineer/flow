@@ -195,16 +195,24 @@ for (const backend of backends) {
     assert.deepEqual((await after.records.query("notes")).map((e) => e.id), ["a-number"], "a value the new declaration refuses is kept, left out of the index");
   });
 
-  test(`${backend.name}: an agent started with an older declaration on the same store never takes away what a newer one indexed`, async () => {
+  test(`${backend.name}: an agent started with an older declaration on the same store keeps a newer one's person fields indexed, in what it puts too`, async () => {
     const id = `agt_${randomUUID().slice(0, 8)}/production`;
     const build = (records: Record<string, { people?: string[]; fields?: string[] }>) => createAgent({ files: { "AGENTS.md": "Test." }, model: noModel, records, scheduleCheckMs: 0, store: backend.store(id) });
-    const older = { notes: { fields: ["status"] } };
-    await build(older).records.put("notes", "n1", { about: "phone:+15550100001", status: "open" });
     const newer = build({ notes: { people: ["about"], fields: ["status"] } });
-    assert.equal((await newer.records.query("notes", { about: "phone:+15550100001" })).length, 1);
-    await build(older).records.get("notes", "n1"); // the old revision starts again (a deploy's overlap, a stale checkout)
-    assert.deepEqual((await newer.records.query("notes", { about: "phone:+15550100001" })).map((e) => e.id), ["n1"]);
-    assert.equal(await newer.records.forgetPerson("phone:+15550100001"), 1);
+    await newer.records.put("notes", "n1", { about: "phone:+15550100001", status: "open" });
+    const older = build({ notes: { fields: ["status"] } }); // a deploy's old revision, a stale checkout
+    await older.records.put("notes", "n2", { about: "phone:+15550100001", status: "open" });
+    await older.records.put("notes", "n1", { about: "phone:+15550100001", status: "answered" });
+    assert.deepEqual((await newer.records.query("notes", { about: "phone:+15550100001" })).map((e) => e.id), ["n1", "n2"]);
+    assert.equal(await build({ notes: { people: ["about"], fields: ["status"] } }).records.forgetPerson("phone:+15550100001"), 2, "after starting again");
+  });
+
+  test(`${backend.name}: a field moved from people to fields and back is a person field again for the records put meanwhile`, async () => {
+    const id = `agt_${randomUUID().slice(0, 8)}/production`;
+    const build = (records: Record<string, { people?: string[]; fields?: string[] }>) => createAgent({ files: { "AGENTS.md": "Test." }, model: noModel, records, scheduleCheckMs: 0, store: backend.store(id) });
+    await build({ notes: { people: ["about"] } }).records.get("notes", "n0");
+    await build({ notes: { fields: ["about"] } }).records.put("notes", "n1", { about: "phone:+15550100001" });
+    assert.equal(await build({ notes: { people: ["about"] } }).records.forgetPerson("phone:+15550100001"), 1);
   });
 
   test(`${backend.name}: export returns every record of every collection, oldest first, past one page`, async () => {
@@ -290,6 +298,33 @@ test("a tool still running when its person is forgotten keeps no record", async 
   await agent.forgetPerson("c1");
   release.open();
   assert.match(await finished.promise, /^flow: records: not kept: the person was forgotten/);
+  assert.deepEqual(await agent.records.query("questions"), []);
+});
+
+test("forgetting a person waits for a record put under way and deletes what it wrote", async () => {
+  const real = new Store(sqlite(), "default");
+  const inPut = gate();
+  const releasePut = gate();
+  // The store as the agent reaches it, with putRecord held at a gate.
+  const store = new Proxy(real, {
+    get(target, name) {
+      const v = (target as unknown as Record<string | symbol, unknown>)[name];
+      if (name === "putRecord") return async (...args: Parameters<Store["putRecord"]>) => (inPut.open(), await releasePut.promise, target.putRecord(...args));
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
+  const ask = tool({ name: "ask_seller", description: "Relay a question.", input: z.object({}), run: async (_input, context) => (await context.records.put("questions", "q1", { buyer: context.person }), {}) });
+  const h = scriptedModel();
+  const agent = createAgent({ files: { "AGENTS.md": "Test." }, model: h.model, tools: [ask], records: COLLECTIONS, scheduleCheckMs: 0, debounceMs: 0, store });
+  agent.receive("c1", "is the bike still for sale?", () => {});
+  (await h.nextCall(0)).answer(respond(say("I'll ask the seller."), call("ask_seller", {})));
+  await inPut.promise;
+  let forgotten = false;
+  const forgetting = agent.forgetPerson("c1").then(() => { forgotten = true; });
+  await new Promise((resolve) => setImmediate(resolve)); // not a wait for time: forgetting cannot end while the put is held
+  assert.equal(forgotten, false, "forgetting waits for the put");
+  releasePut.open();
+  await forgetting;
   assert.deepEqual(await agent.records.query("questions"), []);
 });
 

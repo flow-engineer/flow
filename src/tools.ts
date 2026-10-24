@@ -34,7 +34,8 @@ export interface ToolContext {
   credentials?: Credentials;
   /**
    * The agent's own records (`createAgent({ records })`): small JSON documents that outlive the
-   * conversation, read and written by any person's turn. The same as `agent.records`.
+   * conversation, read and written by any person's turn: `agent.records`, except that a put after
+   * this conversation's person was forgotten (the tool still running) is refused.
    */
   records: Records;
 }

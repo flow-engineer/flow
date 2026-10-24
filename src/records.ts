@@ -221,10 +221,10 @@ export function checkPage(limit: unknown, after: unknown): { limit: number; afte
 }
 
 /**
- * Indexes the records already kept for each field a collection's declaration adds (to `people` or
- * `fields`) since they were indexed, so query finds them and forgetting a person deletes them; never
- * removes what an earlier declaration indexed. What the agent's start waits for, once the store's
- * tables exist.
+ * Adds each collection's declaration to the fields the store indexes for it, and indexes the
+ * records already kept for the fields they were not indexed for (a field added to `people` or
+ * `fields`), so query finds them and forgetting a person deletes them; never removes what an
+ * earlier declaration indexed. What the agent's start waits for, once the store's tables exist.
  */
 export async function indexDeclared(store: StoreApi, collections: Record<string, RecordCollection> | undefined): Promise<void> {
   for (const [name, { fields, people }] of declareCollections(collections)) {
