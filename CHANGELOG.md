@@ -44,6 +44,15 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   agent's first start and changes no existing row.
 - `list_scheduled` and `cancel_scheduled` see only scheduled messages, never the agent's
   wake-ups; the 10-a-person cap on scheduled messages counts only them.
+- **A tool's own text for people.** `tool({ output, format: (result) => markdown })` makes the
+  result readable where people see it: over MCP the text is the result's `content` (structured
+  content still carries the data), and the CLI prints it by default, rendered at a terminal by
+  `marked-terminal` (new optional peers: `marked@12.0.2`, `marked-terminal@7.3.0`; as written when
+  piped, for `NO_COLOR`, or when they are not installed). `--json`, `--fields` and a
+  CLI file's `columns` or `view` still show the data. `format` runs on the checked output; if it
+  throws, the result goes out as JSON, still a success, and `tool.end` carries `formatError`.
+  Chats are unchanged: the model there still reads the data. `flow check` refuses `format`
+  without `output`.
 
 ### Migration notes
 
@@ -60,6 +69,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `createAgent({ wakeUps: false })`.
 - **`NudgeStatus` has a new value, `cancelled`.** Code that switches on a nudge's status
   exhaustively handles it; it comes only from `agent.cancelNudge`.
+- **To render a tool's `format` in a terminal**, a CLI's package adds `marked@12.0.2` and
+  `marked-terminal@7.3.0`; without them it prints the Markdown as written. Nothing else changes.
 
 ## 0.7.0 (2026-10-24)
 

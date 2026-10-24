@@ -94,7 +94,7 @@ export function toolContext(context: Omit<ToolContext, "credentials">, provider?
   return context;
 }
 
-export interface Tool<Input = any> {
+export interface Tool<Input = any, Output = any> {
   name: string;
   description: string;
   input: z.ZodType<Input>;
@@ -105,7 +105,14 @@ export interface Tool<Input = any> {
   /** A name for people ("Place an order"); derived from `name` when absent. */
   title?: string;
   /** The result's shape. Over MCP the result is checked against it and sent as structured content too. */
-  output?: z.ZodType;
+  output?: z.ZodType<Output>;
+  /**
+   * The result as text for people (Markdown), made from the checked output; needs `output`. Over
+   * MCP it is the result's text and the CLI prints it, while structured content (and --json)
+   * keep the data. Keep the ids a model needs to act on: hosts may show their model only this.
+   * If it throws, the result goes out as JSON, still a success. Chats are not changed by it.
+   */
+  format?: (output: Output) => string;
   /** Short lines a host shows while the tool runs and once it is done (at most 64 characters each). */
   status?: { running?: string; done?: string };
   /**
@@ -138,7 +145,7 @@ export interface ToolHints {
  */
 export const STAND_IN = Symbol("chinwag.standIn");
 
-export function tool<Input>(definition: Tool<Input>): Tool<Input> {
+export function tool<Input, Output = any>(definition: Tool<Input, Output>): Tool<Input, Output> {
   return definition;
 }
 
@@ -153,6 +160,9 @@ export function toSpec(t: Tool): ToolSpec {
   const { $schema: _ignored, ...parameters } = given ?? (z.toJSONSchema(t.input) as Record<string, unknown>);
   return { name: t.name, description: t.description, parameters };
 }
+
+/** Set in an MCP result's _meta when its text is the tool's own `format`, not the JSON of its structured content. */
+export const FORMATTED = "chinwag/formatted";
 
 /** A tool's output as the model reads it. */
 export function render(output: unknown): string {

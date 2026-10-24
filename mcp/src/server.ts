@@ -27,7 +27,7 @@ import { emitter, type EventSink } from "../../src/events.ts";
 import { unavailableRecords, type Records } from "../../src/records.ts";
 import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, SKILLS_META, type AgentFiles } from "../../src/skills.ts";
 import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
-import { render, toolContext, type CredentialProvider, type Tool, type ToolContext } from "../../src/tools.ts";
+import { FORMATTED, render, toolContext, type CredentialProvider, type Tool, type ToolContext } from "../../src/tools.ts";
 import { describe, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
 
 export interface McpAuth {
@@ -170,8 +170,8 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
       }, (ctx.http?.authInfo?.extra?.credentials as CredentialProvider | undefined) ?? options.credentials);
       const started = Date.now();
       emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input: parsed.data, ...detail });
-      const result = await callTool(t, parsed.data, context);
-      emit(context.conversationId, "tool.end", { callId: context.callId, tool: t.name, ms: Date.now() - started, ok: !result.isError, output: result.structuredContent ?? result.content, error: result.isError ? result.content.filter(c => c.type === "text").map(c => c.text).join("\n") : undefined, ...detail });
+      const { result, formatError } = await callTool(t, parsed.data, context);
+      emit(context.conversationId, "tool.end", { callId: context.callId, tool: t.name, ms: Date.now() - started, ok: !result.isError, output: result.structuredContent ?? result.content, error: result.isError ? result.content.filter(c => c.type === "text").map(c => c.text).join("\n") : undefined, formatError, ...detail });
       return result;
     });
     options.extend?.(server);
@@ -288,17 +288,26 @@ function identityOf(authInfo: AuthInfo | undefined): McpIdentity | null {
   return typeof key === "string" ? { key, scopes: authInfo!.scopes } : null;
 }
 
-async function callTool(t: Tool, input: unknown, context: ToolContext): Promise<CallToolResult> {
+async function callTool(t: Tool, input: unknown, context: ToolContext): Promise<{ result: CallToolResult; formatError?: string }> {
   let output: unknown;
   try {
     output = await t.run(input, context);
   } catch (error) {
-    return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] };
+    return { result: { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] } };
   }
-  if (!t.output) return { content: [{ type: "text", text: render(output) }] };
+  if (!t.output) return { result: { content: [{ type: "text", text: render(output) }] } };
   const checked = t.output.safeParse(output);
-  if (!checked.success) return { isError: true, content: [{ type: "text", text: `${t.name} returned a result that does not match its output schema.` }] };
-  return { content: [{ type: "text", text: render(checked.data) }], structuredContent: checked.data as CallToolResult["structuredContent"] };
+  if (!checked.success) return { result: { isError: true, content: [{ type: "text", text: `${t.name} returned a result that does not match its output schema.` }] } };
+  const data = { content: [{ type: "text" as const, text: render(checked.data) }], structuredContent: checked.data as CallToolResult["structuredContent"] };
+  if (!t.format) return { result: data };
+  // The tool has run: a formatter that fails sends the data as JSON, never an error.
+  try {
+    const text: unknown = t.format(checked.data);
+    if (typeof text !== "string") return { result: data, formatError: `format returned ${typeof text}, not text` };
+    return { result: { ...data, content: [{ type: "text", text }], _meta: { [FORMATTED]: true } } };
+  } catch (error) {
+    return { result: data, formatError: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 /** node:http in front of the web-standard handler, streaming the answer (event streams included). */

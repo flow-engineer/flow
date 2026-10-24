@@ -81,6 +81,8 @@
     "@modelcontextprotocol/client": "2.3.1",
     "@modelcontextprotocol/server": "2.3.1",
     "@stricli/core": "1.3.0",
+    "marked": "12.0.2",
+    "marked-terminal": "7.3.0",
     "oidc-provider": "9.12.2"
   },
   "peerDependenciesMeta": {
@@ -95,14 +97,23 @@
     },
     "oidc-provider": {
       "optional": true
+    },
+    "marked": {
+      "optional": true
+    },
+    "marked-terminal": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.3.1",
     "@modelcontextprotocol/server": "2.3.1",
     "@stricli/core": "1.3.0",
+    "@types/marked-terminal": "6.1.1",
     "@types/node": "^26.6.5",
     "@types/oidc-provider": "^9.12.1",
+    "marked": "12.0.2",
+    "marked-terminal": "7.3.0",
     "oidc-provider": "9.12.2",
     "typescript": "^7.0.2"
   }
