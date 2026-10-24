@@ -47,6 +47,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - Store migration 10 adds the tables `records`, `record_index` and `record_collections` (per
   collection, every field declared on the store and the fields its records are indexed for); it runs on the agent's first start, as every
   migration does, and changes no existing table.
+- The `zod` dependency is `^4.6.6` (was `^4.6.5`): zod before 4.6.6 could exhaust memory on an
+  oversized input to a constrained collection (GHSA-mrhx-c7xc-m3w5).
 
 ### Migration notes
 
