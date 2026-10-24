@@ -14,14 +14,17 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   scheduled messages.
   - The model gets `wake_me_up({ note, in_minutes | at, key? })` and `cancel_wake_up({ id })`
     built in, for its own conversation only, and each turn shows it the wake-ups it set there.
+    `createAgent({ wakeUps: false })` takes both tools and that list away; wake-ups set by code
+    still run.
   - From code: `context.wakeUps` in a tool (`add({ note, inMs | at, key?, respectQuietHours? })`,
     `cancel(key)`, `list()`), and `agent.wakeUp({ to, ... })`, `agent.cancelWakeUp(key)`,
     `agent.listWakeUps(to)` elsewhere. One active wake-up per key in a conversation: the same key
     again returns it (`status: "exists"`). `cancel(key)` cancels the active ones with that key in
     every conversation, so the seller's answer cancels the reminder set in the buyer's.
   - It keeps the person's rules: due in their quiet hours it waits for them to end (unless
-    `respectQuietHours: false`), and after their STOP or a pause it does not run (skipped, with
-    why). Past WhatsApp's 24-hour window it still runs, and the agent is told only a template
+    `respectQuietHours: false`). After their STOP or in a pause it still runs, so the agent can do
+    its work (close the question), but its note says so and Flow refuses every send to them in
+    that turn (`Not sent: they texted STOP, ...`), until they write. Past WhatsApp's 24-hour window it still runs, and the agent is told only a template
     reaches them (`send_template`); no fallback template goes by itself. Found late after
     downtime, it runs and says when it was due, where a scheduled message is missed.
   - Limits in `WAKE_UP_LIMITS`: 10 active per person, 10,000 per agent, 90 days ahead, notes of
@@ -30,23 +33,33 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   - `agent.forgetPerson` deletes them. `agent.outbox(id)` has a new `wakeUps` list, and the
     playground's Person tab shows it beside scheduled messages; moving its clock (or a business
     run's `wait` in `flow test`) brings them due.
-- Store migration 11 adds the `wake_key` column to `schedules`, a unique index on active wake-ups'
-  keys per conversation, and an index on each conversation's schedules (every turn now reads its
-  wake-ups). It runs on the agent's first start and changes no existing row.
+- **`agent.cancelNudge(key)` cancels a nudge sent with `at`**, by its idempotency key, while it is
+  still to come: nothing goes, and its state is `cancelled` (a new `NudgeStatus`, also in
+  `spec/nudges.openapi.yaml`). A nudge that is not waiting to go (it went, or had no `at`) keeps
+  its state, which it returns; null for a key no nudge has. A scheduled nudge's schedule now
+  carries its key; one scheduled before 0.8 has none, so it is not found and goes as planned.
+- Store migration 11 adds the `schedule_key` column to `schedules` (a wake-up's key, a scheduled
+  nudge's idempotency key), a unique index on active schedules' keys per conversation, and an
+  index on each conversation's schedules (every turn now reads its wake-ups). It runs on the
+  agent's first start and changes no existing row.
 - `list_scheduled` and `cancel_scheduled` see only scheduled messages, never the agent's
   wake-ups; the 10-a-person cap on scheduled messages counts only them.
 
 ### Migration notes
 
-- **`StoreApi` has two new methods, `addWakeUp` and `cancelWakeUps`.** A store of your own that
+- **`StoreApi` has three new methods, `addWakeUp`, `cancelWakeUps` and `cancelScheduledNudge`,**
+  and `addSchedule` writes the new `key` field. A store of your own that
   forwards each call to a `Store` (as Flow's hosting does) forwards them too. A hosted agent on
   0.8 deploys once Flow's hosting runs 0.8 (until then `flow deploy` refuses it, as for any newer
   line).
-- **`ScheduleRow` has a new field, `wakeKey`, and new values: `mode` `"wake"`, `origin`
+- **`ScheduleRow` has a new field, `key`, and new values: `mode` `"wake"`, `origin`
   `"agent"`.** Code that reads `store.schedules(...)` itself and switches on `mode` or `origin`
   handles them, or leaves out rows with `mode === "wake"`.
 - **Every agent's model is offered two more built-in tools**, `wake_me_up` and `cancel_wake_up`. An
-  agent with a tool of its own by either name renames it.
+  agent with a tool of its own by either name renames it, or turns them off with
+  `createAgent({ wakeUps: false })`.
+- **`NudgeStatus` has a new value, `cancelled`.** Code that switches on a nudge's status
+  exhaustively handles it; it comes only from `agent.cancelNudge`.
 
 ## 0.7.0 (2026-10-24)
 

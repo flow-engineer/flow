@@ -100,6 +100,8 @@ export interface ConversationSettings {
   beforeSend?: BeforeSend;
   /** The declared template Flow Framework sends when no other one fits a closed window (createAgent's fallbackTemplate). */
   fallbackTemplate?: string;
+  /** The model has wake_me_up and cancel_wake_up, and its prompt lists its wake-ups (createAgent's wakeUps). */
+  wakeUps: boolean;
   /** Tag every message with its channel (the agent has several), even for a person on one so far. */
   tagChannels: boolean;
   /** How the channels of a conversation loaded from the store are reached again. */
@@ -332,6 +334,8 @@ export class Conversation {
   private leftOut = 0;
   /** They texted STOP (as of the latest look): what the business starts is dropped, with no model call. */
   private stop: NoContactRow | null = null;
+  /** Their STOP or a pause in force, as of this turn's start: a wake-up's turn sends them nothing. */
+  private block: NoContactRow | null = null;
   /**
    * The lease's epoch this copy was read under: 0 for a conversation new here (no runner held it
    * yet). Another epoch at a claim means another runner worked on it since: this copy is stale.
@@ -380,7 +384,7 @@ export class Conversation {
         agentZone: settings.timeZone,
       }),
       ...noContactTools({ store: settings.store, conversationId: id, now: settings.now, zone: () => this.timeZone, setQuietHours: (q) => this.setQuietHours(q) }),
-      ...wakeUpTools(wakeScope),
+      ...(settings.wakeUps ? wakeUpTools(wakeScope) : []),
     ];
     const fallback = settings.fallbackTemplate;
     const offered = settings.templates.filter((t) => t.name !== fallback);
@@ -418,6 +422,8 @@ export class Conversation {
         header: z.string().optional().describe("The header's {{1}}, when its header is text with a value"),
       }),
       run: async ({ name, body, header }, context) => {
+        const blocked = this.blockedSend();
+        if (blocked) return { error: blocked };
         const template: Template = { name, ...(body?.length ? { body } : {}), ...(header ? { header: { kind: "text", text: header } } : {}) };
         const declared = declaredTemplate(this.settings.templates, template);
         let reads = "";
@@ -1079,13 +1085,15 @@ export class Conversation {
     if (!this.pending.length && !this.notes.length) return false;
     const items: Array<{ inbox?: number }> = [];
     for (const note of this.notes.splice(0)) {
-      if (note.owed && this.stop) {
+      if (note.owed && this.stop && note.owed.mode !== "wake") {
         // They texted STOP: what the business started never reaches the model.
         this.settle(note.owed, "dropped", `no-contact rule ${this.stop.id}: ${this.stop.rule}`);
         items.push(note);
         continue;
       }
-      this.history.push({ role: "user", content: note.text, ...(note.reset ? { reset: true as const } : {}) });
+      // A wake-up after their STOP or a pause runs, told that Flow sends them nothing in it.
+      const text = note.owed?.mode === "wake" && this.block ? `${note.text} ${this.blockLine(this.block)}` : note.text;
+      this.history.push({ role: "user", content: text, ...(note.reset ? { reset: true as const } : {}) });
       if (note.reset) this.settings.emit(this.id, "history.reset", { text: note.text });
       if (note.text.startsWith("[Background result:")) this.resultUnsent = "background";
       if (note.owed) this.owed.push(note.owed);
@@ -1159,7 +1167,8 @@ export class Conversation {
     const { store } = this.settings;
     const noContact = await store.noContact(this.id, this.settings.now());
     this.stop = noContact.find((r) => r.hard) ?? null;
-    if (this.stop && !this.resumeTurn && !this.unread() && !this.notes.some((n) => !n.wait && !n.owed)) {
+    this.block = this.stop ?? noContact.find((r) => r.kind === "pause") ?? null;
+    if (this.stop && !this.resumeTurn && !this.unread() && !this.notes.some((n) => !n.wait && (!n.owed || n.owed.mode === "wake"))) {
       // Only what the business started is waiting, and they texted STOP: it is dropped, no turn runs.
       this.absorb();
       return;
@@ -1201,7 +1210,7 @@ export class Conversation {
     const quiet = this.quietHours === "off" ? null : (this.quietHours ?? (this.settings.quietHours === false ? null : (this.settings.quietHours ?? { from: "22:00", to: "07:00" })));
     const zone = this.timeZone ?? this.settings.timeZone ?? "UTC";
     const rules = rulesSection(noContact, zone, this.timeZone ? quiet : null);
-    const wakeUps = wakeUpsSection(await wakeUpsOf(store, this.id), zone);
+    const wakeUps = this.settings.wakeUps ? wakeUpsSection(await wakeUpsOf(store, this.id), zone) : "";
     // A message that came while those loaded had no step to restart: it joins the first one.
     this.absorb();
     let restarts = 0;
@@ -1376,6 +1385,8 @@ export class Conversation {
   private async talk(call: ToolCall): Promise<{ content: string; refused: boolean }> {
     const refused = (content: string) => ({ content, refused: true });
     const done = (content = "") => ({ content, refused: false });
+    const blocked = this.blockedSend();
+    if (blocked) return refused(blocked);
     let raw: unknown;
     try {
       raw = JSON.parse(call.arguments || "{}");
@@ -1489,6 +1500,25 @@ export class Conversation {
       return done();
     }
     return refused(`There is no tool named ${call.name}.`);
+  }
+
+  /**
+   * Why nothing may go to them now: a wake-up's turn after their STOP or in a pause, until they write
+   * in it. Null when sends may go.
+   */
+  private blockedSend(): string | null {
+    if (!this.block || this.theirMessages || !this.owed.some((o) => o.mode === "wake")) return null;
+    return `Not sent: ${this.blockWhy(this.block)}, so Flow sends them nothing in this wake-up. Do the rest without messaging them.`;
+  }
+
+  private blockWhy(rule: NoContactRow): string {
+    if (rule.kind === "stop") return "they texted STOP";
+    return `they paused messages from the business${rule.until ? ` until ${formatLocal(this.timeZone ?? this.settings.timeZone ?? "UTC", rule.until - 1)}` : ""}`;
+  }
+
+  /** The wake-up note's line after their STOP or in a pause. */
+  private blockLine(rule: NoContactRow): string {
+    return `${this.blockWhy(rule)[0].toUpperCase()}${this.blockWhy(rule).slice(1)}: Flow sends them nothing in this turn. Do only what needs no message to them (your tools), or nothing.`;
   }
 
   /** How a scheduled run or a nudge ended, stored in order with everything else. */

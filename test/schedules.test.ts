@@ -16,9 +16,9 @@ const NOON_NY = Date.UTC(2026, 9, 12, 16);
 const SAM = "+15550100100";
 
 /** Sam has written once and been answered; the clock is the test's. */
-async function withSam(db: Database = sqlite(), tools: ReturnType<typeof tool>[] = []) {
+async function withSam(db: Database = sqlite(), tools: ReturnType<typeof tool>[] = [], wakeUps?: false) {
   const clock = { now: NOON_NY };
-  const h = multi({ channels: CHANNELS, database: db, now: () => clock.now, timeZone: "America/New_York", tools });
+  const h = multi({ channels: CHANNELS, database: db, now: () => clock.now, timeZone: "America/New_York", tools, wakeUps });
   await h.agent.resume();
   const a = await h.message("sms", SAM, "hi");
   (await h.nextCall(0)).answer(respond(call("send_sms", { text: "Hi!" })));
@@ -174,7 +174,9 @@ const HOUR = 3_600_000;
 test("the agent wakes itself up: wake_me_up keeps its note, shown to it each turn, and at its time it gets a turn with the note; nothing is sent by itself", async () => {
   const h = await withSam();
   await h.message("sms", SAM, "the seller still hasn't answered my question");
-  (await h.nextCall(1)).answer(respond(call("send_sms", { text: "I'll check tomorrow." }), call("wake_me_up", { note: "check whether the seller answered question Q7", in_minutes: 1440 })));
+  const asked = await h.nextCall(1);
+  assert.ok(["wake_me_up", "cancel_wake_up"].every((name) => asked.request.tools.some((t) => t.name === name)), "on by default");
+  asked.answer(respond(call("send_sms", { text: "I'll check tomorrow." }), call("wake_me_up", { note: "check whether the seller answered question Q7", in_minutes: 1440 })));
   const set = await h.nextCall(2);
   assert.match(last(set.request.messages).content, /^\{"wake_up":\{"id":"w_[0-9a-f]{8}","at":"Tue 13 Oct 2026 12:00 \(New York time\)","note":"check whether the seller answered question Q7"\}\}$/);
   set.answer(respond());
@@ -270,7 +272,7 @@ test("a wake-up found late still runs, saying when it was due: the agent's work 
   await h.conversation.whenIdle();
 });
 
-test("a wake-up keeps the person's rules: in their quiet hours it waits for them to end (unless told not to), after their STOP it does not run", async () => {
+test("a wake-up due in their quiet hours waits for them to end, unless told not to", async () => {
   const h = await withSam();
   const to = { channel: "sms", address: SAM };
   await h.agent.setTimeZone({ to, timeZone: "America/New_York" });
@@ -284,12 +286,57 @@ test("a wake-up keeps the person's rules: in their quiet hours it waits for them
   turn.answer(respond());
   await h.conversation.whenIdle();
   assert.deepEqual((await h.agent.listWakeUps(to)).map((w) => [w.note, w.at]), [["tell them the seller answered", Date.UTC(2026, 9, 13, 11)]], "moved to 07:00, their time");
+  assert.deepEqual((await runRows(h.db)).map((r) => `${r.outcome}: ${r.reason}`).sort(), ["held: their quiet hours: moved to Tue 13 Oct 2026 07:00 (New York time)", "silent: null"]);
+});
 
+test("after their STOP or a pause, a wake-up still runs, told so; its tools run, and Flow refuses every send to them in it", async () => {
+  const closed: string[] = [];
+  const close = tool({ name: "close_question", description: "Close a question.", input: z.object({ id: z.string() }), run: ({ id }) => { closed.push(id); return { closed: id }; } });
+  const h = await withSam(sqlite(), [close]);
+  const to = { channel: "sms", address: SAM };
   await h.store.setStop(h.conversationId, { id: "nc_stop", rule: "they texted STOP" });
-  h.clock.now = Date.UTC(2026, 9, 13, 11);
-  assert.equal(await h.agent.runDue(), 0);
-  assert.equal(h.calls.length, 2, "no turn after their STOP");
-  assert.deepEqual((await runRows(h.db)).map((r) => `${r.outcome}: ${r.reason}`).sort(), ["held: their quiet hours: moved to Tue 13 Oct 2026 07:00 (New York time)", "silent: null", "skipped: no-contact rule nc_stop: they texted STOP"]);
+  await h.agent.wakeUp({ to, inMs: HOUR, note: "close question Q7 and tell them" });
+  h.clock.now += HOUR;
+  assert.equal(await h.agent.runDue(), 1, "a turn, not skipped");
+  const turn = await h.nextCall(1);
+  assert.match(last(turn.request.messages).content, /close question Q7 and tell them\][\s\S]* They texted STOP: Flow sends them nothing in this turn\. Do only what needs no message to them \(your tools\), or nothing\.$/);
+  turn.answer(respond(call("close_question", { id: "Q7" }), call("send_sms", { text: "Your question is closed." })));
+  const after = await h.nextCall(2);
+  const results = after.request.messages.filter((m) => m.role === "tool").slice(-2).map((m) => (m as { content: string }).content);
+  assert.deepEqual(results, ['{"closed":"Q7"}', "Not sent: they texted STOP, so Flow sends them nothing in this wake-up. Do the rest without messaging them."]);
+  after.answer(respond());
+  await h.conversation.whenIdle();
+  assert.deepEqual(closed, ["Q7"]);
+  assert.deepEqual(h.texts("sms"), ["Hi!"]);
+
+  await h.store.setStop(h.conversationId, null);
+  await h.store.addNoContact(h.conversationId, "nc_pause", "pause", Date.UTC(2026, 9, 15, 4), "pause");
+  await h.agent.wakeUp({ to, inMs: HOUR, note: "check on Q8" });
+  h.clock.now += HOUR;
+  assert.equal(await h.agent.runDue(), 1);
+  const paused = await h.nextCall(3);
+  assert.match(last(paused.request.messages).content, /They paused messages from the business until Wed 14 Oct 2026 23:59 \(New York time\): Flow sends them nothing in this turn/);
+  paused.answer(respond(call("send_sms", { text: "Any news?" })));
+  assert.match(last((await h.nextCall(4)).request.messages).content, /^Not sent: they paused messages from the business until/);
+  h.calls[4].answer(respond());
+  await h.conversation.whenIdle();
+  assert.deepEqual(h.texts("sms"), ["Hi!"]);
+});
+
+test("createAgent({ wakeUps: false }) takes the model's wake-up tools and their list away; code's wake-ups still run", async () => {
+  const h = await withSam(sqlite(), [], false);
+  assert.ok(!h.calls[0].request.tools.some((t) => t.name === "wake_me_up" || t.name === "cancel_wake_up"));
+  await h.agent.wakeUp({ to: { channel: "sms", address: SAM }, inMs: HOUR, note: "check on Q7" });
+  await h.message("sms", SAM, "hi again");
+  const next = await h.nextCall(1);
+  assert.doesNotMatch(next.request.system, /Wake-ups you set/);
+  next.answer(respond(call("send_sms", { text: "Hello!" })));
+  await h.conversation.whenIdle();
+  h.clock.now += HOUR;
+  assert.equal(await h.agent.runDue(), 1);
+  assert.match(last((await h.nextCall(2)).request.messages).content, /^\[Wake-up you set for yourself, not from the person: check on Q7\]/);
+  h.calls[2].answer(respond());
+  await h.conversation.whenIdle();
 });
 
 test("the wake-up tools refuse what would go wrong, with a reason the agent can act on, and reach only this conversation", async () => {
@@ -341,7 +388,7 @@ for (const { name, db } of engines) {
   test(`${name}: a wake-up's key is held once per conversation while it is active, also by two adds at once, and freed once it is done or cancelled`, async () => {
     const store = new Store(db, `agt_${Math.random().toString(36).slice(2, 10)}`);
     await store.migrate();
-    const row = (id: string, conversationId: string, at = NOON_NY + HOUR) => ({ id, conversationId, channel: "sms", instruction: "check", fixedText: false, mode: "wake" as const, rule: { repeat: "once", at }, timeZone: "UTC", nextRunAt: at, maxRuns: null, endsOn: null, origin: "agent" as const, wakeKey: "remind:Q7" });
+    const row = (id: string, conversationId: string, at = NOON_NY + HOUR) => ({ id, conversationId, channel: "sms", instruction: "check", fixedText: false, mode: "wake" as const, rule: { repeat: "once", at }, timeZone: "UTC", nextRunAt: at, maxRuns: null, endsOn: null, origin: "agent" as const, key: "remind:Q7" });
     const both = await Promise.all([store.addWakeUp(row("w1", "c1")), store.addWakeUp(row("w2", "c1"))]);
     assert.deepEqual(both.map((r) => ("added" in r ? "added" : "exists" in r ? `exists ${r.exists.id}` : "full")).sort(), ["added", `exists ${"added" in both[0] ? "w1" : "w2"}`]);
     assert.ok("added" in (await store.addWakeUp(row("w3", "c2"))), "another conversation has its own");
@@ -350,6 +397,6 @@ for (const { name, db } of engines) {
     assert.equal(await store.cancelWakeUps("remind:Q7"), 1, "every conversation's active one (c2's came due too)");
     assert.ok("added" in (await store.addWakeUp(row("w5", "c1", NOON_NY + 2 * HOUR))), "cancelled: free again");
     assert.equal(await store.cancelWakeUps("remind:Q7", "c2"), 0, "one conversation's only");
-    assert.deepEqual((await store.schedules("c1")).map((s) => [s.id, s.wakeKey]), [["w5", "remind:Q7"]]);
+    assert.deepEqual((await store.schedules("c1")).map((s) => [s.id, s.key]), [["w5", "remind:Q7"]]);
   });
 }

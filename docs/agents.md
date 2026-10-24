@@ -290,7 +290,9 @@ from the person: <note>]`, and decides: look something up, message them, call a 
 nothing. **A wake-up never sends anything by itself.**
 
 The model has `wake_me_up({ note, in_minutes | at, key? })` and `cancel_wake_up({ id })` built in,
-for its own conversation only, and every turn shows it the wake-ups it set there. Code sets them too:
+for its own conversation only, and every turn shows it the wake-ups it set there
+(`createAgent({ wakeUps: false })` takes both away; wake-ups your code sets still run). Code sets
+them too:
 
 ```ts
 // In a tool, for this person: context.wakeUps (absent outside a conversation, such as over MCP).
@@ -311,14 +313,19 @@ await agent.listWakeUps({ channel: "whatsapp", address: buyer });
   `too_many_for_agent`, `unknown_person` for someone who never wrote). A note that is empty or
   too long, or a time under a minute away or more than 90 days ahead, throws.
 - It keeps the person's rules: due in their quiet hours, it waits for them to end
-  (`respectQuietHours: false` runs it at its time, for work that messages no one); after they
-  texted STOP or paused messages it does not run (recorded as skipped, with why). Past their
+  (`respectQuietHours: false` runs it at its time, for work that messages no one). After they
+  texted STOP, or while they paused messages, it still runs so the agent can do its work (close
+  the question in your system), but the note says so and Flow refuses every send to them in that
+  turn until they write. Past their
   WhatsApp 24-hour window it still runs, and the agent is told only a template reaches them
   (`send_template` when templates are declared); no fallback template goes by itself.
 - Found late (the agent was down), it still runs, and the note says when it was due: unlike a
   scheduled message, which is missed rather than sent late.
 - Limits (`WAKE_UP_LIMITS`): 10 active per person, 10,000 per agent (per environment), 90 days
   ahead, notes of 500 characters, keys of 200. The model is told plainly when it hits one.
+- A nudge sent with `at` is cancelled the same way, by its idempotency key, while it is still to
+  come: `await agent.cancelNudge("session-1")` resolves to its state, `cancelled` (null for a key
+  no nudge has; one that went keeps its state).
 - `agent.forgetPerson` deletes their wake-ups with everything else. The playground's Person tab
   lists them beside scheduled messages, and moving its clock brings them due; in `flow test`, a
   business run's `wait` does the same.

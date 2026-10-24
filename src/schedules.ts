@@ -190,8 +190,8 @@ function ruleOf(input: z.infer<typeof scheduleInput>, zone: string, now: number)
   }
 }
 
-/** A scheduled message from the business (a nudge with a time): fixed text, or an instruction. */
-export function businessSchedule(conversationId: string, channel: string, at: number, zone: string, body: { text?: string; prompt?: string }, quiet = true): NewSchedule {
+/** A scheduled message from the business (a nudge with a time): fixed text, or an instruction; `key`, the nudge's idempotency key, is what agent.cancelNudge finds it by. */
+export function businessSchedule(conversationId: string, channel: string, at: number, zone: string, body: { text?: string; prompt?: string }, quiet = true, key: string | null = null): NewSchedule {
   return {
     id: `s_${randomUUID().slice(0, 8)}`,
     conversationId,
@@ -205,6 +205,7 @@ export function businessSchedule(conversationId: string, channel: string, at: nu
     maxRuns: null,
     endsOn: null,
     origin: "api",
+    key,
   };
 }
 
@@ -374,12 +375,12 @@ export async function addWakeUp(scope: WakeUpScope, input: WakeUpInput): Promise
     maxRuns: null,
     endsOn: null,
     origin: "agent",
-    wakeKey: input.key ?? null,
+    key: input.key ?? null,
   };
   const added = await scope.store.addWakeUp(row);
   if ("full" in added) return { status: "refused", reason: added.full === "person" ? "too_many_for_person" : "too_many_for_agent" };
   if ("exists" in added) return { status: "exists", wakeUp: wakeUpOf(added.exists) };
-  return { status: "scheduled", wakeUp: { id: row.id, at, note: row.instruction, key: row.wakeKey ?? null, channel: row.channel, respectsQuietHours: quiet } };
+  return { status: "scheduled", wakeUp: { id: row.id, at, note: row.instruction, key: row.key ?? null, channel: row.channel, respectsQuietHours: quiet } };
 }
 
 /** A conversation's wake-ups still to come, soonest first. */
@@ -388,7 +389,7 @@ export async function wakeUpsOf(store: StoreApi, conversationId: string): Promis
 }
 
 function wakeUpOf(s: ScheduleRow): WakeUp {
-  return { id: s.id, at: s.nextRunAt ?? 0, note: s.instruction, key: s.wakeKey, channel: s.channel, respectsQuietHours: (s.rule as { quiet?: boolean }).quiet === true };
+  return { id: s.id, at: s.nextRunAt ?? 0, note: s.instruction, key: s.key, channel: s.channel, respectsQuietHours: (s.rule as { quiet?: boolean }).quiet === true };
 }
 
 /** wake_me_up and cancel_wake_up: the model's own wake-ups, in this conversation only. */

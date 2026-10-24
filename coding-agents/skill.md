@@ -311,10 +311,12 @@ person; `context.wakeUps?.cancel(key)` cancels the active ones with that key in 
 (the seller answered); outside a turn, `agent.wakeUp({ to, inMs, note, key })`,
 `agent.cancelWakeUp(key)`, `agent.listWakeUps(to)`. The same key while one is active returns it
 (`exists`). Keys name what the wake-up waits on (`remind:<question id>`). It keeps quiet hours
-(`respectQuietHours: false` for work that messages no one), does not run after STOP or a pause,
-runs past WhatsApp's window with the agent told only a template reaches them, and runs late rather
+(`respectQuietHours: false` for work that messages no one), runs after STOP or in a pause with
+Flow refusing every send to them in that turn (its tools still run), runs past WhatsApp's window with the agent told only a template reaches them, and runs late rather
 than never after downtime. Limits in `WAKE_UP_LIMITS` (10 a person, 10,000 an agent, 90 days).
 The wake-up's turn reads the agent's records to see whether it is still needed.
+`createAgent({ wakeUps: false })` takes the model's wake-up tools away (code's still run). A nudge
+with `at` is cancelled by its idempotency key while still to come: `agent.cancelNudge(key)`.
 
 When the owner's backend is a separate service, mount `nudgeHandler(agent, { token })` (from
 `@flow-engineer/flow`; a token of at least 32 characters, from a secret; `base` is `/nudges` by default) in the
