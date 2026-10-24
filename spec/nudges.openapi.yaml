@@ -13,8 +13,9 @@ info:
     - A POST answers as soon as the nudge is recorded, before it is sent or the agent's turn for it
       runs: usually `queued`. Read how it ended with the GET.
     - What is decided as it is recorded is in the POST's answer, still a 202: it is the nudge's
-      state, not an HTTP error. `refused` with `unknown_person` (they never wrote on that channel;
-      nothing is recorded, so `id` is "" and there is nothing to GET) or `outside_window` (past
+      state, not an HTTP error. `refused` with `unknown_person` (they never wrote on that channel, for
+      text and prompt nudges; a template on WhatsApp makes them a person instead; nothing is
+      recorded, so `id` is "" and there is nothing to GET) or `outside_window` (past
       WhatsApp's 24-hour window, for text and prompt nudges); `dropped` (they texted STOP);
       `scheduled` (it has `at`).
     - Every request needs `Authorization: Bearer <token>`. Wrong tokens are limited per address:
@@ -120,7 +121,7 @@ components:
           type: object
           additionalProperties: false
           required: [channel, address]
-          description: The person, by a channel identity they have written from.
+          description: The person, by a channel identity they have written from; for a template, also a phone number that never wrote.
           properties:
             channel: { type: string, description: One of the agent's channels, by name. }
             address: { type: string, description: "Their address on it: a phone number, or the custom UI's user id." }
