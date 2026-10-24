@@ -30,6 +30,8 @@ export interface Rig {
   /** How many messages the platform has got. */
   count(): number;
   close(): Promise<void> | void;
+  /** How many messages the channel sends a carousel as, when not what its info says (Telegram on Flow Messaging: its text, then one per card). */
+  carouselParts?(carousel: Carousel): number;
 }
 
 /** Lets everything run that does not wait on the platform. */
@@ -93,7 +95,7 @@ export function conformance(name: string, make: () => Promise<Rig>): void {
   });
 
   withRig("a carousel resolves only once the platform accepted all of it", async (rig) => {
-    const parts = rig.channel.info.carousels ? 1 : carouselMessages(rig.channel.info, CAROUSEL).length;
+    const parts = rig.carouselParts?.(CAROUSEL) ?? (rig.channel.info.carousels ? 1 : carouselMessages(rig.channel.info, CAROUSEL).length);
     const sending = Promise.resolve(rig.channel.send(rig.to, { type: "carousel", ...CAROUSEL } satisfies Outbound));
     const state = tracked(sending);
     for (let i = 0; i < parts; i++) {

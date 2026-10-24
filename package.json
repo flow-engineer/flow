@@ -67,7 +67,7 @@
     "prepack": "npm run build",
     "test": "node --test --test-timeout=30000 \"test/**/*.test.ts\"",
     "test:changed": "node scripts/test-changed.ts",
-    "test:conformance": "node --test --test-timeout=60000 \"conformance/**/*.test.ts\"",
+    "test:conformance": "node --test --test-timeout=60000 --test-force-exit \"conformance/**/*.test.ts\"",
     "new": "node scripts/new-agent.ts",
     "typecheck": "tsc --noEmit"
   },
