@@ -95,10 +95,21 @@ test("imessageStyles gives the plain text and its styled ranges in UTF-16 offset
 // Telegram counts a parse_mode text's length after parsing (V0's rule), so a Markdown text the send
 // tool let through (at most TELEGRAM.maxLength) must never parse longer than it was written.
 test("telegramHTML's text, as Telegram parses it, is never longer than the Markdown", () => {
-  const parsed = (html: string) => html.replace(/<[^>]+>/g, "").replace(/&(lt|gt|amp|#34|#39);/g, "x");
+  // The length Telegram counts: tags are not text, and an entity is one character (UTF-16 code units).
+  const parsedLength = (html: string) => {
+    let n = 0;
+    for (let i = 0; i < html.length; i++) {
+      if (html[i] === "<") i = html.indexOf(">", i);
+      else {
+        if (html[i] === "&") i = html.indexOf(";", i);
+        n++;
+      }
+    }
+    return n;
+  };
   const escaped = `<&>"'`.repeat(820).slice(0, 4096);
   for (const md of [...CASES.map(([, input]) => input), escaped, `**${"a".repeat(4092)}**`, `[${"a".repeat(2000)}](https://${"b".repeat(2000)}.example)`]) {
-    assert.ok(parsed(telegramHTML(md)).length <= md.length, md.slice(0, 40));
+    assert.ok(parsedLength(telegramHTML(md)) <= md.length, md.slice(0, 40));
   }
-  assert.ok(telegramHTML(escaped).length > 4096); // longer than the limit only before parsing
+  assert.ok(telegramHTML(escaped).length > 4096 && parsedLength(telegramHTML(escaped)) === 4096); // longer than the limit only before parsing
 });
