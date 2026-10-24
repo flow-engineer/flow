@@ -85,7 +85,7 @@ test("commands come from the CLI file and the tools: positionals, flags, --json 
   assert.equal(table.out, "ORDER_ID  STATUS  TOTAL\nBL-1043   making  9.6\n");
 });
 
-test("a tool's format is what people see; --json, --fields and the CLI file's view show its data", async () => {
+test("a tool's format is what people see, rendered at a terminal; --json, --fields and the CLI file's view show its data", async () => {
   const createKey = tool({
     name: "create_key",
     description: "Create an API key.",
@@ -94,16 +94,18 @@ test("a tool's format is what people see; --json, --fields and the CLI file's vi
     signIn: "none",
     hints: { destructive: false },
     run: () => ({ key: { id: "key_1", name: "ci" }, manage_url: "https://acme.test/keys" }),
-    format: ({ key, manage_url }) => `## Key ${key.name} created\n\nID: ${key.id}\nManage keys: ${manage_url}\n`,
+    format: ({ key, manage_url }) => `## Key **${key.name}** created\n\n- ID: \`${key.id}\`\n- [Manage keys](${manage_url})\n`,
   });
   const cli = (view?: string[]) => defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-")), server, commands: { "key create": { tool: "create_key", ...(view ? { view } : {}) } } });
   const server = await serve({ tools: [createKey] });
-  const run = async (config: CliConfig, argv: string[]) => {
-    const out = io();
+  const run = async (config: CliConfig, argv: string[], terminal = false) => {
+    const out = io(terminal);
     assert.equal(await runCli(config, ["key", "create", ...argv], out.channel), 0);
     return out.out;
   };
-  assert.equal(await run(cli(), []), "## Key ci created\n\nID: key_1\nManage keys: https://acme.test/keys\n");
+  assert.equal(await run(cli(), []), "## Key **ci** created\n\n- ID: `key_1`\n- [Manage keys](https://acme.test/keys)\n", "piped: the Markdown as written");
+  const styled = (await run(cli(), [], true)).replace(/\u001b\[[0-9;]*m/g, "");
+  assert.equal(styled, "Key ci created\n\n    * ID: key_1\n    * Manage keys (https://acme.test/keys)\n", "at a terminal: rendered, no Markdown marks");
   assert.deepEqual(JSON.parse(await run(cli(), ["--json"])), { key: { id: "key_1", name: "ci" }, manage_url: "https://acme.test/keys" });
   assert.equal(await run(cli(), ["--fields", "manage_url"]), "manage_url  https://acme.test/keys\n");
   assert.equal(await run(cli(["key.id", "manage_url"]), []), "key.id      key_1\nmanage_url  https://acme.test/keys\n");
