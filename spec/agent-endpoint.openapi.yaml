@@ -139,7 +139,7 @@ x-flow-platforms: &platforms
     platform: imessage
     reactions: true
     status: false
-    formatting: plain
+    formatting: markdown
     maxLength: 9999
     replies: true
     images: { captionMax: 1024 }

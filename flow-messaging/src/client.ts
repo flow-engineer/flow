@@ -1,5 +1,5 @@
-// A small client for Flow Messaging (api.flow.engineer), against its OpenAPI spec, version
-// 2026-11-01: plain fetch, only the calls the channels and the webhook make.
+// A small client for Flow Messaging (api.flow.engineer), against its OpenAPI spec (V0, at /v0, version
+// 2026-11-01): plain fetch, only the calls the channels and the webhook make.
 //
 // Every POST carries an Idempotency-Key, and a retry repeats the same key, so a send is never made
 // twice. A 429 or a 5xx is tried again in place after its Retry-After when that is short; a longer
@@ -16,20 +16,26 @@ const TIMEOUT_MS = 20_000;
 /** How far a webhook's signed timestamp may be from now (seconds), as the spec says. */
 const SIGNATURE_TOLERANCE = 300;
 
-/** The spec's typed error ({"error": {type, message, channel_code, retry_after, ...}}), or "network". */
+/** The spec's typed error ({"error": {type, message, param, channel, channel_code, retry_after, ...}}), or "network". */
 export class FlowMessagingError extends Error {
   readonly status: number;
   readonly type: string;
   readonly channelCode?: string;
   readonly retryAfter?: number;
+  /** The request field the error is about, as a dotted path (`kind`, `telegram.is_big`, `media`). */
+  readonly param?: string;
+  /** The conversation's channel, on `unsupported_content` and `outside_window`. */
+  readonly channel?: string;
 
-  constructor(status: number, type: string, message: string, extra: { channelCode?: string; retryAfter?: number } = {}) {
+  constructor(status: number, type: string, message: string, extra: { channelCode?: string; retryAfter?: number; param?: string; channel?: string } = {}) {
     super(message);
     this.name = "FlowMessagingError";
     this.status = status;
     this.type = type;
     this.channelCode = extra.channelCode;
     this.retryAfter = extra.retryAfter;
+    this.param = extra.param;
+    this.channel = extra.channel;
   }
 
   /** Worth trying again later: rate limits, Flow's or the channel's 5xx, no answer. */
@@ -65,9 +71,9 @@ export class Client {
     return this.request<T>("GET", path);
   }
 
-  /** A file's bytes: GET /v1/files/{id} answers them or redirects to a signed URL, which fetch follows without the key. */
+  /** A file's bytes: GET /v0/files/{id} answers them or redirects to a signed URL, which fetch follows without the key. */
   async download(fileId: string): Promise<Uint8Array> {
-    const path = `/v1/files/${idSegment("file", fileId)}`;
+    const path = `/v0/files/${idSegment("file", fileId)}`;
     if (!this.apiKey) throw new Error("set FLOW_MESSAGING_KEY (or pass apiKey) to reach Flow Messaging");
     const response = await fetch(this.baseUrl + path, { headers: { authorization: `Bearer ${this.apiKey}`, "flow-version": API_VERSION }, signal: AbortSignal.timeout(60_000) });
     if (!response.ok) throw await errorOf(response);
@@ -108,7 +114,7 @@ export class Client {
 }
 
 async function errorOf(response: Response): Promise<FlowMessagingError> {
-  let body: { type?: string; message?: string; channel_code?: string; retry_after?: number } = {};
+  let body: { type?: string; message?: string; channel_code?: string; retry_after?: number; param?: string; channel?: string } = {};
   try {
     const parsed = (await response.json()) as { error?: typeof body };
     if (parsed && typeof parsed.error === "object") body = parsed.error;
@@ -116,7 +122,7 @@ async function errorOf(response: Response): Promise<FlowMessagingError> {
   const header = Number(response.headers.get("retry-after"));
   const retryAfter = typeof body.retry_after === "number" ? body.retry_after : Number.isFinite(header) && response.headers.has("retry-after") ? header : undefined;
   const type = body.type ?? (response.status >= 500 ? "api_error" : "invalid_request");
-  return new FlowMessagingError(response.status, type, body.message ?? `Flow Messaging answered ${response.status}`, { channelCode: body.channel_code, retryAfter });
+  return new FlowMessagingError(response.status, type, body.message ?? `Flow Messaging answered ${response.status}`, { channelCode: body.channel_code, retryAfter, param: body.param, channel: body.channel });
 }
 
 const wait = (seconds: number) => new Promise<void>((resolve) => setTimeout(resolve, seconds * 1000));

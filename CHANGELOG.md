@@ -2,6 +2,66 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.7.0 (2026-10-24)
+
+### Changes
+
+- **The Flow Messaging adapter (`@flow-engineer/flow/flow-messaging`) speaks Flow Messaging's V0
+  API:** every call goes to `/v0/...`, and each kind of message goes to its own endpoint
+  (`POST /v0/conversations/{id}/basic`, `/buttons`, `/list`, `/carousel`, `/template`, `/reaction`,
+  `/typing`, `/read`). V0 sends exactly what it is given or refuses it (`422 unsupported_content`);
+  it converts nothing. So the adapter now does each channel's conversions itself:
+  - Telegram: the agent's Markdown goes as Telegram's HTML (`telegram.parse_mode: "HTML"`),
+    rendered by the same rules Flow Messaging used, so it looks the same as before. A carousel goes
+    as its text, then one message per card in order: the card's photo with its text as caption and
+    its buttons or link under it (a card with neither is its photo alone).
+  - WhatsApp: a list goes as a WhatsApp `list` with the agent's own label (before, every list
+    opened with "Choose"). Row titles now take WhatsApp's 24 characters (they were cut to 20), and
+    row descriptions are shown (they were dropped). More than 3 buttons also go as a list, under
+    "Choose". WhatsApp's own marks (`*bold*`) go as written, as before.
+  - iMessage: text is now Markdown, sent as iMessage's own styles (`imessage.styles`: bold, italic,
+    underline, strikethrough). `IMESSAGE.formatting` is `"markdown"`, so the agent is told Markdown
+    works there, and so is the iMessage platform `flow test` plays (`x-flow-platforms` in
+    `spec/agent-endpoint.openapi.yaml`).
+  - A message the business starts (a nudge, a scheduled text) goes with `link_preview: false` on
+    every channel, not only WhatsApp.
+- Typing sends `{}` and nothing when the agent stops typing: no channel clears the indicator on
+  request, and it clears itself when the next message goes. iMessage read receipts mark the whole
+  conversation (Flow refuses `up_to` there).
+- Events are read in both shapes: the V0 one (`content.kind`) and the older one (`content.type`),
+  which an app Flow still serves through its bridge to the older API gets.
+- A `422 unsupported_content` reaches the agent saying what the channel does not take, on which
+  channel and why, for example `unsupported_content (no_mms, param media, on sms): ...`, with
+  "don't resend it". `FlowMessagingError` has two new fields, `param` and `channel`.
+- iMessage group conversations are passed over, with one warning. The agent never answers in a
+  group, and no typing or read receipt goes to one. Before, their events failed, and Flow
+  delivered them again.
+
+### Migration notes
+
+- **The Flow Messaging adapter needs Flow Messaging's V0 API.** 0.7 calls `/v0`, so upgrade once
+  Flow Messaging serves V0. Versions before 0.7 call the older `/v1` API. That keeps working only
+  while Flow serves your app through its bridge to the older API, and Flow switches you off the
+  bridge once you upgrade. To move, bump `@flow-engineer/flow`. The adapter's options, channels and
+  exports are unchanged. Code of your own that calls Flow Messaging beside the adapter (`POST
+  /v1/conversations/{id}/messages` with `content`) moves to the per-kind endpoints: see Flow
+  Messaging's migration guide.
+- **iMessage text is Markdown now.** An agent's iMessage replies are read as Markdown and sent with
+  iMessage's styles, and the agent is told Markdown works there. `**6pm**` used to show as written;
+  now it shows as bold "6pm". An agent whose own instructions said to write plain text on iMessage
+  can drop that line. To keep text exactly as written, escape the marks (`\*`).
+- **A Telegram carousel card with buttons needs a text.** Flow sends a card's buttons under its
+  text, and V0 takes no buttons message without one. A carousel with such a card is refused before
+  anything is sent, and the agent is told which card. Before, Flow sent the photo and the buttons
+  with no caption.
+- **A first message to someone with no conversation yet is text or a template.** When the adapter
+  knows no conversation (a nudge, or a send after a restart before the person writes), V0 starts
+  one only with a text or a template. A link still goes, as its text with the URL on a line after it.
+  Buttons, a list or a carousel are refused before anything is sent, and the reason says to send a
+  text first. Before, they started the conversation.
+- **A WhatsApp carousel no longer quotes the message it replies to** (V0's carousel has no
+  `reply_to`).
+
 ## 0.6.0 (2026-10-24)
 
 ### Changes

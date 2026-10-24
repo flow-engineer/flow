@@ -19,12 +19,19 @@
 // channel's send waits for message.sent (from the stream or the webhook, else by reading the message
 // back), so the agent's next message goes only after it. `waitFor: "delivered"` waits for the
 // person's phone instead, where the channel reports it; `waitFor: "queued"` resolves on the 202.
+//
+// Flow Messaging's V0 API takes each kind of message at its own endpoint and sends exactly what it is
+// given, or refuses it (422 unsupported_content): it never converts. So the conversions are made
+// here, per channel: Markdown becomes Telegram's HTML (`telegram.parse_mode`) or iMessage's styles
+// (`imessage.styles`), more than 3 choices on WhatsApp a list, and a carousel on Telegram its text
+// then one message per card.
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { carouselMessages, replyButton, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type SendReceipt, type Template, type WhatsAppFeature } from "../../src/index.ts";
 import { Client, FlowMessagingError, idSegment, verifySignature } from "./client.ts";
+import { imessageStyles, telegramHTML } from "./richtext.ts";
 
 export { API_VERSION, FlowMessagingError, verifySignature } from "./client.ts";
 
@@ -63,6 +70,15 @@ interface Route {
   name: string;
   sender?: string;
 }
+/**
+ * One message as one Flow kind: `kind` names its endpoint (`contact_card`'s is contact-card) and
+ * `body` is what it takes. `preview: false` is the message's, for a link that has to go as text.
+ */
+interface Piece {
+  kind: string;
+  body: Record<string, unknown>;
+  preview?: false;
+}
 /** What the webhook and the stream need of an agent. */
 export type WebhookAgent = Pick<Agent, "message" | "reacted" | "undelivered">;
 
@@ -90,7 +106,11 @@ export interface StreamHandle {
   stopped: Promise<StreamStop>;
 }
 
-/** Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos (one with buttons is one message), carousels (Flow sends their cards one by one), Markdown, no read receipts for bots. */
+/**
+ * Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos (one with
+ * buttons is one message), carousels (their text, then one message per card: its photo, text and
+ * buttons), Markdown (sent as Telegram's HTML), no read receipts for bots.
+ */
 export const TELEGRAM: ChannelInfo = {
   platform: "telegram",
   reactions: true,
@@ -108,16 +128,17 @@ export const TELEGRAM: ChannelInfo = {
 };
 
 /**
- * iMessage as Flow sends it: plain text up to 9999 characters, photos, inline replies, tapbacks
- * (other emoji go as emoji reactions), typing and read receipts (the whole conversation). No buttons,
- * lists or templates. No reply window is set: the line only answers people who wrote to it, and a
- * send it will not deliver comes back as Not delivered (outside_window).
+ * iMessage as Flow sends it: text up to 9999 characters, its Markdown sent as iMessage's own styles
+ * (bold, italic, underline, strikethrough), photos, inline replies, tapbacks (other emoji go as emoji
+ * reactions), typing and read receipts (the whole conversation). No buttons, lists or templates. No
+ * reply window is set: the line only answers people who wrote to it, and a send it will not deliver
+ * comes back as Not delivered (outside_window).
  */
 export const IMESSAGE: ChannelInfo = {
   platform: "imessage",
   reactions: true,
   status: false,
-  formatting: "plain",
+  formatting: "markdown",
   maxLength: 9999,
   replies: true,
   images: { captionMax: 1024 },
@@ -125,8 +146,10 @@ export const IMESSAGE: ChannelInfo = {
   templates: false,
 };
 
-/** Flow sends a list as buttons, whose labels take at most 20 characters, and has no row descriptions. */
-const LIST_TITLE_MAX = 20;
+/** WhatsApp's most reply buttons in one message; more choices go as a list. */
+const WHATSAPP_REPLY_BUTTONS = 3;
+/** The label of the button that opens a list made of more than 3 buttons (Flow Messaging's own, before V0). */
+const LIST_BUTTON = "Choose";
 const MAX_BODY_BYTES = 1_000_000;
 /** Event ids remembered to drop Flow's redeliveries (deliveries are at least once). */
 const SEEN_MAX = 10_000;
@@ -146,19 +169,28 @@ const STREAM_EVENT_TRIES = 5;
 /** Close codes after which reconnecting unchanged fails again: authentication, permission, a bad request. */
 const STREAM_FINAL = new Set([4401, 4403, 4400]);
 
+/** A message's error as Flow gives it (the spec's ErrorBody). */
+interface FlowError {
+  type?: string;
+  message?: string;
+  channel_code?: string;
+  param?: string;
+  channel?: string;
+}
 interface FlowMessage {
   id: string;
   conversation: string;
   direction: "in" | "out";
   status?: string;
-  content: Record<string, unknown> & { type: string };
+  /** A kind object (`kind`), or, for an app on Flow's bridge to the older API, its `type` content. */
+  content: Record<string, unknown>;
   reply_to?: string;
-  error?: { type?: string; message?: string; channel_code?: string };
+  error?: FlowError;
 }
 interface FlowEvent {
   id: string;
   type: string;
-  conversation?: { id: string; channel: string; sender: string; contact: string };
+  conversation?: { id: string; type?: "direct" | "group"; channel: string; sender: string; contact: string };
   data?: { message?: FlowMessage; message_id?: string; emoji?: string; contact?: string };
 }
 
@@ -174,6 +206,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   const contacts = new Map<string, string>(); // Flow contact id -> address
   const templates = new Map<string, Array<{ id: string; name: string; language: string }>>(); // sender -> approved templates
   const seen = new Set<string>();
+  let groupsWarned = false;
   const handling = new Map<string, Promise<void>>();
   const waitFor = options.waitFor ?? "sent";
   const waitTimeoutMs = options.waitTimeoutMs ?? 30_000;
@@ -194,7 +227,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   async function conversationFor(channel: string, to: string, messageId?: string): Promise<string | undefined> {
     const known = flowConversation.get(key(channel, to));
     if (known || !messageId) return known;
-    const found = (await client.get<FlowMessage>(`/v1/messages/${idSegment("msg", messageId)}`)).conversation;
+    const found = (await client.get<FlowMessage>(`/v0/messages/${idSegment("msg", messageId)}`)).conversation;
     flowConversation.set(key(channel, to), found);
     return found;
   }
@@ -206,22 +239,48 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     return { phone: to.startsWith("+") ? to : `+${to}` };
   }
 
-  /** One message: into the person's conversation, or a new one from the channel's sender. */
-  async function send(route: Route, to: string, content: Record<string, unknown>, replyTo?: string, about = replyTo, idempotencyKey?: string, channelOptions?: Record<string, unknown>): Promise<SendReceipt> {
+  /**
+   * One message of one kind: into the person's conversation (`POST /v0/conversations/{id}/<kind>`),
+   * or a new one from the channel's sender (`POST /v0/messages`, which takes a basic message or a
+   * template only).
+   */
+  async function send(route: Route, to: string, piece: Piece, about?: string, idempotencyKey?: string): Promise<SendReceipt> {
     try {
       const conversation = await conversationFor(route.name, to, about);
-      const options = channelOptions ? { channel_options: channelOptions } : {};
       let sent: FlowMessage;
-      if (conversation) sent = await client.post(`/v1/conversations/${idSegment("conv", conversation)}/messages`, { content, ...(replyTo ? { reply_to: replyTo } : {}), ...options }, undefined, idempotencyKey);
+      if (conversation) sent = await client.post(`/v0/conversations/${idSegment("conv", conversation)}/${piece.kind.replace("_", "-")}`, piece.body, undefined, idempotencyKey);
       else {
         if (!route.sender) throw new Error(`no conversation with them on ${route.name} yet, and no sender to start one (set FLOW_MESSAGING_${route.kind.toUpperCase()}_SENDER)`);
-        sent = await client.post("/v1/messages", { sender: route.sender, to: recipient(route.kind, to), content, ...options }, undefined, idempotencyKey);
+        const first = startable(route, piece);
+        sent = await client.post("/v0/messages", { sender: route.sender, to: recipient(route.kind, to), kind: first.kind, ...first.body }, undefined, idempotencyKey);
       }
       flowConversation.set(key(route.name, to), sent.conversation);
       return await arrived(route, sent);
     } catch (error) {
       throw error instanceof FlowMessagingError ? new Error(reason(error)) : error;
     }
+  }
+
+  /**
+   * A first message as a start takes it: a basic message or a template. A link (a buttons message of
+   * one URL button) goes as its text with the URL on a line after it, as on a channel without link
+   * buttons; any other kind needs the conversation first.
+   */
+  function startable(route: Route, piece: Piece): Piece {
+    if (piece.kind === "basic" || piece.kind === "template") return piece;
+    const { buttons, header, ...rest } = piece.body as { text: string; buttons?: Array<{ url?: string }>; header?: { type: string; url?: string; file_id?: string }; telegram?: { parse_mode?: string } };
+    const url = piece.kind === "buttons" && buttons?.length === 1 ? buttons[0]!.url : undefined;
+    if (!url) throw new Error(`no conversation with them on ${route.name} yet, and a first message can only be a text or a template (this is a ${piece.kind} message)`);
+    const line = rest.telegram?.parse_mode === "HTML" ? telegramHTML(url) : url;
+    const { type: _type, ...photo } = header ?? { type: "" };
+    return { kind: "basic", body: { ...rest, text: `${rest.text}\n${line}`, ...(header ? { media: { type: "image", ...photo } } : piece.preview === false ? { link_preview: false } : {}) } };
+  }
+
+  /** Several messages one after another, each after the last went; their receipt is the least far of theirs. */
+  async function sendAll(route: Route, to: string, pieces: Array<{ piece: Piece; about?: string; idempotencyKey?: string }>): Promise<SendReceipt> {
+    const receipts: SendReceipt[] = [];
+    for (const p of pieces) receipts.push(await send(route, to, p.piece, p.about, p.idempotencyKey));
+    return receipts.find((r) => r.status === "unconfirmed") ?? receipts.find((r) => r.status === "queued") ?? receipts.find((r) => r.status === "sent") ?? receipts[0]!;
   }
 
   /**
@@ -249,7 +308,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         if (done || !status) return done;
         if (status === "failed" || status === "unsent") {
           const type = error?.type ?? (status === "unsent" ? "unsent" : "channel_error");
-          finish(new Error(reason({ type, channelCode: error?.channel_code, message: error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" })));
+          finish(new Error(reason({ type, channelCode: error?.channel_code, param: error?.param, channel: error?.channel, message: error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" })));
         } else if ((PROGRESS[status] ?? -1) >= PROGRESS[target]!) finish(PROGRESS[status]! >= PROGRESS.delivered! ? "delivered" : "sent");
         return done;
       };
@@ -265,7 +324,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       let delay = POLL_FIRST;
       const readBack = async () => {
         try {
-          const now = await client.get<FlowMessage>(`/v1/messages/${idSegment("msg", message.id)}`);
+          const now = await client.get<FlowMessage>(`/v0/messages/${idSegment("msg", message.id)}`);
           if (take(now.status, now.error)) return;
         } catch {
           // Read again later: the status event or the timeout settles it meanwhile.
@@ -281,12 +340,13 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   /**
    * Typing and read receipts are a courtesy: Flow's spec says to ignore their failures. Outside the
    * window (iMessage and WhatsApp until the person writes) they are expected to be refused, so that
-   * is not logged; any other failure is, once.
+   * is not logged; any other failure is, once. Each call has its own Idempotency-Key, so a second
+   * typing call shows the indicator again.
    */
   async function courtesy(route: Route, to: string, action: "typing" | "read", body: Record<string, unknown>, messageId?: string): Promise<void> {
     try {
       const conversation = await conversationFor(route.name, to, messageId);
-      if (conversation) await client.post(`/v1/conversations/${idSegment("conv", conversation)}/${action}`, body, 1);
+      if (conversation) await client.post(`/v0/conversations/${idSegment("conv", conversation)}/${action}`, body, 1);
     } catch (error) {
       if (error instanceof FlowMessagingError && error.type === "outside_window") return;
       console.warn(`@flow-engineer/flow/flow-messaging: ${action} on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
@@ -294,31 +354,58 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   /**
-   * A message as Flow content. A link is a url button (WhatsApp's cta_url), a photo a media message
-   * with the text as its caption; a photo with buttons or a link is their message's image header.
+   * A message as one Flow kind. A link is a buttons message with one URL button (WhatsApp's
+   * cta_url), a photo a basic message with the text as its caption; a photo with buttons or a link is
+   * their message's image header. On WhatsApp a list, or more than 3 buttons, is a list message.
    */
-  function content(kind: Kind, message: Message): Record<string, unknown> {
-    const buttons = message.link
-      ? [{ url: message.link.url, label: message.link.label }]
-      : message.buttons?.length
-        ? message.buttons.map(replyButton)
-        : message.list?.rows.map((row) => ({ id: row.id, label: row.title }));
-    if (buttons) return { type: "buttons", text: message.text, buttons, ...(message.image ? { header: { type: "image", ...file(message.image) } } : {}) };
-    if (message.image) return { type: "media", kind: "image", ...file(message.image), ...(message.text ? { caption: message.text } : {}) };
-    return { type: "text", text: message.text, format: kind === "telegram" ? "markdown" : "plain" };
+  function pieceOf(kind: Kind, message: Message): Piece {
+    const replyTo = message.replyTo ? { reply_to: message.replyTo } : {};
+    const preview = message.preview === false ? { preview: false as const } : {};
+    const buttons = message.link ? [{ url: message.link.url, label: message.link.label }] : message.buttons?.length ? message.buttons.map(replyButton) : undefined;
+    const many = kind === "whatsapp" && !message.link && (buttons?.length ?? 0) > WHATSAPP_REPLY_BUTTONS;
+    if (message.list || many) {
+      if (message.image) throw new Error("a WhatsApp list cannot have a photo: send the photo in a message of its own");
+      const rows = message.list ? message.list.rows.map((r) => ({ id: r.id, title: r.title, ...(r.description ? { description: r.description } : {}) })) : (buttons as Array<{ id: string; label: string }>).map((b) => ({ id: b.id, title: b.label }));
+      return { kind: "list", body: { text: message.text, button: message.list?.button ?? LIST_BUTTON, sections: [{ rows }], ...replyTo }, ...preview };
+    }
+    const text = styled(kind, message.text);
+    if (buttons) return { kind: "buttons", body: { ...text, buttons, ...(message.image ? { header: { type: "image", ...file(message.image) } } : {}), ...replyTo }, ...preview };
+    if (message.image) return { kind: "basic", body: { media: { type: "image", ...file(message.image) }, ...(message.text ? text : {}), ...replyTo } };
+    return { kind: "basic", body: { ...text, ...replyTo, ...(message.preview === false ? { link_preview: false } : {}) } };
   }
 
-  /** A carousel as Flow content: each card's photo is its header. */
-  function carouselContent(carousel: Carousel): Record<string, unknown> {
+  /** A WhatsApp carousel as Flow's carousel message: each card's photo is its header. */
+  function carouselOf(carousel: Carousel): Piece {
     return {
-      type: "carousel",
-      text: carousel.text,
-      cards: carousel.cards.map((card) => ({
-        header: { type: "image", ...file(card.image) },
-        ...(card.text ? { text: card.text } : {}),
-        buttons: card.link ? [{ url: card.link.url, label: card.link.label }] : (card.buttons ?? []).map(replyButton),
-      })),
+      kind: "carousel",
+      body: {
+        text: carousel.text,
+        cards: carousel.cards.map((card) => ({
+          header: { type: "image", ...file(card.image) },
+          ...(card.text ? { text: card.text } : {}),
+          buttons: card.link ? [{ url: card.link.url, label: card.link.label }] : (card.buttons ?? []).map(replyButton),
+        })),
+      },
     };
+  }
+
+  /**
+   * A carousel on Telegram, which has none: its text, then one message per card, in order, each its
+   * photo with the card's text as caption and its buttons or link under it (a card with neither is the
+   * photo alone). Each has its own Idempotency-Key, the carousel's plus what it is (`:text`, `:card:0`, ...).
+   */
+  function telegramCarousel(route: Route, to: string, carousel: Carousel): Promise<SendReceipt> {
+    const bare = carousel.cards.findIndex((card) => (card.buttons?.length || card.link) && !card.text);
+    if (bare >= 0) return Promise.reject(new Error(`Telegram shows a card's buttons under its text, and card ${bare + 1} has none: give every card with buttons a text`));
+    const keyed = (what: string) => (carousel.idempotencyKey ? `${carousel.idempotencyKey}:${what}` : undefined);
+    const preview = carousel.preview === false ? { preview: false as const } : {};
+    return sendAll(route, to, [
+      { piece: pieceOf("telegram", { text: carousel.text, ...(carousel.replyTo ? { replyTo: carousel.replyTo } : {}), ...preview }), about: carousel.replyTo, idempotencyKey: keyed("text") },
+      ...carousel.cards.map((card, i) => ({
+        piece: pieceOf("telegram", { text: card.text ?? "", image: card.image, ...(card.link ? { link: card.link } : card.buttons?.length ? { buttons: card.buttons } : {}) }),
+        idempotencyKey: keyed(`card:${i}`),
+      })),
+    ]);
   }
 
   async function template(sender: string, wanted: Template): Promise<{ id: string; language: string }> {
@@ -331,7 +418,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       const all: Array<{ id: string; name: string; language: string }> = [];
       let after = "";
       for (;;) {
-        const page = await client.get<{ data: typeof all; has_more: boolean }>(`/v1/templates?${new URLSearchParams({ sender: idSegment("snd", sender), status: "approved", limit: "100", ...(after ? { after } : {}) })}`);
+        const page = await client.get<{ data: typeof all; has_more: boolean }>(`/v0/templates?${new URLSearchParams({ sender: idSegment("snd", sender), status: "approved", limit: "100", ...(after ? { after } : {}) })}`);
         all.push(...page.data);
         if (!page.has_more || !page.data.length) break;
         after = page.data.at(-1)!.id;
@@ -345,21 +432,19 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   function provider(route: Route) {
     return {
-      sendMessage: async (to: string, message: Message) => {
-        // A message the business started: on WhatsApp, no link preview (its card's title would be the phone's notification).
-        const sent = content(route.kind, message);
-        const options = message.preview === false && route.kind === "whatsapp" && sent.type === "text" ? { preview_url: false } : undefined;
-        return send(route, to, sent, message.replyTo, message.replyTo, message.idempotencyKey, options);
-      },
-      sendCarousel: (to: string, carousel: Carousel) => send(route, to, carouselContent(carousel), carousel.replyTo, carousel.replyTo, carousel.idempotencyKey),
-      react: async (to: string, messageId: string, emoji: string) => void (await send(route, to, { type: "reaction", message_id: messageId, emoji }, undefined, messageId)),
-      typing: (to: string, on: boolean) => courtesy(route, to, "typing", { state: on ? "on" : "off" }),
-      markRead: (to: string, messageIds: string[]) => courtesy(route, to, "read", { up_to: messageIds.at(-1) }, messageIds.at(-1)),
+      sendMessage: (to: string, message: Message) => send(route, to, pieceOf(route.kind, message), message.replyTo, message.idempotencyKey),
+      sendCarousel: (to: string, carousel: Carousel) =>
+        route.kind === "telegram" ? telegramCarousel(route, to, carousel) : send(route, to, carouselOf(carousel), carousel.replyTo, carousel.idempotencyKey),
+      react: async (to: string, messageId: string, emoji: string) => void (await send(route, to, { kind: "reaction", body: { message_id: messageId, emoji } }, messageId)),
+      // The indicator clears itself when the next message goes: there is nothing to send for "off".
+      typing: async (to: string, on: boolean) => (on ? courtesy(route, to, "typing", {}) : undefined),
+      // iMessage marks the whole conversation read, and refuses `up_to`.
+      markRead: (to: string, messageIds: string[]) => courtesy(route, to, "read", route.kind === "whatsapp" ? { up_to: messageIds.at(-1) } : {}, messageIds.at(-1)),
       sendTemplate: async (to: string, wanted: Template, idempotencyKey?: string) => {
         if (!route.sender) throw new Error(`a template needs the channel's sender (set FLOW_MESSAGING_${route.kind.toUpperCase()}_SENDER)`);
         const found = await template(route.sender, wanted);
         const params = templateParams(wanted);
-        return send(route, to, { type: "template", template_id: found.id, language: wanted.language ?? found.language, ...(Object.keys(params).length ? { params } : {}) }, undefined, undefined, idempotencyKey);
+        return send(route, to, { kind: "template", body: { template_id: found.id, language: wanted.language ?? found.language, ...(Object.keys(params).length ? { params } : {}) } }, undefined, idempotencyKey);
       },
     };
   }
@@ -369,7 +454,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     const route = register("whatsapp", o);
     const channel = whatsappChannel(provider(route), { name: route.name, disable: o.disable, instructions: o.instructions });
     // Flow Messaging sends every reply button's own id and gives it back on the tap.
-    return { ...channel, info: { ...channel.info, ...(channel.info.buttons ? { buttonIds: true } : {}), ...(channel.info.lists ? { lists: { ...channel.info.lists, titleMax: LIST_TITLE_MAX } } : {}) } };
+    return { ...channel, info: { ...channel.info, ...(channel.info.buttons ? { buttonIds: true } : {}) } };
   }
 
   /** US SMS from a Flow number: plain text; STOP, START and HELP are Flow's. */
@@ -461,7 +546,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   async function addressOf(route: { kind: Kind }, contactId: string): Promise<string> {
     const known = contacts.get(contactId);
     if (known) return known;
-    const contact = await client.get<{ address?: { phone?: string; telegram_user_id?: string; handle?: string } }>(`/v1/contacts/${idSegment("ct", contactId)}`);
+    const contact = await client.get<{ address?: { phone?: string; telegram_user_id?: string; handle?: string } }>(`/v0/contacts/${idSegment("ct", contactId)}`);
     const a = contact.address;
     const address = (route.kind === "telegram" ? a?.telegram_user_id : route.kind === "imessage" ? (a?.phone ?? a?.handle) : a?.phone) ?? contactId;
     contacts.set(contactId, address);
@@ -470,7 +555,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   async function quoted(id: string): Promise<{ text: string; fromAgent: boolean } | undefined> {
     try {
-      const m = await client.get<FlowMessage>(`/v1/messages/${idSegment("msg", id)}`);
+      const m = await client.get<FlowMessage>(`/v0/messages/${idSegment("msg", id)}`);
       const text = textOf(m.content);
       return text ? { text, fromAgent: m.direction === "out" } : undefined;
     } catch {
@@ -479,26 +564,29 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   async function incoming(m: FlowMessage): Promise<Incoming | null> {
-    const c = m.content;
+    const c = kindOf(m.content);
+    const media = c.kind === "basic" && c.media && typeof c.media === "object" ? (c.media as Record<string, unknown>) : undefined;
+    const caption = c.text === undefined ? "" : String(c.text);
     let base: Incoming;
-    if (c.type === "text") base = { text: String(c.text ?? "") };
-    else if (c.type === "button_reply") {
+    if (c.kind === "basic" && !media) base = { text: caption };
+    else if (c.kind === "button_reply") {
       const id = String(c.button_id ?? "");
       const title = String(c.label ?? id);
       base = { text: title, choice: id ? { id, title } : { title } };
-    } else if (c.type === "voice" && c.transcript) base = { text: String(c.transcript) }; // Flow transcribed it already
-    else if ((c.type === "voice" || c.type === "media") && c.file_id && c.kind !== "video") {
+    } else if (c.kind === "voice" && c.transcript) base = { text: String(c.transcript) }; // Flow transcribed it already
+    else if ((c.kind === "voice" && c.file_id) || (media?.file_id && media.type !== "video")) {
       // Photos, audio and documents go as attachments, their bytes fetched from Flow only when the agent can use them.
-      const kind = c.type === "voice" || c.kind === "audio" ? "audio" : c.kind === "image" ? "image" : "document";
-      const fileId = String(c.file_id);
-      const attachment: Attachment = { kind, mime: String(c.mime_type ?? "application/octet-stream"), ...(c.filename ? { name: String(c.filename) } : {}), data: () => client.download(fileId) };
-      base = { text: String(c.caption ?? ""), attachments: [attachment] };
-    } else if (c.type === "media" || c.type === "file_blocked") {
+      const file = media ?? c;
+      const kind = c.kind === "voice" || file.type === "audio" ? "audio" : file.type === "image" ? "image" : "document";
+      const fileId = String(file.file_id);
+      const attachment: Attachment = { kind, mime: String(file.mime_type ?? "application/octet-stream"), ...(file.filename ? { name: String(file.filename) } : {}), data: () => client.download(fileId) };
+      base = { text: caption, attachments: [attachment] };
+    } else if (media || c.kind === "file_blocked") {
       // A video (Flow Framework reads none), or a file Flow did not keep: the caption, and what it was.
-      const what = String(c.kind ?? "file");
-      base = { text: [c.caption, c.type === "file_blocked" ? `[${what}: not received (${String(c.reason)})]` : `[${what}]`].filter(Boolean).join(" ") };
-    } else if (c.type === "location") base = { text: `[location: ${[c.name, c.address].filter(Boolean).join(", ")} (${c.lat}, ${c.lng})]` };
-    else if (c.type === "contact_card") base = { text: `[contact: ${String(c.name ?? "")}]` };
+      const what = String((media ? media.type : c.media_type) ?? "file");
+      base = { text: [media ? caption : c.caption, c.kind === "file_blocked" ? `[${what}: not received (${String(c.reason)})]` : `[${what}]`].filter(Boolean).join(" ") };
+    } else if (c.kind === "location") base = { text: `[location: ${[c.name, c.address].filter(Boolean).join(", ")} (${c.lat}, ${c.lng})]` };
+    else if (c.kind === "contact_card") base = { text: `[contact: ${String(c.name ?? "")}]` };
     else return null; // reactions arrive as reaction.added
     if (m.reply_to) {
       const replyTo = await quoted(m.reply_to);
@@ -536,6 +624,13 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       }
       if (event.type !== "message.failed") return;
     }
+    if (event.conversation?.type === "group") {
+      // An iMessage group has no one address to answer, so the agent never takes part: nothing is
+      // answered there, and no typing or read receipt goes to it.
+      if (!groupsWarned) console.warn("@flow-engineer/flow/flow-messaging: group conversations are not handled; their events are passed over");
+      groupsWarned = true;
+      return;
+    }
     const route = routeOf(event);
     if (!route || !event.conversation) return;
     const address = await addressOf(route, event.conversation.contact);
@@ -557,7 +652,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       const m = event.data.message;
       const text = textOf(m.content);
       const type = m.error?.type ?? "channel_error";
-      if (text) agent.undelivered(conversationId, text, reason({ type, channelCode: m.error?.channel_code, message: m.error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" }));
+      if (text) agent.undelivered(conversationId, text, reason({ type, channelCode: m.error?.channel_code, param: m.error?.param, channel: m.error?.channel, message: m.error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" }));
     }
   }
 
@@ -625,7 +720,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   // ---- the stream ----
 
   /**
-   * The live event stream (GET /v1/stream): an outbound WebSocket, so the agent needs no public URL.
+   * The live event stream (GET /v0/stream): an outbound WebSocket, so the agent needs no public URL.
    * Events are handled one at a time, in log order, by the webhook's handler. There is no ack frame
    * for events: the stream resumes from `after`, so an event counts as acknowledged once the agent
    * has handled it and the cursor (in memory, or `cursorFile`) has moved past it. A failed event, a
@@ -655,7 +750,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
     function connect(): void {
       const mine = ++generation;
-      const url = new URL(`${client.baseUrl.replace(/^http/, "ws")}/v1/stream`);
+      const url = new URL(`${client.baseUrl.replace(/^http/, "ws")}/v0/stream`);
       if (cursor) url.searchParams.set("after", cursor);
       for (const type of handled) url.searchParams.append("type", type);
       // Node's WebSocket cannot set headers: the key goes as a subprotocol beside "flow", which Flow selects.
@@ -720,7 +815,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
           if (mine === generation) ws.close(1000, "event failed; resuming");
           return;
         }
-        console.warn(`@flow-engineer/flow/flow-messaging: event ${event.id} failed ${times} times; going on without it (it stays in Flow's log, GET /v1/events)`);
+        console.warn(`@flow-engineer/flow/flow-messaging: event ${event.id} failed ${times} times; going on without it (it stays in Flow's log, GET /v0/events)`);
       }
       failing = undefined;
       tries = 0;
@@ -766,9 +861,44 @@ function writeCursor(file: string, id: string | undefined): void {
   writeFileSync(file, id ? `${id}\n` : "");
 }
 
+/**
+ * A text in the channel's own terms. Telegram: the agent's Markdown as Telegram's HTML, with
+ * `parse_mode` HTML (left plain when there is nothing to mark or escape). iMessage: the Markdown's
+ * marks taken out and kept as styled ranges (`imessage.styles`). WhatsApp reads its own marks
+ * (*bold*) itself, and SMS shows none: there the text goes as written.
+ */
+function styled(kind: Kind, text: string): { text: string; telegram?: { parse_mode: "HTML" }; imessage?: { styles: ReturnType<typeof imessageStyles>["styles"] } } {
+  if (kind === "telegram") {
+    const html = telegramHTML(text);
+    return html === text ? { text } : { text: html, telegram: { parse_mode: "HTML" } };
+  }
+  if (kind === "imessage") {
+    const plain = imessageStyles(text);
+    return { text: plain.text, ...(plain.styles.length ? { imessage: { styles: plain.styles } } : {}) };
+  }
+  return { text };
+}
+
 /** A photo as Flow takes it: by URL, or by a file uploaded to Flow. */
 function file(image: Photo): { url: string } | { file_id: string } {
   return "url" in image ? { url: image.url } : { file_id: image.fileId };
+}
+
+/**
+ * A message's content as a kind object (`kind`), from either shape: an app Flow still serves through
+ * its bridge to the older API gets the older one (`type`: text, media with its `kind` and `caption`,
+ * file_blocked with the file's `kind`), which reads here as the kind it became.
+ */
+function kindOf(content: Record<string, unknown>): Record<string, unknown> & { kind: string } {
+  if (typeof content.type !== "string") return { ...content, kind: String(content.kind ?? "") };
+  const { type, kind, caption, ...rest } = content;
+  if (type === "text") return { ...rest, kind: "basic" };
+  if (type === "media") {
+    const { url, file_id, filename, mime_type, size_bytes, ...other } = rest;
+    return { ...other, kind: "basic", ...(caption === undefined ? {} : { text: caption }), media: { type: kind, url, file_id, filename, mime_type, size_bytes } };
+  }
+  if (type === "file_blocked") return { ...rest, kind: "file_blocked", media_type: kind, caption };
+  return { ...rest, kind: type, ...(caption === undefined ? {} : { caption }) };
 }
 
 /** The text of a message's content, as the agent knew it. */
@@ -794,9 +924,14 @@ function templateParams(t: Template): Record<string, unknown> {
   };
 }
 
-/** Why a send did not reach the person, for the agent: Flow Framework's outside_window, else Flow's type and whether to resend. */
-function reason(e: { type: string; channelCode?: string; message: string; retryable: boolean }): string {
-  const what = e.channelCode ? `${e.type} (${e.channelCode})` : e.type;
+/**
+ * Why a send did not reach the person, for the agent: Flow Framework's outside_window, else Flow's
+ * type and whether to resend. A 422 unsupported_content says what the channel does not take
+ * (`param`), where (`channel`) and why (`channel_code`, such as group_unsupported or not_on_sms).
+ */
+function reason(e: { type: string; channelCode?: string; param?: string; channel?: string; message: string; retryable: boolean }): string {
+  const detail = [e.channelCode, ...(e.type === "unsupported_content" ? [e.param && `param ${e.param}`, e.channel && `on ${e.channel}`] : [])].filter(Boolean);
+  const what = detail.length ? `${e.type} (${detail.join(", ")})` : e.type;
   if (e.type === "outside_window" && e.channelCode === "quiet_hours") return `${what}: it is night where they are; send it later`;
   if (e.type === "outside_window") return "outside_window";
   if (e.channelCode === "channel_timeout_unknown_outcome") return `${what}: it may have arrived; ask them before sending it again`;
