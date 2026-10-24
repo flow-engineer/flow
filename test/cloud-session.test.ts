@@ -16,6 +16,7 @@ import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { z } from "zod";
 import { cloudHeaders, runInCloud, tunnelBase } from "../testing/src/client.ts";
 import type { Agent, Incoming } from "../src/index.ts";
+import { unavailableRecords } from "../src/records.ts";
 
 test("a hosted cloud needs the CI key and --synthetic; a local one needs neither", () => {
   const hosted = "https://tests.example.com";
@@ -257,7 +258,7 @@ test("a tool call the cloud has not answered does not hold later posts, over HTT
         channels: () => [],
         receive: (id: string, message: Incoming, deliver: (o: unknown) => Promise<void>) => {
           if (message.text === "first") {
-            void Promise.resolve(tools[0].run({}, { conversationId: id, person: "p", key: null, channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal })).catch(() => {});
+            void Promise.resolve(tools[0].run({}, { conversationId: id, person: "p", key: null, channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal, records: unavailableRecords("a test") })).catch(() => {});
             return "m1";
           }
           events[0]({ type: "turn.start", conversationId: id, at: 1 });

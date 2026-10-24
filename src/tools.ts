@@ -2,6 +2,7 @@
 // in the reply or carries on in the background; tool authors mark nothing.
 
 import { z } from "zod";
+import type { Records } from "./records.ts";
 import type { ToolSpec } from "./types.ts";
 
 export interface ToolContext {
@@ -31,6 +32,11 @@ export interface ToolContext {
   signal: AbortSignal;
   /** Server-side backend access for this verified person. Never supplied by the model or serialized into history or traces. */
   credentials?: Credentials;
+  /**
+   * The agent's own records (`createAgent({ records })`): small JSON documents that outlive the
+   * conversation, read and written by any person's turn. The same as `agent.records`.
+   */
+  records: Records;
 }
 
 /** A business supplies named backend credentials or clients, resolved afresh for the verified person. */

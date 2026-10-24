@@ -8,6 +8,7 @@ import { sqlite, type Database } from "../src/index.ts";
 import { Store } from "../src/store.ts";
 import { claimDue, scheduleTools } from "../src/schedules.ts";
 import { SMS, call, last, multi, respond } from "./helpers.ts";
+import { unavailableRecords } from "../src/records.ts";
 
 const CHANNELS = { sms: { info: SMS, phone: true } };
 const NOON_NY = Date.UTC(2026, 9, 12, 16);
@@ -117,7 +118,7 @@ test("the scheduling tool refuses what would go wrong, with a reason the agent c
   let zone: string | null = null;
   const scope = { store, conversationId: "c1", channel: () => "sms", now: () => NOON_NY, personZone: () => zone, setPersonZone: async (z: string) => void (zone = z), agentZone: "America/New_York" };
   const [schedule] = scheduleTools(scope);
-  const run = (input: Record<string, unknown>) => Promise.resolve(schedule.run(schedule.input.parse(input), { conversationId: "c1", person: "p", key: null, channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal })) as Promise<Record<string, any>>;
+  const run = (input: Record<string, unknown>) => Promise.resolve(schedule.run(schedule.input.parse(input), { conversationId: "c1", person: "p", key: null, channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal, records: unavailableRecords("a test") })) as Promise<Record<string, any>>;
   const daily = { message: "check in", repeat: "daily", time: "09:00" };
 
   assert.match((await run(daily)).error, /^timezone_needed/, "no zone known: ask their city, never take the business's");

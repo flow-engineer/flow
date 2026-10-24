@@ -10,6 +10,7 @@ import { z, type Tool } from "../src/index.ts";
 import { CLOUD_MODEL_BUDGET_MS, postBudgetMs, RETRY_BUDGET_MS, runInCloud, SessionStopped, TimeoutError, toolTimeoutMs } from "../testing/src/client.ts";
 import type { Command } from "../testing/src/protocol.ts";
 import { rollFault, startFaultProxy } from "./fault-proxy.ts";
+import { unavailableRecords } from "../src/records.ts";
 
 const message = (messageId: string, file?: string): Command => ({
   type: "message", conversationId: "c", messageId, channel: { reactions: false, status: false },
@@ -108,7 +109,7 @@ test("a tool call waits out the simulator's latency, then the POST budget, and a
         channels: () => [], reacted: () => {},
         receive: () => {
           const lookup = tools[0];
-          if (lookup) void Promise.resolve(lookup.run({}, { conversationId: "c", person: "p", key: null, channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal })).then(() => {}, (error: unknown) => { timed = error; });
+          if (lookup) void Promise.resolve(lookup.run({}, { conversationId: "c", person: "p", key: null, channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal, records: unavailableRecords("a test") })).then(() => {}, (error: unknown) => { timed = error; });
           return "m";
         },
       }),
@@ -157,7 +158,7 @@ test("a tool call the cloud failed, which the agent started and never awaited, i
         channels: () => [], reacted: () => {},
         receive: (conversationId) => {
           received.push(conversationId);
-          if (conversationId === "sms:a") void tools[0]!.run({}, { conversationId, person: "p", channel: "sms", key: null, callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal });
+          if (conversationId === "sms:a") void tools[0]!.run({}, { conversationId, person: "p", channel: "sms", key: null, callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal, records: unavailableRecords("a test") });
           return null;
         },
       }),

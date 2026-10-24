@@ -23,6 +23,7 @@ import {
   type CallToolResult,
 } from "@modelcontextprotocol/server";
 import { emitter, type EventSink } from "../../src/events.ts";
+import { unavailableRecords, type Records } from "../../src/records.ts";
 import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, SKILLS_META, type AgentFiles } from "../../src/skills.ts";
 import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
 import { render, toolContext, type CredentialProvider, type Tool, type ToolContext } from "../../src/tools.ts";
@@ -63,6 +64,8 @@ export interface McpServerOptions {
   auth?: McpAuth;
   /** Backend access by verified account, separate from the bearer token issued for this MCP resource. */
   credentials?: CredentialProvider;
+  /** The agent's records (`agent.records`), for tools that use `context.records`. Without them, such a tool's call fails saying so. */
+  records?: Records;
   /** Where the endpoint is mounted (default "/mcp"). */
   path?: string;
   /** Native plugins deliver skills themselves. Default: tools only at `${path}/plugin`. */
@@ -94,6 +97,8 @@ export interface McpServerHandle {
 }
 
 const LOCAL = new Set(localhostAllowedHostnames());
+
+const NO_RECORDS = unavailableRecords("give mcpServer({ records: agent.records })");
 
 export function mcpServer(options: McpServerOptions): McpServerHandle {
   if (options.dir !== undefined && options.files !== undefined) throw new Error("@flow-engineer/flow/mcp: give dir or files, not both");
@@ -157,6 +162,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         // CLI retries can preserve a call key; other hosts get one per request.
         idempotencyKey: typeof sentKey === "string" && sentKey.length > 0 && sentKey.length <= 256 ? sentKey : randomUUID(),
         signal: ctx.mcpReq?.signal ?? new AbortController().signal,
+        records: options.records ?? NO_RECORDS,
       }, (ctx.http?.authInfo?.extra?.credentials as CredentialProvider | undefined) ?? options.credentials);
       const started = Date.now();
       emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input: parsed.data, ...detail });
