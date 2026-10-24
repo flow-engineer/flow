@@ -195,6 +195,18 @@ for (const backend of backends) {
     assert.deepEqual((await after.records.query("notes")).map((e) => e.id), ["a-number"], "a value the new declaration refuses is kept, left out of the index");
   });
 
+  test(`${backend.name}: an agent started with an older declaration on the same store never takes away what a newer one indexed`, async () => {
+    const id = `agt_${randomUUID().slice(0, 8)}/production`;
+    const build = (records: Record<string, { people?: string[]; fields?: string[] }>) => createAgent({ files: { "AGENTS.md": "Test." }, model: noModel, records, scheduleCheckMs: 0, store: backend.store(id) });
+    const older = { notes: { fields: ["status"] } };
+    await build(older).records.put("notes", "n1", { about: "phone:+15550100001", status: "open" });
+    const newer = build({ notes: { people: ["about"], fields: ["status"] } });
+    assert.equal((await newer.records.query("notes", { about: "phone:+15550100001" })).length, 1);
+    await build(older).records.get("notes", "n1"); // the old revision starts again (a deploy's overlap, a stale checkout)
+    assert.deepEqual((await newer.records.query("notes", { about: "phone:+15550100001" })).map((e) => e.id), ["n1"]);
+    assert.equal(await newer.records.forgetPerson("phone:+15550100001"), 1);
+  });
+
   test(`${backend.name}: export returns every record of every collection, oldest first, past one page`, async () => {
     const { records } = agentOn(backend);
     for (let n = 0; n < 130; n++) await records.put(n % 2 ? "notes" : "questions", `r${String(n).padStart(3, "0")}`, n % 2 ? { about: "key:7", n } : question(n));

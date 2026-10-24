@@ -185,22 +185,13 @@ export function indexValue(collection: string, field: string, value: unknown, pe
   return JSON.stringify(value);
 }
 
-/**
- * The declared fields of a value, as the store indexes them. `skipRefused`: a field whose value
- * the declaration refuses is left out instead (a record kept under an earlier declaration).
- */
-export function recordIndex(collection: string, value: RecordValue, fields: string[], people: string[], skipRefused = false): Array<{ field: string; value: string; person: boolean }> {
+/** The declared fields of a value, as the store indexes them. */
+export function recordIndex(collection: string, value: RecordValue, fields: string[], people: string[]): Array<{ field: string; value: string; person: boolean }> {
   checkFields(collection, fields, people);
   const index: Array<{ field: string; value: string; person: boolean }> = [];
   for (const [list, person] of [[people, true], [fields, false]] as const) {
     for (const field of list) {
-      let v: string | null;
-      try {
-        v = indexValue(collection, field, value[field], person);
-      } catch (error) {
-        if (!skipRefused) throw error;
-        v = null;
-      }
+      const v = indexValue(collection, field, value[field], person);
       if (v !== null) index.push({ field, value: v, person });
     }
   }
@@ -230,9 +221,10 @@ export function checkPage(limit: unknown, after: unknown): { limit: number; afte
 }
 
 /**
- * Indexes the records already kept again where a collection's declaration changed since they were
- * indexed (a field added to `people` or `fields`), so query finds them and forgetting a person
- * deletes them: what the agent's start waits for, once the store's tables exist.
+ * Indexes the records already kept for each field a collection's declaration adds (to `people` or
+ * `fields`) since they were indexed, so query finds them and forgetting a person deletes them; never
+ * removes what an earlier declaration indexed. What the agent's start waits for, once the store's
+ * tables exist.
  */
 export async function indexDeclared(store: StoreApi, collections: Record<string, RecordCollection> | undefined): Promise<void> {
   for (const [name, { fields, people }] of declareCollections(collections)) {

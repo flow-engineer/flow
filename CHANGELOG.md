@@ -16,7 +16,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   conversation id, any identity, or their number on a phone channel, whatever their key), and a
   tool of theirs still running then can no longer put one. A field added to a collection's
   `people` or `fields` is indexed for the records already kept when the agent next starts, so
-  `query` and forgetting find them. Limits in `RECORD_LIMITS`: 64 KB a record, 10,000 an agent
+  `query` and forgetting find them; an older declaration starting on the same store takes nothing
+  away, but a record it puts meanwhile (a deploy's old revision) is indexed by its declaration
+  until it is put again. Limits in `RECORD_LIMITS`: 64 KB a record, 10,000 an agent
   (new records put at the same moment may pass it by up to as many as are put at once), 20
   collections, 8 declared fields each. If anything other than the agent reads the data, it
   belongs in your own database ([docs/agents.md](docs/agents.md#the-agents-own-records)).

@@ -5,7 +5,7 @@
 // carries the agent's id, so one database can hold several agents.
 
 import type { Database, Row } from "./db.ts";
-import { checkCollection, checkFields, checkId, checkPage, checkWhere, RECORD_LIMITS, recordIndex, recordJson, type ExportedRecord, type RecordEntry, type RecordScalar, type RecordValue } from "./records.ts";
+import { checkCollection, checkFields, checkId, checkPage, checkWhere, indexValue, RECORD_LIMITS, recordIndex, recordJson, type ExportedRecord, type RecordEntry, type RecordScalar, type RecordValue } from "./records.ts";
 import type { ChatMessage } from "./types.ts";
 
 /**
@@ -751,43 +751,65 @@ export class Store {
   }
 
   /**
-   * Indexes `collection`'s records again under this declaration, when it is not the one they were
-   * last indexed under (a field added to `people` or `fields` since): one page of records after the
-   * id `after` (null: from the first) per call, each record locked as a put locks it. Resolves to the
-   * last id done, to be passed as `after` next; or null once every record is done, and only then is
-   * the declaration kept, so a start cut off midway does it all again. A stored value the declaration
-   * refuses (a person field holding a number) is kept, with that field left out of the index.
+   * Indexes `collection`'s records for the fields this declaration adds to the one kept (a field
+   * new to `people` or `fields`, or a field that now holds a person): one page of records after the
+   * id `after` (null: from the first) per call, each record locked as a put locks it. Additive: the
+   * index rows of fields this declaration leaves out stay, so an older declaration starting on the
+   * same store (a deploy's old revision, a stale checkout) never takes away what a newer one indexed.
+   * Resolves to the last id done, to be passed as `after` next; or null once every record is done,
+   * and only then is the declaration kept (the union of the kept one and this), so a start cut off
+   * midway does it all again. A stored value the declaration refuses (a person field holding a
+   * number) is kept, with that field left out of the index.
    */
   async reindexRecords(collection: string, fields: string[], people: string[], after: string | null): Promise<string | null> {
     checkCollection(collection);
     checkFields(collection, fields, people);
-    const declaration = JSON.stringify({ people: [...people].sort(), fields: [...fields].sort() });
+    if (after !== null) checkId(after);
     const scope = [this.agentId, collection];
-    if (after === null) {
-      const [kept] = await this.db.query("SELECT declaration FROM record_collections WHERE agent_id = ? AND collection = ?", scope);
-      if (kept?.declaration === declaration) return null;
-    } else checkId(after);
+    const kept = async () => {
+      const [row] = await this.db.query("SELECT declaration FROM record_collections WHERE agent_id = ? AND collection = ?", scope);
+      return parse<{ people?: string[]; fields?: string[] }>(row?.declaration, {});
+    };
+    const before = await kept();
+    const keptPeople = new Set(before.people ?? []);
+    const keptFields = new Set(before.fields ?? []);
+    const added: Array<[string, boolean]> = [
+      ...people.filter((f) => !keptPeople.has(f)).map((f): [string, boolean] => [f, true]),
+      ...fields.filter((f) => !keptPeople.has(f) && !keptFields.has(f)).map((f): [string, boolean] => [f, false]),
+    ];
+    if (!added.length) return null;
     const ids = await this.db.query(
       `SELECT id FROM records WHERE agent_id = ? AND collection = ?${after === null ? "" : " AND id > ?"} ORDER BY id LIMIT ?`,
       [...scope, ...(after === null ? [] : [after]), REINDEX_PAGE],
     );
     const lock = this.db.dialect === "postgres" ? " FOR UPDATE" : "";
+    const marks = added.map(() => "?").join(", ");
     for (const { id } of ids) {
       const key = [...scope, String(id)];
       await this.db.transaction(async (tx) => {
         const [row] = await tx.query(`SELECT doc FROM records WHERE agent_id = ? AND collection = ? AND id = ?${lock}`, key);
-        await tx.run("DELETE FROM record_index WHERE agent_id = ? AND collection = ? AND id = ?", key);
         if (!row) return; // deleted since the page was read
+        await tx.run(`DELETE FROM record_index WHERE agent_id = ? AND collection = ? AND id = ? AND field IN (${marks})`, [...key, ...added.map(([f]) => f)]);
         const value = parse<RecordValue>(row.doc, {});
-        for (const i of recordIndex(collection, value, fields, people, true)) {
-          await tx.run("INSERT INTO record_index (agent_id, collection, id, field, value, person) VALUES (?, ?, ?, ?, ?, ?)", [...key, i.field, i.value, i.person ? 1 : 0]);
+        for (const [field, person] of added) {
+          let indexed: string | null;
+          try {
+            indexed = indexValue(collection, field, value[field], person);
+          } catch {
+            indexed = null; // a value this declaration refuses: kept, not indexed
+          }
+          if (indexed !== null) await tx.run("INSERT INTO record_index (agent_id, collection, id, field, value, person) VALUES (?, ?, ?, ?, ?, ?)", [...key, field, indexed, person ? 1 : 0]);
         }
       });
     }
     if (ids.length === REINDEX_PAGE) return String(ids.at(-1)!.id);
+    // Read again, so a declaration another start kept meanwhile is part of the union too.
+    const now = await kept();
+    const allPeople = new Set([...(now.people ?? []), ...people]);
+    const allFields = new Set([...(now.fields ?? []), ...fields].filter((f) => !allPeople.has(f)));
     await this.db.run(
       "INSERT INTO record_collections (agent_id, collection, declaration) VALUES (?, ?, ?) ON CONFLICT (agent_id, collection) DO UPDATE SET declaration = excluded.declaration",
-      [...scope, declaration],
+      [...scope, JSON.stringify({ people: [...allPeople].sort(), fields: [...allFields].sort() })],
     );
     return null;
   }

@@ -259,7 +259,9 @@ ranges, sorting, joins, search or transactions across records; a put replaces th
 - A field added to a collection's `people` or `fields` counts for the records already kept from
   the agent's next start: it indexes them again before anything runs, so `query` and forgetting
   find them. A value the new declaration refuses (a person field holding a number) is kept, left
-  out of the index.
+  out of the index. An older declaration starting on the same store (a deploy's old revision, a
+  stale checkout running `flow records export`) takes nothing away; a record it puts meanwhile is
+  indexed by its declaration until it is put again.
 - Values are plain JSON: no Dates (a time is milliseconds or ISO text), NaN, Maps or class
   instances; keys whose value is undefined are left out. A declared field holds a string (at most
   256 characters), a number, a boolean or null; `1` and `"1"` differ.
