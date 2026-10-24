@@ -53,6 +53,15 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   throws, the result goes out as JSON, still a success, and `tool.end` carries `formatError`.
   Chats are unchanged: the model there still reads the data. `flow check` refuses `format`
   without `output`.
+- **The CLI's top-level help is easier to scan.** `chat` comes first, as the way to ask for
+  anything in plain words; the CLI's own commands (`tools`, `skill`, `auth`, `help`) come last,
+  under This CLI; one usage line replaces one per command. At a terminal, headings are bold and
+  command names coloured, chat's the most (plain when piped, for `NO_COLOR` or `TERM=dumb`). `defineCli({ sections: { Account:
+  ["account", "keys"] } })` lists groups and commands under headings, in order, the rest under
+  Other; `flow check` refuses a name that is not a top-level command or group, or one in two
+  sections.
+- **`<cli> help <words>`** lists the commands whose words or descriptions have every word
+  (`acme help invoice`). The CLI's generated SKILL.md mentions it.
 
 ### Migration notes
 
@@ -71,6 +80,7 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   exhaustively handles it; it comes only from `agent.cancelNudge`.
 - **To render a tool's `format` in a terminal**, a CLI's package adds `marked@12.0.2` and
   `marked-terminal@7.3.0`; without them it prints the Markdown as written. Nothing else changes.
+- **A CLI file's own `help` command**, like its own `chat`, replaces the CLI's `help <words>`.
 
 ## 0.7.0 (2026-10-24)
 

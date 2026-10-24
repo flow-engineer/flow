@@ -54,13 +54,15 @@ test("the CLI file is checked against the tools, and a tool it does not name is 
     "order view": { tool: "get_order", args: ["id"] },
     "refund": { tool: "refund_order" },
     "order": { tool: "list_orders" },
-  } }`;
+  }, sections: { Orders: ["order", "menu"], Mine: ["order"] } }`;
   const result = await check(agentFolder(`${listOrders}, ${getOrder}`, cli));
   assert.equal(result.code, 1);
   assert.deepEqual(result.errors, [
     `src/cli.ts: command "order list": columns names placed_at, which list_orders's output does not have`,
     `src/cli.ts: command "order view": args names id, which get_order's input does not have`,
     `src/cli.ts: command "refund": no tool named refund_order on the server`,
+    `src/cli.ts: section "Orders": menu is not a top-level command or group`,
+    `src/cli.ts: section "Mine": order is already in "Orders"`,
     `src/cli.ts: command "order" ("order"): it is also the group of "order list"; a word is a command or a group, not both`,
     `src/cli.ts: command "order" ("order"): it is also the group of "order view"; a word is a command or a group, not both`,
   ]);
