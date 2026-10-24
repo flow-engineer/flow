@@ -15,6 +15,7 @@
 
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
+import { ATTACH_EVENTS, type FlowEvents } from "./business-events/engine.ts";
 import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
 import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
@@ -368,6 +369,7 @@ export class Agent {
   private readonly store: StoreApi;
   /** The agent's own records (`createAgent({ records })`), for code outside a turn: routes, beforeSend, intercept. Tools have them as `context.records`. */
   readonly records: Records;
+  private eventsSide: FlowEvents | undefined;
   /** This process among the agent's runners (`runner`). */
   readonly runner: string;
   private readonly startedAt = Date.now();
@@ -451,6 +453,7 @@ export class Agent {
       away: (conversation, again) => this.away(conversation, again),
       store: this.store,
       records: this.records,
+      events: () => this.eventsSide,
       // The records kept under an earlier declaration are indexed under this one before anything runs.
       ready: this.store.migrate().then(() => indexDeclared(this.store, options.records)),
       now: this.now,
@@ -1112,6 +1115,25 @@ export class Agent {
     const conversation = this.open(conversationId, `${name}:${conversationId}`);
     if (isNew) conversation.persist(() => this.store.addIdentity(conversationId, name, conversationId, "channel"));
     await conversation.seed(messages, name);
+  }
+
+  /**
+   * The agent's own business events side (`flowEvents`), once `events.attach(agent)` ran; undefined
+   * before. For code outside a turn: routes, beforeSend, intercept, context. Tools have it as
+   * `context.events`.
+   */
+  get events(): FlowEvents | undefined {
+    return this.eventsSide;
+  }
+
+  /** flowEvents' attach(): this events side is the agent's own (attached false: it moved to another agent). One per agent, as its state is. */
+  [ATTACH_EVENTS](events: FlowEvents<any>, attached = true): void {
+    if (!attached) {
+      if (this.eventsSide === events) this.eventsSide = undefined;
+      return;
+    }
+    if (this.eventsSide && this.eventsSide !== events) throw new Error("flow: this agent already has an events side (flowEvents); an agent has one, as its state is one per agent");
+    this.eventsSide = events;
   }
 
   /**

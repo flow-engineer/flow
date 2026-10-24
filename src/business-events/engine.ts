@@ -18,7 +18,8 @@
 // agent stopped is processed after the restart (its sends keep their idempotency keys). Only what a
 // rule still reads is saved (told and optional sends a day, nudges a week, copies their days); event
 // ids are kept 30 days. One events side per agent, on one runner at a time, as the state is held in
-// memory between saves.
+// memory between saves. Attached, it is that agent's own: its tools reach it as `context.events`,
+// other code as `agent.events`, so a tool never needs a module variable to find its agent's state.
 //
 // What an app's events mean (its catalog, its templates and wording, its own rules) stays in the
 // app: `catalog` names every type it accepts, `rules` and `onEvent` decide the rest.
@@ -180,6 +181,12 @@ export function createEventState<W extends Watch = Watch>() {
 }
 
 export type EventState<W extends Watch = Watch> = ReturnType<typeof createEventState<W>>;
+
+/**
+ * How attach() tells an Agent that this events side is its own (`context.events`, `agent.events`).
+ * Symbol.for, so an agent and an engine from two copies of the package still find each other.
+ */
+export const ATTACH_EVENTS: unique symbol = Symbol.for("flow.attachEvents");
 
 /** What sends: the agent (its nudge, and reach for copies). */
 export interface EventSender {
@@ -766,8 +773,17 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     routes: { "/v1/events": handler } as Record<string, (request: Request) => Promise<Response>>,
     /** For createAgent's `onTick`. */
     onTick: async () => void (await tick()),
-    /** The agent that sends; with `persist`, its database keeps the state (loaded now, before any event is handled). */
+    /**
+     * The agent that sends; with `persist`, its database keeps the state (loaded now, before any event
+     * is handled). An Agent then has this events side as its own: `context.events` in its tools,
+     * `agent.events` elsewhere. An agent has one: attaching another to it throws. Attached to another
+     * agent, it is no longer the earlier one's (its `agent.events` is then undefined): make one per agent.
+     */
     attach(s: EventSender) {
+      type Owner = { [ATTACH_EVENTS]?: (events: FlowEvents<any>, attached?: boolean) => void };
+      // First, so an agent that refuses it (it has another) leaves this side as it was.
+      (s as Owner)[ATTACH_EVENTS]?.(api);
+      if (sender && sender !== s) (sender as Owner)[ATTACH_EVENTS]?.(api, false);
       const first = sender === null;
       sender = s;
       const kept = first && persist ? (s.eventStateStore?.() ?? null) : null;

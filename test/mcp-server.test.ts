@@ -7,7 +7,7 @@ import { isSpecType } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { tools as cafeTools } from "../examples/cafe/src/tools.ts";
 import { mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
-import { createAgent, tool, type ToolContext } from "../src/index.ts";
+import { createAgent, flowEvents, tool, type ToolContext } from "../src/index.ts";
 
 const servers: Server[] = [];
 after(() => servers.forEach((s) => s.close()));
@@ -155,6 +155,18 @@ test("a served tool's context.records is the records given to mcpServer; without
   assert.equal((await agent.records.get<{ text: string }>("notes", "n1"))?.text, "oat milk");
   const without = await client(await serve({ name: "cafe", version: "1", tools: [note] }));
   assert.match(JSON.stringify(await without.callTool({ name: "note", arguments: { text: "x" } })), /not available here: give mcpServer\(\{ records: agent\.records \}\)/);
+  await served.close();
+  await without.close();
+});
+
+test("a served tool's context.events is the events side given to mcpServer, and absent without one", async () => {
+  const events = flowEvents({ catalog: {}, log: () => {} });
+  const watch = tool({ name: "watch", description: "Watches a topic.", input: z.object({ topic: z.string() }), signIn: "none", run: ({ topic }, context) => context.events?.watch({ address: "+15550100100", topic }).outcome ?? "no events side" });
+  const served = await client(await serve({ name: "cafe", version: "1", tools: [watch], businessEvents: events }));
+  assert.match(JSON.stringify(await served.callTool({ name: "watch", arguments: { topic: "order:1" } })), /saved/);
+  assert.deepEqual(events.state.watches.map((w) => w.topic), ["order:1"]);
+  const without = await client(await serve({ name: "cafe", version: "1", tools: [watch] }));
+  assert.match(JSON.stringify(await without.callTool({ name: "watch", arguments: { topic: "order:2" } })), /no events side/);
   await served.close();
   await without.close();
 });
