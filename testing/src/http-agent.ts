@@ -1,24 +1,24 @@
-// An agent you already have, on any framework, tested through its HTTP endpoint: `chinwag test
-// --agent-url <url>`. This plays the part of a Chinwag Agent on the developer's machine: each of the
+// An agent you already have, on any framework, tested through its HTTP endpoint: `flow test
+// --agent-url <url>`. This plays the part of a Flow Framework Agent on the developer's machine: each of the
 // person's messages is one POST to the URL from here (so the agent never has to be reachable from
-// the internet), and the replies it answers go to the test cloud as a Chinwag agent's would. Its own
+// the internet), and the replies it answers go to the test cloud as a Flow Framework agent's would. Its own
 // tools run on its side, for real.
 //
 //   POST <url>  { conversationId, messageId, channel, message: { text, attachments?: [{ kind, mime, name?, data }] } }
 //   200         { replies: Outbound[] }        (data is base64; [] is no reply)
 //
 // A conversation's messages go one at a time, in order: the next is sent once the last one's answer
-// is in. Each reply is checked against what the run's platform can show, as a Chinwag agent's send
+// is in. Each reply is checked against what the run's platform can show, as a Flow Framework agent's send
 // is. Agents that answer later (through a callback) are not supported yet.
 
 import { Buffer } from "node:buffer";
 import { emitter } from "../../src/events.ts";
-import { fitMessage, z, type ChannelInfo, type ChannelSummary, type Deliver, type EventSink, type Incoming, type Outbound, type ReceiveOptions } from "../../src/index.ts";
-import { sendInput, sendRefusal } from "../../src/talk.ts";
+import { contentRefusal, fitMessage, z, type ChannelInfo, type ChannelSummary, type Deliver, type EventSink, type Incoming, type Outbound, type ReceiveOptions } from "../../src/index.ts";
+import { contentRefusalText, sendInput, sendRefusal } from "../../src/talk.ts";
 
 export interface HttpAgentOptions {
   url: string;
-  /** Sent as `authorization: Bearer <token>` (CHINWAG_AGENT_TOKEN). */
+  /** Sent as `authorization: Bearer <token>` (FLOW_FRAMEWORK_AGENT_TOKEN). */
   token?: string;
   /** The channel every message names; default the platform the run plays (whatsapp, sms, imessage, telegram, web). */
   channel?: string;
@@ -85,7 +85,7 @@ export async function postMessage(options: Pick<HttpAgentOptions, "url" | "token
   return answer.data.replies;
 }
 
-/** The reply as the platform takes it, or why it cannot go: the checks a Chinwag agent's send gets. */
+/** The reply as the platform takes it, or why it cannot go: the checks a Flow Framework agent's send gets. */
 export function checkReply(reply: unknown, info: ChannelInfo): { outbound: Outbound } | { refused: string } {
   const type = (reply as { type?: unknown } | null)?.type;
   if (type !== "message") {
@@ -93,13 +93,23 @@ export function checkReply(reply: unknown, info: ChannelInfo): { outbound: Outbo
     return other.success ? { outbound: other.data as Outbound } : { refused: problems(other.error) };
   }
   const { type: _, replyTo, fields, ...rest } = reply as Extract<Outbound, { type: "message" }>;
-  const input = { ...rest, ...(replyTo !== undefined ? { reply_to: replyTo } : {}) };
+  const input = { ...rest, ...(rest.image !== undefined ? { image: toolPhoto(rest.image) } : {}), ...(replyTo !== undefined ? { reply_to: replyTo } : {}) };
   const sent = sendInput(info).strict().safeParse(input);
-  if (!sent.success) return { refused: problems(sent.error).replaceAll("reply_to", "replyTo") };
+  if (!sent.success) return { refused: problems(sent.error).replaceAll("reply_to", "replyTo").replaceAll("file_id", "fileId") };
   if (fields !== undefined && (typeof fields !== "object" || fields === null || Array.isArray(fields))) return { refused: "fields: must be an object" };
   const refusal = sendRefusal(info, input as Parameters<typeof sendRefusal>[1]);
   if (refusal) return { refused: refusal };
-  return { outbound: fitMessage(info, { type: "message" as const, ...rest, ...(replyTo !== undefined ? { replyTo } : {}), ...(fields ? { fields } : {}) }) };
+  const outbound = fitMessage(info, { type: "message" as const, ...rest, ...(replyTo !== undefined ? { replyTo } : {}), ...(fields ? { fields } : {}) });
+  // What the platform itself refuses (Flow Messaging's content rules), as it refuses it.
+  const refused = contentRefusal(info, outbound);
+  return refused ? { refused: contentRefusalText(info, refused) } : { outbound };
+}
+
+/** A reply's photo ({ url } or { fileId }) as the send tool takes it ({ url } or { file_id }). */
+function toolPhoto(image: unknown): unknown {
+  if (!image || typeof image !== "object" || !("fileId" in image)) return image;
+  const { fileId, ...rest } = image as { fileId: unknown };
+  return { ...rest, file_id: fileId };
 }
 
 export function httpAgent(options: HttpAgentOptions) {

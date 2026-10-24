@@ -8,17 +8,20 @@
 // failed request is dropped, logged once per kind of failure, and never names the key.
 //
 // Content (what the person and the agent wrote, tool inputs and results) is sent only with
-// `content: true` (CHINWAG_TRACES_CONTENT=1); without it the spans hold ids, names, timing and counts,
+// `content: true` (FLOW_FRAMEWORK_TRACES_CONTENT=1); without it the spans hold ids, names, timing and counts,
 // and the endpoint has no messages to show or grade.
 //
-// Under `chinwag test`, which plays the agent in this process, every trace says so: the CLI sets
-// CHINWAG_RUN_KIND=test before it loads the agent, and CHINWAG_TEST_SESSION once the session opens.
+// Under `flow test`, which plays the agent in this process, every trace says so: the CLI sets
+// FLOW_FRAMEWORK_RUN_KIND=test before it loads the agent, and FLOW_FRAMEWORK_TEST_SESSION once the session opens.
 // The resource's `chinwag.run_kind` is then "test" (else "production") and each turn's root span
 // names the session (`chinwag.test.session`), so the endpoint keeps test traces apart from real
 // conversations and links them to their test run.
+// These two keep Chinwag's names on purpose: Flow's observe reads run attributes only as chinwag.*,
+// so a flow.* spelling waits until it reads that too.
 
 import { randomBytes } from "node:crypto";
-import type { EventSink, ChinwagEvent } from "./events.ts";
+import type { EventSink, FlowEvent } from "./events.ts";
+import { setting } from "./names.ts";
 
 export interface TracesOptions {
   /** The traces endpoint's base URL; traces go to `<url>/v1/traces`. */
@@ -39,22 +42,25 @@ const TIMEOUT_MS = 10_000;
 /** The cap per content attribute. */
 const MAX_TEXT = 32 * 1024;
 
-/** Where traces go when a key is set and no address is, and the test cloud `chinwag test` uses when none is named. */
+/** Where traces go when a key is set and no address is, and the test cloud `flow test` uses when none is named. */
 export const OBSERVE_URL = "https://flow.engineer/observe";
 
+/** A setting from the environment: FLOW_FRAMEWORK_<name>, else CHINWAG_<name> (src/names.ts). */
+export { setting };
+
 /**
- * The traces options from the environment: on when CHINWAG_TRACES_KEY is set, except under
+ * The traces options from the environment: on when FLOW_FRAMEWORK_TRACES_KEY is set, except under
  * `node --test` (NODE_TEST_CONTEXT), so an agent's own tests never send their turns. The address
- * is CHINWAG_TRACES_URL, else {@link OBSERVE_URL}.
+ * is FLOW_FRAMEWORK_TRACES_URL, else {@link OBSERVE_URL}.
  */
 export function tracesFromEnv(env: NodeJS.ProcessEnv = process.env): TracesOptions | undefined {
-  const key = env.CHINWAG_TRACES_KEY?.trim() ?? "";
+  const key = setting("TRACES_KEY", env)?.trim() ?? "";
   if (!key || env.NODE_TEST_CONTEXT) return undefined;
-  return { key, url: env.CHINWAG_TRACES_URL?.trim() || OBSERVE_URL, content: env.CHINWAG_TRACES_CONTENT === "1" };
+  return { key, url: setting("TRACES_URL", env)?.trim() || OBSERVE_URL, content: setting("TRACES_CONTENT", env) === "1" };
 }
 
-/** The endpoint's channel names: Chinwag's custom UIs are web or app chats. */
-const CHANNEL_KIND: Record<string, string> = { sms: "sms", whatsapp: "whatsapp", custom: "web" };
+/** The endpoint's channel names: Flow Framework's custom UIs are web or app chats. */
+const CHANNEL_KIND: Record<string, string> = { sms: "sms", mms: "mms", whatsapp: "whatsapp", telegram: "telegram", imessage: "imessage", web: "web", voice: "voice", other: "other", custom: "web", cli: "cli" };
 
 type Attr = { key: string; value: Record<string, unknown> };
 interface Span {
@@ -73,7 +79,7 @@ interface Inbound {
   at: number;
   text: string;
   channel: string;
-  /** The channel's own id for the message (Chinwag's own ids are not sent: they restart). */
+  /** The channel's own id for the message (Flow Framework's own ids are not sent: they restart). */
   messageId?: string;
 }
 
@@ -96,31 +102,35 @@ export interface Traces {
 let warnedMetadataOnly = false;
 
 export function traces(options: TracesOptions, agent: { service: string; kindOf(channel: string): string | undefined }): Traces {
-  const base = (options.url ?? "").replace(/\/+$/, "");
-  if (!options.key) throw new Error("chinwag: traces need a key");
-  if (!base) throw new Error("chinwag: traces need your traces endpoint's URL");
-  if (!allowedUrl(base)) throw new Error("chinwag: traces go over https (http only to this machine)");
+  const url = options.url ?? "";
+  let end = url.length;
+  while (end > 0 && url.charCodeAt(end - 1) === 47) end--;
+  const base = url.slice(0, end);
+  if (!options.key) throw new Error("flow: traces need a key");
+  if (!base) throw new Error("flow: traces need your traces endpoint's URL");
+  if (!allowedUrl(base)) throw new Error("flow: traces go over https (http only to this machine)");
   const endpoint = `${base}/v1/traces`;
   const content = options.content === true;
   if (!content && !warnedMetadataOnly) {
     warnedMetadataOnly = true;
-    console.warn("chinwag: traces are metadata only. Set CHINWAG_TRACES_CONTENT=1 to send what was written.");
+    console.warn("flow: traces are metadata only. Set FLOW_FRAMEWORK_TRACES_CONTENT=1 to send what was written.");
   }
   const open = new Map<string, Turn>();
+  const calls = new Map<string, { at: number; input?: unknown }>();
   /** Messages and background results that came while no turn was open: they join the next one. */
   const waiting = new Map<string, { inbound: Inbound[]; spans: Array<(turn: Turn) => Span> }>();
   const queue: Span[][] = [];
   const warned = new Set<string>();
   let sending: Promise<void> | null = null;
 
-  const testRun = process.env.CHINWAG_RUN_KIND === "test";
+  const testRun = setting("RUN_KIND") === "test";
   const resource: Attr[] = [attr("service.name", agent.service), attr("telemetry.sdk.name", "chinwag"), attr("chinwag.run_kind", testRun ? "test" : "production")];
   if (options.version) resource.push(attr("service.version", options.version));
 
   function warnOnce(kind: string, message: string) {
     if (warned.has(kind)) return;
     warned.add(kind);
-    console.warn(`chinwag: ${message}; later failures of this kind are not logged`);
+    console.warn(`flow: ${message}; later failures of this kind are not logged`);
   }
 
   const kindOf = (channel: string | undefined) => (channel ? CHANNEL_KIND[agent.kindOf(channel) ?? ""] ?? "other" : undefined);
@@ -149,10 +159,14 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
     const turn = open.get(conversationId);
     if (!turn) return;
     open.delete(conversationId);
+    record(conversationId, turn, failed, at);
+  }
+
+  function record(conversationId: string, turn: Turn, failed: boolean, at: number) {
     const attributes = [attr("gen_ai.operation.name", "invoke_agent"), attr("gen_ai.agent.name", agent.service), ...ids(conversationId)];
     const channel = kindOf(turn.inbound.at(-1)?.channel ?? turn.replyChannel);
     if (channel) attributes.push(attr("chinwag.channel", channel));
-    const session = testRun ? process.env.CHINWAG_TEST_SESSION : undefined;
+    const session = testRun ? setting("TEST_SESSION") : undefined;
     if (session) attributes.push(attr("chinwag.test.session", session));
     if (turn.inbound.length) {
       attributes.push(attr("chinwag.messages", turn.inbound.length));
@@ -163,12 +177,11 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
     enqueue([root, ...turn.spans]);
   }
 
-  /** A message sent outside any turn (one the business wrote, sent as is): a trace of its own. */
+  /** A message sent outside any turn (one the business wrote, or a rule's answer, sent as is): a trace of its own. */
   function alone(conversationId: string, at: number, channel: string, text: unknown) {
     const turn: Turn = { traceId: hex(16), rootId: hex(8), start: at, inbound: [], spans: [], tools: new Map(), replyChannel: channel };
-    open.set(conversationId, turn);
     turn.spans.push(reply(turn, at, channel, text));
-    finish(conversationId, false, at);
+    record(conversationId, turn, false, at);
   }
 
   function reply(turn: Turn, at: number, channel: string, text: unknown): Span {
@@ -213,7 +226,26 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
     }
   }
 
-  function handle(e: ChinwagEvent) {
+  function handle(e: FlowEvent) {
+    // An MCP/CLI call has no conversation or model turn. Reuse the same bounded exporter.
+    if (["mcp", "mcp-plugin", "cli"].includes(String(e.surface))) {
+      const call = String(e.callId);
+      if (e.type === "tool.start") {
+        calls.set(call, { at: e.at, ...(content ? { input: e.input } : {}) });
+        if (calls.size > MAX_QUEUED) calls.delete(calls.keys().next().value!);
+      } else if (e.type === "tool.end") {
+        const started = calls.get(call);
+        calls.delete(call);
+        const attributes = toolAttributes(e, started?.input);
+        attributes.push(attr("chinwag.surface", String(e.surface)), attr("openinference.span.kind", "TOOL"));
+        for (const [field, key] of Object.entries({ client: "chinwag.mcp.client", clientVersion: "chinwag.mcp.client_version", session: "chinwag.mcp.session", person: "chinwag.person", command: "chinwag.command" })) {
+          if (typeof e[field] === "string") attributes.push(attr(key, e[field] as string));
+        }
+        if (e.ok === false) attributes.push(attr("error", typeof e.error === "string" ? clip(e.error) : "Tool failed"));
+        enqueue([span(hex(16), `mcp.call ${e.tool}`, started?.at ?? e.at - Number(e.ms ?? 0), e.at, attributes, undefined, e.ok === false)]);
+      }
+      return;
+    }
     const id = e.conversationId;
     const turn = open.get(id);
     switch (e.type) {
@@ -224,6 +256,8 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
         // A voice note's text is its transcript (and any caption).
         const text = [e.transcript, e.text].filter(Boolean).join(" ");
         const m: Inbound = { at: e.at, text, channel: String(e.channel ?? ""), messageId: e.ownId ? String(e.messageId) : undefined };
+        // Answered with no model call (intercept, a keyword): a trace of its own, never part of a turn.
+        if (e.answered) return record(id, { traceId: hex(16), rootId: hex(8), start: e.at, inbound: [m], spans: [], tools: new Map() }, false, e.at);
         (turn ?? waitingFor(id)).inbound.push(m);
         return;
       }
@@ -234,7 +268,7 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
       case "model.error":
         return finish(id, true, e.at);
       case "message.out":
-        if (!turn) return alone(id, e.at, String(e.channel), e.text);
+        if (!turn || e.answered) return alone(id, e.at, String(e.channel), e.text);
         turn.spans.push(reply(turn, e.at, String(e.channel), e.text));
         return;
       case "model.call": {
@@ -272,10 +306,10 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
     }
   }
 
-  function toolAttributes(e: ChinwagEvent, input?: unknown): Attr[] {
+  function toolAttributes(e: FlowEvent, input?: unknown): Attr[] {
     const attributes = [attr("gen_ai.operation.name", "execute_tool"), attr("gen_ai.tool.name", String(e.tool)), attr("gen_ai.tool.call.id", String(e.callId))];
     if (content && input !== undefined) attributes.push(attr("gen_ai.tool.call.arguments", clip(JSON.stringify(input))));
-    if (content && typeof e.output === "string") attributes.push(attr("gen_ai.tool.call.result", clip(e.output)));
+    if (content && e.output !== undefined) attributes.push(attr("gen_ai.tool.call.result", clip(typeof e.output === "string" ? e.output : JSON.stringify(e.output))));
     return attributes;
   }
 
@@ -291,7 +325,7 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
   };
 }
 
-/** The endpoint's ids: the conversation is the person (Chinwag keeps one per person across channels). */
+/** The endpoint's ids: the conversation is the person (Flow Framework keeps one per person across channels). */
 function ids(conversationId: string): Attr[] {
   return [attr("chinwag.conversation_id", conversationId), attr("chinwag.contact_id", conversationId)];
 }

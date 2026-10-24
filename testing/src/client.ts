@@ -7,9 +7,12 @@ import { readFile } from "node:fs/promises";
 import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { basename, relative, resolve } from "node:path";
-import { toSpec, type Agent, type Incoming, type EventSink, type Outbound, type ChinwagEvent, type Tool } from "../../src/index.ts";
-import type { Command, Opened, WireIncoming, OpenSession, Receipt, RunKey, RunSummary, SessionSummary, ToolCallRequest, ToolCallResult } from "./protocol.ts";
+import { toSpec, type Agent, type Incoming, type EventSink, type Outbound, type FlowEvent, type Tool } from "../../src/index.ts";
+import { PROFILE_TOOL, profileTool } from "../../src/conversation.ts";
+import { STAND_IN } from "../../src/tools.ts";
+import type { Command, Opened, WireIncoming, OpenSession, Receipt, RunKey, RunSummary, SessionLimits, SessionSummary, ToolCallRequest, ToolCallResult } from "./protocol.ts";
 import { mimeOf, parseScenario, parseToolFile, suiteHash, type SuiteFile } from "./suite.ts";
+import { businessRuns, type BusinessAgent, type BusinessBuild } from "./business.ts";
 
 export interface ConnectOptions {
   /** The cloud's address, such as http://127.0.0.1:8900. */
@@ -20,12 +23,15 @@ export interface ConnectOptions {
   title?: string;
   /** The agent's real tools: only their names, descriptions and inputs are used. */
   tools: Tool[];
-  /** Builds the agent with the tools and events it is given: a Chinwag Agent, or anything that answers like one (http-agent.ts). */
-  build: (options: { tools: Tool[]; events: EventSink[] }) => AgentUnderTest;
+  /** Builds the agent with the tools and events it is given: a Flow Framework Agent, or anything that answers like one (http-agent.ts).
+   * A business run (protocol.ts) builds one more per run, with its own channels and clock (`BusinessBuild`); that needs a Flow Framework Agent. */
+  build: (options: { tools: Tool[]; events: EventSink[] } & Partial<BusinessBuild>) => AgentUnderTest;
   files: SuiteFile[];
   /** The tests folder: files a scenario attaches are read from here, and never leave this machine. */
   testsDir?: string;
   runs?: number;
+  /** Ask the cloud to replay no stored person, tool or judge answers (`flow test --fresh`). */
+  fresh?: boolean;
   log?: (line: string) => void;
   /** Headers for the open only (cloudHeaders: the CI key and the attestation); never sent to the tunnel. */
   openHeaders?: Record<string, string>;
@@ -33,6 +39,8 @@ export interface ConnectOptions {
   onRun?: (run: RunSummary) => void;
   /** Called once the session has opened, with its dashboard link, its id, and the cloud's id for the agent (a hosted cloud answers one). */
   onDashboard?: (url: string, sessionId: string, agent?: string) => void;
+  /** Called once the session has opened, with the limits the cloud sent (none from an older cloud). */
+  onLimits?: (limits: SessionLimits) => void;
   /** How long one POST waits before the size allowance. Default 30s, plus 1s per 100KB of body. A tool call waits {@link CLOUD_MODEL_BUDGET_MS} plus the simulator's latency, unless this is set. */
   postTimeoutMs?: number;
   /** How long the stream may sit with no bytes, including the cloud's 15s ping. Default 45s. */
@@ -41,6 +49,8 @@ export interface ConnectOptions {
   retryBudgetMs?: number;
   /** How long a lost stream keeps trying to resume, on a cloud that resumes (Opened.resume). Default 2 minutes, as long as the cloud holds its commands. */
   resumeWindowMs?: number;
+  /** The clock the resume window is measured on. Default Date.now; a test passes one it moves itself. */
+  now?: () => number;
   /** How often a resumable stream is replaced, before the tunnel's one-hour request cap. Default 50 minutes. */
   streamRefreshMs?: number;
   /** The longest Retry-After a busy cloud's refused open is sent again after, once. Default 60s. */
@@ -56,9 +66,12 @@ type OpenAnswer = Opened & { agent?: string };
  * code (`capacity: ...` gives capacity), when it starts with one. */
 export class CloudEnded extends Error {
   readonly code?: string;
+  /** The cloud's error as it sent it. */
+  readonly error: string;
   constructor(error: string) {
     super(`the cloud stopped the session: ${error}`);
     this.name = "CloudEnded";
+    this.error = error;
     this.code = /^([a-z_]+):/.exec(error)?.[1];
   }
 }
@@ -85,7 +98,32 @@ class SessionGone extends SessionStopped {
 }
 
 /** What runInCloud answers. When the cloud lost the session and a second one played the runs it had not finished, `runs` holds both sessions' runs and `lost` names the first. */
-export type CloudSummary = SessionSummary & { lost?: { sessionId: string; dashboard: string } };
+export type CloudSummary = SessionSummary & { lost?: { sessionId: string; dashboard: string }; sendPath?: SendPathProblem[] };
+
+/** A conversation whose messages did not all go one way: how many reached the cloud through the agent's channels,
+ * and how many its `message.out` events say it sent. Equal when every message went through the agent's send. */
+export interface SendPathProblem {
+  conversationId: string;
+  delivered: number;
+  announced: number;
+}
+
+/** Messages, carousels and templates: what the agent's send announces with `message.out`. */
+const isMessage = (outbound: Outbound) => outbound.type === "message" || outbound.type === "carousel" || outbound.type === "template";
+
+/** Counts, per conversation, the messages the channels took and the ones the agent announced. */
+export function sendPathCheck() {
+  const delivered = new Map<string, number>();
+  const announced = new Map<string, number>();
+  const add = (counts: Map<string, number>, id: string) => counts.set(id, (counts.get(id) ?? 0) + 1);
+  return {
+    delivered: (conversationId: string, outbound: Outbound) => { if (isMessage(outbound)) add(delivered, conversationId); },
+    event: (event: FlowEvent) => { if (event.type === "message.out") add(announced, event.conversationId); },
+    problems: (): SendPathProblem[] => [...new Set([...delivered.keys(), ...announced.keys()])].sort()
+      .map((id) => ({ conversationId: id, delivered: delivered.get(id) ?? 0, announced: announced.get(id) ?? 0 }))
+      .filter((p) => p.delivered !== p.announced),
+  };
+}
 
 /** A POST that sat until its own deadline. It fails that one call. Only a cloud that stores keys sends it again. The session abort is not one of these. */
 export class TimeoutError extends Error {
@@ -145,13 +183,13 @@ export function postBudgetMs(baseMs: number, bytes: number): number {
   return baseMs + Math.floor(Math.max(0, bytes) / 100_000) * 1_000;
 }
 
-/** What the cloud plays: a Chinwag Agent's channels, messages in and reactions. */
-export type AgentUnderTest = Pick<Agent, "channels" | "receive" | "reacted">;
+/** What the cloud plays: a Flow Framework Agent's channels, messages in and reactions. */
+export type AgentUnderTest = Pick<Agent, "channels" | "receive" | "reacted"> & Partial<Pick<Agent, "hasProfile" | "seedHistory">>;
 
 export interface CloudAccess {
   /** The cloud's front door, as given to --cloud. */
   cloud: string;
-  /** The agent's CI key (CHINWAG_CLOUD_KEY). */
+  /** The agent's CI key (FLOW_FRAMEWORK_CLOUD_KEY). */
   ciKey?: string;
   /** Whoever runs the tests attests that the test files hold no real people's data. */
   synthetic: boolean;
@@ -164,7 +202,7 @@ export interface CloudAccess {
  * a local one needs neither, and gets them when they are given. */
 export function cloudHeaders(access: CloudAccess): Record<string, string> {
   const local = isLoopback(access.cloud);
-  if (!local && !access.ciKey) throw new Error("A hosted cloud needs the agent's CI key: set CHINWAG_CLOUD_KEY.");
+  if (!local && !access.ciKey) throw new Error("A hosted cloud needs the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY.");
   if ((!local || access.ciKey) && !access.synthetic) {
     throw new Error("A hosted cloud runs synthetic tests only: pass --synthetic to attest that your test files hold no real customer or member data.");
   }
@@ -233,7 +271,8 @@ export async function runInCloud(options: ConnectOptions): Promise<CloudSummary>
 
 /** The runs the suite plays (each scenario on each of its channels, `runs` times) that have no summary in `done`. */
 function unfinishedRuns(files: SuiteFile[], runs: number, done: RunSummary[]): RunKey[] {
-  const have = new Set(done.map((r) => `${r.scenario}\n${r.channel}\n${r.run}`));
+  // A second play of a failed run (rerunOf) is not a run of the suite; its original is what counts.
+  const have = new Set(done.filter((r) => !r.rerunOf).map((r) => `${r.scenario}\n${r.channel}\n${r.run}`));
   const out: RunKey[] = [];
   for (const file of files) {
     if (!file.path.startsWith("scenarios/")) continue;
@@ -247,13 +286,14 @@ function unfinishedRuns(files: SuiteFile[], runs: number, done: RunSummary[]): R
 }
 
 /** One session, start to finish. `only`: the runs a re-open plays. */
-async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<SessionSummary> {
+async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<CloudSummary> {
   const log = options.log ?? ((line: string) => console.log(line));
   const postTimeoutMs = options.postTimeoutMs ?? POST_TIMEOUT_MS;
   const streamIdleMs = options.streamIdleMs ?? STREAM_IDLE_MS;
   const retryBudgetMs = options.retryBudgetMs ?? RETRY_BUDGET_MS;
   const openRetryCapMs = options.openRetryCapMs ?? OPEN_RETRY_CAP_MS;
   const resumeWindowMs = options.resumeWindowMs ?? RESUME_WINDOW_MS;
+  const now = options.now ?? Date.now;
   const streamRefreshMs = options.streamRefreshMs ?? STREAM_REFRESH_MS;
   let idempotent = false;
   const base = options.cloud.replace(/\/$/, "");
@@ -293,8 +333,13 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
   // until its simulator has answered and the chosen latency has passed.
   // 210s already includes the default POST budget. A session that sets its own uses that instead, so a test can still watch a timeout.
   const toolBudget = options.postTimeoutMs == null ? CLOUD_MODEL_BUDGET_MS : postTimeoutMs;
-  const toolWait = new Map(options.tools.map((t) => [t.name, toolTimeoutMs(options.files, t.name, toolBudget)]));
-  const tools: Tool[] = options.tools.map((t) => ({
+  // The built-in get_user_profile is played like the agent's own tools, so a test never reads a real
+  // profile: its stand-in is given to every agent, and counts only for one with a `profile`.
+  const ownProfile = options.tools.some((t) => t.name === PROFILE_TOOL);
+  const standIn = ownProfile ? [] : [Object.assign(profileTool(() => null), { [STAND_IN]: true })];
+  const played = [...options.tools, ...standIn];
+  const toolWait = new Map(played.map((t) => [t.name, toolTimeoutMs(options.files, t.name, toolBudget)]));
+  const tools: Tool[] = played.map((t) => ({
     ...t,
     run: (input: unknown, context: { conversationId: string }) => {
       const call = (async () => {
@@ -371,8 +416,10 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     if (flushing || stopped || failure || !session) return;
     flushing = flush().catch((error) => fail("events", error)).finally(() => { flushing = null; });
   };
+  const sendPath = sendPathCheck();
   const events: EventSink = (event) => {
     if (stopped || failure) return;
+    sendPath.event(event);
     try {
       const json = JSON.stringify(event);
       queued.push({ json, bytes: Buffer.byteLength(json), at: Date.now() });
@@ -383,15 +430,24 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
   events.context = true;
   try {
   const agent = options.build({ tools, events: [events] });
+  // Business runs need an agent of this framework: its own channels, routes, clock and nudges.
+  const canBusiness = typeof (agent as Partial<BusinessAgent>).reach === "function" && typeof (agent as Partial<BusinessAgent>).fetch === "function";
+  // A restart starts the run's next agent and resumes it on the run's store.
+  const canRestart = canBusiness && typeof (agent as Partial<BusinessAgent>).resume === "function";
 
   const open: OpenSession = {
-    agent: { name: options.name, title: options.title, tools: options.tools.map(toSpec), channels: agent.channels() },
+    agent: { name: options.name, title: options.title, tools: [...options.tools, ...(agent.hasProfile?.() ? standIn : [])].map(toSpec), channels: agent.channels() },
     files: options.files.map(({ path, hash }) => ({ path, hash })),
     runs: options.runs ?? 1,
     deliveryReceipts: true,
     retries: true,
     resume: true,
     reopen: true,
+    ...(canBusiness ? { business: true } : {}),
+    ...(canRestart ? { restart: true } : {}),
+    ...(typeof agent.seedHistory === "function" ? { history: true } : {}),
+    flaky: true,
+    ...(options.fresh ? { fresh: true } : {}),
     ...(only ? { only } : {}),
   };
   const opened = await openOnce(`${base}/api/sessions`, open, options.openHeaders, controller.signal, postTimeoutMs, openRetryCapMs, log);
@@ -411,10 +467,33 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     });
   }
   log(`Session ${opened.sessionId}: suite ${suiteHash(options.files).slice(0, 12)}, ${options.files.length} files (${uploads.length} new to the cloud, the rest it already had).`);
+  const limits = sessionLimits(opened.limits);
+  if (limits) {
+    const line = limitsLine(limits);
+    if (line) log(line);
+    options.onLimits?.(limits);
+  }
   dashboard = opened.dashboard;
   options.onDashboard?.(dashboard, opened.sessionId, typeof opened.agent === "string" && opened.agent ? opened.agent : undefined);
+  if (opened.replay === true) log("The cloud replays stored person, tool and judge answers where a scenario has not changed (--fresh plays them all anew).");
   log(`Watch it: ${opened.dashboard}`);
   session = `${tunnel}/api/sessions/${opened.sessionId}`;
+
+  const business = canBusiness && opened.business === true
+    ? businessRuns({
+      sessionAgent: agent as unknown as BusinessAgent,
+      build: (built) => options.build(built) as unknown as BusinessAgent,
+      tunnelTools: tools,
+      realTools: options.tools,
+      events,
+      post: (path, body, key, what) => postRetry(`${session}/${path}`, body, auth, controller.signal, log, postTimeoutMs, {
+        mode: idempotent ? "idempotent" : path === "outbound" ? "outbound" : "never", key, budgetMs: retryBudgetMs, what,
+      }),
+      watch,
+      log,
+      sent: sendPath.delivered,
+    })
+    : null;
 
   if (failure) throw failure;
   startFlush();
@@ -464,8 +543,9 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     } while (pending.size || queued.length);
   };
   /** One command from the stream. Returns the summary once the session has finished. */
-  const handle = async (command: Command): Promise<SessionSummary | undefined> => {
+  const handle = async (command: Command): Promise<CloudSummary | undefined> => {
     if (draining && (command.type === "message" || command.type === "reaction")) throw new Error("the cloud sent a command after drain");
+    if (business && (business.handle(command, (incoming) => withFiles(incoming, options.testsDir, log)))) return;
     if (command.type === "message") {
       const deliveries: Promise<unknown>[] = [];
       // Not async: register the promise during receive(), before its fire-and-forget
@@ -478,7 +558,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
           key: `outbound:${command.conversationId}:${command.messageId}:${index}`,
           budgetMs: retryBudgetMs,
           what: "outbound delivery",
-        }).then(() => {});
+        }).then(() => void sendPath.delivered(command.conversationId, outbound));
         deliveries.push(delivery);
         // Keep the rejection for the normal conversation's delivery recovery, but
         // attach a handler immediately for fire-and-forget interceptor sends too.
@@ -486,6 +566,15 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
         watch(delivery, "outbound delivery", true);
         return delivery;
       };
+      // A run that starts from an earlier conversation: it is in the agent's store before the first message.
+      if (command.history?.length) {
+        try {
+          if (typeof agent.seedHistory !== "function") throw new Error("this agent cannot start from an earlier conversation");
+          await agent.seedHistory(command.conversationId, command.history.map(({ from, text }) => ({ from, text })), { channelName: command.channelName });
+        } catch (error) {
+          log(`${command.conversationId}: the earlier conversation (history) could not be written into the agent's store: ${error instanceof Error ? error.message : String(error)}; the run plays without it`);
+        }
+      }
       let taken: string | null;
       try {
         taken = agent.receive(command.conversationId, withFiles(command.incoming, options.testsDir, log), deliver, {
@@ -538,7 +627,9 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
     } else if (command.type === "finished") {
       pauseIdle();
       if (!drained) await drainWork();
-      return command.summary;
+      // Checked on an agent of this framework, whose send announces each message; another one's (a stub, --agent-url) has its own ways.
+      const problems = canBusiness ? sendPath.problems() : [];
+      return problems.length ? { ...command.summary, sendPath: problems } : command.summary;
     } else if (command.type === "failed") {
       throw new CloudEnded(command.error);
     }
@@ -546,20 +637,20 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Se
   /** The stream opened again after the last command handled, with backoff, until the resume window closes. */
   const reconnect = async (why: string): Promise<IncomingMessage> => {
     log(`stream ${why}; resuming after command ${lastId}`);
-    const deadline = Date.now() + resumeWindowMs;
+    const deadline = now() + resumeWindowMs;
     let last: unknown;
     for (let attempt = 0; ; attempt++) {
       const backoff = attempt === 0 ? 0 : Math.min(10_000, 250 * 2 ** attempt) * (0.8 + Math.random() * 0.4);
       const refused = last instanceof Error && last.cause instanceof PostError ? last.cause : undefined;
       const wait = Math.max(backoff, refused?.retryAfterMs ?? 0);
-      if (Date.now() + wait >= deadline) {
+      if (now() + wait >= deadline) {
         const detail = last instanceof Error ? `; last try: ${last.message}` : "";
         throw new StreamLost(`the stream did not resume within ${resumeWindowMs / 1000}s (${why})${detail}`);
       }
       await pause(wait, controller.signal);
       if (failure) throw failure;
       try {
-        return await openStream(streamUrl, { ...auth, "last-event-id": String(lastId) }, controller.signal, Math.max(1, Math.min(postTimeoutMs, deadline - Date.now())));
+        return await openStream(streamUrl, { ...auth, "last-event-id": String(lastId) }, controller.signal, Math.max(1, Math.min(postTimeoutMs, deadline - now())));
       } catch (error) {
         if (failure) throw failure;
         const cause = error instanceof Error && error.cause instanceof PostError ? error.cause : error;
@@ -920,4 +1011,32 @@ function readAttachment(testsDir: string | undefined, file: string): Promise<Uin
   const inside = testsDir && !relative(resolve(testsDir), path).startsWith("..") && path !== resolve(testsDir);
   if (!inside) return Promise.reject(new Error(`${file} is not a file in the tests folder`));
   return readFile(path).then((bytes) => new Uint8Array(bytes));
+}
+
+const count = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v > 0;
+const money = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+const dollars = (v: number) => `$${Number.isInteger(v) ? v : v.toFixed(2)}`;
+
+/** The well-formed fields of the cloud's Opened.limits, or undefined when it sent none. */
+export function sessionLimits(raw: unknown): SessionLimits | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: SessionLimits = {};
+  if (count(r.runsAtOnce)) out.runsAtOnce = r.runsAtOnce;
+  if (count(r.sessionsAtOnce)) out.sessionsAtOnce = r.sessionsAtOnce;
+  if (r.dailyUsd === null || money(r.dailyUsd)) out.dailyUsd = r.dailyUsd;
+  if (r.leftUsd === null || money(r.leftUsd)) out.leftUsd = r.leftUsd;
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** One line for the limits, such as "Up to 8 runs at once · daily test budget: $5 ($3.75 left) · 2 sessions at once on this workspace". */
+export function limitsLine(limits: SessionLimits): string {
+  const parts: string[] = [];
+  if (limits.runsAtOnce) parts.push(`Up to ${limits.runsAtOnce} run${limits.runsAtOnce === 1 ? "" : "s"} at once`);
+  if (limits.dailyUsd === null) parts.push("daily test budget: uncapped");
+  else if (limits.dailyUsd !== undefined) parts.push(`daily test budget: ${dollars(limits.dailyUsd)}${typeof limits.leftUsd === "number" ? ` (${dollars(limits.leftUsd)} left)` : ""}`);
+  if (limits.sessionsAtOnce) parts.push(`${limits.sessionsAtOnce} session${limits.sessionsAtOnce === 1 ? "" : "s"} at once on this workspace`);
+  if (!parts.length) return "";
+  parts[0] = parts[0][0].toUpperCase() + parts[0].slice(1);
+  return parts.join(" · ");
 }

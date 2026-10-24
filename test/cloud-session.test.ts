@@ -16,11 +16,12 @@ import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { z } from "zod";
 import { cloudHeaders, runInCloud, tunnelBase } from "../testing/src/client.ts";
 import type { Agent, Incoming } from "../src/index.ts";
+import { unavailableRecords } from "../src/records.ts";
 
 test("a hosted cloud needs the CI key and --synthetic; a local one needs neither", () => {
   const hosted = "https://tests.example.com";
   assert.deepEqual(cloudHeaders({ cloud: "http://127.0.0.1:8900", synthetic: false }), {});
-  assert.throws(() => cloudHeaders({ cloud: hosted, synthetic: true }), /CHINWAG_CLOUD_KEY/);
+  assert.throws(() => cloudHeaders({ cloud: hosted, synthetic: true }), /FLOW_FRAMEWORK_CLOUD_KEY/);
   assert.throws(() => cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: false }), /--synthetic/);
   assert.throws(() => cloudHeaders({ cloud: "http://localhost:8900", ciKey: "oci_x", synthetic: false }), /--synthetic/);
   assert.throws(() => cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: true, environment: "dev" }), /staging or production/);
@@ -86,7 +87,7 @@ test("the key goes to the front door only; the files and the stream go to the tu
 });
 
 test("a file a scenario attaches is read from the tests folder on this machine, and from nowhere else", async () => {
-  const testsDir = mkdtempSync(join(tmpdir(), "chinwag-tests-"));
+  const testsDir = mkdtempSync(join(tmpdir(), "flow-tests-"));
   mkdirSync(join(testsDir, "fixtures"));
   writeFileSync(join(testsDir, "fixtures", "receipt.png"), new Uint8Array([1, 2, 3]));
   const incoming = { conversationId: "c", messageId: "m1", channel: { reactions: false, status: false }, incoming: { text: "my receipt", attachments: [{ kind: "image", file: "fixtures/receipt.png" }, { kind: "document", file: "../../etc/passwd" }] } };
@@ -257,7 +258,7 @@ test("a tool call the cloud has not answered does not hold later posts, over HTT
         channels: () => [],
         receive: (id: string, message: Incoming, deliver: (o: unknown) => Promise<void>) => {
           if (message.text === "first") {
-            void Promise.resolve(tools[0].run({}, { conversationId: id, person: "p", channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal })).catch(() => {});
+            void Promise.resolve(tools[0].run({}, { conversationId: id, person: "p", key: null, channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal, records: unavailableRecords("a test") })).catch(() => {});
             return "m1";
           }
           events[0]({ type: "turn.start", conversationId: id, at: 1 });

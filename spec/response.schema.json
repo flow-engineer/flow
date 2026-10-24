@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/flow-engineer/chinwag/blob/main/spec/response.schema.json",
+  "$id": "https://github.com/flow-engineer/flow/blob/main/spec/response.schema.json",
   "title": "AgentResponse",
   "description": "The agent's answer to one message: status 200, content-type application/json, the replies to send, in order. An empty list sends nothing. Keys other than `replies` are ignored.",
   "type": "object",
@@ -10,7 +10,7 @@
   "properties": {
     "replies": {
       "type": "array",
-      "description": "Sent to the person one after another. Each is checked on its own against what the run's platform can show (see x-chinwag-platforms in agent-endpoint.openapi.yaml): one that does not fit is not sent and the run says why; the others still go.",
+      "description": "Sent to the person one after another. Each is checked on its own against what the run's platform can show (see x-flow-platforms in agent-endpoint.openapi.yaml): one that does not fit is not sent and the run says why; the others still go.",
       "items": {
         "oneOf": [
           {
@@ -60,10 +60,32 @@
         },
         "buttons": {
           "type": "array",
-          "description": "Reply buttons; a tap comes back as the person's message, with `choice`. Platforms with buttons only, within their max and labelMax.",
+          "description": "Reply buttons: a label (its id is the label), or { id, label }; a tap comes back as the person's message, with `choice` holding the id. Ids are 1 to 64 bytes and unique within the message. Platforms with buttons only, within their max and labelMax.",
           "items": {
-            "type": "string",
-            "minLength": 1
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "object",
+                "required": [
+                  "id",
+                  "label"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            ]
           }
         },
         "list": {

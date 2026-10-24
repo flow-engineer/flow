@@ -3,7 +3,7 @@
 
 import { appendFileSync } from "node:fs";
 
-export interface ChinwagEvent {
+export interface FlowEvent {
   type:
     | "message.in"
     | "message.arrived"
@@ -22,22 +22,32 @@ export interface ChinwagEvent {
     | "skill.loaded"
     | "text.hidden"
     | "ack.required"
+    | "auth.required"
     | "reaction"
     | "status"
     | "message.undelivered"
+    | "message.refused"
+    | "message.slow"
     | "reaction.in"
     | "attachment.failed"
     | "keyword"
     | "message.duplicate"
-    | "history.trimmed";
+    | "history.trimmed"
+    | "history.reset"
+    | "template.missing";
   conversationId: string;
   at: number;
+  /** The runner (process) the event happened in, as createAgent's `runner`. */
+  runner?: string;
   [detail: string]: unknown;
 }
 
+/** @deprecated Renamed {@link FlowEvent} with the package (formerly chinwag). */
+export type ChinwagEvent = FlowEvent;
+
 /** A place events go. `context` asks for `turn.context`; without it the person's record is not sent. */
 export interface EventSink {
-  (event: ChinwagEvent): void;
+  (event: FlowEvent): void;
   context?: boolean;
 }
 
@@ -46,14 +56,15 @@ export function jsonlSink(path: string): EventSink {
   return (event) => appendFileSync(path, JSON.stringify(event) + "\n");
 }
 
-export function emitter(sinks: EventSink[]) {
-  return (conversationId: string, type: ChinwagEvent["type"], detail: Record<string, unknown> = {}) => {
-    const event: ChinwagEvent = { type, conversationId, at: Date.now(), ...detail };
+/** Events of one runner (createAgent's `runner`): each names it, so two runners' lines tell apart. */
+export function emitter(sinks: EventSink[], runner?: string) {
+  return (conversationId: string, type: FlowEvent["type"], detail: Record<string, unknown> = {}) => {
+    const event: FlowEvent = { type, conversationId, at: Date.now(), ...(runner ? { runner } : {}), ...detail };
     for (const sink of sinks) {
       try {
         sink(event);
       } catch (error) {
-        console.warn("chinwag: an event sink failed:", error);
+        console.warn("flow: an event sink failed:", error);
       }
     }
   };

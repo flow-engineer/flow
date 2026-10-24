@@ -1,4 +1,4 @@
-// Channels: where people reach an agent. Chinwag knows each platform (what WhatsApp can show, its
+// Channels: where people reach an agent. Flow Framework knows each platform (what WhatsApp can show, its
 // limits, its 24-hour window); a provider only says how to send through its own API. A provider
 // implements one sendMessage, which gets everything the agent's send tool carries, plus the
 // optional actions that are not messages (react, typing, markRead, sendTemplate). A feature the
@@ -10,15 +10,17 @@
 //   customUI("app", new MyApp())                         your own web or mobile UI, with your params
 
 import type { z } from "zod";
-import type { ChannelInfo, ListRow, Outbound, Template, TemplateDefinition } from "./types.ts";
+import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, ReplyButton, SendReceipt, Template, TemplateDefinition } from "./types.ts";
 
 export type ChannelKind = "sms" | "whatsapp" | "custom";
 
 /** A channel as the agent uses it. Made by whatsapp(), sms() or customUI(), or written by hand. */
 export interface Channel {
-  /** The agent's name for it; its send tool is send_<name> when a person uses several. */
+  /** The agent's name for it; its send tool is always send_<name> (lowercase, other characters as _). "key" and "phone" are reserved. */
   name: string;
   kind: ChannelKind;
+  /** Override the trace channel classification, e.g. a terminal custom UI as cli. */
+  traceChannel?: string;
   info: ChannelInfo;
   /** Addresses are phone numbers the channel verified, so the same number on two channels is one person. */
   phone?: boolean;
@@ -28,7 +30,8 @@ export interface Channel {
   instructions?: string;
   /** Opt-out keywords this channel honours (SMS and WhatsApp have them by default). */
   keywords?: Keywords;
-  send(address: string, outbound: Outbound): Promise<void> | void;
+  /** Resolves once the channel has the outbound (the platform accepted it), optionally with a receipt; see Deliver. */
+  send(address: string, outbound: Outbound): Promise<void | SendReceipt> | void | SendReceipt;
 }
 
 /**
@@ -92,26 +95,44 @@ export interface Message {
   text: string;
   /** The person's message this one quotes. */
   replyTo?: string;
-  buttons?: string[];
+  /** Reply buttons: a label, or { id, label } (`replyButton` gives both either way). */
+  buttons?: ReplyButton[];
   list?: { button: string; rows: ListRow[] };
   /** A button that opens this page. Never with buttons or a list. */
   link?: { label: string; url: string };
-  /** A photo, the text its caption. Never with a list. */
-  image?: { url: string };
+  /** A photo, the text its caption; with buttons or a link it heads the same message. Never with a list. */
+  image?: Photo;
+  /** false: send it with link previews off (a message the business started). */
+  preview?: false;
+  /** Given for a send the business starts (a nudge, a scheduled text): the same in every process, so a provider that takes one sends it once. */
+  idempotencyKey?: string;
+}
+
+/** A carousel, as the agent's send tool wrote it. */
+export interface Carousel {
+  text: string;
+  cards: CarouselCard[];
+  replyTo?: string;
+  preview?: false;
+  idempotencyKey?: string;
 }
 
 export interface WhatsAppProvider {
-  sendMessage(to: string, message: Message): Promise<void>;
+  /** Resolves once the platform accepted the message (optionally saying how far it got, SendReceipt); rejects when it refused it. */
+  sendMessage(to: string, message: Message): Promise<void | SendReceipt>;
+  /** A media carousel; without it the agent is never offered one. */
+  sendCarousel?(to: string, carousel: Carousel): Promise<void | SendReceipt>;
   /** Which parts of a message this provider can send. Default: all. */
   features?: { buttons?: boolean; lists?: boolean; replies?: boolean; links?: boolean; images?: boolean };
   react?(to: string, messageId: string, emoji: string): Promise<void>;
   typing?(to: string, on: boolean): Promise<void>;
   markRead?(to: string, messageIds: string[]): Promise<void>;
-  sendTemplate?(to: string, template: Template): Promise<void>;
+  sendTemplate?(to: string, template: Template, idempotencyKey?: string): Promise<void | SendReceipt>;
 }
 
 export interface SmsProvider {
-  sendMessage(to: string, message: { text: string }): Promise<void>;
+  /** Resolves once the provider accepted the text; rejects when it refused it. */
+  sendMessage(to: string, message: Pick<Message, "text" | "idempotencyKey">): Promise<void | SendReceipt>;
 }
 
 /** Your own UI. `message` carries the text, any buttons, and your params by name. */
@@ -121,7 +142,10 @@ export interface CustomUIProvider {
   params?: Record<string, z.ZodType>;
   /** Your own guidance for the agent on this channel, such as how to use your params. */
   instructions?: string;
-  sendMessage(to: string, message: Message & Record<string, unknown>): Promise<void>;
+  /** Resolves once your UI has the message (stored or shown); rejects when it could not take it. */
+  sendMessage(to: string, message: Message & Record<string, unknown>): Promise<void | SendReceipt>;
+  /** A carousel, on a UI whose info declares carousels; without it the cards go one by one through sendMessage. */
+  sendCarousel?(to: string, carousel: Carousel): Promise<void | SendReceipt>;
   react?(to: string, messageId: string, emoji: string): Promise<void>;
   typing?(to: string, on: boolean): Promise<void>;
   markRead?(to: string, messageIds: string[]): Promise<void>;
@@ -131,6 +155,7 @@ export interface CustomUIProvider {
 
 /** WhatsApp's own limits, the same for every provider. */
 export const WHATSAPP: ChannelInfo = {
+  platform: "whatsapp",
   reactions: true,
   status: false,
   formatting: "whatsapp",
@@ -146,10 +171,13 @@ export const WHATSAPP: ChannelInfo = {
   replyWindowHours: 24,
 };
 
-/** SMS: plain text; providers join up to 10 segments into one text (1,530 GSM-7 characters). */
-export const SMS: ChannelInfo = { reactions: false, status: false, formatting: "plain", maxLength: 1530 };
+/** WhatsApp's media carousel: 2 to 10 cards, each a photo, up to 160 characters and 1 or 2 reply buttons (or one URL button). */
+export const WHATSAPP_CAROUSELS: NonNullable<ChannelInfo["carousels"]> = { maxCards: 10, textMax: 1024, cardTextMax: 160, buttons: 2, labelMax: 20 };
 
-export type WhatsAppFeature = "buttons" | "lists" | "links" | "images" | "replies" | "reactions" | "typing" | "readReceipts" | "templates";
+/** SMS: plain text; providers join up to 10 segments into one text (1,530 GSM-7 characters). */
+export const SMS: ChannelInfo = { platform: "sms", reactions: false, status: false, formatting: "plain", maxLength: 1530, templates: false, typing: false };
+
+export type WhatsAppFeature = "buttons" | "lists" | "links" | "images" | "carousels" | "replies" | "reactions" | "typing" | "readReceipts" | "templates";
 
 export function whatsapp(provider: WhatsAppProvider, options: { name?: string; disable?: WhatsAppFeature[]; instructions?: string; keywords?: false | Partial<Keywords> } = {}): Channel {
   const off = new Set(options.disable ?? []);
@@ -164,6 +192,11 @@ export function whatsapp(provider: WhatsAppProvider, options: { name?: string; d
     lists: has("lists", f.lists !== false) ? WHATSAPP.lists : undefined,
     linkButton: has("links", f.links !== false) ? WHATSAPP.linkButton : undefined,
     images: has("images", f.images !== false) ? WHATSAPP.images : undefined,
+    carousels: has("carousels", Boolean(provider.sendCarousel)) ? WHATSAPP_CAROUSELS : undefined,
+    // Only ever true: a provider without sendTemplate keeps 0.4's behaviour (its send says so), and a
+    // business run's copy of the channel, whose send goes to the test cloud, still sends templates.
+    templates: has("templates", Boolean(provider.sendTemplate)) || undefined,
+    typing: has("typing", Boolean(provider.typing)),
   };
   return {
     name: options.name ?? "whatsapp",
@@ -176,6 +209,8 @@ export function whatsapp(provider: WhatsAppProvider, options: { name?: string; d
       switch (outbound.type) {
         case "message":
           return provider.sendMessage(to, message(outbound));
+        case "carousel":
+          return info.carousels && provider.sendCarousel ? provider.sendCarousel(to, carouselOf(outbound)) : sendCards(info, carouselOf(outbound), (m) => provider.sendMessage(to, m));
         case "reaction":
           return info.reactions ? provider.react?.(to, outbound.messageId, outbound.emoji) : undefined;
         case "typing":
@@ -184,8 +219,8 @@ export function whatsapp(provider: WhatsAppProvider, options: { name?: string; d
           return info.readReceipts ? provider.markRead?.(to, outbound.messageIds) : undefined;
         case "template": {
           if (!provider.sendTemplate || off.has("templates")) throw new Error("this WhatsApp provider sends no templates");
-          const { type: _type, ...template } = outbound;
-          return provider.sendTemplate(to, template);
+          const { type: _type, idempotencyKey, ...template } = outbound;
+          return provider.sendTemplate(to, template, idempotencyKey);
         }
         case "status":
           return;
@@ -203,7 +238,8 @@ export function sms(provider: SmsProvider, options: { name?: string; instruction
     keywords: keywordsFrom(SMS_KEYWORDS, options.keywords),
     phone: true,
     send: (to, outbound) => {
-      if (outbound.type === "message") return provider.sendMessage(to, { text: outbound.text });
+      if (outbound.type === "message") return provider.sendMessage(to, { text: outbound.text, ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}) });
+      if (outbound.type === "carousel") return sendCards(SMS, carouselOf(outbound), (m) => provider.sendMessage(to, { text: m.text, ...(m.idempotencyKey ? { idempotencyKey: m.idempotencyKey } : {}) }));
       if (outbound.type === "template") throw new Error("SMS has no templates");
       // Reactions, typing, read receipts and status do not exist on SMS.
     },
@@ -228,6 +264,8 @@ export function customUI(name: string, provider: CustomUIProvider): Channel {
       switch (outbound.type) {
         case "message":
           return provider.sendMessage(to, { ...message(outbound), ...outbound.fields });
+        case "carousel":
+          return info.carousels && provider.sendCarousel ? provider.sendCarousel(to, carouselOf(outbound)) : sendCards(info, carouselOf(outbound), (m) => provider.sendMessage(to, { ...m }));
         case "reaction":
           return provider.react?.(to, outbound.messageId, outbound.emoji);
         case "typing":
@@ -251,14 +289,60 @@ function message(outbound: Extract<Outbound, { type: "message" }>): Message {
     ...(outbound.list ? { list: outbound.list } : {}),
     ...(outbound.link ? { link: outbound.link } : {}),
     ...(outbound.image ? { image: outbound.image } : {}),
+    ...(outbound.preview === false ? { preview: false as const } : {}),
+    ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}),
   };
+}
+
+function carouselOf(outbound: Extract<Outbound, { type: "carousel" }>): Carousel {
+  const { type: _type, ...carousel } = outbound;
+  return carousel;
+}
+
+/**
+ * A carousel as messages one after another, for a channel that cannot show one: its text, then
+ * each card (its photo with its text as caption, its buttons or link), each fitted to the channel.
+ * A send the business started keeps one idempotency key per message (key, key:1, key:2, ...).
+ */
+export function carouselMessages(info: ChannelInfo, carousel: Carousel): Message[] {
+  const keyed = (i: number) => (carousel.idempotencyKey ? { idempotencyKey: i ? `${carousel.idempotencyKey}:${i}` : carousel.idempotencyKey } : {});
+  const preview = carousel.preview === false ? { preview: false as const } : {};
+  const cards = carousel.cards.map((card, i) =>
+    fitMessage(info, {
+      text: card.text ?? "",
+      image: card.image,
+      ...(card.buttons?.length && info.buttons ? { buttons: card.buttons } : {}),
+      ...(card.link ? { link: card.link } : {}),
+      ...preview,
+      ...keyed(i + 1),
+    }),
+  );
+  const first = { text: carousel.text, ...(carousel.replyTo ? { replyTo: carousel.replyTo } : {}), ...preview, ...keyed(0) };
+  // A card with nothing this channel shows (no text, its photo dropped) is not sent.
+  return [first, ...cards.filter((m) => m.text || m.image)];
+}
+
+/** Sends a carousel's messages one by one, in order, each after the last went; its receipt is the least far of theirs. */
+async function sendCards(info: ChannelInfo, carousel: Carousel, send: (message: Message) => Promise<void | SendReceipt>): Promise<SendReceipt | undefined> {
+  const receipts: Array<void | SendReceipt> = [];
+  for (const m of carouselMessages(info, carousel)) receipts.push(await send(m));
+  return leastOf(receipts);
+}
+
+const RECEIPT_RANK: Record<SendReceipt["status"], number> = { unconfirmed: 0, queued: 1, sent: 2, delivered: 3 };
+
+/** The least far of several sends' receipts (none when no send gave one). */
+function leastOf(receipts: Array<void | SendReceipt>): SendReceipt | undefined {
+  let least: SendReceipt | undefined;
+  for (const r of receipts) if (r && (!least || RECEIPT_RANK[r.status] < RECEIPT_RANK[least.status])) least = r;
+  return least;
 }
 
 /**
  * A message as this channel can show it: without a link button the link's URL goes on a line after
  * the text, and without images the text goes alone. So a provider only gets what it declared.
  */
-export function fitMessage<M extends { text: string; link?: { label: string; url: string }; image?: { url: string } }>(info: ChannelInfo, message: M): M {
+export function fitMessage<M extends { text: string; link?: { label: string; url: string }; image?: Photo }>(info: ChannelInfo, message: M): M {
   const { link, image, ...rest } = message;
   return {
     ...rest,
@@ -266,6 +350,204 @@ export function fitMessage<M extends { text: string; link?: { label: string; url
     ...(link && info.linkButton ? { link } : {}),
     ...(image && info.images ? { image } : {}),
   } as M;
+}
+
+/**
+ * Each platform's content limits as Flow Messaging enforces them (its API spec, flow-engineer/sdk,
+ * and the checks its server runs on every send: the channel's text, caption and buttons-text limits,
+ * SMS segments). They are the platforms' own (WhatsApp's, Telegram's), with Flow Messaging's
+ * counting: characters as code points, Telegram's as UTF-16 code units. Keep them in step with it.
+ */
+export const CONTENT_LIMITS: Record<NonNullable<ChannelInfo["platform"]>, ContentLimits> = {
+  whatsapp: { name: "WhatsApp", text: 4096, caption: 1024, buttonsText: 1024, mediaHeaderReplies: 3 },
+  // Flow sends Telegram text as Markdown and counts it as rendered; this counts it as written, so it
+  // can only be stricter, and only for formatted text near the limit.
+  telegram: { name: "Telegram", text: 4096, utf16: true, caption: 1024, buttonsText: 4096 },
+  imessage: { name: "iMessage", text: 9999, caption: 1024 },
+  sms: { name: "SMS", text: 1530, caption: 1024, smsSegments: 10 },
+};
+
+export interface ContentLimits {
+  /** The platform's name in errors. */
+  name: string;
+  /** The most characters a text takes. */
+  text: number;
+  /** Characters are counted as UTF-16 code units (an emoji such as 😀 is 2), not code points. */
+  utf16?: boolean;
+  /** The most characters a photo's caption takes. */
+  caption: number;
+  /** With buttons (or a link button): the most characters their text takes. Absent: the platform shows no buttons. */
+  buttonsText?: number;
+  /** With a photo heading them: the most reply buttons (WhatsApp shows more as a list, whose header can only be text). */
+  mediaHeaderReplies?: number;
+  /** The most SMS segments one text takes. */
+  smsSegments?: number;
+}
+
+/** Limits of every platform (the spec's). */
+const SPEC = { buttonsText: 4096, caption: 1024, buttons: 10, label: 20, buttonId: 64, carouselText: 1024, minCards: 2, maxCards: 10, cardText: 160, cardLineBreaks: 2, cardButtons: 2 };
+
+/** A send Flow Messaging refuses, as it refuses it: its error type, the field (`param`) and its message. */
+export interface ContentRefusal {
+  type: "invalid_request";
+  param: string;
+  message: string;
+}
+
+/**
+ * Why the channel's platform would refuse this outbound (Flow Messaging's checks, in its order, on
+ * the content Flow Framework's Flow Messaging channels make of it), or null. Only messages and
+ * carousels are checked, on channels whose info names a platform. A link is a link button, a photo
+ * with buttons or a link their header (else a photo with the text as its caption), a button's id is
+ * its own or its label (a list row's, its id), and a carousel on a channel without carousels is checked as the
+ * messages it is sent as. Photos by file id are the provider's own and not checked here; nor are
+ * media types (Flow converts WebP, GIF, BMP and TIFF; the rest is known only from the file's bytes).
+ */
+export function contentRefusal(info: ChannelInfo, outbound: Outbound): ContentRefusal | null {
+  // Flow Messaging's own refusal of a template where the channel has none.
+  if (outbound.type === "template" && info.templates === false) return refuse("content.type", `${info.platform ? CONTENT_LIMITS[info.platform].name : "This channel"} has no templates; send a message instead.`);
+  const limits = info.platform ? CONTENT_LIMITS[info.platform] : undefined;
+  if (!limits) return null;
+  if (outbound.type === "message") return messageRefusal(limits, outbound);
+  if (outbound.type !== "carousel") return null;
+  if (info.carousels) return carouselRefusal(outbound);
+  for (const m of carouselMessages(info, carouselOf(outbound))) {
+    const refusal = messageRefusal(limits, m);
+    if (refusal) return refusal;
+  }
+  return null;
+}
+
+const refuse = (param: string, message: string): ContentRefusal => ({ type: "invalid_request", param, message });
+const codePoints = (s: string) => [...s].length;
+const isHttps = (s: string) => {
+  try {
+    const u = new URL(s);
+    return u.protocol === "https:" && u.host !== "";
+  } catch {
+    return false;
+  }
+};
+
+/** A reply button's id and label: a plain label is its own id. */
+export function replyButton(button: ReplyButton): { id: string; label: string } {
+  return typeof button === "string" ? { id: button, label: button } : { id: button.id, label: button.label };
+}
+
+type FlowButton = { id: string; label: string } | { url: string; label: string };
+
+/** Buttons at `param` (reply ids unique across `seen`): Flow Messaging's checkButtonList. */
+function buttonsRefusal(buttons: FlowButton[], param: string, seen: Set<string>, duplicate = "Button ids must be unique within a message."): ContentRefusal | null {
+  for (const [i, b] of buttons.entries()) {
+    const bp = `${param}.buttons[${i}]`;
+    const label = codePoints(b.label);
+    if ("url" in b) {
+      if (!isHttps(b.url) || label === 0 || label > SPEC.label) return refuse(bp, "A link button needs an https url and a label of 1 to 20 characters.");
+      continue;
+    }
+    if (b.id === "" || new TextEncoder().encode(b.id).length > SPEC.buttonId || label === 0 || label > SPEC.label) return refuse(bp, "A reply button needs an id of 1 to 64 bytes and a label of 1 to 20.");
+    if (seen.has(b.id)) return refuse(`${bp}.id`, duplicate);
+    seen.add(b.id);
+  }
+  return null;
+}
+
+function messageRefusal(limits: ContentLimits, m: Pick<Message, "text" | "buttons" | "list" | "link" | "image">): ContentRefusal | null {
+  const length = (s: string) => (limits.utf16 ? s.length : codePoints(s));
+  const on = limits.name;
+  const buttons: FlowButton[] | undefined = m.link
+    ? [{ url: m.link.url, label: m.link.label }]
+    : m.buttons?.length
+      ? m.buttons.map(replyButton)
+      : m.list?.rows.map((row) => ({ id: row.id, label: row.title }));
+  const header = m.image && "url" in m.image ? m.image.url : undefined;
+  if (buttons && limits.buttonsText) {
+    if (m.text === "" || codePoints(m.text) > SPEC.buttonsText) return refuse("content.text", `text must be 1 to ${SPEC.buttonsText} characters.`);
+    if (buttons.length < 1 || buttons.length > SPEC.buttons) return refuse("content.buttons", "Give 1 to 10 buttons.");
+    const problem = buttonsRefusal(buttons, "content", new Set());
+    if (problem) return problem;
+    if (header !== undefined && !isHttps(header)) return refuse("content.header.url", "content.header.url must be an https URL Flow can fetch.");
+    if (m.image && codePoints(m.text) > SPEC.caption) return refuse("content.text", `text must be 1 to ${SPEC.caption} characters with a media header.`);
+    if (length(m.text) > limits.buttonsText) return refuse("content.text", `text must be 1 to ${limits.buttonsText} characters with buttons on ${on}.`);
+    if (m.image && length(m.text) > limits.caption) return refuse("content.text", `caption must be at most ${limits.caption} characters on ${on}.`);
+    const replies = buttons.filter((b) => !("url" in b)).length;
+    if (m.image && limits.mediaHeaderReplies && replies > limits.mediaHeaderReplies) return refuse("content.header", `A media header goes with at most ${limits.mediaHeaderReplies} reply buttons on ${on}.`);
+    return null;
+  }
+  if (m.image) {
+    if (header !== undefined && !isHttps(header)) return refuse("content.url", "url must be an https URL Flow can fetch.");
+    if (m.text && codePoints(m.text) > SPEC.caption) return refuse("content.caption", `caption must be at most ${SPEC.caption} characters.`);
+    if (m.text && length(m.text) > limits.caption) return refuse("content.caption", `caption must be at most ${limits.caption} characters on ${on}.`);
+    return null;
+  }
+  const n = length(m.text);
+  if (n === 0) return refuse("content.text", `text is empty; give 1 to ${limits.text} characters on ${on}.`);
+  if (n > limits.text) return refuse("content.text", `text must be 1 to ${limits.text} characters on ${on}.`);
+  if (limits.smsSegments) {
+    const { segments, encoding } = smsSegmentsOf(m.text);
+    if (segments > limits.smsSegments) {
+      return refuse(
+        "content.text",
+        encoding === "ucs2"
+          ? `This text is ${segments} SMS segments as UCS-2 because it contains an emoji or a character outside GSM-7; SMS takes at most ${limits.smsSegments}.`
+          : `This text is ${segments} SMS segments (GSM-7); SMS takes at most ${limits.smsSegments}.`,
+      );
+    }
+  }
+  return null;
+}
+
+function carouselRefusal(c: Carousel): ContentRefusal | null {
+  if (c.text === "" || codePoints(c.text) > SPEC.carouselText) return refuse("content.text", `text must be 1 to ${SPEC.carouselText} characters.`);
+  if (c.cards.length < SPEC.minCards || c.cards.length > SPEC.maxCards) return refuse("content.cards", `Give ${SPEC.minCards} to ${SPEC.maxCards} cards.`);
+  const seen = new Set<string>();
+  let first: { links: boolean; count: number } | undefined;
+  for (const [i, card] of c.cards.entries()) {
+    const cp = `content.cards[${i}]`;
+    if ("url" in card.image && !isHttps(card.image.url)) return refuse(`${cp}.header.url`, `${cp}.header.url must be an https URL Flow can fetch.`);
+    if (card.text !== undefined) {
+      const n = codePoints(card.text);
+      if (n === 0 || n > SPEC.cardText) return refuse(`${cp}.text`, `${cp}.text must be 1 to ${SPEC.cardText} characters.`);
+      if (card.text.split("\n").length - 1 > SPEC.cardLineBreaks) return refuse(`${cp}.text`, `${cp}.text has more than ${SPEC.cardLineBreaks} line breaks.`);
+    }
+    const buttons: FlowButton[] = card.link ? [{ url: card.link.url, label: card.link.label }] : (card.buttons ?? []).map(replyButton);
+    if (buttons.length < 1 || buttons.length > SPEC.cardButtons) return refuse(`${cp}.buttons`, `${cp}.buttons must hold 1 to ${SPEC.cardButtons} buttons.`);
+    const problem = buttonsRefusal(buttons, cp, seen, "Reply button ids must be unique across the carousel.");
+    if (problem) return problem;
+    const links = Boolean(card.link);
+    if (!first) first = { links, count: buttons.length };
+    else if (links !== first.links || buttons.length !== first.count) return refuse(`${cp}.buttons`, `${cp}.buttons differ from cards[0].buttons in number or kind.`);
+  }
+  return null;
+}
+
+/** GSM 03.38's alphabet: one septet each, its extension table's characters two. */
+const GSM_BASIC = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà";
+const GSM_EXTENDED = "^{}\\[~]|€\f";
+
+/**
+ * How many SMS segments a text takes, as Flow Messaging counts them: GSM-7 when every character is
+ * in the GSM alphabet (160 in one segment, 153 per segment when split, an extension character two
+ * and never split across segments), else UCS-2 (70 UTF-16 units, 67 when split, a character outside
+ * the BMP two and never split).
+ */
+function smsSegmentsOf(text: string): { segments: number; encoding: "gsm7" | "ucs2" } {
+  const chars = [...text];
+  const gsm = chars.every((c) => GSM_BASIC.includes(c) || GSM_EXTENDED.includes(c));
+  const unit = gsm ? (c: string) => (GSM_EXTENDED.includes(c) ? 2 : 1) : (c: string) => c.length;
+  const [single, split] = gsm ? [160, 153] : [70, 67];
+  const encoding = gsm ? ("gsm7" as const) : ("ucs2" as const);
+  if (chars.reduce((n, c) => n + unit(c), 0) <= single) return { segments: 1, encoding };
+  let segments = 1;
+  let used = 0;
+  for (const c of chars) {
+    if (used + unit(c) > split) {
+      segments++;
+      used = 0;
+    }
+    used += unit(c);
+  }
+  return { segments, encoding };
 }
 
 /** A declared template filled with the values of one send: what the person sees. */
@@ -284,7 +566,7 @@ export interface FilledTemplate {
  */
 export function fillTemplate(definition: TemplateDefinition, template: Template): FilledTemplate {
   const fail = (problem: string): never => {
-    throw new Error(`chinwag: template "${definition.name}" (${definition.language}) ${problem}`);
+    throw new Error(`flow: template "${definition.name}" (${definition.language}) ${problem}`);
   };
   if (template.body && template.variables) fail("got both body and variables: give one");
   const values = template.body ?? numbered(template.variables);

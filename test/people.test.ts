@@ -1,8 +1,9 @@
-// covers: src/agent.ts src/conversation.ts src/talk.ts src/store.ts
+// covers: src/agent.ts src/conversation.ts src/talk.ts src/store.ts src/tools.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { z } from "zod";
 import { sqlite, Store, tool } from "../src/index.ts";
+import { STAND_IN } from "../src/tools.ts";
 import { SMS, WEB_APP, WHATSAPP, call, last, multi, respond, users } from "./helpers.ts";
 
 const PHONES = { sms: { info: SMS, phone: true }, whatsapp: { info: WHATSAPP, phone: true } };
@@ -54,12 +55,16 @@ test("different numbers, and a web visitor with no resolver, are never joined", 
   assert.equal(new Set([a!.conversationId, b!.conversationId, c!.conversationId]).size, 3);
 });
 
+/** A tool that records who it ran for: `context.person` and `context.key`. */
+function whoami(seen: Array<{ person: string; key: string | null }>) {
+  return tool({ name: "whoami", description: "", input: z.object({}), run: (_input, { person, key }) => (seen.push({ person, key }), "ok") });
+}
+
 test("the owner's resolver joins a web visitor to the person, and tools get who they are", async () => {
-  const seen: string[] = [];
-  const whoami = tool({ name: "whoami", description: "", input: z.object({}), run: (_input, context) => (seen.push(context.person), "ok") });
+  const seen: Array<{ person: string; key: string | null }> = [];
   const h = multi({
     channels: { sms: { info: SMS, phone: true }, web: { info: WEB_APP } },
-    tools: [whoami],
+    tools: [whoami(seen)],
     resolve: ({ address }) => (address === "+15550100100" || address === "session-sam" ? "customer-7" : null),
   });
   const a = await h.message("sms", "+15550100100", "hi");
@@ -70,7 +75,64 @@ test("the owner's resolver joins a web visitor to the person, and tools get who 
   (await h.nextCall(1)).answer(respond(call("send_web", { text: "Hello again." }), call("whoami")));
   (await h.nextCall(2)).answer(respond());
   await h.agent.conversation(a!.conversationId)!.whenIdle();
-  assert.deepEqual(seen, ["key:customer-7"]);
+  assert.deepEqual(seen, [{ person: "key:customer-7", key: "customer-7" }], "key is resolve's value as returned");
+});
+
+test("a person resolve does not know is keyed by their verified phone, with no key, in tools", async () => {
+  const seen: Array<{ person: string; key: string | null }> = [];
+  const h = multi({ channels: { sms: { info: SMS, phone: true } }, tools: [whoami(seen)], resolve: () => null });
+  const a = await h.message("sms", "+1 (555) 010-0300", "hi");
+  (await h.nextCall(0)).answer(respond(call("send_sms", { text: "Hi!" }), call("whoami")));
+  (await h.nextCall(1)).answer(respond());
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.deepEqual(seen, [{ person: "phone:+15550100300", key: null }]);
+});
+
+// Phone-first brands need the verified, normalized number, never a number claimed by an ordinary web address.
+test("only phone channels supply verified phone evidence, and phone sign-in gives tools backend access directly", async () => {
+  const evidence: Array<{ channel: string; address: string; phone?: string }> = [];
+  const accounts: string[] = [];
+  let contextJSON = "";
+  const h = multi({
+    channels: { whatsapp: { info: WHATSAPP, phone: true, kind: "whatsapp" }, imessage: { info: SMS, phone: true }, web: { info: WEB_APP } },
+    resolve: (identity) => {
+      evidence.push(identity);
+      return identity.phone === "+919876543210" ? "account-7" : null;
+    },
+    credentials: (name, context) => {
+      assert.equal(name, "backend");
+      assert.equal(context.key, "account-7");
+      accounts.push(context.key);
+      return { authorization: "private-backend-credential" };
+    },
+    tools: [tool({ name: "account", description: "Read the signed-in account.", input: z.object({}), run: async (_input, context) => {
+      contextJSON = JSON.stringify(context);
+      const client = await context.credentials!.get<{ authorization: string }>("backend");
+      assert.equal(client.authorization, "private-backend-credential");
+      return { account: context.key };
+    } })],
+  });
+  const a = await h.message("whatsapp", "919876543210", "my account");
+  (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Looking it up." }), call("account")));
+  (await h.nextCall(1)).answer(respond());
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  const b = await h.message("imessage", "+91 (98765) 43210", "me too");
+  assert.equal(b!.conversationId, a!.conversationId);
+  (await h.nextCall(2)).answer(respond(call("send_imessage", { text: "Welcome back." })));
+  await h.agent.conversation(b!.conversationId)!.whenIdle();
+  const web = await h.message("web", "+919876543210", "I claim that number");
+  assert.notEqual(web!.conversationId, a!.conversationId);
+  (await h.nextCall(3)).answer(respond(call("send_web", { text: "Hello." })));
+  await h.agent.conversation(web!.conversationId)!.whenIdle();
+  assert.deepEqual(evidence.map(e => [e.channel, e.phone]), [["whatsapp", "+919876543210"], ["imessage", "+919876543210"], ["web", undefined]]);
+  assert.deepEqual(accounts, ["account-7"]);
+  assert.ok(!contextJSON.includes("credential"));
+  assert.ok(!JSON.stringify(h.events).includes("private-backend-credential"));
+});
+
+test("a channel may not be named key or phone, so a channel identity never reads as a resolve key or a phone", () => {
+  assert.throws(() => multi({ channels: { key: { info: WEB_APP } } }), /"key" is reserved/);
+  assert.throws(() => multi({ channels: { phone: { info: SMS, phone: true } } }), /"phone" is reserved/);
 });
 
 test("each channel's send tool is named for it from the first message; a second channel adds one and changes nothing", async () => {
@@ -146,4 +208,40 @@ test("with messages waiting on two channels, tool calls wait until both have hea
   await h.agent.conversation(b!.conversationId)!.whenIdle();
   assert.equal(ran, 1);
   assert.ok(h.events.some((e) => e.type === "ack.required"));
+});
+
+test("with a profile the agent gets get_user_profile, about the person it is talking to; a tool of the owner's with that name is used instead", async () => {
+  const asked: unknown[] = [];
+  const h = multi({ channels: { sms: { info: SMS, phone: true } }, resolve: () => "customer-7", profile: (who) => (asked.push(who), { plan: "monthly" }) });
+  await h.message("sms", "+15550100100", "what plan am I on?");
+  const first = await h.nextCall(0);
+  const spec = first.request.tools.find((t) => t.name === "get_user_profile");
+  assert.deepEqual(spec?.parameters.properties, {}, "it takes no input: whose profile is never the model's choice");
+  first.answer(respond(call("send_sms", { text: "Let me check." }), call("get_user_profile")));
+  const second = await h.nextCall(1);
+  assert.match(last(second.request.messages).content, /"plan":"monthly"/);
+  assert.deepEqual(asked.map((w) => ({ ...(w as object), conversationId: "any" })), [{ conversationId: "any", person: "key:customer-7", channel: "sms" }]);
+  second.answer(respond(call("send_sms", { text: "Monthly." })));
+
+  const none = multi({ channels: { sms: { info: SMS, phone: true } } });
+  await none.message("sms", "+15550100100", "hi");
+  assert.ok(!(await none.nextCall(0)).request.tools.some((t) => t.name === "get_user_profile"), "no profile, no tool");
+
+  const own = tool({ name: "get_user_profile", description: "mine", input: z.object({}), run: () => "own" });
+  const overridden = multi({ channels: { sms: { info: SMS, phone: true } }, tools: [own], profile: () => assert.fail("the owner's tool wins") });
+  await overridden.message("sms", "+15550100100", "hi");
+  assert.deepEqual((await overridden.nextCall(0)).request.tools.filter((t) => t.name === "get_user_profile").map((t) => t.description), ["mine"]);
+});
+
+test("the test cloud's stand-in for get_user_profile replaces the real one, and is dropped for an agent without a profile", async () => {
+  const standIn = Object.assign(tool({ name: "get_user_profile", description: "played", input: z.object({}), run: () => "played" }), { [STAND_IN]: true });
+  const h = multi({ channels: { sms: { info: SMS, phone: true } }, tools: [standIn], profile: () => assert.fail("a test never reads a real profile") });
+  await h.message("sms", "+15550100100", "hi");
+  assert.deepEqual((await h.nextCall(0)).request.tools.filter((t) => t.name === "get_user_profile").map((t) => t.description), ["played"]);
+  assert.equal(h.agent.hasProfile(), true);
+
+  const plain = multi({ channels: { sms: { info: SMS, phone: true } }, tools: [standIn] });
+  await plain.message("sms", "+15550100100", "hi");
+  assert.ok(!(await plain.nextCall(0)).request.tools.some((t) => t.name === "get_user_profile"));
+  assert.equal(plain.agent.hasProfile(), false);
 });

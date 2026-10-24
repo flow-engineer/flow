@@ -10,7 +10,8 @@
 
 import { z } from "zod";
 import { toSpec, tool } from "./tools.ts";
-import type { ChannelInfo, ToolSpec } from "./types.ts";
+import { CONTENT_LIMITS, type ContentRefusal } from "./channels.ts";
+import type { CarouselCard, ChannelInfo, Outbound, Photo, ReplyButton, ToolSpec } from "./types.ts";
 
 export const REACT = "react";
 export const UPDATE = "share_updates";
@@ -37,6 +38,10 @@ export function sendToolName(channel: string): string {
 }
 
 const https = z.url({ protocol: /^https$/ });
+/** A photo by URL, or by a file id a tool gave (the provider's own). */
+const photo = z.union([z.object({ url: https }), z.object({ file_id: z.string().min(1) })]);
+/** A reply button: its label, or an id its tap comes back with and a label. */
+const replyButton = (labelMax: number) => z.union([z.string().min(1).max(labelMax), z.object({ id: z.string().min(1).max(64), label: z.string().min(1).max(labelMax) })]);
 
 /** A send tool's input on this channel: only the features it has, with its limits, and its own params. */
 export function sendInput(channel: ChannelInfo, several = false, params: Record<string, z.ZodType> = {}) {
@@ -51,10 +56,10 @@ export function sendInput(channel: ChannelInfo, several = false, params: Record<
   }
   if (channel.buttons) {
     shape.buttons = z
-      .array(z.string().min(1).max(channel.buttons.labelMax))
+      .array(replyButton(channel.buttons.labelMax))
       .max(channel.buttons.max)
       .optional()
-      .describe(`Up to ${channel.buttons.max} reply buttons, ${channel.buttons.labelMax} characters each; a tap comes back as their message`);
+      .describe(`Up to ${channel.buttons.max} reply buttons, ${channel.buttons.labelMax} characters each, or {id, label}; a tap comes back as their message, with the id`);
   }
   if (channel.lists) {
     shape.list = z
@@ -74,16 +79,31 @@ export function sendInput(channel: ChannelInfo, several = false, params: Record<
       .optional()
       .describe(`A list of up to ${channel.lists.maxRows} options the person picks one of; their pick comes back as their message`);
   }
-  // Every channel takes a link: where there is no link button, Chinwag puts its URL after the text.
+  // Every channel takes a link: where there is no link button, Flow Framework puts its URL after the text.
   shape.link = z
     .object({ label: z.string().min(1).max(channel.linkButton?.labelMax ?? 20), url: https })
     .optional()
     .describe(channel.linkButton ? "A button that opens a page, by a URL you were given; not with buttons or a list" : "A page, by a URL you were given: it goes on a line after your text; not with buttons or a list");
   if (channel.images) {
-    shape.image = z
-      .object({ url: https })
+    shape.image = photo
       .optional()
-      .describe(`A photo, by a URL you were given; your text is its caption, up to ${channel.images.captionMax} characters${channel.lists ? "; not with a list" : ""}`);
+      .describe(`A photo, by a URL or file id you were given; your text is its caption, up to ${channel.images.captionMax} characters${channel.lists ? "; not with a list" : ""}`);
+  }
+  if (channel.carousels) {
+    const c = channel.carousels;
+    shape.carousel = z
+      .array(
+        z.object({
+          image: photo,
+          text: z.string().max(c.cardTextMax).optional(),
+          buttons: z.array(replyButton(c.labelMax)).min(1).max(c.buttons).optional(),
+          link: z.object({ label: z.string().min(1).max(c.labelMax), url: https }).optional(),
+        }),
+      )
+      .min(2)
+      .max(c.maxCards)
+      .optional()
+      .describe(`Up to ${c.maxCards} cards they swipe through under your text: each a photo, up to ${c.cardTextMax} characters, and 1 to ${c.buttons} reply buttons ({id, label} tells cards apart) or one link, the same on every card; not with buttons, a list, a link or an image`);
   }
   for (const [name, schema] of Object.entries(params)) shape[name] = schema.optional();
   return z.object(shape);
@@ -92,16 +112,42 @@ export function sendInput(channel: ChannelInfo, several = false, params: Record<
 export type SendInput = {
   text: string;
   reply_to?: string;
-  buttons?: string[];
+  buttons?: ReplyButton[];
   list?: { button: string; rows: Array<{ id: string; title: string; description?: string }> };
   link?: { label: string; url: string };
-  image?: { url: string };
+  image?: { url: string } | { file_id: string };
+  carousel?: Array<{ image: { url: string } | { file_id: string }; text?: string; buttons?: ReplyButton[]; link?: { label: string; url: string } }>;
   confirm?: boolean;
 };
+
+/** A photo as the send tool took it, as channels take it. */
+export function photoOf(image: { url: string } | { file_id: string }): Photo {
+  return "url" in image ? { url: image.url } : { fileId: image.file_id };
+}
+
+/** A carousel's cards as the send tool took them, as channels take them. */
+export function cardsOf(cards: NonNullable<SendInput["carousel"]>): CarouselCard[] {
+  return cards.map((card) => ({
+    image: photoOf(card.image),
+    ...(card.text ? { text: card.text } : {}),
+    ...(card.buttons?.length ? { buttons: card.buttons } : {}),
+    ...(card.link ? { link: card.link } : {}),
+  }));
+}
 
 /** Why a send that fits its schema still cannot go out as written (WhatsApp's rules), or null. */
 export function sendRefusal(channel: ChannelInfo, input: SendInput): string | null {
   if (input.link && (input.buttons?.length || input.list)) return "Not sent: a message with a link cannot also have buttons or a list. Send them in separate messages.";
+  if (input.carousel) {
+    if (input.buttons?.length || input.list || input.link || input.image) return "Not sent: a carousel goes alone, without buttons, a list, a link or an image. Send them in separate messages.";
+    const kind = (card: NonNullable<SendInput["carousel"]>[number]) => (card.link && card.buttons?.length ? "both" : card.link ? "link" : `${card.buttons?.length ?? 0} buttons`);
+    const kinds = new Set(input.carousel.map(kind));
+    if (kinds.has("both") || kinds.has("0 buttons")) return "Not sent: every card needs reply buttons or one link, not both.";
+    if (kinds.size > 1) return "Not sent: every card of a carousel has the same kind and number of buttons.";
+    const max = channel.carousels?.textMax ?? 1024;
+    if (input.text.length > max) return `Not sent: a carousel's text is at most ${max} characters. Shorten it, or send the rest in another message.`;
+    return null;
+  }
   if (input.image && input.list) return "Not sent: a message with an image cannot also have a list. Send them in separate messages.";
   if (input.image && channel.images && input.text.length > channel.images.captionMax) {
     return `Not sent: with an image, your text is its caption, at most ${channel.images.captionMax} characters. Shorten it, or send the rest in another message.`;
@@ -111,6 +157,34 @@ export function sendRefusal(channel: ChannelInfo, input: SendInput): string | nu
     return `Not sent: the link's URL goes after your text here, and together they are over ${max} characters. Shorten the text.`;
   }
   return null;
+}
+
+/** A send the platform's content rules refuse, as the agent is told it: the platform's own error. */
+export function contentRefusalText(channel: ChannelInfo, refusal: ContentRefusal): string {
+  const platform = channel.platform ? CONTENT_LIMITS[channel.platform].name : "The channel";
+  const card = /cards\[(\d+)\]/.exec(refusal.param);
+  return `Not sent, ${platform} refuses it: ${refusal.message}${card ? ` (cards[${card[1]}] is card ${Number(card[1]) + 1}.)` : ""} Fix it and send again.`;
+}
+
+/** A message or carousel as it was sent, in the send tool's words: what the history and the transcript keep. */
+export function sentArgs(outbound: Extract<Outbound, { type: "message" | "carousel" }>): SendInput & Record<string, unknown> {
+  const tool = (p: Photo) => ("url" in p ? { url: p.url } : { file_id: p.fileId });
+  if (outbound.type === "carousel") {
+    return {
+      text: outbound.text,
+      ...(outbound.replyTo ? { reply_to: outbound.replyTo } : {}),
+      carousel: outbound.cards.map((c) => ({ image: tool(c.image), ...(c.text ? { text: c.text } : {}), ...(c.buttons?.length ? { buttons: c.buttons } : {}), ...(c.link ? { link: c.link } : {}) })),
+    };
+  }
+  return {
+    text: outbound.text,
+    ...(outbound.replyTo ? { reply_to: outbound.replyTo } : {}),
+    ...(outbound.buttons?.length ? { buttons: outbound.buttons } : {}),
+    ...(outbound.list ? { list: outbound.list } : {}),
+    ...(outbound.link ? { link: outbound.link } : {}),
+    ...(outbound.image ? { image: tool(outbound.image) } : {}),
+    ...outbound.fields,
+  };
 }
 
 const reactTool = tool({
@@ -129,7 +203,7 @@ const updateTool = tool({
 export interface TalkSettings {
   /** Live status on channels that can show it (web and app UIs). Default on. */
   shareUpdates: boolean;
-  /** The owner's own guidance for when and what to share; replaces Chinwag's default line. */
+  /** The owner's own guidance for when and what to share; replaces Flow Framework's default line. */
   shareUpdatesInstructions?: string;
 }
 

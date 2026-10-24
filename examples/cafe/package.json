@@ -1,14 +1,21 @@
 {
-  "name": "chinwag-example-cafe",
+  "name": "cafe",
+  "displayName": "Pip",
   "version": "0.1.0",
   "private": true,
-  "description": "Pip, an ordering assistant for a café: Chinwag's first example agent.",
+  "description": "Pip, an ordering assistant for a café: Flow Framework's first example agent.",
+  "license": "Apache-2.0",
   "type": "module",
+  "bin": {
+    "cafe": "src/cli.ts"
+  },
   "engines": {
     "node": ">=22.18"
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env src/main.ts",
+    "mcp": "node --env-file-if-exists=.env src/mcp.ts",
+    "cli": "node --env-file-if-exists=.env src/cli.ts",
     "typecheck": "../../node_modules/.bin/tsc --noEmit -p ."
   }
 }

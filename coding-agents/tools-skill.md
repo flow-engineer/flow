@@ -1,17 +1,19 @@
 ---
-name: chinwag-tools
-description: Write or change a Chinwag agent's tools and their test files (tests/tools/*.yaml). Load when adding a tool to a Chinwag agent, changing what a tool returns, or describing how a tool behaves in tests.
+name: flow-framework-tools
+description: Write or change a Flow Framework agent's tools and their test files (tests/tools/*.yaml). Load when adding a tool to a Flow Framework agent, changing what a tool returns, or describing how a tool behaves in tests.
 ---
 
-# Writing tools for a Chinwag agent
+# Writing tools for a Flow Framework agent
 
-Read the `chinwag` skill (`skill.md`) first if you haven't. Tests that use these tool files are
-in the `chinwag-tests` skill (`test-skill.md`).
+Read the `flow-framework` skill (`skill.md`) first if you haven't. Tests that use these tool files are
+in the `flow-framework-tests` skill (`test-skill.md`). For a company with an existing app or API, build
+the context pack first (the `flow-framework-context` skill, `context-skill.md`) and write the tools from
+it.
 
 ## The tool
 
 ```ts
-import { tool, z } from "chinwag";
+import { tool, z } from "@flow-engineer/flow";
 
 export const findSlots = tool({
   name: "find_session_slots",
@@ -26,13 +28,31 @@ export const findSlots = tool({
 
 - The name and description are what the model reads to choose the tool: say what it does and
   what it returns, in one line.
-- `input` is a zod schema; Chinwag checks the model's input against it before `run` is called and
+- `input` is a zod schema; Flow Framework checks the model's input against it before `run` is called and
   sends the model the error if it doesn't fit.
 - `run` returns any JSON-able value; throw to report a failure (the agent sees `Failed: <message>`).
 - Don't make tools for talking to the person (send_<channel>, react, share_updates), for reminders
-  or scheduled messages, or for opting out of messages: Chinwag has them.
-- Key a person's data by `context.person` (who Chinwag verified they are) or `context.conversationId`,
-  never by an id the model passed.
+  or scheduled messages, or for opting out of messages: Flow Framework has them.
+- Key a person's data by `context.person` (who Flow Framework verified they are) or `context.conversationId`,
+  never by an id the model passed. `context.person` is `key:<resolve's value>`, else
+  `phone:<E.164>` (`phone:+15550100100`), else `<channel>:<address>`. To look the person up in the
+  owner's backend use `context.key`: exactly what `resolve` returned (`customer-7`), or null when
+  they are known only by phone or channel.
+- What the agent itself must remember across days and people, and nothing else reads (a question
+  waiting for a seller's answer), goes in `context.records` (`put`, `get`, `query`, `delete`),
+  in collections declared on `createAgent({ records })`, with each field that holds a person in
+  `people` so forgetting them deletes it (a put after they were forgotten is refused). If anything
+  other than the agent reads it, it belongs in the owner's database, through a tool.
+  docs/agents.md, "The agent's own records".
+- A tool that keeps what the person asked to be told about (business events: `flowEvents`) saves
+  it in `context.events`, its own agent's events side (`context.events.watch({ address:
+  context.address, topic })`, `mute`, `notInterested`), never in a module variable: the same tool
+  object serves every agent in the process, each `flow test` run included, as long as `buildAgent`
+  makes a `flowEvents` per agent. Absent when no events side is attached. docs/events.md, "Watches
+  raise a message".
+- Never tell your own tools apart by a copy: `buildAgent` gets the very objects your module
+  exports (in `flow test`'s real runs too), so `t === myTool` holds; the tools the test cloud
+  simulates are stand-ins with the same name, never `===` yours.
 - A tool that changes something (books, pays, sends) passes `context.idempotencyKey` to its backend:
   it is the same for the same input in the same turn, also when the turn runs again after a
   restart, so the booking happens once. `context.callId` is the model's id for the call;
@@ -45,6 +65,79 @@ export const findSlots = tool({
 - Say what you covered. An agent reads a list as complete: return the range or filter you
   searched ("Mon Oct 12 through Sun Oct 18", "all open times") and never cut results short
   silently. If there are more, say so.
+
+## Tools from the context pack
+
+- One tool per task in `context/workflows.arazzo.yaml`, never one per endpoint: "place an order"
+  is one tool even when it is three API calls. A host or a small model chooses well among a few
+  task-shaped tools and badly among dozens of raw ones. A product with many tasks (all a dashboard
+  does) still gets one tool per task: name them by area with a shared prefix (`billing_`, `team_`)
+  and give the CLI one group per area.
+- Take the input and output shapes from `context/openapi.yaml` with `context/overlay.yaml` applied,
+  the words and rules from `business.md`, and leave out the personal fields `data.md` marks unless
+  the task needs them.
+- `signIn` and `hints` come from `context/access.yaml` (below).
+- When the team sends a new spec, re-read the overlay and the workflows against it, change only the
+  tools whose operations changed, and run `flow check` and the tests.
+
+## The fields MCP and the CLI read
+
+The same tool is served to Claude and ChatGPT over MCP (`@flow-engineer/flow/mcp`) and as a command (`@flow-engineer/flow/cli`).
+These optional fields describe it there. **Chat ignores all of them**: they change nothing on
+WhatsApp, SMS or iMessage.
+
+```ts
+export const placeOrder = tool({
+  name: "place_order",
+  title: "Place an order",                         // default: "Place order", from the name
+  description: "Place a confirmed pickup order. Returns the order number and when it will be ready.",
+  input: z.object({ name: z.string(), items: z.array(item) }),
+  output: z.object({ order_id: z.string(), ready_by: z.string() }),  // the result's shape
+  status: { running: "Placing your order…", done: "Order placed" },  // at most 64 characters each
+  signIn: "required",                              // "required" (default) | "optional" | "none"
+  hints: { readOnly: false, destructive: false, idempotent: false, openWorld: false },
+  run: async (input, context) => pos.place(input, context.idempotencyKey),
+});
+```
+
+- `output`: over MCP the result is checked against it and sent as structured content, and the CLI
+  shows its fields with `--json` and `--fields`. Give it whenever the result has a fixed shape.
+- `signIn`: "none" for what anyone may do signed out (the menu, opening hours), "optional" for what
+  works either way and does more signed in, "required" (the default) for everything about a
+  person's own account. It applies only where sign-in is set up (the `flow-framework-auth` skill).
+- `hints` describe the tool to hosts, which ask the person before risky calls; nothing enforces
+  them. `readOnly` (default false: a tool counts as a write), `destructive` (a write that may delete
+  or overwrite; default true for writes), `idempotent` (calling again with the same input changes
+  nothing more; default false), `openWorld` (reaches outside the business's own systems, such as the
+  web; default true). Set them honestly: a read-only tool should say so, or hosts treat it as a
+  write and the CLI asks for `--yes`.
+- `flow check` (from the agent's folder) refuses what cannot be served exactly: a name outside
+  1 to 128 of `A-Z a-z 0-9 _ - .`, an empty description, a description naming a chat-only tool
+  (`send_*`, `share_updates`, `load_skill`), an input that is not a `z.object`, an input or output
+  with no exact JSON Schema (`z.date()`, transforms; use an ISO string), `readOnly` with
+  `destructive`, or a status line over 64 characters.
+
+## Tools from another MCP server
+
+An existing MCP server's tools become the agent's own, so the agent uses them on WhatsApp or
+iMessage like any tool:
+
+```ts
+import { mcpTools } from "@flow-engineer/flow/mcp";
+
+export const tools = [
+  ...myTools,
+  ...(await mcpTools({ name: "todoist", url: "https://ai.todoist.net/mcp", headers: { authorization: `Bearer ${process.env.TODOIST_KEY}` } })),
+];
+```
+
+- They are pinned: `flow mcp update` (from the agent's folder) writes the server's tools to
+  `mcp.lock.json`, and only those are used. Commit it with the tests. A tool the server changes or
+  removes later is refused with a clear error until the lock is updated, tested and committed; a
+  tool it adds is not offered until then. `only: [...]` keeps a few of its tools, `prefix` keeps
+  two servers' names apart, and `live: true` skips the lock (for a server you do not build around).
+- Each needs a `tests/tools/<tool>.yaml` like any tool. A tool without `readOnlyHint` counts as a
+  write. Keep keys in the environment, never in the lock.
 
 ## The tool's test file
 
@@ -80,7 +173,11 @@ responses:
   personal data removed); otherwise write realistic ones in exactly the shape `run` returns.
 - Examples show the shape, not the answer: the simulator takes ids, names and dates from the
   scenario's world, the call's input and what the agent already said. Write dates as placeholders
-  for the test's clock (`{{now + 10m}}`, `{{now + 2d | date}}`; see the `chinwag-tests` skill),
+  for the test's clock (`{{now + 10m}}`, `{{now + 2d | date}}`; see the `flow-framework-tests` skill),
   never as written dates, which go stale.
 - Latency lives only here. Scenarios describe situations ("the point of sale is slow this
   morning"); the simulator picks the matching response and latency on each call.
+
+## Authenticated backend access
+
+A tool can use `await context.credentials!.get<YourClient>("backend")` when the agent/server supplies a `credentials` provider. That provider resolves access from Flow Framework’s verified `context.key`/`context.person`, independently of model input. Share it between chat and MCP; never put credentials into tool schemas, outputs, errors or logs. See `auth-skill.md` for verified-phone and OAuth entry points.

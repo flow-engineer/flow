@@ -45,6 +45,20 @@ test("a prompt nudge gives the agent a turn, and it may choose to send nothing",
   assert.equal((await sent).status, "sent");
 });
 
+test("what the business starts never lets a link preview lead: a text nudge's link is a button, and its messages go with previews off", async () => {
+  const h = await withSam({ whatsapp: { info: { ...WHATSAPP, linkButton: { labelMax: 20 } }, phone: true } });
+  assert.equal((await h.agent.nudge({ to: h.to, text: "Your order is out for delivery.", link: { label: "Track", url: "https://example.com/o/1" } })).status, "sent");
+  const prompted = h.agent.nudge({ to: h.to, prompt: "Tell them the shop opens at 9: https://example.com/hours" });
+  (await h.nextCall(1)).answer(respond(call("send_whatsapp", { text: "We open at 9, see https://example.com/hours" })));
+  assert.equal((await prompted).status, "sent");
+  const messages = h.out.flatMap((o) => (o.outbound.type === "message" ? [o.outbound] : []));
+  assert.deepEqual(messages.map((m) => [m.text, m.link?.url ?? null, m.preview ?? null]), [
+    ["Hi!", null, null],
+    ["Your order is out for delivery.", "https://example.com/o/1", false],
+    ["We open at 9, see https://example.com/hours", null, false],
+  ]);
+});
+
 test("a nudge that arrives during a turn waits for it to end", async () => {
   const h = await withSam();
   await h.message("sms", SAM.address, "what's my plan?");
@@ -83,7 +97,7 @@ test("a nudge a no-contact rule covers is dropped, and the rules are in the agen
 
   await h.message("sms", SAM.address, "thanks");
   const next = await h.nextCall(4);
-  assert.match(next.request.system, /What they asked not to be messaged about[\s\S]*no reminders about the specials/);
+  assert.match(next.request.system, /When and what not to message them[\s\S]*no reminders about the specials/);
   next.answer(respond(call("send_sms", { text: "Anytime." })));
   await h.conversation.whenIdle();
 });
@@ -98,7 +112,7 @@ test("outside WhatsApp's window, text and prompt nudges are refused before any m
   assert.equal(h.calls.length, 1, "no model call");
   const template = await h.agent.nudge({ to: h.to, template: { name: "order_ready", variables: { name: "Sam" } } });
   assert.equal(template.status, "sent");
-  assert.deepEqual(h.out.at(-1)!.outbound, { type: "template", name: "order_ready", variables: { name: "Sam" } });
+  assert.deepEqual(h.out.at(-1)!.outbound, { type: "template", name: "order_ready", variables: { name: "Sam" }, idempotencyKey: `nudge:${template.id}` });
 });
 
 test("a declared template is checked before it goes, and the agent is told what it read", async () => {
@@ -117,8 +131,9 @@ test("a declared template is checked before it goes, and the agent is told what 
   assert.equal(h.out.filter((o) => o.outbound.type === "template").length, 0, "nothing was sent");
 
   const template = { name: "order_ready", header, body: ["Sam", "latte"], buttons: [{ index: 0, value: "log_order" }, { index: 1, value: "latte" }] };
-  assert.equal((await h.agent.nudge({ to: h.to, template })).status, "sent");
-  assert.deepEqual(h.out.at(-1)!.outbound, { type: "template", ...template });
+  const sent = await h.agent.nudge({ to: h.to, template });
+  assert.equal(sent.status, "sent");
+  assert.deepEqual(h.out.at(-1)!.outbound, { type: "template", ...template, idempotencyKey: `nudge:${sent.id}` });
   await h.message("whatsapp", SAM.address, "ok");
   const next = await h.nextCall(1);
   assert.ok(next.request.messages.some((m) => m.role === "user" && m.content === '[Chinwag] The business sent them its template "order_ready" on whatsapp. It reads:\nHi Sam, your latte is ready.'));
@@ -126,9 +141,86 @@ test("a declared template is checked before it goes, and the agent is told what 
   await h.conversation.whenIdle();
 });
 
-test("a nudge for someone who never wrote is refused", async () => {
-  const h = await withSam();
-  assert.deepEqual(await h.agent.nudge({ to: { channel: "sms", address: "+15550199999" }, text: "hi" }), { id: "", status: "refused", reason: "unknown_person" });
+test("a template to someone who never wrote makes them a person: their reply joins its conversation, and later nudges go where they wrote from", async () => {
+  const clock = { now: Date.UTC(2026, 9, 12, 16) };
+  const h = multi({ channels: { whatsapp: { info: { ...WHATSAPP, replyWindowHours: 24 }, phone: true, kind: "whatsapp" } }, now: () => clock.now, templates: [SHIPPED], defaultCountryCode: "+44" });
+  const to = { channel: "whatsapp", address: "+1 (555) 010-0177" };
+  assert.deepEqual(await h.agent.nudge({ to, text: "hi" }), { id: "", status: "refused", reason: "unknown_person" });
+  assert.deepEqual(await h.agent.nudge({ to, prompt: "Say hi" }), { id: "", status: "refused", reason: "unknown_person" });
+  await assert.rejects(h.agent.nudge({ to, template: { name: "order_shipped", body: ["Ana"] } }), /takes 2 body values, got 1/);
+  assert.equal(await h.agent.contact(to), null, "none of them made a person");
+  // A national number on WhatsApp (read with no defaultCountryCode) would be another country's: refused.
+  for (const address of ["(555) 010-0177", "07700 900123", "5550100177"]) {
+    assert.deepEqual(await h.agent.nudge({ to: { channel: "whatsapp", address }, template: { name: "order_shipped", body: ["Ana", "1042"] } }), { id: "", status: "refused", reason: "unknown_person" });
+  }
+
+  const template = { name: "order_shipped", body: ["Ana", "1042"] };
+  const [first, again] = await Promise.all([0, 1].map(() => h.agent.nudge({ to, template, idempotencyKey: "seller-17-welcome" })));
+  assert.deepEqual([first.status, again.id], ["sent", first.id]);
+  // WhatsApp's numbers are always full, so defaultCountryCode does not apply to them.
+  assert.deepEqual(h.out.map((o) => [o.address, o.outbound.type]), [["+15550100177", "template"]], "sent once, to the number in E.164");
+
+  // They reply, the way the provider writes their number: the same conversation, which knows what they were sent.
+  const reply = await h.message("whatsapp", "15550100177", "which order?");
+  const turn = await h.nextCall(0);
+  assert.ok(turn.request.messages.some((m) => m.role === "user" && m.content === '[Chinwag] The business sent them its template "order_shipped" on whatsapp. It reads:\nHi Ana, your order 1042 has shipped.'));
+  turn.answer(respond(call("send_whatsapp", { text: "Order 1042." })));
+  await h.agent.conversation(reply!.conversationId)!.whenIdle();
+  const lines = (await h.agent.transcript(reply!.conversationId)).flatMap((e) => (e.kind === "in" ? [e.text] : e.kind === "out" ? [e.template ?? e.text] : []));
+  assert.deepEqual(lines, ["order_shipped", "which order?", "Order 1042."]);
+
+  // Their window is open now: a text in the business's own format goes, to the number they wrote from.
+  assert.equal((await h.agent.nudge({ to, text: "It arrives Friday." })).status, "sent");
+  assert.deepEqual(h.out.at(-1)!.address, "15550100177");
+});
+
+test("a test person's playground identity and their real phone's share a number: a business's nudge goes to the phone, the Person panel's to the playground, whichever wrote last", async () => {
+  const tester = { name: "Sam", phone: "+15550100177" };
+  /** Sam writes from both, in this order, a minute apart. */
+  async function wrote(order: Array<"phone" | "playground">) {
+    const clock = { now: Date.UTC(2026, 9, 12, 16) };
+    const h = multi({ channels: { whatsapp: { info: { ...WHATSAPP, replyWindowHours: 24 }, phone: true, kind: "whatsapp" } }, testPeople: [tester], now: () => clock.now });
+    for (const [i, from] of order.entries()) {
+      clock.now += 60_000;
+      const a = from === "phone" ? await h.message("whatsapp", "15550100177", "hi") : await h.agent.simulate({ person: tester.phone, channel: "whatsapp", message: "hi" });
+      (await h.nextCall(i)).answer(respond(call("send_whatsapp", { text: "Hi" })));
+      await h.agent.conversation(a!.conversationId)!.whenIdle();
+    }
+    clock.now += 60_000;
+    return { ...h, sent: h.out.length };
+  }
+
+  const business = await wrote(["phone", "playground"]);
+  assert.equal((await business.agent.nudge({ to: { channel: "whatsapp", address: "+1 555 010 0177" }, text: "Your order shipped." })).status, "sent");
+  assert.deepEqual(business.out.slice(business.sent).map((o) => o.address), ["15550100177"], "the business's nudge reached the real phone");
+
+  const panel = await wrote(["playground", "phone"]);
+  const nudge = { to: { channel: "whatsapp", address: tester.phone }, text: "From the panel", idempotencyKey: "panel-1" };
+  await panel.agent.recordNudge(nudge, { via: "playground" });
+  assert.equal((await panel.agent.nudge(nudge)).status, "sent", "settled: the same key answers how it ended");
+  assert.equal(panel.out.length, panel.sent, "the Person panel's nudge stayed in the playground");
+});
+
+
+test("a nudge in another format finds the person their resolve() keys", async () => {
+  const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true, kind: "whatsapp" } }, resolve: async () => "acct-1" });
+  const a = await h.message("whatsapp", "15550100177", "hi");
+  (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Hi" })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  const to = { channel: "whatsapp", address: "+1 (555) 010-0177" };
+  assert.notEqual(await h.agent.contact(to), null, "contact() finds them as nudge() does");
+  assert.equal((await h.agent.nudge({ to, text: "Your order shipped." })).status, "sent");
+  assert.equal(h.out.at(-1)!.address, "15550100177");
+});
+
+test("a template to a new number joins the person that number already is (read with defaultCountryCode), and their STOP holds; SMS makes no one", async () => {
+  const h = multi({ channels: { sms: { info: { ...SMS, templates: false }, phone: true, kind: "sms", keywords: SMS_KEYWORDS }, whatsapp: { info: WHATSAPP, phone: true, kind: "whatsapp" } }, defaultCountryCode: "+1" });
+  assert.deepEqual(await h.agent.nudge({ to: { channel: "sms", address: "+15550100199" }, template: { name: "order_shipped" } }), { id: "", status: "refused", reason: "unknown_person" });
+  assert.equal(await h.message("sms", "(555) 010-0188", "STOP"), null);
+  const result = await h.agent.nudge({ to: { channel: "whatsapp", address: "+15550100188" }, template: { name: "order_shipped" } });
+  assert.equal(result.status, "dropped");
+  assert.match(result.reason!, /no-contact rule/);
+  assert.equal(h.out.filter((o) => o.outbound.type === "template").length, 0);
 });
 
 test("a nudge with a time waits for it: text goes out as written, a prompt gets a turn", async () => {
@@ -157,7 +249,7 @@ test("a no-contact rule ends at its until date, and goes when the agent removes 
   added.answer(respond());
   await h.conversation.whenIdle();
 
-  h.clock.now = Date.UTC(2026, 9, 13, 1); // the day is over (UTC: no zone set)
+  h.clock.now = Date.UTC(2026, 9, 13, 13); // the day is over everywhere: their zone is not known, so it ends where it ends last
   const nudge = h.agent.nudge({ to: h.to, text: "Order ready" });
   const check = await h.nextCall(3);
   assert.doesNotMatch(check.request.messages[0].content as string, /no reminders today/, "the ended rule is gone");
@@ -205,10 +297,16 @@ test("STOP on SMS stops everything the business starts, with no model call, unti
   assert.equal(await h.agent.runDue(), 0, "the scheduled one is skipped");
   assert.equal(h.calls.length, 1, "no model call for any of it");
 
-  // They write again: the agent answers, knows about the STOP, and cannot lift it itself.
+  // They write again: the agent answers, knows about the STOP and what they were sent, and cannot lift it itself.
   await h.message("sms", SAM.address, "what time do you open?");
   const asked = await h.nextCall(1);
-  assert.ok(asked.request.messages.some((m) => m.role === "user" && /They texted "Stop\." on sms/.test(m.content)));
+  const stopped = asked.request.messages.findIndex((m) => m.role === "user" && m.content.startsWith("[m2] Stop.\n"));
+  assert.match(asked.request.messages[stopped].content as string, /They texted "Stop\." on sms/);
+  assert.deepEqual(asked.request.messages.slice(stopped + 1, stopped + 4).map((m) => m.role === "assistant" ? m.toolCalls![0].arguments : m.content.split("\n")[0]), [
+    '{"text":"You\'re unsubscribed. Reply START to resume."}',
+    '{"delivered":true,"channel":"sms"}',
+    "[m3] help",
+  ]);
   const stopRule = /\[(nc_stop_\w+)\]/.exec(asked.request.system)![1];
   asked.answer(respond(call("send_sms", { text: "We open at 9." }), call("remove_no_contact", { id: stopRule })));
   const removed = await h.nextCall(2);
@@ -221,9 +319,12 @@ test("STOP on SMS stops everything the business starts, with no model call, unti
   await h.conversation.whenIdle();
   assert.equal((await h.agent.nudge({ to: h.to, text: "Your order is ready." })).status, "sent");
   assert.equal(h.calls.length, 3);
+  const shown = (await h.agent.transcript(h.conversation.id)).flatMap((l) => (l.kind === "in" || l.kind === "out") && /stop|help|start|unsubscribed|opt out/i.test(l.text) ? [[l.kind, l.text]] : []);
+  assert.deepEqual(shown, [["in", "Stop."], ["out", "You're unsubscribed. Reply START to resume."], ["in", "help"], ["out", "Reply STOP to opt out."], ["in", "START"]], "START had no reply to send");
+  assert.deepEqual(h.events.filter((e) => e.answered && e.type === "message.out").map((e) => e.text), ["You're unsubscribed. Reply START to resume.", "Reply STOP to opt out."]);
 });
 
-test("intercept sees STOP, START and HELP first, marked as keywords; its own reply goes instead of Chinwag's, and the STOP holds", async () => {
+test("intercept sees STOP, START and HELP first, marked as keywords; its own reply goes instead of Flow Framework's, and the STOP holds", async () => {
   const seen: Array<[string, string | null]> = [];
   const keywords = { ...SMS_KEYWORDS, replies: { stop: "You're unsubscribed.", start: "Welcome back.", help: "Reply STOP to opt out." } };
   const h = multi({
@@ -239,11 +340,82 @@ test("intercept sees STOP, START and HELP first, marked as keywords; its own rep
   assert.equal(await h.message("sms", SAM.address, "Start"), null);
   assert.equal((await h.agent.nudge({ to: SAM, text: "Your order is ready." })).status, "sent");
   assert.deepEqual(seen, [["STOP", "stop"], ["help", "help"], ["Start", "start"]]);
-  assert.deepEqual(h.texts("sms"), ["Okay, no more texts from us.", "Text us any question.", "Welcome back.", "Your order is ready."], "one reply each: the hook's, else Chinwag's");
+  assert.deepEqual(h.texts("sms"), ["Okay, no more texts from us.", "Text us any question.", "Welcome back.", "Your order is ready."], "one reply each: the hook's, else Flow Framework's");
   assert.equal(h.calls.length, 0);
 });
 
-test("a STOP is kept, and Chinwag's reply sent, when intercept throws on it", async () => {
+/** Answers chest pain by rule, and says nothing to "ok". */
+const emergency: Parameters<typeof multi>[0]["intercept"] = (_id, text) => (/chest pain/i.test(text) ? "Call 911 now." : text === "ok" ? "" : null);
+
+test("a message intercept answers is kept with its reply: the next turn reads both, the transcript shows them, and both are events", async () => {
+  const h = multi({ channels: { sms: { info: SMS, phone: true } }, intercept: emergency });
+  assert.equal(await h.message("sms", SAM.address, "I have chest pain"), null);
+  assert.deepEqual(h.texts("sms"), ["Call 911 now."]);
+  assert.equal(h.calls.length, 0, "no model call for it");
+  const a = await h.message("sms", SAM.address, "it's better now");
+  const next = await h.nextCall(0);
+  assert.deepEqual(
+    next.request.messages.map((m) => [m.role, m.role === "assistant" ? m.toolCalls!.map((c) => [c.name, c.arguments]) : m.content]),
+    [
+      ["user", "[m1] I have chest pain\n[Chinwag] The business's own rules answered this for you on sms, as written:"],
+      ["assistant", [["send_sms", '{"text":"Call 911 now."}']]],
+      ["tool", '{"delivered":true,"channel":"sms"}'],
+      ["user", "[m2] it's better now"],
+    ],
+  );
+  next.answer(respond(call("send_sms", { text: "Glad to hear it." })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  const transcript = await h.agent.transcript(a!.conversationId);
+  assert.deepEqual(transcript.map((l) => (l.kind === "in" || l.kind === "out") && [l.kind, l.channel, l.text]), [
+    ["in", "sms", "I have chest pain"],
+    ["out", "sms", "Call 911 now."],
+    ["in", "sms", "it's better now"],
+    ["out", "sms", "Glad to hear it."],
+  ]);
+  const answered = h.events.filter((e) => e.answered);
+  assert.deepEqual(answered.map((e) => [e.type, e.text, e.channel, e.direct]), [["message.in", "I have chest pain", "sms", undefined], ["message.out", "Call 911 now.", "sms", true]]);
+  assert.ok(!h.events.some((e) => e.type === "message.in" && e.text === "it's better now" && e.answered), "messages the agent answers are not marked");
+});
+
+test("a message intercept answers with silence is kept, with nothing sent back", async () => {
+  const h = multi({ channels: { sms: { info: SMS, phone: true } }, intercept: emergency });
+  await h.message("sms", SAM.address, "ok");
+  assert.deepEqual(h.texts("sms"), []);
+  const a = await h.message("sms", SAM.address, "when do you open?");
+  const next = await h.nextCall(0);
+  assert.deepEqual(next.request.messages.map((m) => [m.role, m.content]), [
+    ["user", "[m1] ok\n[Chinwag] The business's own rules took this message for you on sms and sent nothing back."],
+    ["user", "[m2] when do you open?"],
+  ]);
+  next.answer(respond(call("send_sms", { text: "At 9." })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.deepEqual((await h.agent.transcript(a!.conversationId)).map((l) => (l.kind === "in" || l.kind === "out") && [l.kind, l.text]), [["in", "ok"], ["in", "when do you open?"], ["out", "At 9."]]);
+  assert.deepEqual(h.events.filter((e) => e.answered).map((e) => e.type), ["message.in"]);
+});
+
+test("a message intercept answers while a turn runs is answered at once, and joins that turn's history after its step, in order", async () => {
+  const h = multi({ channels: { sms: { info: SMS, phone: true } }, intercept: emergency });
+  const a = await h.message("sms", SAM.address, "what should I eat today?");
+  const thinking = await h.nextCall(0);
+  await h.message("sms", SAM.address, "chest pain, help");
+  assert.deepEqual(h.texts("sms"), ["Call 911 now."], "sent while the model was still thinking");
+  assert.equal(thinking.request.signal.aborted, false, "the step in flight goes on");
+  thinking.answer(respond(call("send_sms", { text: "Oats and fruit." })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  // The turn takes the exchange in after its step: one more step reads it (the helper answers it with nothing).
+  assert.equal(h.calls.length, 1);
+  const after = h.followUps.at(-1)!;
+  assert.deepEqual(after.messages.slice(1).map((m) => [m.role, m.role === "assistant" ? m.toolCalls![0].arguments : m.content.split("\n")[0]]), [
+    ["assistant", '{"text":"Oats and fruit."}'],
+    ["tool", '{"delivered":true,"channel":"sms"}'],
+    ["user", "[m2] chest pain, help"],
+    ["assistant", '{"text":"Call 911 now."}'],
+    ["tool", '{"delivered":true,"channel":"sms"}'],
+  ]);
+  assert.deepEqual((await h.agent.transcript(a!.conversationId)).map((l) => (l.kind === "in" || l.kind === "out") && l.text), ["what should I eat today?", "Oats and fruit.", "chest pain, help", "Call 911 now."]);
+});
+
+test("a STOP is kept, and Flow Framework's reply sent, when intercept throws on it", async () => {
   const keywords = { ...SMS_KEYWORDS, replies: { stop: "You're unsubscribed." } };
   let calls = 0;
   const h = multi({ channels: { sms: { info: SMS, phone: true, kind: "sms", keywords } }, intercept: () => { calls++; throw new Error("the flag store is down"); } });
@@ -262,6 +434,16 @@ test("receive() keeps a STOP the hook answered, and sends only the hook's reply"
   await h.agent.conversation("c1")!.stored();
   assert.deepEqual(sent, ["Okay, no more texts."]);
   assert.equal((await h.agent.nudge({ to: { channel: "sms", address: "c1" }, text: "Your order is ready." })).status, "dropped");
+});
+
+test("receive() sends a message intercept answers while it runs, and keeps both", async () => {
+  const h = multi({ channels: { sms: { info: SMS, phone: true } }, intercept: emergency });
+  await h.agent.resume();
+  const sent: string[] = [];
+  assert.equal(h.agent.receive("c1", "chest pain", (o) => void (o.type === "message" && sent.push(o.text)), { channelName: "sms", messageId: "r1" }), null);
+  assert.deepEqual(sent, ["Call 911 now."], "delivered before receive() returned");
+  await h.agent.conversation("c1")!.whenIdle();
+  assert.deepEqual((await h.agent.transcript("c1")).map((l) => (l.kind === "in" || l.kind === "out") && [l.kind, l.text]), [["in", "chest pain"], ["out", "Call 911 now."]]);
 });
 
 test("intercept is told the channel each message came in on, from a provider, the playground and receive(), keywords included", async () => {
@@ -311,9 +493,11 @@ test("a model error in a nudge texts the person nothing, and the nudge settles a
   assert.equal(h.events.filter((e) => e.type === "model.error").length, 2);
 
   await h.message("sms", SAM.address, "is it at 10?");
-  (await h.nextCall(5)).fail(new Error("503 overloaded"));
+  // A typed error (Flow's model API, a provider's APIError) keeps its code and status on the event, so a test cloud can tell credit from a failure.
+  (await h.nextCall(5)).fail(Object.assign(new Error("Your trial model credit is used up."), { code: "trial_credit_used", status: 402 }));
   await h.conversation.whenIdle();
   assert.equal(h.texts("sms").at(-1), "Sorry, something went wrong on my side. Could you send that again?");
+  assert.deepEqual(h.events.filter((e) => e.type === "model.error").map((e) => [e.code ?? null, e.status ?? null]), [[null, null], [null, null], ["trial_credit_used", 402]]);
 });
 
 test("two calls with one idempotency key at once send once, and both get its result; a scheduled one is written once", async () => {
@@ -330,3 +514,210 @@ test("two calls with one idempotency key at once send once, and both get its res
   h.clock.now += 120_000;
   assert.equal(await h.agent.runDue(), 1, "one schedule, so it goes out once");
 });
+
+// --- Quiet hours ---
+
+const ELEVEN_PM_NY = Date.UTC(2026, 9, 13, 3);
+const SEVEN_AM_NY = Date.UTC(2026, 9, 13, 11);
+
+/** Sam in New York (the business set it), at 11pm their time: inside the default quiet hours, 22:00 to 07:00. */
+async function samAtNight() {
+  const h = await withSam(undefined, { now: ELEVEN_PM_NY });
+  assert.deepEqual(await h.agent.setTimeZone({ to: h.to, timeZone: "America/New_York" }), { status: "set" });
+  return h;
+}
+
+test("in their quiet hours nudges are held, and when the hours end everything held reaches one turn", async () => {
+  const h = await samAtNight();
+  const shipped = await h.agent.nudge({ to: h.to, prompt: "Their order shipped" });
+  const coupon = await h.agent.nudge({ to: h.to, text: "Your coupon code is SAVE10" });
+  assert.deepEqual([shipped.status, coupon.status], ["held", "held"]);
+  assert.equal(shipped.reason, "quiet_hours");
+  assert.equal(h.calls.length, 1, "no model call while they sleep");
+  assert.deepEqual(h.texts("sms"), ["Hi!"]);
+
+  await h.agent.runDue();
+  assert.equal(h.calls.length, 1, "still their quiet hours: nothing released");
+  h.clock.now = SEVEN_AM_NY;
+  await h.agent.runDue();
+  const turn = await h.nextCall(1);
+  assert.match(last(turn.request.messages).content, /held for their quiet hours since Mon 12 Oct 2026 23:00 \(New York time\); Their order shipped\][\s\S]*cover them all in one short message/);
+  turn.answer(respond(call("send_sms", { text: "Morning! Your order shipped." })));
+  await h.conversation.whenIdle();
+  assert.deepEqual(h.texts("sms").sort(), ["Hi!", "Morning! Your order shipped.", "Your coupon code is SAVE10"], "a text nudge goes as written, a prompt one in the agent's words");
+  assert.equal((await h.agent.nudgeState(shipped.id))?.status, "sent");
+});
+
+test("held nudges go as soon as the person writes, in the turn that answers them", async () => {
+  const h = await samAtNight();
+  await h.agent.nudge({ to: h.to, prompt: "Their order shipped" });
+  await h.message("sms", SAM.address, "can't sleep, what's my order status?");
+  const { call: turn } = await h.callWith(1, (c) => /order shipped/.test(JSON.stringify(c.request.messages)));
+  const seen = JSON.stringify(turn.request.messages);
+  assert.ok(seen.includes("what's my order status") && seen.includes("held for their quiet hours"), "their message and what was held, in one turn");
+  turn.answer(respond(call("send_sms", { text: "It shipped tonight." })));
+  await h.conversation.whenIdle();
+});
+
+test("a held nudge past its expiresAt is dropped as expired; respectQuietHours false sends it now", async () => {
+  const h = await samAtNight();
+  const stale = await h.agent.nudge({ to: h.to, text: "Your table is ready", expiresAt: ELEVEN_PM_NY + 30 * 60_000 });
+  assert.equal(stale.status, "held");
+  h.clock.now = SEVEN_AM_NY;
+  await h.agent.runDue();
+  assert.equal((await h.agent.nudgeState(stale.id))?.status, "expired");
+  assert.deepEqual(h.texts("sms"), ["Hi!"]);
+
+  h.clock.now = ELEVEN_PM_NY;
+  assert.equal((await h.agent.nudge({ to: h.to, text: "Your account was locked", respectQuietHours: false })).status, "sent");
+});
+
+test("without their time zone quiet hours do not apply; a person may set their own, or none", async () => {
+  const h = await withSam(undefined, { now: ELEVEN_PM_NY });
+  assert.equal((await h.agent.nudge({ to: h.to, text: "Order shipped" })).status, "sent", "their zone is not known: nothing is held");
+  assert.equal((await h.agent.contact(h.to))?.quietHoursSource, "no_time_zone");
+
+  await h.agent.setTimeZone({ to: h.to, timeZone: "America/New_York" });
+  assert.deepEqual(await h.agent.setQuietHours({ to: h.to, quietHours: "off" }), { status: "set" });
+  assert.equal((await h.agent.nudge({ to: h.to, text: "Second" })).status, "sent", "they turned quiet hours off");
+
+  await h.message("sms", SAM.address, "please nothing after 9pm or before 9am");
+  (await h.nextCall(1)).answer(respond(call("send_sms", { text: "Got it." }), call("set_quiet_hours", { set: "hours", from: "21:00", to: "09:00" })));
+  (await h.nextCall(2)).answer(respond());
+  await h.conversation.whenIdle();
+  const contact = await h.agent.contact(h.to);
+  assert.deepEqual([contact?.quietHours, contact?.quietHoursSource, contact?.timeZoneSource], [{ from: "21:00", to: "09:00" }, "person", "business"]);
+  h.clock.now = Date.UTC(2026, 9, 13, 12, 30); // 8:30am New York: inside their own hours, not the default
+  assert.equal((await h.agent.nudge({ to: h.to, text: "Third" })).status, "held");
+});
+
+test("a pause drops what the business starts with no model call, and the contact record shows it", async () => {
+  const h = await withSam();
+  await h.message("sms", SAM.address, "no messages until the 20th please");
+  (await h.nextCall(1)).answer(respond(call("send_sms", { text: "Paused." }), call("pause_messages", { until: "2026-10-20" })));
+  (await h.nextCall(2)).answer(respond());
+  await h.conversation.whenIdle();
+  const result = await h.agent.nudge({ to: h.to, prompt: "Tell them about the sale" });
+  assert.equal(result.status, "dropped");
+  assert.match(result.reason ?? "", /pause/);
+  assert.equal(h.calls.length, 3, "no model call to judge it");
+  const contact = await h.agent.contact(h.to);
+  assert.equal(contact?.pauses.length, 1);
+  assert.deepEqual(contact?.topics, []);
+});
+
+test("a reminder that can wait skips its runs in their quiet hours; a business schedule moves to when they end", async () => {
+  const h = await samAtNight();
+  h.clock.now = Date.UTC(2026, 9, 12, 16); // noon, to schedule
+  await h.message("sms", SAM.address, "check for new listings every night at 11 and let me know");
+  (await h.nextCall(1)).answer(respond(call("send_sms", { text: "Will do." }), call("schedule_message", { message: "check listings", repeat: "daily", time: "23:00", mode: "check", respect_quiet_hours: true })));
+  (await h.nextCall(2)).answer(respond());
+  await h.conversation.whenIdle();
+  const later = await h.agent.nudge({ to: h.to, prompt: "Their order shipped", at: ELEVEN_PM_NY });
+  assert.equal(later.status, "scheduled");
+
+  h.clock.now = ELEVEN_PM_NY;
+  await h.agent.runDue();
+  assert.equal(h.calls.length, 3, "nothing ran in their quiet hours");
+  const outcomes = (await h.database.query("SELECT outcome, reason FROM schedule_runs ORDER BY ran_at")).map((r) => `${r.outcome}: ${r.reason}`);
+  assert.ok(outcomes.some((o) => o === "skipped: their quiet hours"), outcomes.join(" | "));
+  assert.ok(outcomes.some((o) => /^held: their quiet hours: moved to Tue 13 Oct 2026 07:00/.test(o)), outcomes.join(" | "));
+});
+
+// --- WhatsApp's closed window: the agent's template, else the fallback ---
+
+const WAITING: TemplateDefinition = { name: "message_waiting", language: "en", category: "utility", body: "You have a new message. Reply to see it." };
+const SHIPPED: TemplateDefinition = { name: "order_shipped", language: "en", category: "utility", body: "Hi {{1}}, your order {{2}} has shipped." };
+
+/** Sam on WhatsApp, last heard from 25 hours ago, with a fallback template. */
+async function samWindowClosed() {
+  const clock = { now: Date.UTC(2026, 9, 12, 16) };
+  const h = multi({ channels: { whatsapp: { info: { ...WHATSAPP, replyWindowHours: 24 }, phone: true } }, now: () => clock.now, templates: [WAITING, SHIPPED], fallbackTemplate: { name: "message_waiting" } });
+  const a = await h.message("whatsapp", SAM.address, "hi");
+  (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Hi!" })));
+  const conversation = h.agent.conversation(a!.conversationId)!;
+  await conversation.whenIdle();
+  clock.now += 25 * 3_600_000;
+  return { ...h, conversation, clock, to: { channel: "whatsapp", address: SAM.address } };
+}
+
+const templatesSent = (h: { out: Array<{ outbound: { type: string } }> }) => h.out.flatMap((o) => (o.outbound.type === "template" ? [(o.outbound as unknown as { name: string }).name] : []));
+
+test("past the window, the agent sends a template that says the nudge, filled in", async () => {
+  const h = await samWindowClosed();
+  const nudge = h.agent.nudge({ to: h.to, prompt: "Their order 1042 shipped" });
+  const turn = await h.nextCall(1);
+  assert.match(last(turn.request.messages).content, /window is closed[\s\S]*send_template/);
+  assert.ok(turn.request.tools.some((t) => t.name === "send_template" && !/message_waiting:/.test(t.description)), "the fallback is Flow Framework's, not offered");
+  turn.answer(respond(call("send_template", { name: "order_shipped", body: ["Sam", "1042"] })));
+  (await h.nextCall(2)).answer(respond());
+  assert.equal((await nudge).status, "sent");
+  assert.deepEqual(templatesSent(h), ["order_shipped"]);
+});
+
+test("past the window with no template that fits, the fallback goes, the nudge waits for their reply, and template.missing says what", async () => {
+  const h = await samWindowClosed();
+  const nudge = h.agent.nudge({ to: h.to, prompt: "Their refund was approved" });
+  (await h.nextCall(1)).answer(respond());
+  const result = await nudge;
+  assert.deepEqual([result.status, result.reason], ["held", "window_closed"]);
+  await h.sentWhere((o) => o.outbound.type === "template");
+  assert.deepEqual(templatesSent(h), ["message_waiting"]);
+  assert.deepEqual(h.events.filter((e) => e.type === "template.missing").map((e) => e.prompt), ["Their refund was approved"]);
+
+  await h.message("whatsapp", SAM.address, "what's new?");
+  const { call: reply } = await h.callWith(2, (c) => JSON.stringify(c.request.messages).includes("Their refund was approved") && !/window is closed/.test(JSON.stringify(c.request.messages.at(-1))));
+  reply.answer(respond(call("send_whatsapp", { text: "Your refund was approved." })));
+  await h.conversation.whenIdle();
+  assert.equal((await h.agent.nudgeState(result.id))?.status, "sent");
+});
+
+test("a scheduled prompt nudge due past the window goes as one sent now would: a template the agent picks, else the fallback until they reply; a scheduled text is skipped", async () => {
+  const h = await samWindowClosed();
+  const hour = 3_600_000;
+  const start = h.clock.now;
+  assert.equal((await h.agent.nudge({ to: h.to, prompt: "Their order 1042 shipped", at: start + hour })).status, "scheduled");
+  await h.agent.nudge({ to: h.to, text: "Your code is 4417", at: start + hour });
+  await h.agent.nudge({ to: h.to, prompt: "Their refund was approved", at: start + 2 * hour });
+
+  h.clock.now = start + hour;
+  assert.equal(await h.agent.runDue(), 0, "neither is a scheduled turn: the prompt went on as a nudge, the text was skipped");
+  const turn = await h.nextCall(1);
+  assert.match(last(turn.request.messages).content, /Their order 1042 shipped[\s\S]*window is closed[\s\S]*send_template/);
+  turn.answer(respond(call("send_template", { name: "order_shipped", body: ["Sam", "1042"] })));
+  (await h.nextCall(2)).answer(respond());
+  await h.conversation.whenIdle();
+  assert.deepEqual(templatesSent(h), ["order_shipped"]);
+  assert.deepEqual(h.texts("whatsapp"), ["Hi!"], "the text did not go");
+
+  h.clock.now = start + 2 * hour;
+  await h.agent.runDue();
+  (await h.nextCall(3)).answer(respond());
+  await h.sentWhere((o) => o.outbound.type === "template" && (o.outbound as { name?: string }).name === "message_waiting");
+  assert.deepEqual(h.events.filter((e) => e.type === "template.missing").map((e) => e.prompt), ["Their refund was approved"]);
+  await h.message("whatsapp", SAM.address, "what's new?");
+  const { call: reply } = await h.callWith(4, (c) => JSON.stringify(c.request.messages).includes("Their refund was approved") && !/window is closed/.test(JSON.stringify(c.request.messages.at(-1))));
+  reply.answer(respond(call("send_whatsapp", { text: "Your refund was approved." })));
+  await h.conversation.whenIdle();
+  assert.deepEqual(h.texts("whatsapp"), ["Hi!", "Your refund was approved."]);
+});
+
+test("a text nudge past the window sends the fallback at once and goes as written when they reply", async () => {
+  const h = await samWindowClosed();
+  const result = await h.agent.nudge({ to: h.to, text: "Your code is 4417" });
+  assert.deepEqual([result.status, result.reason], ["held", "window_closed"]);
+  await h.sentWhere((o) => o.outbound.type === "template");
+  assert.deepEqual(templatesSent(h), ["message_waiting"]);
+  assert.equal(h.calls.length, 1, "no model call");
+  await h.message("whatsapp", SAM.address, "ok?");
+  (await h.nextCall(1)).answer(respond(call("send_whatsapp", { text: "Here it is." })));
+  await h.sentWhere((o) => o.outbound.type === "message" && o.outbound.text === "Your code is 4417");
+  await h.conversation.whenIdle();
+  assert.equal((await h.agent.nudgeState(result.id))?.status, "sent");
+});
+
+test("a fallback template that is not declared, or needs values, throws at setup", () => {
+  assert.throws(() => multi({ channels: { whatsapp: { info: WHATSAPP, phone: true } }, templates: [WAITING], fallbackTemplate: { name: "nope" } }), /not one of the declared templates/);
+  assert.throws(() => multi({ channels: { whatsapp: { info: WHATSAPP, phone: true } }, templates: [SHIPPED], fallbackTemplate: { name: "order_shipped" } }), /body values/);
+});
+

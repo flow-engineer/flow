@@ -24,7 +24,7 @@ test("a double text folds into the reply being written", async () => {
 });
 
 test("a double text that comes before the first model call (the turn still loading) joins that call", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "chinwag-"));
+  const dir = mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const loading = gate();
@@ -42,7 +42,7 @@ test("a double text that comes before the first model call (the turn still loadi
 });
 
 test("the context block is an event, so a judge can see what the agent was given", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "chinwag-"));
+  const dir = mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const events: Array<{ type: string; text?: unknown }> = [];
@@ -64,7 +64,7 @@ test("the context block is an event, so a judge can see what the agent was given
 });
 
 test("turn.context stays off unless a sink asks for it", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "chinwag-"));
+  const dir = mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const events: string[] = [];

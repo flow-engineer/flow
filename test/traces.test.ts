@@ -1,11 +1,13 @@
-// covers: src/traces.ts src/agent.ts
+// covers: src/traces.ts src/agent.ts src/conversation.ts mcp/src/server.ts
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage } from "node:http";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, tool, z, type Outbound } from "../src/index.ts";
+import { createAgent, tool, z, type AgentOptions, type Outbound } from "../src/index.ts";
+import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { mcpServer } from "../mcp/src/index.ts";
 import { tracesFromEnv } from "../src/traces.ts";
 import { SMS, call, respond, scriptedModel } from "./helpers.ts";
 
@@ -34,14 +36,14 @@ async function fakeEndpoint(status = 200) {
 }
 
 /** An SMS agent with one tool, tracing to `url`. */
-function agentFor(url: string, content: boolean) {
-  const dir = mkdtempSync(join(tmpdir(), "chinwag-"));
+function agentFor(url: string, content: boolean, intercept?: AgentOptions["intercept"], traceChannel?: string) {
+  const dir = mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const sent: string[] = [];
-  const sms = { name: "sms", kind: "sms" as const, info: SMS, phone: true, send: (_: string, o: Outbound) => void (o.type === "message" && sent.push(o.text)) };
+  const sms = { name: "sms", kind: "sms" as const, traceChannel, info: SMS, phone: true, send: (_: string, o: Outbound) => void (o.type === "message" && sent.push(o.text)) };
   const lookup = tool({ name: "lookup", description: "Finds a slot.", input: z.object({ day: z.string() }), run: async ({ day }) => `free on ${day}` });
-  const agent = createAgent({ dir, model: scripted.model, tools: [lookup], channels: [sms], debounceMs: 0, scheduleCheckMs: 0, id: "cafe", traces: { url, key: KEY, content, version: "v7" } });
+  const agent = createAgent({ dir, model: scripted.model, tools: [lookup], channels: [sms], debounceMs: 0, scheduleCheckMs: 0, id: "cafe", traces: { url, key: KEY, content, version: "v7" }, intercept });
   return { agent, sent, ...scripted };
 }
 
@@ -56,7 +58,8 @@ const attrs = (span: any) => Object.fromEntries(span.attributes.map((a: any) => 
 
 test("each turn is one trace: the person's ids and channel, its model calls, tools and replies", async () => {
   const endpoint = await fakeEndpoint();
-  const h = agentFor(endpoint.url, true);
+  // This path assertion also covers long trailing-slash runs without regex backtracking.
+  const h = agentFor(endpoint.url + "/".repeat(100_000), true);
   await playTurn(h, "+15550100123");
   const request = await endpoint.next(1);
   endpoint.close();
@@ -91,12 +94,35 @@ test("each turn is one trace: the person's ids and channel, its model calls, too
   assert.ok(children.filter((s: any) => attrs(s)["gen_ai.operation.name"] === "chat").length >= 2, "a span per model call");
 });
 
-test("under chinwag test, every trace says it is a test's and names the test session, so it is kept apart from real conversations", async (t) => {
-  process.env.CHINWAG_RUN_KIND = "test";
-  process.env.CHINWAG_TEST_SESSION = "tse_01JTESTSESSION0000000000000";
+test("a message intercept answers, and its reply, are traces of their own, also while a turn is open", async () => {
+  const endpoint = await fakeEndpoint();
+  const h = agentFor(endpoint.url, true, (_id, text) => (/chest pain/.test(text) ? "Call 911 now." : null));
+  const a = await h.agent.message({ channel: "sms", from: "+15550100123", message: "Can I move my check-in?", messageId: "SM-1" });
+  const thinking = await h.nextCall(0);
+  await h.agent.message({ channel: "sms", from: "+15550100123", message: "chest pain", messageId: "SM-2" });
+  thinking.answer(respond(call("send_sms", { text: "Yes, to when?" })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  await h.agent.flushTraces();
+  endpoint.close();
+  const traces = new Map<string, any[]>();
+  for (const request of endpoint.requests) for (const span of request.body.resourceSpans[0].scopeSpans[0].spans) traces.set(span.traceId, [...(traces.get(span.traceId) ?? []), span]);
+  const shown = [...traces.values()].map((spans) => {
+    const root = attrs(spans.find((s: any) => !s.parentSpanId));
+    return [root["chinwag.user_message"] ?? null, spans.flatMap((s: any) => attrs(s)["chinwag.agent_reply"] ?? []), spans.some((s: any) => s.name.startsWith("chat"))];
+  });
+  assert.deepEqual(shown.sort((a, b) => String(a[0]).localeCompare(String(b[0]))), [
+    ["Can I move my check-in?", ["Yes, to when?"], true],
+    ["chest pain", [], false],
+    [null, ["Call 911 now."], false],
+  ]);
+});
+
+test("under flow test, every trace says it is a test's and names the test session, so it is kept apart from real conversations", async (t) => {
+  process.env.FLOW_FRAMEWORK_RUN_KIND = "test";
+  process.env.FLOW_FRAMEWORK_TEST_SESSION = "tse_01JTESTSESSION0000000000000";
   t.after(() => {
-    delete process.env.CHINWAG_RUN_KIND;
-    delete process.env.CHINWAG_TEST_SESSION;
+    delete process.env.FLOW_FRAMEWORK_RUN_KIND;
+    delete process.env.FLOW_FRAMEWORK_TEST_SESSION;
   });
   const endpoint = await fakeEndpoint();
   const h = agentFor(endpoint.url, false);
@@ -139,11 +165,60 @@ test("the endpoint refusing traces never touches the conversation, is logged onc
   assert.doesNotMatch(warnings.join(""), /do-not-log-me/);
 });
 
-test("from the environment: a trace key goes to flow.engineer/observe unless a URL is set, content only with CHINWAG_TRACES_CONTENT=1, never under node --test", () => {
+test("from the environment: a trace key goes to flow.engineer/observe unless a URL is set, content only with FLOW_FRAMEWORK_TRACES_CONTENT=1, never under node --test; the CHINWAG_ names still work", () => {
   assert.equal(tracesFromEnv({}), undefined);
-  assert.deepEqual(tracesFromEnv({ CHINWAG_TRACES_KEY: KEY }), { key: KEY, url: "https://flow.engineer/observe", content: false });
-  assert.deepEqual(tracesFromEnv({ CHINWAG_TRACES_KEY: KEY, CHINWAG_TRACES_URL: "  " }), { key: KEY, url: "https://flow.engineer/observe", content: false });
-  assert.deepEqual(tracesFromEnv({ CHINWAG_TRACES_KEY: KEY, CHINWAG_TRACES_URL: "https://example.test/traces" }), { key: KEY, url: "https://example.test/traces", content: false });
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY }), { key: KEY, url: "https://flow.engineer/observe", content: false });
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "  " }), { key: KEY, url: "https://flow.engineer/observe", content: false });
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "https://example.test/traces" }), { key: KEY, url: "https://example.test/traces", content: false });
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "https://example.test/traces", FLOW_FRAMEWORK_TRACES_CONTENT: "1" }), { key: KEY, url: "https://example.test/traces", content: true });
+  assert.equal(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, NODE_TEST_CONTEXT: "child-v8" }), undefined);
   assert.deepEqual(tracesFromEnv({ CHINWAG_TRACES_KEY: KEY, CHINWAG_TRACES_URL: "https://example.test/traces", CHINWAG_TRACES_CONTENT: "1" }), { key: KEY, url: "https://example.test/traces", content: true });
-  assert.equal(tracesFromEnv({ CHINWAG_TRACES_KEY: KEY, NODE_TEST_CONTEXT: "child-v8" }), undefined);
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, CHINWAG_TRACES_KEY: "old", CHINWAG_TRACES_URL: "https://example.test/old" }), { key: KEY, url: "https://example.test/old", content: false });
+});
+
+// Turn trace tests never exercise standalone calls, which have no conversation to attach to.
+test("standalone calls export one trace each with host metadata and content only when enabled", async (t) => {
+  for (const content of [false, true]) {
+    const endpoint = await fakeEndpoint();
+    t.after(endpoint.close);
+    let key = "";
+    const lookup = tool({ name: "lookup", description: "Look up.", input: z.object({ secret: z.string() }), output: z.object({ result: z.string() }), signIn: "none", run: (input, ctx) => { key = ctx.idempotencyKey; return { result: input.secret }; } });
+    const mcp = mcpServer({ name: "tools", version: "1", tools: [lookup], traces: { url: endpoint.url, key: KEY, content } });
+    const http = createServer((req, res) => void mcp.node(req, res));
+    await new Promise<void>(resolve => http.listen(0, "127.0.0.1", resolve));
+    t.after(() => http.close());
+    const c = new Client({ name: "test-host", version: "2" });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${(http.address() as any).port}/mcp/plugin`)));
+    try {
+      await c.callTool({ name: "lookup", arguments: { secret: "private-tool-data" }, _meta: { "chinwag/surface": "cli", "chinwag/command": "site view", "chinwag/idempotency-key": "retry-7" } });
+      await mcp.flushTraces();
+      assert.equal(key, "retry-7");
+      const spans = endpoint.requests.flatMap(r => r.body.resourceSpans[0].scopeSpans[0].spans);
+      assert.equal(spans.length, 1);
+      const root = attrs(spans[0]);
+      assert.equal(spans[0].name, "mcp.call lookup");
+      assert.equal(root["chinwag.surface"], "cli");
+      assert.equal(root["chinwag.mcp.client"], "test-host");
+      assert.equal(root["chinwag.mcp.client_version"], "2");
+      assert.equal(root["chinwag.command"], "site view");
+      assert.equal(root["chinwag.conversation_id"], undefined);
+      assert.equal(root["openinference.span.kind"], "TOOL");
+      assert.equal(JSON.stringify(spans).includes("private-tool-data"), content);
+    } finally { await c.close(); }
+  }
+});
+
+// Existing traces use SMS; they do not cover adapters with explicit channel attribution.
+test("explicit trace channels keep terminal and custom chat sources distinct", async () => {
+  for (const channel of ["cli", "web", "imessage", "telegram"]) {
+    const endpoint = await fakeEndpoint();
+    try {
+      const h = agentFor(endpoint.url, false, undefined, channel);
+      await playTurn(h, "+15550100123");
+      const request = await endpoint.next(1);
+      await h.agent.flushTraces();
+      const root = request.body.resourceSpans[0].scopeSpans[0].spans.find((s: any) => !s.parentSpanId);
+      assert.equal(attrs(root)["chinwag.channel"], channel);
+    } finally { endpoint.close(); }
+  }
 });

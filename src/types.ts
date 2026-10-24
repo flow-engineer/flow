@@ -1,4 +1,4 @@
-// The shapes every part of Chinwag shares: chat history, the model contract, what a channel is sent.
+// The shapes every part of Flow Framework shares: chat history, the model contract, what a channel is sent.
 
 export interface ToolCall {
   id: string;
@@ -8,13 +8,20 @@ export interface ToolCall {
 }
 
 export type ChatMessage =
-  | { role: "user"; content: string; media?: Media[]; messages?: PersonMessage[] }
+  | {
+      role: "user";
+      content: string;
+      media?: Media[];
+      messages?: PersonMessage[];
+      /** A reset marker (`agent.resetHistory`): the model is sent only what comes after it. */
+      reset?: true;
+    }
   | { role: "assistant"; content: string | null; toolCalls?: ToolCall[] }
   | { role: "tool"; toolCallId: string; content: string };
 
 /**
  * One of the person's messages in a history entry, kept beside its text (never sent to the model):
- * its id (the provider's, or Chinwag's m1, m2, ...), its channel, and what they wrote or tapped.
+ * its id (the provider's, or Flow Framework's m1, m2, ...), its channel, and what they wrote or tapped.
  */
 export interface PersonMessage {
   id: string;
@@ -22,6 +29,8 @@ export interface PersonMessage {
   text: string;
   /** They tapped a button or list row. */
   choice?: boolean;
+  /** The id of what they tapped, when it is not its label. */
+  choiceId?: string;
 }
 
 /**
@@ -60,7 +69,7 @@ export interface ModelResponse {
   model?: string;
 }
 
-/** Any model behind Chinwag. `complete` must reject promptly when `signal` aborts. */
+/** Any model behind Flow Framework. `complete` must reject promptly when `signal` aborts. */
 export interface Model {
   complete(request: ModelRequest): Promise<ModelResponse>;
   /** Its context window in tokens, when known: each call is kept well within it (see `history`). */
@@ -75,33 +84,102 @@ export interface ListRow {
   description?: string;
 }
 
+/** A photo by https URL, or by the provider's own id for a file it holds (Flow Messaging's file_..., WhatsApp's media id). */
+export type Photo = { url: string } | { fileId: string };
+
+/**
+ * A reply button: its label (the id a tap carries back is then the label), or an id and a label.
+ * Ids are 1 to 64 bytes and unique within a message and across a carousel; labels may repeat.
+ */
+export type ReplyButton = string | { id: string; label: string };
+
+/** One card of a carousel: its photo, a short text, and either reply buttons or one link button (the same kind and number on every card). */
+export interface CarouselCard {
+  image: Photo;
+  text?: string;
+  /** Reply buttons; a tap comes back as the person's message, with the button's id as `choice.id`. */
+  buttons?: ReplyButton[];
+  /** One button that opens this https page. */
+  link?: { label: string; url: string };
+}
+
 /** What a conversation sends to its channel. */
 export type Outbound =
   | {
       type: "message";
       text: string;
+      /** A framework-generated login challenge; its link opens real authentication in simulators. */
+      authentication?: boolean;
       /** The person's message this one quotes (channels with replies). */
       replyTo?: string;
-      /** Reply buttons; a tap comes back as the person's message. */
-      buttons?: string[];
+      /** Reply buttons; a tap comes back as the person's message, with the button's id as `choice.id`. */
+      buttons?: ReplyButton[];
       /** A list the person picks one row from. */
       list?: { button: string; rows: ListRow[] };
-      /** A button that opens this https page; only on channels with linkButton (elsewhere Chinwag puts the URL in the text). */
+      /** A button that opens this https page; only on channels with linkButton (elsewhere Flow Framework puts the URL in the text). */
       link?: { label: string; url: string };
-      /** A photo by https URL, the text its caption; only on channels with images (elsewhere the text goes alone). */
-      image?: { url: string };
+      /** A photo, the text its caption (with buttons or a link, the photo heads the same message); only on channels with images (elsewhere the text goes alone). */
+      image?: Photo;
       /** The channel's own params (see Channel.params), as the agent filled them in. */
       fields?: Record<string, unknown>;
+      /**
+       * false: no link preview. Set on every message the business starts (a nudge, a scheduled
+       * message, a turn the person did not start): on WhatsApp a preview card's title would become
+       * the phone's notification instead of the message's text. Its call to action goes as `link`.
+       */
+      preview?: false;
+      /** The same in every process for one send the business starts (a nudge, a scheduled text), for providers that take one. */
+      idempotencyKey?: string;
     }
+  /**
+   * Cards side by side the person swipes through, under a text (WhatsApp's media carousel); only on
+   * channels with carousels. A channel that cannot show one sends the text, then each card as a message, in order.
+   */
+  | { type: "carousel"; text: string; cards: CarouselCard[]; replyTo?: string; preview?: false; idempotencyKey?: string }
   /** The agent has picked these messages up (WhatsApp's blue ticks). */
   | { type: "read"; messageIds: string[] }
-  /** A reaction on one of the person's messages, by the id Chinwag gave it. */
+  /** A reaction on one of the person's messages, by the id Flow Framework gave it. */
   | { type: "reaction"; emoji: string; messageId: string }
   /** A template the owner set up with the channel (WhatsApp), sent as is, even outside its window. */
-  | ({ type: "template" } & Template)
+  | ({ type: "template"; idempotencyKey?: string } & Template)
   /** A short line of what the agent is doing, shown in the loading indicator; null clears it. */
   | { type: "status"; text: string | null }
   | { type: "typing"; on: boolean };
+
+/** What the person reads: a message, a carousel or a template. */
+export type OutboundMessage = Extract<Outbound, { type: "message" | "carousel" | "template" }>;
+
+/** Where a message is going, and what started it: what `beforeSend` gets with it. */
+export interface SendContext {
+  conversationId: string;
+  /** The channel's name (whatsapp, sms, your UI's), and what it can show. */
+  channel: string;
+  info: ChannelInfo;
+  /** The person's address on it. */
+  address: string;
+  /**
+   * agent: its send tools, or a template it sent. direct: a fixed-text scheduled message or a nudge,
+   * with no model. framework: Flow Framework's own (a keyword's or intercept's reply, a sign-in
+   * prompt, the apology after a failed turn).
+   */
+  origin: "agent" | "direct" | "framework";
+  /**
+   * The texts already sent to the person in this conversation, oldest first, read from its stored
+   * history (so they hold across restarts): what guards such as `oncePerChat` and `noRepeats` check against.
+   */
+  sent?: readonly string[];
+}
+
+/**
+ * createAgent's `beforeSend`: every message, carousel and template passes through it before it is
+ * checked against the platform's content rules, sent and recorded. Return nothing (or the message)
+ * to send it as it is, another message to send that instead, or `{ refuse: why }` to send nothing.
+ * A refused send of the agent's goes back to it with the reason, to fix and send again.
+ */
+export type BeforeSend = (
+  message: OutboundMessage,
+  context: SendContext,
+) => OutboundMessage | { refuse: string } | void | Promise<OutboundMessage | { refuse: string } | void>;
 
 /** A WhatsApp template as it is sent: its name and the values for its placeholders (Meta's template parameters). */
 export interface Template {
@@ -120,7 +198,7 @@ export interface Template {
 
 /**
  * A WhatsApp template as the owner set it up with Meta, declared in `createAgent({ templates })`:
- * Chinwag checks every send of it against this, and the playground shows it as WhatsApp would.
+ * Flow Framework checks every send of it against this, and the playground shows it as WhatsApp would.
  */
 export interface TemplateDefinition {
   name: string;
@@ -138,8 +216,24 @@ export interface TemplateDefinition {
 
 export type TemplateButton = { type: "quick_reply"; text: string } | { type: "url"; text: string; url: string } | { type: "phone"; text: string; phone: string };
 
-/** Sends one outbound; a rejection means it did not reach the person. */
-export type Deliver = (outbound: Outbound) => Promise<void> | void;
+/**
+ * Sends one outbound. It resolves once the channel has it (the platform accepted it), so the next
+ * message goes only after it; a rejection means it did not reach the person. It may resolve with a
+ * receipt saying how far the message got.
+ */
+export type Deliver = (outbound: Outbound) => Promise<void | SendReceipt> | void | SendReceipt;
+
+/**
+ * How far a sent message got when its send resolved. sent: the platform accepted it. delivered: it
+ * reached the person's device. queued: the provider stored it to send later (it does not wait).
+ * unconfirmed: no signal came within the provider's wait; it may still arrive and is never sent
+ * again (Flow Framework emits `message.slow`).
+ */
+export interface SendReceipt {
+  status: "queued" | "sent" | "delivered" | "unconfirmed";
+  /** How long the send waited for that, ms. */
+  waitedMs?: number;
+}
 
 /** What the channel a conversation is on can show. */
 export interface ChannelInfo {
@@ -155,14 +249,35 @@ export interface ChannelInfo {
   replies?: boolean;
   /** Reply buttons under a message. */
   buttons?: { max: number; labelMax: number };
+  /**
+   * A tap on a `{ id, label }` button comes back with that id (`choice.id`). Without it a provider may
+   * know only the label: number the labels yourself if taps must be told apart.
+   */
+  buttonIds?: boolean;
   /** A list the person picks one row from. */
   lists?: { maxRows: number; titleMax: number; buttonMax: number };
   /** One button under a message that opens a web page (WhatsApp's call-to-action URL button). */
   linkButton?: { labelMax: number };
   /** Photos sent by URL, with the message's text as their caption. */
   images?: { captionMax: number };
+  /**
+   * The platform whose content rules (Flow Messaging's, CONTENT_LIMITS) every send on this channel is
+   * checked against, after beforeSend and before it goes: what the platform would refuse is refused
+   * here, with its error, in the playground, the test cloud and production alike.
+   */
+  platform?: "whatsapp" | "telegram" | "imessage" | "sms";
+  /** Carousels: 2 to maxCards cards, each a photo, up to cardTextMax characters and 1 to `buttons` reply buttons (or one link). */
+  carousels?: { maxCards: number; textMax: number; cardTextMax: number; buttons: number; labelMax: number };
   /** The channel shows the person when their message has been read. */
   readReceipts?: boolean;
+  /**
+   * Templates the owner set up with the platform (WhatsApp's), which also go outside its window.
+   * false: a template send is refused before it goes, with the platform's error. Absent: not known
+   * (a hand-written channel), so its send decides, as before.
+   */
+  templates?: boolean;
+  /** A typing indicator while the agent writes. Absent: not known, so typing is handed to the channel, as before. */
+  typing?: boolean;
   /**
    * The business may message first only this many hours after the person's last message
    * (WhatsApp: 24); after that, only templates.
@@ -175,7 +290,7 @@ export interface Incoming {
   text: string;
   /** The message they replied to (theirs or the agent's), quoted. */
   replyTo?: { text: string; fromAgent: boolean };
-  /** They tapped a button or picked a list row rather than typing. */
+  /** They tapped a button or picked a list row rather than typing: its id (a button's, a row's) and its label. */
   choice?: { id?: string; title: string };
   /** Photos, voice notes and documents sent with it; `text` is then their caption, or "". */
   attachments?: Attachment[];

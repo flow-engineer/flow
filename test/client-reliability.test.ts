@@ -10,6 +10,7 @@ import { z, type Tool } from "../src/index.ts";
 import { CLOUD_MODEL_BUDGET_MS, postBudgetMs, RETRY_BUDGET_MS, runInCloud, SessionStopped, TimeoutError, toolTimeoutMs } from "../testing/src/client.ts";
 import type { Command } from "../testing/src/protocol.ts";
 import { rollFault, startFaultProxy } from "./fault-proxy.ts";
+import { unavailableRecords } from "../src/records.ts";
 
 const message = (messageId: string, file?: string): Command => ({
   type: "message", conversationId: "c", messageId, channel: { reactions: false, status: false },
@@ -60,7 +61,7 @@ test("a thrown receive, a bad frame and an unreadable attachment leave the sessi
   });
   try {
     const summary = await runInCloud({
-      cloud: cloud.url, name: "test", tools: [], files: [], testsDir: mkdtempSync(join(tmpdir(), "chinwag-files-")), log: (line) => logs.push(line),
+      cloud: cloud.url, name: "test", tools: [], files: [], testsDir: mkdtempSync(join(tmpdir(), "flow-files-")), log: (line) => logs.push(line),
       build: () => ({
         channels: () => [], reacted: () => {},
         receive: (_id, incoming, _deliver, options) => {
@@ -108,7 +109,7 @@ test("a tool call waits out the simulator's latency, then the POST budget, and a
         channels: () => [], reacted: () => {},
         receive: () => {
           const lookup = tools[0];
-          if (lookup) void Promise.resolve(lookup.run({}, { conversationId: "c", person: "p", channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal })).then(() => {}, (error: unknown) => { timed = error; });
+          if (lookup) void Promise.resolve(lookup.run({}, { conversationId: "c", person: "p", key: null, channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal, records: unavailableRecords("a test") })).then(() => {}, (error: unknown) => { timed = error; });
           return "m";
         },
       }),
@@ -157,7 +158,7 @@ test("a tool call the cloud failed, which the agent started and never awaited, i
         channels: () => [], reacted: () => {},
         receive: (conversationId) => {
           received.push(conversationId);
-          if (conversationId === "sms:a") void tools[0]!.run({}, { conversationId, person: "p", channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal });
+          if (conversationId === "sms:a") void tools[0]!.run({}, { conversationId, person: "p", channel: "sms", key: null, callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal, records: unavailableRecords("a test") });
           return null;
         },
       }),
@@ -709,11 +710,17 @@ test("a silent resumable stream is opened again instead of ending the session", 
 
 test("a stream that cannot resume within the window stops the session with the runs already in", { timeout: 10_000 }, async () => {
   let gets = 0;
+  // The window is measured on a clock the test moves: it closes only once the cloud has refused a
+  // resume (503), so the last try is always that 503, however slow the machine is.
+  let clock = 0;
   const cloud = await listen(({ url }, res) => {
     if (url === "/api/sessions") return void res.writeHead(200, { "content-type": "application/json" }).end(openedResuming);
     if (url.endsWith("/stream")) {
       gets++;
-      if (gets > 1) return void res.writeHead(503, { "content-type": "text/html" }).end("<html>503 Server Error</html>");
+      if (gets > 1) {
+        clock += 60_000;
+        return void res.writeHead(503, { "content-type": "text/html" }).end("<html>503 Server Error</html>");
+      }
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.end(numbered(1, run("r1")));
       return;
@@ -722,15 +729,15 @@ test("a stream that cannot resume within the window stops the session with the r
   });
   try {
     await assert.rejects(runInCloud({
-      cloud: cloud.url, name: "test", tools: [], files: [], log: () => {}, resumeWindowMs: 600,
+      cloud: cloud.url, name: "test", tools: [], files: [], log: () => {}, resumeWindowMs: 60_000, now: () => clock,
       build: () => ({ channels: () => [], receive: () => null, reacted: () => {} }),
     }), (error: unknown) => {
       assert.ok(error instanceof SessionStopped);
-      assert.match(error.message, /the stream did not resume within 0.6s \(lost \(the cloud closed it\)\); last try: could not open the stream \(503\)/);
+      assert.match(error.message, /the stream did not resume within 60s \(lost \(the cloud closed it\)\); last try: could not open the stream \(503\)/);
       assert.deepEqual(error.runs.map((r) => r.runId), ["r1"]);
       return true;
     });
-    assert.ok(gets >= 2, `stream opened ${gets} times`);
+    assert.equal(gets, 2, "the first stream, then one refused resume");
   } finally { cloud.close(); }
 });
 

@@ -1,18 +1,24 @@
-// `chinwag show <run-id|last>`: one run's full record from the test cloud (the transcript, the tool
+// `flow show <run-id|last>`: one run's full record from the test cloud (the transcript, the tool
 // calls the simulator played, every check with the judge's reason), so a coding agent can read why a
-// run failed without a browser. The agent's id comes from .chinwag/last-session.json, and the read
+// run failed without a browser. The agent's id comes from .flow/last-session.json, and the read
 // carries the agent's CI key: GET {cloud}/v1/agents/{agent}/tests/runs/{run}.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { OBSERVE_URL } from "../../src/traces.ts";
-import { loadEnv } from "./report.ts";
+import { OBSERVE_URL, setting } from "../../src/traces.ts";
+import { RESULTS_DIR, resultsFile } from "../../src/names.ts";
+import { loadEnv, type SessionInvalid } from "./report.ts";
 
-/** Where every session's results go, in the agent's folder; `chinwag new` git-ignores .chinwag/. */
-export const LAST_SESSION = join(".chinwag", "last-session.json");
+/** Where every session's results go, in the agent's folder; `flow new` git-ignores .flow/. */
+export const LAST_SESSION = join(RESULTS_DIR, "last-session.json");
 
-/** .chinwag/last-session.json: what each run ended as, for `--failed`, `chinwag show` and coding agents. */
+/** The last session's file in dir: LAST_SESSION, else, before a run has written it, the one from before the rename (.chinwag/). */
+export function lastSessionIn(dir: string): string {
+  return resultsFile(dir, "last-session.json");
+}
+
+/** .flow/last-session.json: what each run ended as, for `--failed`, `flow show` and coding agents. */
 export interface LastSession {
   sessionId: string;
   /** The cloud's id for the agent, from the open (an older cloud names none). */
@@ -29,35 +35,43 @@ export interface LastSession {
     scenario: string;
     channel: string;
     run: number;
-    /** The cloud's id for the run, for `chinwag show`; null when it was not played. */
+    /** The cloud's id for the run, for `flow show`; null when it was not played. */
     runId?: string | null;
-    verdict: "passed" | "failed" | "errored" | "not_played";
+    /** flaky: failed, then passed when the cloud played it again. */
+    verdict: "passed" | "failed" | "flaky" | "errored" | "not_played";
+    /** passed, failed, credit or infra; null for a run never played. Absent in a file from an older client. */
+    outcome?: "passed" | "failed" | "credit" | "infra" | null;
     /** The checks as the test file says them, with the judge's reason. The file is local and
      * git-ignored, and the suite is synthetic by attestation; the messages themselves are never kept. */
     failedChecks: Array<{ kind: string; text: string; reason?: string }>;
+    /** The scenario file the cloud could not play and what is wrong in it (error scenario_invalid). */
+    invalid?: { path: string; reason: string };
   }>;
+  /** The cloud ended the whole session scenario_invalid: its reason, whether the cloud looks older
+   * than the client, and the scenario files sent. */
+  sessionInvalid?: SessionInvalid;
 }
 
-export const SHOW_LINE = `  chinwag show <run-id|last> [--json]
+export const SHOW_LINE = `  flow show <run-id|last> [--json]
                             Print one run's record from the test cloud: its checks with the
-                            judge's reasons, the transcript and the tool calls (chinwag show --help)`;
+                            judge's reasons, the transcript and the tool calls (flow show --help)`;
 
 const SHOW_USAGE = `Usage:
-  chinwag show <run-id|last> [options]
+  flow show <run-id|last> [options]
 
-Prints one run of the last \`chinwag test\` (or any run of this agent, by the id on its PASS or
+Prints one run of the last \`flow test\` (or any run of this agent, by the id on its PASS or
 FAIL line): verdict, every check with the judge's reason, then the conversation in time order with
 each tool call the simulator played and what it changed. \`last\` is the first run that did not
-pass in .chinwag/last-session.json (its first run when all passed).
+pass in .flow/last-session.json (its first run when all passed).
 
 Options:
   --json                   The record exactly as the cloud answered it, on stdout
-  --cloud <url>            The test cloud (default: CHINWAG_CLOUD, else https://flow.engineer/observe)
+  --cloud <url>            The test cloud (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)
   --dotenv <path>          Read the environment from this file instead of the folder's .env
   -h, --help               Show this help
 
-Needs CHINWAG_CLOUD_KEY (the agent's CI key, also read from .env), and the agent's id that
-\`chinwag test\` keeps in .chinwag/last-session.json.
+Needs FLOW_FRAMEWORK_CLOUD_KEY (the agent's CI key, also read from .env), and the agent's id that
+\`flow test\` keeps in .flow/last-session.json.
 
 Exit status:
   0    Printed
@@ -77,7 +91,7 @@ interface RunRecord {
   checks?: Array<{ kind?: string; text?: string; pass?: boolean; reason?: string }>;
   error?: unknown;
   detail?: unknown;
-  summary?: { passed?: boolean; ended?: string; turns?: number; watch?: string; error?: string };
+  summary?: { passed?: boolean; ended?: string; turns?: number; watch?: string; error?: string; label?: string; rerun?: { passed?: boolean; watch?: string } };
 }
 
 type Line =
@@ -85,7 +99,7 @@ type Line =
   | { kind: "out"; id?: string; text?: string; at?: number; buttons?: unknown; list?: unknown; link?: unknown; image?: unknown; template?: unknown }
   | { kind: "reaction"; messageId?: string; emoji?: string; at?: number; by?: string };
 
-/** `chinwag show`: returns the exit status. */
+/** `flow show`: returns the exit status. */
 export async function showCli(args: string[]): Promise<number> {
   let parsed;
   try {
@@ -98,7 +112,7 @@ export async function showCli(args: string[]): Promise<number> {
   } catch (error) {
     const { code, message } = error as NodeJS.ErrnoException;
     const unknown = code === "ERR_PARSE_ARGS_UNKNOWN_OPTION" ? /'([^']+)'/.exec(message)?.[1] : undefined;
-    console.error(`chinwag: ${unknown ? `unknown option ${unknown}` : message.split(". ")[0]}\n\n${SHOW_USAGE}`);
+    console.error(`flow: ${unknown ? `unknown option ${unknown}` : message.split(". ")[0]}\n\n${SHOW_USAGE}`);
     return 1;
   }
   const { values, positionals } = parsed;
@@ -107,7 +121,7 @@ export async function showCli(args: string[]): Promise<number> {
     return 0;
   }
   if (positionals.length !== 1) {
-    console.error(`chinwag show takes one run id, or last.\n\n${SHOW_USAGE}`);
+    console.error(`flow show takes one run id, or last.\n\n${SHOW_USAGE}`);
     return 1;
   }
   const envProblem = loadEnv(values.dotenv);
@@ -115,10 +129,10 @@ export async function showCli(args: string[]): Promise<number> {
     console.error(envProblem);
     return 1;
   }
-  const cloud = (values.cloud || process.env.CHINWAG_CLOUD || OBSERVE_URL).replace(/\/+$/, "");
-  const key = process.env.CHINWAG_CLOUD_KEY || undefined;
+  const cloud = (values.cloud || setting("CLOUD") || OBSERVE_URL).replace(/\/+$/, "");
+  const key = setting("CLOUD_KEY") || undefined;
   if (!key) {
-    console.error(`chinwag show reads the run with the agent's CI key: set CHINWAG_CLOUD_KEY.${cloud === OBSERVE_URL ? ` Make a key at ${OBSERVE_URL}: your agent, Developers.` : ""}`);
+    console.error(`flow show reads the run with the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY.${cloud === OBSERVE_URL ? ` Make a key at ${OBSERVE_URL}: your agent, Developers.` : ""}`);
     return 1;
   }
   const last = readLast();
@@ -130,7 +144,7 @@ export async function showCli(args: string[]): Promise<number> {
   if (runId === "last") {
     const pickedRun = pickLast(last);
     if (!pickedRun) {
-      console.error(`${LAST_SESSION} has no run ids: run chinwag test again, then chinwag show last.`);
+      console.error(`${LAST_SESSION} has no run ids: run flow test again, then flow show last.`);
       return 1;
     }
     runId = pickedRun;
@@ -141,7 +155,7 @@ export async function showCli(args: string[]): Promise<number> {
     return 1;
   }
   if (!id.test(last.agent!)) {
-    console.error(`${LAST_SESSION} names an agent id that is not one: run chinwag test again.`);
+    console.error(`${LAST_SESSION} names an agent id that is not one: run flow test again.`);
     return 1;
   }
   const url = `${cloud}/v1/agents/${last.agent}/tests/runs/${runId}`;
@@ -173,27 +187,27 @@ export async function showCli(args: string[]): Promise<number> {
 
 /** The last session's results, or what to do when there are none or they name no agent. */
 function readLast(): LastSession | string {
-  const path = join(process.cwd(), LAST_SESSION);
-  if (!existsSync(path)) return `No ${LAST_SESSION} in ${process.cwd()}: run chinwag test first; chinwag show reads the agent's id from it.`;
+  const path = lastSessionIn(process.cwd());
+  if (!existsSync(path)) return `No ${LAST_SESSION} in ${process.cwd()}: run flow test first; flow show reads the agent's id from it.`;
   let last: LastSession;
   try {
     last = JSON.parse(readFileSync(path, "utf8")) as LastSession;
     if (!Array.isArray(last.runs)) throw new Error("it has no runs");
   } catch (error) {
-    return `${LAST_SESSION} could not be read (${(error as Error).message}): run chinwag test again.`;
+    return `${LAST_SESSION} could not be read (${(error as Error).message}): run flow test again.`;
   }
-  if (!last.agent) return `${LAST_SESSION} has no agent id: run chinwag test once more against a current cloud, which names it, then chinwag show.`;
+  if (!last.agent) return `${LAST_SESSION} has no agent id: run flow test once more against a current cloud, which names it, then flow show.`;
   return last;
 }
 
 /** The first run that did not pass, else the first run; says which on stderr and names the others that did not pass. */
 function pickLast(last: LastSession): string | undefined {
   const withId = last.runs.filter((r) => r.runId);
-  const notPassed = withId.filter((r) => r.verdict === "failed" || r.verdict === "errored");
+  const notPassed = withId.filter((r) => r.verdict === "failed" || r.verdict === "flaky" || r.verdict === "errored");
   const chosen = notPassed[0] ?? withId[0];
   if (!chosen) return undefined;
   console.error(`Showing ${chosen.scenario} #${chosen.run} (${chosen.channel}), ${chosen.verdict}: ${chosen.runId}`);
-  for (const r of notPassed.slice(1)) console.error(`  also did not pass: chinwag show ${r.runId}   (${r.scenario} #${r.run}, ${r.channel}, ${r.verdict})`);
+  for (const r of notPassed.slice(1)) console.error(`  also did not pass: flow show ${r.runId}   (${r.scenario} #${r.run}, ${r.channel}, ${r.verdict})`);
   return chosen.runId!;
 }
 
@@ -236,7 +250,7 @@ function render(record: RunRecord, runId: string): string[] {
   const passed = s.passed ?? (checks.length > 0 && checks.every((c) => c.pass));
   // An error (judge_failed, spend_cap, ...) or run_failed: the cloud could not play or judge the run.
   const error = record.error ?? s.error;
-  const verdict = error || s.ended === "run_failed" ? "ERROR" : passed ? "PASS" : "FAIL";
+  const verdict = error || s.ended === "run_failed" ? "ERROR" : passed ? "PASS" : s.label === "flaky" ? "FLAKY" : "FAIL";
   const where = record.scenario?.path ?? record.scenario?.id ?? "?";
   out.push(`${verdict}  ${where}${record.scenario?.title ? ` (${record.scenario.title})` : ""}`);
   out.push(`  channel ${record.channel ?? "?"}, run ${record.run ?? "?"}, ${record.runId ?? runId}; ended: ${s.ended ?? "?"}${s.turns === undefined ? "" : `, ${s.turns} turn${s.turns === 1 ? "" : "s"}`}`);
@@ -289,6 +303,7 @@ function render(record: RunRecord, runId: string): string[] {
     out.push("", ...indent(typeof record.detail === "string" ? record.detail : JSON.stringify(record.detail, null, 2), "Detail: ", "  "));
   }
   if (s.watch) out.push("", `Watch: ${s.watch}`);
+  if (s.rerun?.watch) out.push(`Played again: ${s.rerun.passed ? "passed" : "failed"} ${s.rerun.watch}`);
   return out;
 }
 

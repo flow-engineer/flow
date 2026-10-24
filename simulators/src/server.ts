@@ -21,25 +21,33 @@
 //   POST /api/clear       ?person           forget the person: history, schedules, everything
 //   GET  /api/status                         busy / idle, background tasks
 //   GET  /api/platforms                      each platform's rules, the agent's channels and test people, link cards,
-//                                            the Backend panel's action labels
-//   POST /api/actions     {index}            runs one of `actions`; its result goes to every open page's trace
+//                                            the action labels (the Person tab's "Their account")
+//   GET  /api/media/<id>                     a file the person sent (a line's attachment url), kept in memory a while
+//   GET  /api/records                        the agent's records, the newest 200, newest first, with each declared
+//                                            collection's count → {records, counts, older}
 //
-// The test cloud (`testCloud: true`, for Chinwag's test cloud only): generated people per run, any
+// The test cloud (`testCloud: true`, for Flow Framework's test cloud only): generated people per run, any
 // person id, through AgentConnection.receive; the same API with `platform` for `channel`, `person`
 // free, and POST /api/reset to start a conversation over. Its transcript is kept in memory.
 //
 // The person's messages have the agent's ids (m1, m2, ...); the agent's messages get a1, a2, ...
 
-import { createHash, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { TLSSocket } from "node:tls";
 import {
+  carouselMessages,
+  contentRefusal,
+  WHATSAPP_CAROUSELS,
   declaredTemplate,
   fillTemplate,
   fitMessage,
   type Attachment,
+  type CarouselCard,
   type ChannelInfo,
   type ChannelSummary,
   type Deliver,
@@ -48,14 +56,22 @@ import {
   type Incoming,
   type ListRow,
   type Outbound,
-  type ChinwagEvent,
+  type Photo,
+  type ReplyButton,
+  type FlowEvent,
   type PlaygroundSink,
   type Template,
   type TemplateDefinition,
+  type ExportedRecord,
+  type Records,
   type TestPerson,
   type TranscriptEntry,
 } from "../../src/index.ts";
-import { PLATFORMS, channelOf, platform as platformOf, smsSegments, type Platform } from "./platforms.ts";
+import type { Agent } from "../../src/agent.ts";
+import type { CliConfig } from "../../cli/src/commands.ts";
+import type { CliIO } from "../../cli/src/run.ts";
+import { requireToken, sameSecret, wrongTries } from "../../src/http.ts";
+import { PLATFORMS, channelOf, platform as platformOf, smsSegments, wirePayload, type Platform, type Wire } from "./platforms.ts";
 
 /** What the test cloud's simulators need from an agent. */
 export interface AgentConnection {
@@ -71,12 +87,14 @@ export interface AgentConnection {
   status(): { busy: boolean; idleForMs: number; backgroundTasks: number; conversations: number };
 }
 
-/** What the playground needs from an agent. Chinwag's Agent is one as it is. */
+/** What the playground needs from an agent. Flow Framework's Agent is one as it is. */
 export interface PlaygroundAgent {
   testPeople(): TestPerson[];
   channels(): ChannelSummary[];
   simulate(input: { person: string; channel: string; message: Incoming }): Promise<{ conversationId: string; messageId: string } | null>;
   testConversation(phone: string): Promise<string | null>;
+  simulateVisitor?: Agent["simulateVisitor"];
+  visitorConversation?: Agent["visitorConversation"];
   transcript(conversationId: string): Promise<TranscriptEntry[]>;
   reacted(conversationId: string, emoji: string, toText: string): void;
   forgetPerson(conversationId: string): Promise<void>;
@@ -84,6 +102,33 @@ export interface PlaygroundAgent {
   status(): { busy: boolean; idleForMs: number; backgroundTasks: number; conversations: number };
   /** The WhatsApp templates the agent declared, shown as WhatsApp would show them. */
   templates?(): TemplateDefinition[];
+  /** The Person panel (Flow Framework's Agent has them all): what is set and waiting for a person, nudges, the clock's due work. */
+  contact?: Agent["contact"];
+  outbox?: Agent["outbox"];
+  recordNudge?: Agent["recordNudge"];
+  setTimeZone?: Agent["setTimeZone"];
+  setQuietHours?: Agent["setQuietHours"];
+  runDue?: Agent["runDue"];
+  /** The Records panel (shown when collections are declared): every record the agent keeps, read only. */
+  records?: Pick<Records, "export" | "collections">;
+}
+
+/**
+ * The playground's clock: the agent's `now` (createAgent({ now: clock.now })), which the Person
+ * panel moves forward to bring scheduled and held messages due. Real time plus an offset.
+ */
+export interface PlaygroundClock {
+  now(): number;
+  /** Moves the clock to `at` (ms since the epoch); never backwards. */
+  set(at: number): void;
+}
+
+export function playgroundClock(): PlaygroundClock {
+  let offset = 0;
+  return {
+    now: () => Date.now() + offset,
+    set: (at) => void (offset = Math.max(offset, at - Date.now())),
+  };
 }
 
 export interface SimulatorsOptions {
@@ -95,18 +140,20 @@ export interface SimulatorsOptions {
   cards?: LinkCard[];
   /** The pages' HTML, for a host with no file system (Cloudflare); else read from this folder. */
   pages?: { page: string; person: string };
-}
-
-/**
- * A button in the playground's Backend panel that makes your backend do something (an order ships,
- * a price drops), so a demo shows the agent reacting. Playground only: it runs on this server,
- * behind the playground's token, and never exists on the agent's channels.
- */
-export interface PlaygroundAction {
-  /** The button's label, such as "Order 1042 ships". */
-  label: string;
-  /** Runs when the button is pressed. A string it returns ("sent", "skipped: quiet hours") shows in the trace; a throw shows as a failure. */
-  run: () => Promise<string | void> | string | void;
+  /** The agent's clock (playgroundClock(), passed to createAgent as `now`): the Person panel can move it. */
+  clock?: PlaygroundClock;
+  /**
+   * Adds "New user · signed out" to the person picker. `visitor` is an opaque browser identity,
+   * scoped to the channel. Return the account `key` only after the application's normal auth
+   * verifies it, plus its channel `address` if different from visitor. Keep credentials server-side.
+   * Existing declared test people keep their current identity shortcut.
+   */
+  authentication?: (input: { channel: ChannelSummary; visitor: string }) => Promise<{
+    key?: string;
+    address?: string;
+    label?: string;
+    signInUrl?: string;
+  }>;
 }
 
 export interface LinkCard {
@@ -121,35 +168,177 @@ export interface LinkCard {
 type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 type Listening = { close(): Promise<void>; url: string };
 
+export interface LocalCliOptions {
+  /** The team's actual defineCli configuration. The browser cannot override its endpoints. */
+  config: CliConfig;
+  /** The channel tab that opens this runner, e.g. "terminal". */
+  channel: string;
+}
+
 export interface Playground {
   /** Pass to the agent's `events`: the trace and tool calls of test people's conversations. */
   events: EventSink;
   /** Serves the playground on 127.0.0.1 only; a token is optional there. */
-  listen(agent: PlaygroundAgent, port: number, options?: { token?: string }): Promise<Listening>;
+  listen(agent: PlaygroundAgent, port: number, options?: { token?: string; localCli?: LocalCliOptions }): Promise<Listening>;
   /** The playground as a request handler under `base`, for a deployed agent's own server: a token is required. */
-  handler(agent: PlaygroundAgent, options: { token: string; base?: string }): Handler;
+  handler(agent: PlaygroundAgent, options: { token: string; base?: string; localCli?: LocalCliOptions }): Handler;
+}
+
+/** Literal argv, with quoting and escaping, but no shell expansion, pipelines or execution. */
+function cliWords(text: string): string[] {
+  const words: string[] = [];
+  let word = "", quote = "", started = false, escape = false;
+  for (const ch of text) {
+    if (escape) { word += ch; escape = false; started = true; }
+    else if (ch === "\\" && quote !== "'") { escape = true; started = true; }
+    else if (quote) { if (ch === quote) quote = ""; else word += ch; }
+    else if (ch === '"' || ch === "'") { quote = ch; started = true; }
+    else if (/\s/.test(ch)) { if (started) words.push(word); word = ""; started = false; }
+    else { word += ch; started = true; }
+  }
+  if (quote || escape) throw new Error("Finish the quoted or escaped argument, then try again.");
+  if (started) words.push(word);
+  return words;
+}
+
+function localRequest(req: IncomingMessage): boolean {
+  // TODO: hosted CLI execution needs a security review before implementation/deployment.
+  // Keep this direct-loopback boundary; hosted support is not enabled by localCli options.
+  const ip = req.socket.remoteAddress ?? "";
+  return loopback(req.headers.host) && (ip === "::1" || /^127\./.test(ip) || /^::ffff:127\./.test(ip)) && !req.headers["x-forwarded-host"] && !req.headers["x-forwarded-for"];
+}
+
+/** Only explicitly enabled local playgrounds instantiate a runner; the test cloud never does. */
+function localCliRunner(options: LocalCliOptions, base: string): Handler & { close(): void } {
+  type Output = { seq: number; stream: "stdout" | "stderr" | "input" | "exit" | "login"; text: string };
+  type Session = {
+    directory: string; config: CliConfig; output: Output[]; seq: number; size: number; touched: number;
+    running: boolean; waiting: boolean; abort: AbortController; accept?: (line: string | null) => void;
+  };
+  const sessions = new Map<string, Session>();
+  const dispose = (s: Session) => { s.abort.abort(); s.accept?.(null); rmSync(s.directory, { recursive: true, force: true }); };
+  const clean = () => { for (const [key, s] of sessions) if (Date.now() - s.touched > 30 * 60_000) { dispose(s); sessions.delete(key); } };
+  const timer = setInterval(clean, 60_000); timer.unref();
+  const close = () => { clearInterval(timer); for (const s of sessions.values()) dispose(s); sessions.clear(); process.removeListener("exit", close); };
+  process.once("exit", close);
+  const emit = (s: Session, stream: Output["stream"], text: string) => {
+    if (s.abort.signal.aborted) return;
+    // Keep a reconnectable tail, with a bounded amount of developer-visible output.
+    text = text.slice(-128 * 1024);
+    s.output.push({ seq: ++s.seq, stream, text }); s.size += text.length;
+    while (s.size > 128 * 1024 && s.output.length > 1) s.size -= s.output.shift()!.text.length;
+  };
+  const input = (s: Session) => new Promise<string | null>((resolve) => {
+    if (s.abort.signal.aborted) return resolve(null);
+    s.waiting = true;
+    s.accept = (line) => { s.waiting = false; s.accept = undefined; resolve(line); };
+  });
+  const handle: Handler = async (req, res) => {
+    if (!localRequest(req) || crossSite(req)) return forbid(res, "The CLI runner is available only on the local playground's own origin.");
+    const url = new URL(req.url ?? "/", "http://localhost");
+    const path = inside(url, base);
+    clean();
+    const cookie = `chinwag_cli_${createHash("sha256").update(`${req.headers.host} ${base}`).digest("hex").slice(0, 12)}`;
+    let key = (req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(`${cookie}=`))?.slice(cookie.length + 1);
+    let s = key ? sessions.get(key) : undefined;
+    if (req.method === "POST" && path === "/api/cli/reset" && s) { dispose(s); sessions.delete(key!); s = undefined; }
+    if (!s) {
+      key = randomBytes(32).toString("base64url");
+      const directory = mkdtempSync(join(tmpdir(), "chinwag-cli-"));
+      s = { directory, config: { ...options.config, directory }, output: [], seq: 0, size: 0, touched: Date.now(), running: false, waiting: false, abort: new AbortController() };
+      const owned = s;
+      s.config.openUrl = (link) => emit(owned, "login", link);
+      sessions.set(key, s);
+      res.appendHeader("set-cookie", `${cookie}=${key}; HttpOnly; SameSite=Lax; Path=${base || "/"}`);
+    }
+    s.touched = Date.now();
+    if (req.method === "GET" && path === "/api/cli") {
+      const after = Math.max(0, Number(url.searchParams.get("after")) || 0);
+      return json(res, 200, { events: s.output.filter((e) => e.seq > after), seq: s.seq, running: s.running, waiting: s.waiting });
+    }
+    if (req.method === "POST" && path === "/api/cli/reset") return json(res, 200, { ok: true });
+    if (req.method === "POST" && path === "/api/cli/input") {
+      const body = await readBody(req, MAX_BODY);
+      const text = typeof body?.text === "string" ? body.text.slice(0, 4_000) : "";
+      if (!text.trim()) return json(res, 400, { error: "Enter a command or a reply." });
+      if (s.running) {
+        if (!s.accept) return json(res, 409, { error: "The CLI is still running. Wait for its input prompt." });
+        emit(s, "input", `${text}\n`); s.accept(text);
+        return json(res, 202, { ok: true });
+      }
+      let argv: string[];
+      try { argv = cliWords(text); } catch (error) { return json(res, 400, { error: (error as Error).message }); }
+      if (argv[0] === s.config.name) argv.shift();
+      if (argv.some((w) => /^--(server|token)(=|$)/.test(w))) return json(res, 400, { error: "This runner uses its configured server and its own sign-in. Use auth login." });
+      if (argv[0] === "skill" && argv.some((w) => /^--write(=|$)/.test(w))) return json(res, 400, { error: "Use the installed CLI to write a skill to your computer; this runner can display it with skill." });
+      emit(s, "input", `$ ${text}\n`);
+      s.running = true;
+      const owned = s;
+      const io: CliIO = {
+        env: { NO_COLOR: "1", TERM: "dumb" }, signal: s.abort.signal, interactive: true,
+        background: work => { void work(); },
+        write: (text) => emit(owned, "stdout", text), writeError: (text) => emit(owned, "stderr", text),
+        async *lines(prompt) {
+          while (!owned.abort.signal.aborted) {
+            if (prompt) emit(owned, "stdout", prompt);
+            const line = await input(owned);
+            if (line === null) return;
+            yield line;
+          }
+        },
+        confirm: async (question) => { emit(owned, "stderr", `${question} [y/N] `); return /^y(es)?$/i.test((await input(owned)) ?? ""); },
+      };
+      void import("../../cli/src/run.ts").then(({ runCli }) => runCli(owned.config, argv, io)).then(
+        (code) => emit(owned, "exit", String(code)),
+        () => { emit(owned, "stderr", "The CLI could not finish this command.\n"); emit(owned, "exit", "1"); },
+      ).finally(() => { owned.running = false; owned.waiting = false; owned.accept = undefined; });
+      return json(res, 202, { ok: true });
+    }
+    res.writeHead(404).end();
+  };
+  return Object.assign(handle, { close });
 }
 
 export interface TestCloudSimulators {
   events: EventSink;
+  /** Where the agent's sends to one person's thread go, before they have written (a run the business starts). */
+  deliverer(platform: string, person: string): Deliver;
   listen(agent: AgentConnection, port: number): Promise<Listening>;
   handler(agent: AgentConnection, base?: string): Handler;
 }
 
 export type Line =
-  | { kind: "in"; id: string | null; text: string; at: number; replyTo?: string; choice?: boolean; attachments?: Array<{ kind: Attachment["kind"]; name?: string }> }
+  | {
+      kind: "in";
+      id: string | null;
+      text: string;
+      at: number;
+      replyTo?: string;
+      choice?: boolean;
+      choiceId?: string;
+      /** The files they sent: `url` shows one (GET /api/media/<id>, under the simulators' base) while it is kept. */
+      attachments?: Array<{ kind: Attachment["kind"]; name?: string; mime?: string; size?: number; url?: string }>;
+      /** The webhook the platform's API would have delivered it as (the debug view). */
+      api?: Wire;
+    }
   | {
       kind: "out";
       id: string;
       text: string;
       at: number;
       replyTo?: string;
-      buttons?: string[];
+      /** The request the agent's provider would have made on the platform's API (the debug view). */
+      api?: Wire;
+      /** A carousel shown as one (WhatsApp, a UI with carousels): its cards, the text above them. */
+      carousel?: CarouselCard[];
+      /** As the agent gave them: a label, or { id, label } (a tap sends back the id). */
+      buttons?: ReplyButton[];
       list?: { button: string; rows: ListRow[] };
       /** A button under the message that opens this page. */
       link?: { label: string; url: string };
+      authentication?: boolean;
       /** A photo above the text, which is its caption. */
-      image?: { url: string };
+      image?: Photo;
       /** The channel's own params the agent filled in (an app_link): shown under the message. */
       fields?: Record<string, unknown>;
       /**
@@ -193,9 +382,13 @@ const MAX_BODY = 16_384;
 /** A message may carry files (base64): up to 4, about 11 MB in all, above the largest the agent reads (10 MB). */
 const MAX_MESSAGE_BODY = 15_000_000;
 const MAX_FILES = 4;
-/** Wrong tokens one address may try in a window before it is refused for the rest of it. */
-const MAX_FAILURES = 10;
-const FAILURE_WINDOW_MS = 15 * 60_000;
+/** The Records panel shows the newest this many, and says how many older ones it does not. */
+const RECORDS_SHOWN = 200;
+/** The person's files kept to show them again: the latest, up to this many and this many bytes. */
+const MEDIA_KEPT = 64;
+const MEDIA_BYTES = 96_000_000;
+/** What a kept file may be served as, inline; anything else is served as a download. */
+const SHOWN_MEDIA = /^(image\/(png|jpeg|gif|webp|heic|heif|avif)|audio\/[\w.+-]+|video\/(mp4|webm|quicktime))$/;
 const COOKIE = "chinwag_playground";
 /** The events kept per conversation for pollers, and how long one stays kept after nobody asked for it. */
 const RECENT_EVENTS = 500;
@@ -213,6 +406,9 @@ interface Recent {
   touched: number;
 }
 
+/** Who a conversation is with, for the made-up addresses in its API payloads. */
+type Who = { name: string; phone: string };
+
 interface Thread {
   lines: Line[];
   agentCount: number;
@@ -221,8 +417,8 @@ interface Thread {
 }
 
 export function simulators(options: SimulatorsOptions & { testCloud: true }): TestCloudSimulators;
-export function simulators(options?: SimulatorsOptions & { testCloud?: false; /** The playground's Backend panel: one button per action. */ actions?: PlaygroundAction[] }): Playground;
-export function simulators(options: SimulatorsOptions & { testCloud?: boolean; actions?: PlaygroundAction[] } = {}): Playground | TestCloudSimulators {
+export function simulators(options?: SimulatorsOptions & { testCloud?: false }): Playground;
+export function simulators(options: SimulatorsOptions & { testCloud?: boolean } = {}): Playground | TestCloudSimulators {
   const cloud = options.testCloud === true;
   const playPage = options.pages?.page ?? readFileSync(new URL("./page.html", import.meta.url), "utf8");
   const personPage = options.pages?.person ?? readFileSync(new URL("./person.html", import.meta.url), "utf8");
@@ -235,6 +431,37 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
   const boot = () => (started ||= `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`);
   const clients = new Map<string, Set<ServerResponse>>();
   const threads = new Map<string, Thread>();
+  /** The person's files, by a random id, so the simulator shows the photo, voice note or document they sent. */
+  const media = new Map<string, { mime: string; name?: string; bytes: Uint8Array }>();
+
+  function keep(file: { mime: string; name?: string; bytes: Uint8Array }): string {
+    const id = randomBytes(12).toString("base64url");
+    media.set(id, file);
+    let total = 0;
+    for (const f of media.values()) total += f.bytes.length;
+    for (const [old, f] of media) {
+      if (media.size <= MEDIA_KEPT && total <= MEDIA_BYTES) break;
+      if (old === id) break;
+      media.delete(old);
+      total -= f.bytes.length;
+    }
+    return id;
+  }
+
+  /** A kept file: a photo, voice note or video shown inline; anything else only as a download, never as a page of this origin. */
+  function serveMedia(res: ServerResponse, id: string): void {
+    const file = media.get(id);
+    if (!file) return void res.writeHead(404, { "cache-control": "no-store" }).end();
+    const shown = SHOWN_MEDIA.test(file.mime);
+    res.writeHead(200, {
+      "content-type": shown ? file.mime : "application/octet-stream",
+      "content-length": String(file.bytes.length),
+      "content-disposition": `${shown ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(file.name ?? "file")}`,
+      "content-security-policy": "default-src 'none'; sandbox",
+      "x-content-type-options": "nosniff",
+      "cache-control": "private, max-age=3600",
+    }).end(file.bytes);
+  }
 
   const thread = (k: string) => {
     let t = threads.get(k);
@@ -288,7 +515,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
   /** Tool calls in progress, by call id, so later events update the same line. */
   const toolLines = new Map<string, Extract<Line, { kind: "tool" }>>();
 
-  function show(k: string, event: ChinwagEvent): void {
+  function show(k: string, event: FlowEvent): void {
     if (event.type === "tool.start" && typeof event.callId === "string") {
       const line: Extract<Line, { kind: "tool" }> = { kind: "tool", callId: event.callId, tool: String(event.tool), input: event.input, at: event.at, status: "running" };
       toolLines.set(`${k}:${event.callId}`, line);
@@ -306,16 +533,26 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
         push(k, { type: "lineUpdate", line });
       }
     }
-    if (event.type === "message.undelivered") {
+    if (event.type === "message.undelivered" || event.type === "message.refused") {
       emitLine(k, { kind: "undelivered", text: String(event.text), reason: String(event.reason), at: event.at });
     }
     push(k, { type: "trace", event });
   }
 
   /** What the platform does with one thing the agent sends. Throws when it would not arrive. */
-  function deliverer(p: Platform, k: string, templates: TemplateDefinition[] = []) {
-    return (outbound: Outbound) => {
+  function deliverer(p: Platform, k: string, templates: TemplateDefinition[] = [], who: Who = { name: "", phone: "" }) {
+    const emitOut = (line: Extract<Line, { kind: "out" }>) => emitLine(k, wired(p, line, who));
+    const deliver = (outbound: Outbound): void => {
       const t = thread(k);
+      // What the platform refuses (Flow Messaging's content rules), it refuses here too, with its error.
+      // An agent on Flow Framework checks this before it sends; this catches anything else (an agent
+      // over HTTP, an older client). A carousel that reached here is shown by a channel with carousels.
+      const refusal = contentRefusal(outbound.type === "carousel" ? { ...channelOf(p), carousels: WHATSAPP_CAROUSELS } : channelOf(p), outbound);
+      if (refusal) {
+        const reason = `${refusal.message} (${refusal.type}, ${refusal.param})`;
+        emitLine(k, { kind: "undelivered", text: outbound.type === "message" || outbound.type === "carousel" ? outbound.text : outbound.type, reason, at: Date.now() });
+        throw new Error(reason);
+      }
       if (outbound.type === "template") {
         const { type: _type, ...sent } = outbound;
         const declared = declaredTemplate(templates, sent);
@@ -328,13 +565,25 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
           throw error;
         }
         const { body, ...shown } = filled ?? { body: valuesOf(sent) };
-        emitLine(k, { kind: "out", id: `a${++t.agentCount}`, text: body, at: Date.now(), template: { name: sent.name, ...shown } });
+        emitOut({ kind: "out", id: `a${++t.agentCount}`, text: body, at: Date.now(), template: { name: sent.name, ...shown } });
+        return;
+      }
+      if (outbound.type === "carousel") {
+        const { type: _type, ...carousel } = outbound;
+        // In the playground WhatsApp and a UI show it as one message the person swipes through. Telegram
+        // gets the cards one by one (Flow Messaging sends them so), and so does the test cloud, whose runs
+        // mark a carousel's lines themselves.
+        if (!cloud && (p.id === "whatsapp" || p.id === "web")) {
+          emitOut({ kind: "out", id: `a${++t.agentCount}`, text: carousel.text, at: Date.now(), ...(carousel.replyTo ? { replyTo: carousel.replyTo } : {}), carousel: carousel.cards });
+          return;
+        }
+        for (const m of carouselMessages(channelOf(p), carousel)) deliver({ type: "message", ...m });
         return;
       }
       if (outbound.type === "message") {
         if (t.optedOut) throw new Error("the person texted STOP, so the carrier blocks messages to them");
         const sms = p.segments ? smsSegments(outbound.text) : undefined;
-        emitLine(k, {
+        emitOut({
           kind: "out",
           id: `a${++t.agentCount}`,
           text: outbound.text,
@@ -343,6 +592,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
           ...(outbound.buttons ? { buttons: outbound.buttons } : {}),
           ...(outbound.list ? { list: outbound.list } : {}),
           ...(outbound.link ? { link: outbound.link } : {}),
+          ...(outbound.authentication ? { authentication: true } : {}),
           ...(outbound.image ? { image: outbound.image } : {}),
           ...(outbound.fields ? { fields: outbound.fields } : {}),
           ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}),
@@ -359,6 +609,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
       }
       push(k, { ...outbound, at: Date.now() });
     };
+    return deliver;
   }
 
   /** The SMS carrier's own handling of STOP, START and HELP. The text still reaches the agent. */
@@ -380,7 +631,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
       const sms = smsSegments(reply);
       // In the playground the agent's ids come from the store, so the carrier's lines have their own.
       const id = cloud ? `a${++t.agentCount}` : `c${++t.carrierCount}`;
-      emitLine(k, { kind: "out", id, text: reply, at: Date.now(), carrier: true, sms: { segments: sms.segments, encoding: sms.encoding } });
+      emitLine(k, wired(p, { kind: "out", id, text: reply, at: Date.now(), carrier: true, sms: { segments: sms.segments, encoding: sms.encoding } }, { name: "", phone: k.slice(k.indexOf(":") + 1) }));
     }
   }
 
@@ -390,7 +641,9 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
 
   function serve(handle: Handler, port: number): Promise<Listening> {
     const server = createServer(handle);
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      // A port taken since it was chosen rejects, as an error the caller can print, never an unhandled 'error' event.
+      server.once("error", reject);
       server.listen(port, "127.0.0.1", () =>
         resolve({
           // The bound port, so port 0 (any free port) works too.
@@ -403,7 +656,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
 
   const guarded = (work: (req: IncomingMessage, res: ServerResponse) => Promise<void>): Handler => (req, res) =>
     work(req, res).catch((error) => {
-      console.warn("chinwag simulators:", error);
+      console.warn("flow simulators:", error);
       if (!res.headersSent) res.writeHead(500).end();
     });
 
@@ -453,16 +706,26 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
     const replyId = replies && typeof body?.replyTo === "string" ? body.replyTo : undefined;
     const quoted = replyId ? findLine(k, replyId) : undefined;
     const choice = body?.choice && typeof body.choice === "object" ? (body.choice as { id?: string; title?: string }) : undefined;
-    const attachments = attachmentsOf(body);
+    const sent = filesOf(body);
+    const attachments: Attachment[] = sent.map(({ bytes, ...a }) => ({ ...a, data: async () => bytes }));
     const incoming: Incoming = {
       text,
       ...(quoted && (quoted.kind === "in" || quoted.kind === "out") ? { replyTo: { text: quoted.text, fromAgent: quoted.kind === "out" } } : {}),
-      ...(choice?.title ? { choice: { id: choice.id, title: String(choice.title) } } : {}),
+      ...(choice?.title ? { choice: { ...(choice.id ? { id: String(choice.id) } : {}), title: String(choice.title) } } : {}),
       ...(attachments.length ? { attachments } : {}),
     };
-    const files = attachments.map((a) => ({ kind: a.kind, ...(a.name ? { name: a.name } : {}) }));
-    const line: Extract<Line, { kind: "in" }> = { kind: "in", id: null, text, at: Date.now(), ...(quoted ? { replyTo: replyId } : {}), ...(choice?.title ? { choice: true } : {}), ...(files.length ? { attachments: files } : {}) };
+    const files = sent.map((f) => ({ kind: f.kind, ...(f.name ? { name: f.name } : {}), mime: f.mime, size: f.bytes.length, url: `/api/media/${keep(f)}` }));
+    const line: Extract<Line, { kind: "in" }> = { kind: "in", id: null, text, at: Date.now(), ...(quoted ? { replyTo: replyId } : {}), ...(choice?.title ? { choice: true } : {}), ...(choice?.title && choice.id && choice.id !== choice.title ? { choiceId: String(choice.id) } : {}), ...(files.length ? { attachments: files } : {}) };
     return { incoming, line };
+  }
+
+  /** The line with what the platform's API carried for it: the webhook for theirs, the request for the agent's. */
+  function wired<L extends Line>(p: Platform, line: L, who: Who, k?: string): L {
+    if (line.kind !== "in" && line.kind !== "out") return line;
+    const quoted = line.kind === "in" && line.replyTo && k ? findLine(k, line.replyTo) : undefined;
+    const api = wirePayload(p, line, who, quoted?.kind === "in" || quoted?.kind === "out" ? quoted : undefined);
+    if (api) line.api = api;
+    return line;
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -503,6 +766,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
       }
       if (req.method === "GET" && path === "/api/events") return events(req, res, qk, url);
       if (req.method === "GET" && path === "/api/poll") return poll(res, qk, url);
+      if (req.method === "GET" && path.startsWith("/api/media/")) return serveMedia(res, path.slice("/api/media/".length));
 
       const body = req.method === "POST" ? await readBody(req, path === "/api/messages" ? MAX_MESSAGE_BODY : MAX_BODY) : null;
       const p = typeof body?.platform === "string" ? platformOf(body.platform) : qp;
@@ -523,15 +787,16 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
 
       if (req.method === "POST" && path === "/api/messages") {
         const text = typeof body?.text === "string" ? body.text.trim().slice(0, 4_000) : "";
-        if (!text && !attachmentsOf(body).length) return json(res, 400, { error: "text or a file is required" });
+        if (!text && !filesOf(body).length) return json(res, 400, { error: "text or a file is required" });
         const { incoming, line } = incomingOf(k, body, text, Boolean(p.replies));
         emitLine(k, line);
         carrier(p, k, text);
         const id = conversationId(k);
         const own = ownChannel(agent, p, id);
-        const messageId = agent.receive(id, incoming, deliverer(p, k), own ? { channel: own.info, channelName: own.name } : { channel: channelOf(p) });
+        const who = { name: person, phone: person };
+        const messageId = agent.receive(id, incoming, deliverer(p, k, [], who), own ? { channel: own.info, channelName: own.name } : { channel: channelOf(p) });
         line.id = messageId;
-        push(k, { type: "id", at: line.at, messageId });
+        push(k, { type: "id", at: line.at, messageId, api: wired(p, line, who, k).api });
         return json(res, 202, { messageId, at: line.at });
       }
       res.writeHead(404).end();
@@ -539,6 +804,10 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
 
     const testCloud: TestCloudSimulators = {
       events: cloudEvents,
+      deliverer: (platform, person) => {
+        const p = platformOf(platform);
+        return deliverer(p, key(p.id, person), [], { name: person, phone: person });
+      },
       listen: (agent, port) => serve(guarded((req, res) => handle(agent, req, res, "")), port),
       handler: (agent, base = "") => guarded((req, res) => handle(agent, req, res, base)),
     };
@@ -549,43 +818,54 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
   // The playground.
 
   /** The test person (by phone) each conversation belongs to, so its trace shows in their simulators. */
-  const people = new Map<string, TestPerson>();
+  type PlayingPerson = TestPerson & { key?: string; visitor?: string; visitorChannel?: string };
+  const people = new Map<string, Map<string, PlayingPerson>>();
   let playing: PlaygroundAgent | null = null;
-  const threadKey = (channel: string, person: TestPerson) => `${channel}:${person.phone}`;
+  const personKey = (person: PlayingPerson) => person.key ? `account:${person.key}` : person.visitor ? `visitor:${person.visitor}` : person.phone;
+  const threadKey = (channel: string, person: PlayingPerson) => `${channel}:${personKey(person)}`;
+  const rememberPerson = (id: string, person: PlayingPerson) => {
+    const all = people.get(id) ?? new Map<string, PlayingPerson>();
+    all.set(personKey(person), person); people.set(id, all);
+  };
+  const conversation = (agent: PlaygroundAgent, person: PlayingPerson) => person.key
+    ? agent.visitorConversation!(person.key) : person.visitor ? agent.visitorConversation!(null, { channel: person.visitorChannel!, address: person.visitor }) : agent.testConversation(person.phone);
 
   const playgroundEvents: EventSink = (event) => {
-    const person = people.get(event.conversationId);
+    const known = people.get(event.conversationId);
+    const person = known?.values().next().value;
     // A failed turn (a wrong or expired model key, say) on the terminal too, also for no known person.
-    if (event.type === "model.error") console.error(`chinwag: model error${person ? ` (${person.name})` : ""}: ${String(event.error)}`);
-    if (!person || !playing) return;
-    for (const c of playing.channels()) show(threadKey(c.name, person), event);
+    if (event.type === "model.error") console.error(`flow: model error${person ? ` (${person.name})` : ""}: ${String(event.error)}`);
+    if (!known || !playing) return;
+    for (const person of known.values()) for (const c of playing.channels()) show(threadKey(c.name, person), event);
   };
 
   function attach(agent: PlaygroundAgent): void {
     playing = agent;
     agent.attachPlayground(({ conversationId, person, channel, outbound }) => {
-      people.set(conversationId, person);
+      rememberPerson(conversationId, { ...person, visitorChannel: channel });
       const own = agent.channels().find((c) => c.name === channel);
-      if (own) return deliverer(platformFor(own), threadKey(channel, person), agent.templates?.())(outbound);
+      if (own) for (const other of people.get(conversationId)!.values()) deliverer(platformFor(own), threadKey(channel, other), agent.templates?.(), other)(outbound);
     });
   }
 
   /** The conversation on one channel, rebuilt from the agent's store, with what only the platform showed (the carrier's replies). */
-  async function load(agent: PlaygroundAgent, person: TestPerson, channel: ChannelSummary): Promise<Thread> {
+  async function load(agent: PlaygroundAgent, person: PlayingPerson, channel: ChannelSummary): Promise<Thread> {
     const k = threadKey(channel.name, person);
     const t = thread(k);
-    const id = await agent.testConversation(person.phone);
-    if (id) people.set(id, person);
+    const id = await conversation(agent, person);
+    if (id) rememberPerson(id, person);
     const p = platformFor(channel);
     let count = 0;
     const lines: Line[] = [];
+    // What only the simulator kept of the person's messages: the files they sent, the message they replied to.
+    const kept = new Map(t.lines.flatMap((l) => (l.kind === "in" && l.id ? [[l.id, { ...(l.attachments ? { attachments: l.attachments } : {}), ...(l.replyTo ? { replyTo: l.replyTo } : {}) }] as const] : [])));
     for (const e of id ? await agent.transcript(id) : []) {
       if (e.kind === "tool") {
         lines.push({ kind: "tool", callId: e.callId, tool: e.tool, input: e.input, at: e.at, status: e.ok ? "done" : "failed", output: e.output });
         continue;
       }
       if (e.channel !== channel.name) continue;
-      if (e.kind === "in") lines.push({ kind: "in", id: e.id, text: e.text, at: e.at, ...(e.choice ? { choice: true } : {}) });
+      if (e.kind === "in") lines.push({ kind: "in", id: e.id, text: e.text, at: e.at, ...(e.choice ? { choice: true } : {}), ...(e.choiceId ? { choiceId: e.choiceId } : {}), ...kept.get(e.id) });
       else if (e.kind === "out" && e.template) {
         // The store keeps a template's name and body text, not its other values: those show as declared.
         const declared = agent.templates?.().find((d) => d.name === e.template);
@@ -593,19 +873,24 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
       } else if (e.kind === "reaction") lines.push({ kind: "reaction", messageId: e.messageId, emoji: e.emoji, at: e.at, by: "agent" });
       else {
         // The agent's message as this platform showed it (a link's URL in the text where it has no link button).
-        const { kind: _kind, channel: _channel, template: _template, ...rest } = fitMessage(channel.info, e);
-        const sms = p.segments ? smsSegments(rest.text) : undefined;
-        lines.push({ kind: "out", id: `a${++count}`, ...rest, ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}) });
+        const { kind: _kind, channel: _channel, template: _template, carousel, ...sent } = e;
+        const swiped = carousel && (p.id === "whatsapp" || p.id === "web");
+        const shown = swiped ? [{ ...sent, carousel }] : carousel ? carouselMessages(channel.info, { text: sent.text, cards: carousel }) : [fitMessage(channel.info, sent)];
+        for (const rest of shown) {
+          const sms = p.segments ? smsSegments(rest.text) : undefined;
+          lines.push({ kind: "out", id: `a${++count}`, at: e.at, ...rest, ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}) });
+        }
       }
     }
     const stored = new Set(lines.flatMap((l) => (l.kind === "in" && l.id ? [l.id] : [])));
     const onlyHere = t.lines.filter((l) => (l.kind === "out" && l.carrier) || (l.kind === "in" && !(l.id && stored.has(l.id))));
     t.lines = [...lines, ...onlyHere].sort((a, b) => a.at - b.at);
     t.agentCount = count;
+    for (const l of t.lines) wired(p, l, person, k);
     return t;
   }
 
-  async function handle(agent: PlaygroundAgent, req: IncomingMessage, res: ServerResponse, base: string, gate: Gate | null): Promise<void> {
+  async function handle(agent: PlaygroundAgent, req: IncomingMessage, res: ServerResponse, base: string, gate: Gate | null, cli?: { options: LocalCliOptions; handle: Handler }): Promise<void> {
     const url = new URL(req.url ?? "/", "http://localhost");
     const path = inside(url, base);
     // Without a token, a page on another site (or a DNS name rebound to 127.0.0.1) must not run
@@ -613,39 +898,87 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
     if (!gate && !loopback(req.headers.host)) return forbid(res, "This playground answers only on localhost or 127.0.0.1.");
     if (path.startsWith("/api/") && crossSite(req)) return forbid(res, "This playground's API answers only its own page.");
     if (gate && !gate.allows(req, res, url, base)) return;
+    if (path === "/api/cli" || path.startsWith("/api/cli/")) {
+      if (!cli) { res.writeHead(404).end(); return; }
+      return cli.handle(req, res);
+    }
+    if (req.method === "GET" && path.startsWith("/api/media/")) return serveMedia(res, path.slice("/api/media/".length));
 
     if (req.method === "GET" && path === "/") return html(res, page(playPage, base));
     if (req.method === "GET" && path === "/person") return html(res, page(personPage, base));
     if (req.method === "GET" && path === "/api/status") return json(res, 200, agent.status());
     if (req.method === "GET" && path === "/api/platforms") {
       const channels = agent.channels().map((c) => ({ name: c.name, kind: c.kind, platform: platformFor(c) }));
-      return json(res, 200, { platforms: PLATFORMS, channels, people: agent.testPeople(), cards: options.cards ?? [], actions: (options.actions ?? []).map((a) => a.label) });
+      return json(res, 200, {
+        platforms: PLATFORMS, channels, people: agent.testPeople(), cards: options.cards ?? [], authentication: !!options.authentication,
+        ...(cli && localRequest(req) ? { localCli: { channel: cli.options.channel, name: cli.options.config.name } } : {}),
+        templates: (agent.templates?.() ?? []).map((t) => ({ name: t.name, body: t.body })),
+        panel: { person: !!(agent.contact && agent.outbox), nudge: !!agent.recordNudge, clock: !!(options.clock && agent.runDue), records: !!agent.records?.collections.length },
+      });
+    }
+    // The agent's records, not one person's: no person or channel to choose.
+    if (req.method === "GET" && path === "/api/records") {
+      if (!agent.records) return json(res, 404, { error: "this agent keeps no records" });
+      // Export is oldest first: keep the last RECORDS_SHOWN while counting them all.
+      const newest: ExportedRecord[] = [];
+      const counts: Record<string, number> = Object.fromEntries(agent.records.collections.map((name) => [name, 0]));
+      for await (const r of agent.records.export()) {
+        counts[r.collection] = (counts[r.collection] ?? 0) + 1;
+        newest.push(r);
+        if (newest.length > RECORDS_SHOWN) newest.shift();
+      }
+      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      return json(res, 200, { records: newest.reverse(), counts, older: total - newest.length });
     }
 
     const body = req.method === "POST" ? await readBody(req, path === "/api/messages" ? MAX_MESSAGE_BODY : MAX_BODY) : null;
+    /** What the Person panel did (moved the clock, sent a nudge), in every open page's trace. */
+    const announce = (label: string, outcome: { ok: true; result?: string } | { ok: false; error: string }) => {
+      const event = { type: "action", label, at: Date.now(), ...outcome };
+      for (const key of new Set([...clients.keys(), ...recent.keys()])) push(key, event);
+    };
 
-    if (req.method === "POST" && path === "/api/actions") {
-      const action = typeof body?.index === "number" ? options.actions?.[body.index] : undefined;
-      if (!action) return json(res, 400, { error: "index must be one of the playground's actions" });
-      console.info(JSON.stringify({ chinwag: "playground.action", label: action.label, at: new Date().toISOString(), ip: req.socket.remoteAddress ?? null }));
-      let outcome: { ok: true; result?: string } | { ok: false; error: string };
-      try {
-        const result = await action.run();
-        outcome = { ok: true, ...(typeof result === "string" ? { result } : {}) };
-      } catch (error) {
-        outcome = { ok: false, error: error instanceof Error ? error.message : String(error) };
-      }
-      // A backend event belongs to no one conversation: every open page shows it, streamed or polled.
-      const event = { type: "action", label: action.label, at: Date.now(), ...outcome };
-      for (const k of new Set([...clients.keys(), ...recent.keys()])) push(k, event);
-      return json(res, 200, outcome);
+    if (req.method === "POST" && path === "/api/clock") {
+      if (!options.clock || !agent.runDue) return json(res, 400, { error: "give simulators({ clock }) the agent's clock (playgroundClock())" });
+      const to = typeof body?.to === "number" ? body.to : typeof body?.advanceMs === "number" ? options.clock.now() + body.advanceMs : NaN;
+      if (!Number.isFinite(to)) return json(res, 400, { error: "give to (ms since the epoch) or advanceMs" });
+      options.clock.set(to);
+      const ran = await agent.runDue();
+      const result = `clock at ${new Date(options.clock.now()).toISOString().replace(".000Z", "Z")}; ${ran} scheduled message${ran === 1 ? "" : "s"} due`;
+      announce("Clock", { ok: true, result });
+      return json(res, 200, { now: options.clock.now(), ran });
     }
+
     const asked = (name: string) => (typeof body?.[name] === "string" ? (body[name] as string) : (url.searchParams.get(name) ?? ""));
-    const person = agent.testPeople().find((p) => digits(p.phone) === digits(asked("person")) && digits(p.phone) !== "");
-    if (!person) return json(res, 403, { error: "only this agent's test people can be played: declare them in createAgent({ testPeople })" });
+    const isVisitor = asked("person") === "visitor";
+    let person: PlayingPerson | undefined = agent.testPeople().find((p) => digits(p.phone) === digits(asked("person")) && digits(p.phone) !== "");
+    const channel = agent.channels().find((c) => c.name === asked("channel"));
+    let visitorAddress = "";
+    if (isVisitor && options.authentication) {
+      if (!channel) return json(res, 400, { error: "channel must be one of the agent's own channels" });
+      if (!agent.simulateVisitor || !agent.visitorConversation) return json(res, 400, { error: "this playground needs an agent with authenticated visitor support" });
+      const cookieName = `chinwag_visitor_${createHash("sha256").update(`${req.headers.host} ${base}`).digest("hex").slice(0, 12)}`;
+      let browser = (req.headers.cookie ?? "").split(/;\s*/).find((cookie) => cookie.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
+      if (!browser || !/^[A-Za-z0-9_-]{43}$/.test(browser)) browser = undefined;
+      const reset = req.method === "POST" && path === "/api/auth/reset";
+      if (!browser || reset) {
+        browser = randomBytes(32).toString("base64url");
+        const secure = (req.socket as TLSSocket).encrypted || req.headers["x-forwarded-proto"] === "https";
+        res.setHeader("set-cookie", `${cookieName}=${browser}; HttpOnly; SameSite=Lax; Path=${base || "/"}; Max-Age=2592000${secure ? "; Secure" : ""}`);
+      }
+      // Each interface needs its own proof. A web login cannot authenticate an unrelated CLI.
+      const visitor = createHash("sha256").update(JSON.stringify([browser, channel.name])).digest("base64url");
+      const state = await options.authentication({ channel, visitor });
+      const publicState = { signedIn: !!state.key, label: state.label, signInUrl: state.signInUrl };
+      if (path === "/api/auth" || reset) return json(res, 200, publicState);
+      visitorAddress = state.address ?? visitor;
+      person = state.key ? { phone: "", name: "Signed-in user", key: state.key } : { phone: "", name: "New user", visitor: visitorAddress, visitorChannel: channel.name };
+    } else if (!person) return json(res, 403, { error: "choose a declared test person, or a new user when sign-in is configured" });
+    if (!person) return json(res, 403, { error: "Sign in to continue." });
+    if (path === "/api/auth") return json(res, 200, { signedIn: true });
 
     if (req.method === "POST" && path === "/api/clear") {
-      const id = await agent.testConversation(person.phone);
+      const id = await conversation(agent, person);
       if (id) {
         await agent.forgetPerson(id);
         people.delete(id);
@@ -658,16 +991,63 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
       return json(res, 200, { ok: true });
     }
 
-    const channel = agent.channels().find((c) => c.name === asked("channel"));
     if (!channel) return json(res, 400, { error: "channel must be one of the agent's own channels" });
     const k = threadKey(channel.name, person);
     const p = platformFor(channel);
+
+    // The Person panel: what is set and waiting for this person, and the business's side (nudges).
+    const to = { channel: channel.name, address: person.key ? visitorAddress : person.visitor ? `visitor:${visitorAddress}` : channel.kind === "custom" ? `test:${person.phone}` : person.phone };
+    if (req.method === "GET" && path === "/api/person") {
+      if (!agent.contact || !agent.outbox) return json(res, 404, { error: "this agent has no contact record" });
+      const id = await conversation(agent, person);
+      // One person on every channel: their record from whichever channel they have written on.
+      let contact = await agent.contact(to);
+      if (!person.key && !person.visitor) for (const c of agent.channels()) contact ??= await agent.contact({ channel: c.name, address: c.kind === "custom" ? `test:${person.phone}` : person.phone });
+      // When the agent wrote on each channel (its latest 20), so the page can flag a channel it is not showing.
+      const lastOut: Record<string, number[]> = {};
+      for (const e of id ? await agent.transcript(id) : []) if (e.kind === "out") lastOut[e.channel] = [...(lastOut[e.channel] ?? []), e.at].slice(-20);
+      return json(res, 200, { now: options.clock?.now() ?? Date.now(), contact, outbox: id ? await agent.outbox(id) : { schedules: [], held: [] }, lastOut });
+    }
+    if (req.method === "POST" && path === "/api/nudge") {
+      if (!agent.recordNudge) return json(res, 404, { error: "this agent takes no nudges" });
+      const kind = body?.kind;
+      const input = {
+        to,
+        ...(kind === "text" ? { text: String(body?.text ?? "") } : kind === "template" ? { template: { name: String(body?.template ?? ""), ...(Array.isArray(body?.body) && body.body.length ? { body: body.body.map(String) } : {}) } } : { prompt: String(body?.prompt ?? "") }),
+        ...(typeof body?.at === "number" ? { at: body.at } : {}),
+        ...(body?.respect_quiet_hours === false ? { respectQuietHours: false } : {}),
+        ...(typeof body?.expires_at === "number" ? { expiresAt: body.expires_at } : {}),
+        ...(typeof body?.idempotency_key === "string" && body.idempotency_key ? { idempotencyKey: body.idempotency_key } : {}),
+      };
+      try {
+        // A template may make a test person who never wrote a person: the playground's, so it shows here.
+        const state = await agent.recordNudge(input, person.key || person.visitor ? {} : { via: "playground" });
+        announce(`Nudge (${kind ?? "prompt"}) to ${person.name}`, { ok: true, result: `${state.status}${state.reason ? `: ${state.reason}` : ""}${state.id ? ` (${state.id})` : ""}` });
+        return json(res, 202, state);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        announce(`Nudge to ${person.name}`, { ok: false, error: message });
+        return json(res, 400, { error: message });
+      }
+    }
+    if (req.method === "POST" && (path === "/api/time-zone" || path === "/api/quiet-hours")) {
+      if (!agent.setTimeZone || !agent.setQuietHours) return json(res, 404, { error: "this agent has no contact record" });
+      try {
+        const result = path === "/api/time-zone"
+          ? await agent.setTimeZone({ to, timeZone: String(body?.time_zone ?? "") })
+          : await agent.setQuietHours({ to, quietHours: (body?.quiet_hours ?? null) as never });
+        announce(path === "/api/time-zone" ? `Time zone for ${person.name}` : `Quiet hours for ${person.name}`, { ok: true, result: result.status === "set" ? "set" : "they have not written on this channel yet" });
+        return json(res, result.status === "set" ? 200 : 404, result);
+      } catch (error) {
+        return json(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      }
+    }
 
     if (req.method === "GET" && path === "/api/transcript") {
       const t = await load(agent, person, channel);
       // Taken with the lines, in the same step: every event after this number came after these lines.
       recentOf(k);
-      return json(res, 200, { channel: channel.name, person, optedOut: t.optedOut, lines: t.lines, seq });
+      return json(res, 200, { channel: channel.name, person: { name: person.name, phone: person.phone }, optedOut: t.optedOut, lines: t.lines, seq });
     }
     if (req.method === "GET" && path === "/api/events") return events(req, res, k, url);
     if (req.method === "GET" && path === "/api/poll") return poll(res, k, url);
@@ -676,7 +1056,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
       const messageId = typeof body?.messageId === "string" ? body.messageId : "";
       const emoji = typeof body?.emoji === "string" ? body.emoji.slice(0, 16) : "";
       const target = findLine(k, messageId);
-      const id = await agent.testConversation(person.phone);
+      const id = await conversation(agent, person);
       if (!p.personReactions || !target || target.kind !== "out" || !emoji || !id) {
         return json(res, 400, { error: "reactions need a platform that has them, an agent message id and an emoji" });
       }
@@ -687,15 +1067,16 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
 
     if (req.method === "POST" && path === "/api/messages") {
       const text = typeof body?.text === "string" ? body.text.trim().slice(0, 4_000) : "";
-      if (!text && !attachmentsOf(body).length) return json(res, 400, { error: "text or a file is required" });
+      if (!text && !filesOf(body).length) return json(res, 400, { error: "text or a file is required" });
       const { incoming, line } = incomingOf(k, body, text, Boolean(p.replies));
-      console.info(JSON.stringify({ chinwag: "playground.message", person: person.name, phone: person.phone, channel: channel.name, at: new Date(line.at).toISOString(), ip: req.socket.remoteAddress ?? null }));
+      console.info(JSON.stringify({ chinwag: "playground.message", person: person.name, channel: channel.name, at: new Date(line.at).toISOString() }));
       emitLine(k, line);
       carrier(p, k, text);
-      const taken = await agent.simulate({ person: person.phone, channel: channel.name, message: incoming });
-      if (taken) people.set(taken.conversationId, person);
+      const taken = person.key || person.visitor ? await agent.simulateVisitor!({ key: person.key, address: visitorAddress, channel: channel.name, message: incoming })
+        : await agent.simulate({ person: person.phone, channel: channel.name, message: incoming });
+      if (taken) rememberPerson(taken.conversationId, person);
       line.id = taken?.messageId ?? null;
-      push(k, { type: "id", at: line.at, messageId: line.id });
+      push(k, { type: "id", at: line.at, messageId: line.id, api: wired(p, line, person, k).api });
       return json(res, 202, { messageId: line.id, at: line.at });
     }
     res.writeHead(404).end();
@@ -703,16 +1084,22 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean; a
 
   const playground: Playground = {
     events: playgroundEvents,
-    listen: (agent, port, listenOptions = {}) => {
+    listen: async (agent, port, listenOptions = {}) => {
       const gate = listenOptions.token === undefined ? null : tokenGate(listenOptions.token);
       attach(agent);
-      return serve(guarded((req, res) => handle(agent, req, res, "", gate)), port);
+      const runner = listenOptions.localCli ? localCliRunner(listenOptions.localCli, "") : undefined;
+      const cli = runner ? { options: listenOptions.localCli!, handle: runner } : undefined;
+      try {
+        const listening = await serve(guarded((req, res) => handle(agent, req, res, "", gate, cli)), port);
+        return { ...listening, close: async () => { runner?.close(); await listening.close(); } };
+      } catch (error) { runner?.close(); throw error; }
     },
     handler: (agent, handlerOptions) => {
       const gate = tokenGate(handlerOptions?.token);
       attach(agent);
       const base = handlerOptions.base ?? "";
-      return guarded((req, res) => handle(agent, req, res, base, gate));
+      const cli = handlerOptions.localCli ? { options: handlerOptions.localCli, handle: localCliRunner(handlerOptions.localCli, base) } : undefined;
+      return guarded((req, res) => handle(agent, req, res, base, gate, cli));
     },
   };
   return playground;
@@ -725,32 +1112,28 @@ interface Gate {
 
 /**
  * The playground's lock on a deployed agent. The token comes once as `?token=` (swapped for an
- * HttpOnly, SameSite=Strict cookie, and dropped from the URL) or on every API call as
- * `Authorization: Bearer`. Compared in constant time; wrong tokens are limited per address.
+ * HttpOnly, SameSite=Lax cookie, and dropped from the URL) or on every API call as
+ * `Authorization: Bearer`. Lax lets sign-in return from another site. Compared in constant time; wrong tokens are limited per address.
  */
 function tokenGate(token: string | undefined): Gate {
-  if (typeof token !== "string" || token.length < 32) throw new Error("chinwag simulators: a deployed playground needs a token of at least 32 characters");
-  const hash = (text: string) => createHash("sha256").update(text).digest();
-  const same = (given: string, wanted: string) => timingSafeEqual(hash(given), hash(wanted));
+  requireToken(token, "flow simulators: a deployed playground");
   // The cookie holds a value made from the token, not the token itself.
-  const session = hash(`chinwag-playground:${token}`).toString("hex");
-  const failures = new Map<string, { count: number; until: number }>();
+  const session = createHash("sha256").update(`chinwag-playground:${token}`).digest("hex");
+  // Cookies are shared across localhost ports: independent agents must not overwrite each other.
+  const cookieName = `${COOKIE}_${session.slice(0, 12)}`;
+  const tries = wrongTries();
 
   return {
     allows(req, res, url, base) {
       const ip = req.socket.remoteAddress ?? "unknown";
-      const now = Date.now();
-      const failed = failures.get(ip);
-      if (failed && failed.until <= now) failures.delete(ip);
-      const blocked = (failures.get(ip)?.count ?? 0) >= MAX_FAILURES;
+      const blocked = tries.blocked(ip);
       const fail = () => {
-        for (const [k, v] of failures) if (v.until <= now) failures.delete(k);
-        const entry = failures.get(ip) ?? { count: 0, until: now + FAILURE_WINDOW_MS };
-        entry.count++;
-        failures.set(ip, entry);
+        tries.failed(ip);
         refuse(res, 401);
         return false;
       };
+      const secure = (req.socket as TLSSocket).encrypted || req.headers["x-forwarded-proto"] === "https";
+      const sessionCookie = `${cookieName}=${session}; Path=${base || "/"}; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
       const query = url.searchParams.get("token");
       const bearer = /^Bearer (.+)$/.exec(req.headers.authorization ?? "")?.[1];
       if ((query !== null || bearer !== undefined) && blocked) {
@@ -758,17 +1141,19 @@ function tokenGate(token: string | undefined): Gate {
         return false;
       }
       if (query !== null) {
-        if (req.method !== "GET" || !same(query, token)) return fail();
+        if (req.method !== "GET" || !sameSecret(query, token)) return fail();
         url.searchParams.delete("token");
-        const secure = (req.socket as TLSSocket).encrypted || req.headers["x-forwarded-proto"] === "https";
-        const cookie = `${COOKIE}=${session}; Path=${base || "/"}; HttpOnly; SameSite=Strict${secure ? "; Secure" : ""}`;
         const rest = url.searchParams.toString();
-        res.writeHead(303, { "set-cookie": cookie, location: url.pathname + (rest ? `?${rest}` : ""), "cache-control": "no-store" }).end();
+        res.writeHead(303, { "set-cookie": sessionCookie, location: url.pathname + (rest ? `?${rest}` : ""), "cache-control": "no-store" }).end();
         return false;
       }
-      if (bearer !== undefined) return same(bearer, token) ? true : fail();
-      const cookie = (req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(`${COOKIE}=`))?.slice(COOKIE.length + 1);
-      if (cookie !== undefined && same(cookie, session)) return true;
+      if (bearer !== undefined) return sameSecret(bearer, token) ? true : fail();
+      const cookie = (req.headers.cookie ?? "").split(/;\s*/).find((c) => c.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
+      if (cookie !== undefined && sameSecret(cookie, session)) {
+        // Renew on page visits so existing Strict cookies also survive the next sign-in round trip.
+        if (req.method === "GET" && ["/", "/person"].includes(inside(url, base))) res.setHeader("set-cookie", sessionCookie);
+        return true;
+      }
       refuse(res, 401);
       return false;
     },
@@ -810,17 +1195,24 @@ function inside(url: URL, base: string): string {
   return base && url.pathname.startsWith(base) ? url.pathname.slice(base.length) || "/" : url.pathname;
 }
 
-/** The simulator that plays one of the agent's channels: SMS, WhatsApp, or the web for a custom UI. */
+/**
+ * The simulator that plays one of the agent's channels: SMS, WhatsApp, Telegram or iMessage (a custom
+ * channel on that platform, as Flow Messaging's are), else the web for a custom UI.
+ */
 function platformFor(channel: ChannelSummary): Platform {
-  return { ...platformOf(channel.kind === "custom" ? "web" : channel.kind), ...channel.info };
+  return { ...platformOf(simulatorOf(channel)), ...channel.info };
+}
+
+function simulatorOf(channel: ChannelSummary): Platform["id"] {
+  if (channel.kind !== "custom") return platformOf(channel.kind).id;
+  return channel.info.platform === "telegram" || channel.info.platform === "imessage" ? channel.info.platform : "web";
 }
 
 const digits = (phone: string) => phone.replace(/[^\d]/g, "");
 
 /** The agent's own channel a simulator plays, if it has one of that kind. */
 function ownChannel(agent: AgentConnection, p: Platform, conversationId: string): ChannelSummary | undefined {
-  const kind = p.id === "web" ? "custom" : p.id;
-  return agent.channels?.(conversationId).find((c) => c.kind === kind);
+  return agent.channels?.(conversationId).find((c) => simulatorOf(c) === p.id);
 }
 
 /** A template the agent did not declare: the values it was sent with, one per line. */
@@ -838,12 +1230,12 @@ function asDeclared(d: TemplateDefinition): Omit<FilledTemplate, "body"> {
 }
 
 /** The files of a message, from the page: { kind, mime, name?, data (base64) }. */
-function attachmentsOf(body: Record<string, unknown> | null): Attachment[] {
+function filesOf(body: Record<string, unknown> | null): Array<{ kind: Attachment["kind"]; mime: string; name?: string; bytes: Uint8Array }> {
   if (!Array.isArray(body?.attachments)) return [];
-  return body.attachments.slice(0, MAX_FILES).flatMap((a): Attachment[] => {
+  return body.attachments.slice(0, MAX_FILES).flatMap((a) => {
     if (!a || typeof a !== "object" || typeof a.mime !== "string" || typeof a.data !== "string" || !["image", "audio", "document"].includes(a.kind)) return [];
     const bytes = new Uint8Array(Buffer.from(a.data, "base64"));
-    return [{ kind: a.kind, mime: a.mime.slice(0, 100), ...(typeof a.name === "string" && a.name ? { name: a.name.slice(0, 200) } : {}), data: async () => bytes }];
+    return [{ kind: a.kind as Attachment["kind"], mime: a.mime.slice(0, 100), ...(typeof a.name === "string" && a.name ? { name: a.name.slice(0, 200) } : {}), bytes }];
   });
 }
 
@@ -863,7 +1255,7 @@ async function readBody(req: IncomingMessage, limit = MAX_BODY): Promise<Record<
 }
 
 function json(res: ServerResponse, status: number, value: unknown): void {
-  res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
+  res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(value));
 }
 
 function html(res: ServerResponse, body: string): void {
