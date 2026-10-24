@@ -43,6 +43,7 @@ import { z } from "zod";
 import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type ContentRefusal } from "./channels.ts";
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
+import { recordsUntil, type Records } from "./records.ts";
 import { scheduleTools } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
 import { REACT, UPDATE, cardsOf, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
@@ -79,6 +80,8 @@ export interface ConversationSettings {
   talk: TalkSettings;
   emit: Emit;
   store: StoreApi;
+  /** The agent's records, for its tools (`context.records`). */
+  records: Records;
   /** Resolves once the store's tables exist. */
   ready: Promise<void>;
   now: () => number;
@@ -269,6 +272,12 @@ export class Conversation {
   private turns = 0;
   /** Aborted when the conversation closes: tools' signal. */
   private readonly lifetime = new AbortController();
+  /** Why the conversation was closed (null: open), for a tool's record put that comes after. */
+  private closedWhy: string | null = null;
+  /** The records puts of this conversation's tools still under way: stored() waits for them. */
+  private readonly puts = new Set<Promise<unknown>>();
+  /** The agent's records as this conversation's tools have them (`context.records`): no put once it is closed. */
+  private readonly records: Records;
   private recentChannels: string[] = [];
   private promptDestination?: { channel: string; address?: string };
   private timeZone: string | null = null;
@@ -328,6 +337,7 @@ export class Conversation {
     this.id = id;
     this.personKey = personKey;
     this.settings = settings;
+    this.records = recordsUntil(settings.records, () => this.closedWhy, this.puts);
     if (existing) {
       this.messageCount = existing.messageCount;
       this.turns = existing.turns;
@@ -714,9 +724,9 @@ export class Conversation {
     await this.writes;
   }
 
-  /** Resolves once everything so far is in the store. */
+  /** Resolves once everything so far is in the store, the tools' record puts under way included. */
   stored(): Promise<void> {
-    return this.writes;
+    return Promise.all([this.writes, ...this.puts]).then(() => undefined);
   }
 
   /**
@@ -760,8 +770,9 @@ export class Conversation {
    * The person was forgotten: a step in flight is cut off, nothing waiting runs, nothing more is
    * sent or kept. Tools already running finish on their own, and their results go nowhere.
    */
-  close(): void {
+  close(why = "the person was forgotten while the tool ran"): void {
     this.closed = true;
+    this.closedWhy = why;
     if (this.renewal) clearInterval(this.renewal);
     this.renewal = null;
     if (this.timer) clearTimeout(this.timer);
@@ -831,7 +842,7 @@ export class Conversation {
     if ((await this.claim()) === "mine") return;
     // This runner stalled past its lease and another took the conversation: it stops here.
     console.warn("flow: runner %s lost conversation %s to another runner; it stops working on it", this.settings.runner, this.id);
-    this.close();
+    this.close("another runner took the conversation while the tool ran");
     this.leave(false);
   }
 
@@ -1709,7 +1720,7 @@ export class Conversation {
 
     this.settings.emit(this.id, "tool.start", { callId: call.id, tool: call.name, input: parsed.data });
     const key = createHash("sha256").update(`${this.id}\u0000${this.turns}\u0000${call.name}\u0000${input}`).digest("hex").slice(0, 32);
-    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal };
+    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal, records: this.records };
     const credentials = this.settings.credentialProvider?.(identityContext) ?? this.settings.credentials;
     let context = toolContext(identityContext, credentials);
     let authorize!: () => void;

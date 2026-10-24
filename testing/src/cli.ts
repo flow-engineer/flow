@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // The flow command. `flow new <name>` makes ./<name>/, an agent started from the café example, and
 // `flow init` the same agent in the current folder (testing/src/new.ts). `flow chat` talks to the
-// agent in this folder from the terminal (testing/src/chat.ts). `flow test`, or `flow` with flags, runs an agent's tests in the cloud,
+// agent in this folder from the terminal (testing/src/chat.ts), and `flow records export` prints
+// its records (testing/src/records.ts). `flow test`, or `flow` with flags, runs an agent's tests in the cloud,
 // from the agent's folder:
 //   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--strict] [--fresh] [--json]
 // A hosted cloud (any --cloud off this machine, the default included) needs the
@@ -36,6 +37,7 @@ import { checkEndpointCli } from "./check-endpoint.ts";
 import { CHECK_LINE as TOOLS_CHECK_LINE, checkCli, mcpUpdateCli } from "./check.ts";
 import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
+import { RECORDS_LINE, recordsCli } from "./records.ts";
 import { DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
@@ -146,7 +148,7 @@ the CHINWAG_ names from before the rename still work):
                            GEMINI_API_KEY: the first with a value is used, else FLOW_KEY
                            (the agent's Flow key, on its trial credit; flow setup writes it)`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
-const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${INSPECT_LINE}
+const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${RECORDS_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${INSPECT_LINE}
 ${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${DEPLOY_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
 
 /** What to do after new or init, from step 2; a model key comes first when none is set here. */
@@ -194,6 +196,7 @@ if (process.argv[2] === "inspect") {
 if (process.argv[2] === "deploy") process.exit(await deployCli(process.argv.slice(3)));
 if (process.argv[2] === "logs") process.exit(await logsCli(process.argv.slice(3)));
 if (process.argv[2] === "chat") process.exit(await chatCli(process.argv.slice(3)));
+if (process.argv[2] === "records") process.exit(await recordsCli(process.argv.slice(3)));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) process.exit(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
 const TEST_FLAGS = {

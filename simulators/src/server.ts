@@ -23,6 +23,8 @@
 //   GET  /api/platforms                      each platform's rules, the agent's channels and test people, link cards,
 //                                            the action labels (the Person tab's "Their account")
 //   GET  /api/media/<id>                     a file the person sent (a line's attachment url), kept in memory a while
+//   GET  /api/records                        the agent's records, the newest 200, newest first, with each declared
+//                                            collection's count → {records, counts, older}
 //
 // The test cloud (`testCloud: true`, for Flow Framework's test cloud only): generated people per run, any
 // person id, through AgentConnection.receive; the same API with `platform` for `channel`, `person`
@@ -60,6 +62,8 @@ import {
   type PlaygroundSink,
   type Template,
   type TemplateDefinition,
+  type ExportedRecord,
+  type Records,
   type TestPerson,
   type TranscriptEntry,
 } from "../../src/index.ts";
@@ -105,6 +109,8 @@ export interface PlaygroundAgent {
   setTimeZone?: Agent["setTimeZone"];
   setQuietHours?: Agent["setQuietHours"];
   runDue?: Agent["runDue"];
+  /** The Records panel (shown when collections are declared): every record the agent keeps, read only. */
+  records?: Pick<Records, "export" | "collections">;
 }
 
 /**
@@ -376,6 +382,8 @@ const MAX_BODY = 16_384;
 /** A message may carry files (base64): up to 4, about 11 MB in all, above the largest the agent reads (10 MB). */
 const MAX_MESSAGE_BODY = 15_000_000;
 const MAX_FILES = 4;
+/** The Records panel shows the newest this many, and says how many older ones it does not. */
+const RECORDS_SHOWN = 200;
 /** The person's files kept to show them again: the latest, up to this many and this many bytes. */
 const MEDIA_KEPT = 64;
 const MEDIA_BYTES = 96_000_000;
@@ -905,8 +913,22 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
         platforms: PLATFORMS, channels, people: agent.testPeople(), cards: options.cards ?? [], authentication: !!options.authentication,
         ...(cli && localRequest(req) ? { localCli: { channel: cli.options.channel, name: cli.options.config.name } } : {}),
         templates: (agent.templates?.() ?? []).map((t) => ({ name: t.name, body: t.body })),
-        panel: { person: !!(agent.contact && agent.outbox), nudge: !!agent.recordNudge, clock: !!(options.clock && agent.runDue) },
+        panel: { person: !!(agent.contact && agent.outbox), nudge: !!agent.recordNudge, clock: !!(options.clock && agent.runDue), records: !!agent.records?.collections.length },
       });
+    }
+    // The agent's records, not one person's: no person or channel to choose.
+    if (req.method === "GET" && path === "/api/records") {
+      if (!agent.records) return json(res, 404, { error: "this agent keeps no records" });
+      // Export is oldest first: keep the last RECORDS_SHOWN while counting them all.
+      const newest: ExportedRecord[] = [];
+      const counts: Record<string, number> = Object.fromEntries(agent.records.collections.map((name) => [name, 0]));
+      for await (const r of agent.records.export()) {
+        counts[r.collection] = (counts[r.collection] ?? 0) + 1;
+        newest.push(r);
+        if (newest.length > RECORDS_SHOWN) newest.shift();
+      }
+      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      return json(res, 200, { records: newest.reverse(), counts, older: total - newest.length });
     }
 
     const body = req.method === "POST" ? await readBody(req, path === "/api/messages" ? MAX_MESSAGE_BODY : MAX_BODY) : null;

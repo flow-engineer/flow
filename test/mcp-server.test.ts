@@ -1,4 +1,4 @@
-// covers: mcp/src/server.ts mcp/src/describe.ts src/skills.ts src/tools.ts
+// covers: mcp/src/server.ts mcp/src/describe.ts src/skills.ts src/tools.ts src/records.ts
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { after, test } from "node:test";
@@ -7,7 +7,7 @@ import { isSpecType } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { tools as cafeTools } from "../examples/cafe/src/tools.ts";
 import { mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
-import { tool, type ToolContext } from "../src/index.ts";
+import { createAgent, tool, type ToolContext } from "../src/index.ts";
 
 const servers: Server[] = [];
 after(() => servers.forEach((s) => s.close()));
@@ -145,6 +145,18 @@ test("a tool that throws is an isError result, and output is checked and sent as
   assert.deepEqual(placed.structuredContent, { order_id: "BL-1" });
   assert.equal((await c.callTool({ name: "bad", arguments: {} })).isError, true);
   await c.close();
+});
+
+test("a served tool's context.records is the records given to mcpServer; without them its call says how to give them", async () => {
+  const agent = createAgent({ files: { "AGENTS.md": "Test." }, model: { complete: () => Promise.reject(new Error("no model")) }, records: { notes: { people: ["about"] } }, scheduleCheckMs: 0 });
+  const note = tool({ name: "note", description: "Keeps a note.", input: z.object({ text: z.string() }), signIn: "none", run: async ({ text }, context) => (await context.records.put("notes", "n1", { about: context.person, text }), { kept: true }) });
+  const served = await client(await serve({ name: "cafe", version: "1", tools: [note], records: agent.records }));
+  assert.equal((await served.callTool({ name: "note", arguments: { text: "oat milk" } })).isError, undefined);
+  assert.equal((await agent.records.get<{ text: string }>("notes", "n1"))?.text, "oat milk");
+  const without = await client(await serve({ name: "cafe", version: "1", tools: [note] }));
+  assert.match(JSON.stringify(await without.callTool({ name: "note", arguments: { text: "x" } })), /not available here: give mcpServer\(\{ records: agent\.records \}\)/);
+  await served.close();
+  await without.close();
 });
 
 test("skills are listed in the instructions and read with read_skill", async () => {

@@ -19,6 +19,7 @@ import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, typ
 import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
+import { indexDeclared, recordsOf, type RecordCollection, type Records } from "./records.ts";
 import { businessSchedule, claimDue, summary } from "./schedules.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
 import { Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
@@ -129,6 +130,18 @@ export interface AgentOptions {
    * the store's to know.
    */
   store?: StoreApi;
+  /**
+   * The agent's own records, by collection: small JSON documents it keeps across days and people
+   * (a question waiting for a seller's answer), in the same store as its conversations, so they
+   * survive restarts and deploys. `people` names the top-level fields that hold a person (their
+   * `context.person`): forgetting that person deletes the record. `people` and `fields` are what
+   * `query` may match on, by equality. Tools reach them as `context.records`, other code as
+   * `agent.records`. Keep them small (64 KB a record, 10,000 an agent): if anything other than the
+   * agent reads the data, it belongs in your own database.
+   *
+   *   records: { questions: { people: ["buyer", "seller"], fields: ["listing", "status"] } }
+   */
+  records?: Record<string, RecordCollection>;
   /** The channels people reach the agent on: whatsapp(...), sms(...), customUI(...), each with its own name. */
   channels?: Channel[];
   /**
@@ -353,6 +366,8 @@ export class Agent {
   private readonly options: AgentOptions;
   private readonly settings: ConversationSettings;
   private readonly store: StoreApi;
+  /** The agent's own records (`createAgent({ records })`), for code outside a turn: routes, beforeSend, intercept. Tools have them as `context.records`. */
+  readonly records: Records;
   /** This process among the agent's runners (`runner`). */
   readonly runner: string;
   private readonly startedAt = Date.now();
@@ -408,6 +423,7 @@ export class Agent {
     if (skills.length && !options.inlineSkills) tools.push(skillTool(skills, (id, name) => emit(id, "skill.loaded", { skill: name })));
     if (options.store && (options.database || options.id)) throw new Error("flow: give an agent a store or a database (and id), not both");
     this.store = options.store ?? new Store(options.database ?? sqlite(), options.id ?? "default");
+    this.records = recordsOf(this.store, options.records, () => this.settings.ready);
     this.settings = {
       model: options.model,
       transcribe: options.transcribe,
@@ -434,7 +450,9 @@ export class Agent {
       runner: this.runner,
       away: (conversation, again) => this.away(conversation, again),
       store: this.store,
-      ready: this.store.migrate(),
+      records: this.records,
+      // The records kept under an earlier declaration are indexed under this one before anything runs.
+      ready: this.store.migrate().then(() => indexDeclared(this.store, options.records)),
       now: this.now,
       timeZone: options.timeZone,
       quietHours: options.quietHours,
@@ -659,8 +677,9 @@ export class Agent {
 
   /**
    * Forgets a person: a turn in progress stops, and everything kept about them goes (history,
-   * inbox, background tools, schedules and their runs, nudges, no-contact rules, identities and
-   * the conversation). Their next message starts from nothing.
+   * inbox, background tools, schedules and their runs, nudges, no-contact rules, identities, the
+   * conversation, and the records naming them in a person field). Their next message starts from
+   * nothing. For someone with no conversation who is named in records: `agent.records.forgetPerson`.
    */
   async forgetPerson(conversationId: string): Promise<void> {
     await this.settings.ready;
@@ -670,8 +689,17 @@ export class Agent {
       this.conversations.delete(conversationId);
       await resident.stored();
     }
-    for (const i of await this.store.identities(conversationId)) this.via.delete(viaKey(i.channel, i.address));
+    const identities = await this.store.identities(conversationId);
+    for (const i of identities) this.via.delete(viaKey(i.channel, i.address));
     this.rows.delete(conversationId);
+    // Records may name them by their number (phone:<E.164>, or bare) whatever their person key is:
+    // the store cannot tell which channels' addresses are numbers, so those are deleted here, first.
+    const numbers = identities.flatMap((i) => {
+      const adapter = this.channelsByName.get(i.channel);
+      const phone = adapter?.phone ? normalizePhone(i.address, adapter.kind === "whatsapp" ? undefined : this.countryCode) : "";
+      return phone ? [`phone:${phone}`, phone] : [];
+    });
+    if (numbers.length) await this.store.forgetRecords(numbers);
     await this.store.forgetPerson(conversationId);
   }
 

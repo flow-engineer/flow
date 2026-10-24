@@ -30,7 +30,8 @@ users and room to customize the generated tools, commands and handlers.
 
 In Claude and ChatGPT, the host's model uses your MCP tools. In messaging, Flow runs the
 conversation with your model, handling double texts, acknowledgements, background tools,
-channel rules, reminders and persistent history. Start with whichever interface you need.
+channel rules, reminders, persistent history and the agent's own records. Start with whichever
+interface you need.
 
 ## Quick start
 
@@ -119,6 +120,14 @@ history (`context.sent`), so they hold after a restart. `agent.resetHistory({ to
 the history the model is sent again from now (nothing is deleted). Each model call carries at most
 24,000 tokens of history, or 60% of the model's `contextTokens` when that is less
 (`createAgent({ history: { maxTokens } })` to change it).
+
+What the agent must remember across days and people (a buyer's question waiting for the
+seller's answer) it keeps as records: small JSON documents in collections declared on
+`createAgent({ records })`, read by id or matched on a few declared fields, in the same store as its
+conversations, so they survive restarts and deploys and work the same in the playground,
+self-hosted and on Flow's hosting. Forgetting a person deletes the records that name them, and
+`flow records export` prints them all. The rule: if anything other than the agent reads it, it
+belongs in your own database. [docs/agents.md](docs/agents.md#the-agents-own-records)
 
 ## Stability
 

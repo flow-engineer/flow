@@ -187,6 +187,9 @@ await agent.resume();                     // a durable database: always before t
 await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" });
 ```
 
+- The agent's own records (`createAgent({ records })`, `context.records`, `agent.records`) live
+  in the same database or store, so they move with it; keep them small (docs/agents.md, "The
+  agent's own records").
 - Several processes or machines need Postgres, not a SQLite file: `database: postgres(pool)`
   with the app's own node-postgres `Pool` (Flow Framework adds no Postgres dependency). An agent that must
   not hold database credentials gets `store` instead of `database`: any object with Store's

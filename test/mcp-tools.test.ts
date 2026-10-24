@@ -9,6 +9,7 @@ import { z } from "zod";
 import { UPDATE_ENV } from "../mcp/src/client.ts";
 import { mcpServer, mcpTools, type McpLock, type McpServerHandle } from "../mcp/src/index.ts";
 import { tool, toSpec, type Tool, type ToolContext } from "../src/index.ts";
+import { unavailableRecords } from "../src/records.ts";
 
 const servers: Server[] = [];
 after(() => servers.forEach((s) => s.close()));
@@ -23,7 +24,7 @@ async function upstream(tools: Tool[]) {
   return { url: `http://127.0.0.1:${port}/mcp`, swap: (next: Tool[]) => void (handle = mcpServer({ name: "shop", version: "1", tools: next })) };
 }
 
-const context = (): ToolContext => ({ conversationId: "c", person: "phone:+15550100", key: null, channel: "whatsapp", callId: "1", idempotencyKey: "k1", signal: new AbortController().signal });
+const context = (): ToolContext => ({ conversationId: "c", person: "phone:+15550100", key: null, channel: "whatsapp", callId: "1", idempotencyKey: "k1", signal: new AbortController().signal, records: unavailableRecords("a test") });
 
 async function update<T>(run: () => Promise<T>): Promise<T> {
   process.env[UPDATE_ENV] = "1";
