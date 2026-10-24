@@ -111,7 +111,7 @@ test("a tool's format is what people see, rendered at a terminal; --json, --fiel
   assert.equal(await run(cli(["key.id", "manage_url"]), []), "key.id      key_1\nmanage_url  https://acme.test/keys\n");
 });
 
-test("a group's help lists its subcommands, and the top level lists groups and commands", async () => {
+test("a group's help lists its subcommands, and the top level lists groups and commands, styled at a terminal", async () => {
   const cli = acme(await serve({ tools: [listOrders, getOrder, cancelOrder] }));
   for (const argv of [["order"], ["order", "-h"]]) {
     const group = io();
@@ -129,6 +129,11 @@ test("a group's help lists its subcommands, and the top level lists groups and c
   assert.match(top.out, /\n {2}cancel-order +Cancel order\n/, "a tool the file does not name keeps its own name");
   assert.doesNotMatch(top.out.slice(top.out.indexOf("COMMANDS")), /\n {2}(list|view) /, "subcommands are not listed at the top");
   assert.match(top.out.slice(top.out.indexOf("THIS CLI")), /\n {2}tools .*\n {2}skill .*\n {2}auth .*\n {2}help <words> /);
+
+  const styled = io(true);
+  assert.equal(await runCli(cli, ["--help"], { ...styled.channel, env: {} }), 0);
+  assert.match(styled.out, /\u001b\[1m\u001b\[36mASK ANYTHING/, "at a terminal, headings and chat stand out");
+  assert.equal(styled.out.replace(/\u001b\[[0-9;]*m/g, ""), top.out, "styling adds no text");
 
   const sectioned = io();
   assert.equal(await runCli({ ...cli, sections: { Orders: ["order"] } }, ["--help"], sectioned.channel), 0);

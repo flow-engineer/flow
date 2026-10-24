@@ -17,7 +17,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   without `output`.
 - **The CLI's top-level help is easier to scan.** `chat` comes first, as the way to ask for
   anything in plain words; the CLI's own commands (`tools`, `skill`, `auth`, `help`) come last,
-  under This CLI; one usage line replaces one per command. `defineCli({ sections: { Account:
+  under This CLI; one usage line replaces one per command. At a terminal, headings are bold and
+  command names coloured, chat's the most (plain when piped, for `NO_COLOR` or `TERM=dumb`). `defineCli({ sections: { Account:
   ["account", "keys"] } })` lists groups and commands under headings, in order, the rest under
   Other; `flow check` refuses a name that is not a top-level command or group, or one in two
   sections.
