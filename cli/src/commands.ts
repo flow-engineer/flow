@@ -60,6 +60,11 @@ export interface CliConfig {
   commands?: Record<string, CommandConfig>;
   /** One line about each group, shown in help ("order": "Place and track orders"). Default: its subcommands. */
   groups?: Record<string, string>;
+  /**
+   * Headings for the top-level help, each with its groups and commands in order
+   * ({ Orders: ["order", "menu"] }). Those not placed are listed under Other. Default: one list.
+   */
+  sections?: Record<string, string[]>;
   /** A Client ID Metadata Document URL for sign-in; without it the CLI registers itself (DCR). */
   clientMetadataUrl?: string;
   /** A registered public OAuth client, for providers without dynamic registration. No client secret in a distributed CLI. */
@@ -199,6 +204,15 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
     claim(derivedName(t.name), `tool ${t.name}`);
     if (config.commands) warnings.push(`tool ${t.name} has no command in the CLI file; it is reachable as "${derivedName(t.name)}"`);
   }
+  const tops = new Set([...words.keys()].map((key) => key.split(" ")[0]!));
+  const placed = new Map<string, string>();
+  for (const [heading, entries] of Object.entries(config.sections ?? {})) {
+    for (const entry of entries) {
+      if (!tops.has(entry)) errors.push(`section "${heading}": ${entry} is not a top-level command or group`);
+      else if (placed.has(entry)) errors.push(`section "${heading}": ${entry} is already in "${placed.get(entry)}"`);
+      else placed.set(entry, heading);
+    }
+  }
   for (const [key, owner] of words) {
     const first = key.split(" ")[0]!;
     if (BUILT_IN.has(first)) errors.push(`command "${key}": ${first} is the CLI's own (${[...BUILT_IN].join(", ")})`);
@@ -225,6 +239,7 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     `Sign in once with \`${name} auth login\`, or set ${tokenEnvOf(config)} in CI.`,
     "Tool definitions may be cached; add `--refresh-tools` to fetch current commands and schemas.",
     `List workflow summaries with \`${name} skill list\`; read selected instructions with \`${name} skill get <name> [name...]\` before doing what they cover.`,
+    `Find a command by what it does with \`${name} help <words>\` (every word must match its name or description).`,
     "",
     "Exit codes: 0 done, 1 the tool failed (its message on stderr), 2 wrong command or arguments, 3 sign-in needed, 4 needs --yes, 5 the server could not be reached.",
     "",

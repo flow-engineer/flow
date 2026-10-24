@@ -13,6 +13,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } 
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
+import { styleText } from "node:util";
 import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider, type Tool as McpTool } from "@modelcontextprotocol/client";
 import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
 import { configDir, isSignedIn, signIn, signOut, storedProvider } from "./auth.ts";
@@ -245,6 +246,16 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
       const parseFailure = code === ExitCode.UnknownCommand || code === ExitCode.InvalidArgument;
       if (attempt === 0 && (reparse || (cached && parseFailure && !custom))) {
         try { if (reparse || await discover()) continue; } catch {}
+      }
+      // The top-level overview lists every command; Stricli's flat list after it would repeat them.
+      // (Its routes stay visible to Stricli, which suggests only visible ones for a typo.)
+      // Its usage lines, one per command, are replaced by one.
+      if (asksHelp) {
+        const heading = (text: string) => `(?:\\u001b\\[4m)?${text}(?:\\u001b\\[24m)?\\n`;
+        out = out.replace(new RegExp(`(${heading(text_en.headers.flags)}(?:  .*\\n)+)\\n+${heading(text_en.headers.commands)}[\\s\\S]*$`), "$1");
+        const paint = painter(io);
+        out = out.replace(new RegExp(`^(?:${heading(text_en.headers.usage)})(?:  .*\\n)+`), `${paint("bold", text_en.headers.usage)}\n  ${config.name} <command> [flags]\n  ${config.name} <command> --help\n`);
+        out = out.replace(new RegExp(`\\n${heading(text_en.headers.flags)}`), `\n${paint("bold", text_en.headers.flags)}\n`);
       }
       io.write(out); io.writeError(err);
       if (problem) io.writeError(`\n${problem.message}\n`);
@@ -498,11 +509,88 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
   const top = build(root, []);
   for (const word of BUILT_IN) if (top[word]) throw new Error(`${config.name}: "${word}" is the CLI's own command; name yours something else.`);
   const notice = server ? `Server: ${server}` : noServer(config);
+  const paint = painter(io);
+  // chat and help are the CLI's, unless the CLI file has its own.
+  const own: Record<string, Target> = {
+    tools: toolsCommand(tools, io), skill: skillCommand(config, tools, call, io, server ? refresh : undefined), auth: authRoutes(config, server, io),
+  };
+  if (!top.help) own.help = helpCommand(config, tools, top, own, io);
+  const all = { chat: top.chat ?? buildCommand({ docs: { brief: CHAT_BRIEF }, parameters: {}, func() {} }), ...top, ...own };
+  const theirs = Object.keys(top).filter((word) => word !== "chat");
   return buildRouteMap({
-    routes: { ...top,
-      chat: top.chat ?? buildCommand({ docs: { brief: "Chat with the agent in a terminal (chat --help)" }, parameters: {}, func() {} }),
-      tools: toolsCommand(tools, io), skill: skillCommand(config, tools, call, io, server ? refresh : undefined), auth: authRoutes(config, server, io) },
-    docs: { brief: config.description ?? config.name, fullDescription: `${config.description ?? config.name}\n\n${notice}\n--server <url>, --token <token> and --refresh-tools (bypass discovery cache) work on every command.` },
+    routes: all,
+    docs: { brief: config.description ?? config.name, fullDescription: `${overview(config, all, theirs, Object.keys(own), paint)}\n\n${paint("dim", `${notice}\n--server <url>, --token <token> and --refresh-tools (bypass discovery cache) work on every command.`)}` },
+  });
+}
+
+const CHAT_BRIEF = "Ask for anything in plain words, and the agent gets it done";
+
+/** The top-level help: the description, chat first, the team's commands (in its sections), then the CLI's own. */
+function overview(config: CliConfig, all: Record<string, Target>, theirs: string[], own: string[], paint: Paint): string {
+  const blocks: Array<[string, Array<[string, string]>]> = [];
+  const line = (word: string): [string, string] => [word, all[word]!.brief];
+  const placed = new Set<string>();
+  for (const [heading, entries] of Object.entries(config.sections ?? {})) {
+    const here = entries.filter((word) => theirs.includes(word) && !placed.has(word));
+    here.forEach((word) => placed.add(word));
+    if (here.length) blocks.push([heading.toUpperCase(), here.map(line)]);
+  }
+  const rest = theirs.filter((word) => !placed.has(word));
+  if (rest.length) blocks.push([placed.size ? "OTHER" : "COMMANDS", rest.map(line)]);
+  blocks.push(["THIS CLI", own.map((word) => (word === "help" ? [`help <words>`, all.help!.brief] : line(word)))]);
+  // chat's lines are long; the sections share their own column.
+  const chat: Array<[string, string]> = all.chat!.brief === CHAT_BRIEF
+    ? [[`${config.name} chat "<request>"`, CHAT_BRIEF], [`${config.name} chat`, "A conversation, until /exit (chat --help)"]]
+    : [["chat", all.chat!.brief]];
+  const rows = (list: Array<[string, string]>, name: (text: string) => string) => {
+    const width = Math.max(...list.map(([n]) => n.length));
+    return list.map(([n, brief]) => `  ${name(n)}${" ".repeat(width - n.length)}  ${brief}`);
+  };
+  const width = Math.max(...blocks.flatMap(([, list]) => list.map(([n]) => n.length)));
+  const pad = (list: Array<[string, string]>) => list.map(([n, brief]): [string, string] => [n.padEnd(width), brief]);
+  return [
+    config.description ?? config.name,
+    [paint(["bold", "cyan"], "ASK ANYTHING"), ...rows(chat, (n) => paint(["bold", "cyan"], n))].join("\n"),
+    ...blocks.map(([heading, list]) => [paint("bold", heading), ...rows(pad(list), (n) => paint("cyan", n))].join("\n")),
+  ].join("\n\n");
+}
+
+type Paint = (format: Parameters<typeof styleText>[0], text: string) => string;
+
+/** Styles for a person at a terminal; none when piped, for NO_COLOR or TERM=dumb. */
+function painter(io: CliIO): Paint {
+  return atTerminal(io) ? (format, text) => styleText(format, text, { validateStream: false }) : (_format, text) => text;
+}
+
+function atTerminal(io: CliIO): boolean {
+  const env = io.env ?? process.env;
+  return io.interactive && !env.NO_COLOR && env.TERM !== "dumb";
+}
+
+/** `help <words>`: the commands whose words or descriptions have every one of them; without words, the overview. */
+function helpCommand(config: CliConfig, tools: ToolInfo[], top: Record<string, Target>, own: Record<string, Target>, io: CliIO): StricliCommand<CliContext> {
+  return buildCommand<Record<string, never>, string[], CliContext>({
+    docs: { brief: "Find commands by what they do" },
+    parameters: { flags: {}, positional: { kind: "array", parameter: { brief: "Words to look for", parse: String, placeholder: "words" } } },
+    func(_flags, ...words) {
+      if (!words.length) return void io.write(`Run ${config.name} --help for every command, or ${config.name} help <words> to find one.\n`);
+      const wanted = words.map((w) => w.toLowerCase());
+      const rows: Array<[string, string]> = [];
+      for (const c of commandTable(config, tools)) {
+        if (c.config && !isCustom(c.config) && c.config.alias?.trim() === c.words.join(" ")) continue;
+        const group = c.words.slice(0, -1).map((_, i) => config.groups?.[c.words.slice(0, i + 1).join(" ")] ?? "").join(" ");
+        const summary = c.config && isCustom(c.config) ? c.config.command.brief : c.summary;
+        const text = [c.words.join(" "), summary, c.tool?.description ?? "", group].join(" ").toLowerCase();
+        if (wanted.every((w) => text.includes(w))) rows.push([c.words.join(" "), summary]);
+      }
+      for (const [word, target] of Object.entries({ ...own, ...(top.chat ? {} : { chat: { brief: CHAT_BRIEF } }) })) {
+        if (wanted.every((w) => `${word} ${target.brief}`.toLowerCase().includes(w))) rows.push([word, target.brief]);
+      }
+      if (!rows.length) return void io.write(`No command matches "${words.join(" ")}". ${config.name} --help lists them all.\n`);
+      const width = Math.max(...rows.map(([name]) => name.length + config.name.length + 1));
+      const paint = painter(io);
+      io.write(`${rows.map(([name, brief]) => `  ${paint("cyan", `${config.name} ${name}`.padEnd(width))}  ${brief}`).join("\n")}\n`);
+    },
   });
 }
 
@@ -763,8 +851,7 @@ function valueOf(result: { content?: unknown; structuredContent?: unknown; isErr
  * it (optional peers, loaded only here); as written when piped, for NO_COLOR, or without them.
  */
 async function forTerminal(markdown: string, io: CliIO): Promise<string> {
-  const env = io.env ?? process.env;
-  if (!io.interactive || env.NO_COLOR || env.TERM === "dumb") return markdown;
+  if (!atTerminal(io)) return markdown;
   try {
     const [{ Marked }, { markedTerminal }] = await Promise.all([import("marked"), import("marked-terminal")]);
     // marked-terminal 7 returns an extension; its published types still say a renderer.

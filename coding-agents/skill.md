@@ -583,6 +583,7 @@ export const cli = defineCli({
   server: process.env.ACME_SERVER ?? "https://acme.example.com/mcp",
   description: "Acme's orders and customers",
   groups: { order: "Place and track orders" },
+  sections: { Orders: ["order"] },                 // headings in `acme -h`; the rest go under Other
   commands: {
     "order list": { tool: "list_orders", columns: ["order_id", "status", "total"], alias: "orders" },
     "order view": { tool: "get_order", args: ["order_id"], examples: ["acme order view BL-1042 --json"] },
@@ -597,6 +598,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   subcommands. `acme order` and `acme order -h` list the group's subcommands, `acme order place -h`
   that command's flags and examples, and `acme -h` the groups and top-level commands. A word is a
   group or a command, never both. `groups` gives each group its line in help.
+- `acme -h` puts `chat` first (ask for anything in plain words), then the groups and commands,
+  then the CLI's own (`tools`, `skill`, `auth`, `help`). With many groups, `sections` puts them
+  under headings in the order given; those no section names are listed under Other. `acme help
+  <words>` lists the commands whose words or descriptions have them all (`acme help invoice`).
+  A command of the CLI file named `chat` or `help` replaces the CLI's own.
 - `args` are the input fields taken as positional arguments, `columns` a list's table, `view` one
   record's fields, `alias` another name, `examples` lines for help. Every other input field is a
   flag (`order_id` is `--order-id`); a list is a repeatable or comma-separated flag; an object or a

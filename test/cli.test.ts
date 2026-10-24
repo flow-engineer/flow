@@ -111,7 +111,7 @@ test("a tool's format is what people see, rendered at a terminal; --json, --fiel
   assert.equal(await run(cli(["key.id", "manage_url"]), []), "key.id      key_1\nmanage_url  https://acme.test/keys\n");
 });
 
-test("a group's help lists its subcommands, and the top level lists groups and commands", async () => {
+test("a group's help lists its subcommands, and the top level lists groups and commands, styled at a terminal", async () => {
   const cli = acme(await serve({ tools: [listOrders, getOrder, cancelOrder] }));
   for (const argv of [["order"], ["order", "-h"]]) {
     const group = io();
@@ -121,11 +121,37 @@ test("a group's help lists its subcommands, and the top level lists groups and c
   }
   const top = io();
   assert.equal(await runCli(cli, ["--help"], top.channel), 0);
+  const headings = (out: string) => out.split("\n").filter((l) => /^[A-Z][A-Z ]+$/.test(l));
+  assert.deepEqual(headings(top.out), ["USAGE", "ASK ANYTHING", "COMMANDS", "THIS CLI", "FLAGS"], "chat first, the CLI's own last, each command once");
+  assert.match(top.out, /^USAGE\n {2}acme <command> \[flags\]\n {2}acme <command> --help\n\n/, "one usage line, not one per command");
+  assert.match(top.out, /ASK ANYTHING\n {2}acme chat "<request>" +Ask for anything/);
   assert.match(top.out, /\n {2}order +list, view\n/, "the group, with its subcommands as its line");
-  assert.match(top.out, /\n {2}chat +Chat with/);
-  assert.doesNotMatch(top.out, /\n {2}ask +/);
   assert.match(top.out, /\n {2}cancel-order +Cancel order\n/, "a tool the file does not name keeps its own name");
   assert.doesNotMatch(top.out.slice(top.out.indexOf("COMMANDS")), /\n {2}(list|view) /, "subcommands are not listed at the top");
+  assert.match(top.out.slice(top.out.indexOf("THIS CLI")), /\n {2}tools .*\n {2}skill .*\n {2}auth .*\n {2}help <words> /);
+
+  const styled = io(true);
+  assert.equal(await runCli(cli, ["--help"], { ...styled.channel, env: {} }), 0);
+  assert.match(styled.out, /\u001b\[1m\u001b\[36mASK ANYTHING/, "at a terminal, headings and chat stand out");
+  assert.equal(styled.out.replace(/\u001b\[[0-9;]*m/g, ""), top.out, "styling adds no text");
+
+  const sectioned = io();
+  assert.equal(await runCli({ ...cli, sections: { Orders: ["order"] } }, ["--help"], sectioned.channel), 0);
+  assert.deepEqual(headings(sectioned.out), ["USAGE", "ASK ANYTHING", "ORDERS", "OTHER", "THIS CLI", "FLAGS"]);
+  assert.match(sectioned.out, /ORDERS\n {2}order +list, view\n\nOTHER\n {2}orders +Same as order list\n {2}cancel-order +Cancel order\n/, "what no section names is under Other");
+});
+
+test("help <words> finds commands by their words and descriptions, the CLI's own too", async () => {
+  const cli = acme(await serve({ tools: [listOrders, getOrder, cancelOrder] }));
+  const found = async (...words: string[]) => {
+    const out = io();
+    assert.equal(await runCli(cli, ["help", ...words], out.channel), 0);
+    return out.out;
+  };
+  assert.equal(await found("order"), "  acme order list    List orders\n  acme order view    Get order\n  acme cancel-order  Cancel order\n");
+  assert.equal(await found("cancel", "order"), "  acme cancel-order  Cancel order\n", "every word must match");
+  assert.equal(await found("sign"), "  acme auth  Sign in, sign out, or see who is signed in\n");
+  assert.equal(await found("refund"), `No command matches "refund". acme --help lists them all.\n`);
 });
 
 // The old skill smoke test checked only exit status; it cannot protect selective discovery or multi-skill reads.
