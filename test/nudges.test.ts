@@ -149,6 +149,10 @@ test("a template to someone who never wrote makes them a person: their reply joi
   assert.deepEqual(await h.agent.nudge({ to, prompt: "Say hi" }), { id: "", status: "refused", reason: "unknown_person" });
   await assert.rejects(h.agent.nudge({ to, template: { name: "order_shipped", body: ["Ana"] } }), /takes 2 body values, got 1/);
   assert.equal(await h.agent.contact(to), null, "none of them made a person");
+  // A national number on WhatsApp (read with no defaultCountryCode) would be another country's: refused.
+  for (const address of ["(555) 010-0177", "07700 900123"]) {
+    assert.deepEqual(await h.agent.nudge({ to: { channel: "whatsapp", address }, template: { name: "order_shipped", body: ["Ana", "1042"] } }), { id: "", status: "refused", reason: "unknown_person" });
+  }
 
   const template = { name: "order_shipped", body: ["Ana", "1042"] };
   const [first, again] = await Promise.all([0, 1].map(() => h.agent.nudge({ to, template, idempotencyKey: "seller-17-welcome" })));
@@ -168,6 +172,43 @@ test("a template to someone who never wrote makes them a person: their reply joi
   // Their window is open now: a text in the business's own format goes, to the number they wrote from.
   assert.equal((await h.agent.nudge({ to, text: "It arrives Friday." })).status, "sent");
   assert.deepEqual(h.out.at(-1)!.address, "15550100177");
+});
+
+test("a test person's playground identity and their real phone's share a number: a business's nudge goes to the phone, the Person panel's to the playground, whichever wrote last", async () => {
+  const tester = { name: "Sam", phone: "+15550100177" };
+  /** Sam writes from both, in this order, a minute apart. */
+  async function wrote(order: Array<"phone" | "playground">) {
+    const clock = { now: Date.UTC(2026, 9, 12, 16) };
+    const h = multi({ channels: { whatsapp: { info: { ...WHATSAPP, replyWindowHours: 24 }, phone: true, kind: "whatsapp" } }, testPeople: [tester], now: () => clock.now });
+    for (const [i, from] of order.entries()) {
+      clock.now += 60_000;
+      const a = from === "phone" ? await h.message("whatsapp", "15550100177", "hi") : await h.agent.simulate({ person: tester.phone, channel: "whatsapp", message: "hi" });
+      (await h.nextCall(i)).answer(respond(call("send_whatsapp", { text: "Hi" })));
+      await h.agent.conversation(a!.conversationId)!.whenIdle();
+    }
+    clock.now += 60_000;
+    return { ...h, sent: h.out.length };
+  }
+
+  const business = await wrote(["phone", "playground"]);
+  assert.equal((await business.agent.nudge({ to: { channel: "whatsapp", address: "+1 555 010 0177" }, text: "Your order shipped." })).status, "sent");
+  assert.deepEqual(business.out.slice(business.sent).map((o) => o.address), ["15550100177"], "the business's nudge reached the real phone");
+
+  const panel = await wrote(["playground", "phone"]);
+  const nudge = { to: { channel: "whatsapp", address: tester.phone }, text: "From the panel", idempotencyKey: "panel-1" };
+  await panel.agent.recordNudge(nudge, { via: "playground" });
+  assert.equal((await panel.agent.nudge(nudge)).status, "sent", "settled: the same key answers how it ended");
+  assert.equal(panel.out.length, panel.sent, "the Person panel's nudge stayed in the playground");
+});
+
+
+test("a nudge in another format finds the person their resolve() keys", async () => {
+  const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true, kind: "whatsapp" } }, resolve: async () => "acct-1" });
+  const a = await h.message("whatsapp", "15550100177", "hi");
+  (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Hi" })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.equal((await h.agent.nudge({ to: { channel: "whatsapp", address: "+1 (555) 010-0177" }, text: "Your order shipped." })).status, "sent");
+  assert.equal(h.out.at(-1)!.address, "15550100177");
 });
 
 test("a template to a new number joins the person that number already is (read with defaultCountryCode), and their STOP holds; SMS makes no one", async () => {

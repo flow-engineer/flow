@@ -792,13 +792,26 @@ export class Agent {
     const known = await this.store.identity(to.channel, to.address);
     const adapter = this.channelsByName.get(to.channel);
     if (!adapter?.phone) return known;
-    const read = (address: string) => normalizePhone(address, adapter.kind === "whatsapp" ? undefined : this.countryCode);
+    const whatsapp = adapter.kind === "whatsapp";
+    // WhatsApp's numbers are read with no defaultCountryCode, so a business's number counts only
+    // when it is written in full (+ or 00) or as the provider writes it (digits, no leading 0):
+    // "(555) 010-0177" would read as +55 and reach someone else.
+    if (whatsapp && !/^(?:\+|00|[1-9]\d{6,14}$)/.test(to.address.trim())) return known;
+    const read = (address: string) => normalizePhone(address, whatsapp ? undefined : this.countryCode);
     const phone = read(to.address);
     if (!phone) return known;
-    const conversationId = known?.conversationId ?? (await this.store.identity(to.channel, phone))?.conversationId ?? (await this.store.conversationByKey(`phone:${phone}`))?.id;
+    const byKey = async () => {
+      const owner = await this.options.resolve?.({ channel: to.channel, address: phone, phone });
+      return (await this.store.conversationByKey(owner ? `key:${owner}` : `phone:${phone}`))?.id;
+    };
+    const conversationId = known?.conversationId ?? (await this.store.identity(to.channel, phone))?.conversationId
+      ?? (whatsapp ? (await this.store.identity(to.channel, phone.slice(1)))?.conversationId : undefined) ?? (await byKey());
     if (conversationId) {
       const same = (await this.store.identities(conversationId)).filter((i) => i.channel === to.channel && read(i.address) === phone);
-      const latest = same.sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))[0];
+      // A test person's playground identity and their real phone's share the number: a business's
+      // nudge goes to the provider's, the Person panel's to the playground's, while there is one.
+      const wanted = same.filter((i) => i.via === (via ?? "provider"));
+      const latest = (wanted.length ? wanted : same).sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))[0];
       if (latest) return latest;
     }
     if (known || !template || adapter.info.templates === false || !PHONE_NUMBER.test(to.address.trim())) return known;
@@ -1221,15 +1234,20 @@ export class Agent {
     const queued = await claimDue(this.store, now, (s) => this.quietEnd(s.conversationId, now), async (s) => {
       const stop = s.origin === "person" ? await this.stopOf(s.conversationId) : await this.blockOf(s.conversationId);
       if (stop) return `no-contact rule ${stop.id}: ${stop.rule}`;
-      // The identity on that channel they last wrote from (a template may have made another for the same number).
-      const identity = (await this.store.identities(s.conversationId)).filter((i) => i.channel === s.channel).sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))[0];
+      // The identity on that channel they last wrote from (a template may have made another for the
+      // same number); for the business's messages, the provider's over a test person's playground one.
+      const onChannel = (await this.store.identities(s.conversationId)).filter((i) => i.channel === s.channel);
+      const provider = s.origin === "person" ? [] : onChannel.filter((i) => i.via === "provider");
+      const identity = (provider.length ? provider : onChannel).sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))[0];
       if (!identity) return `no way to reach them on ${s.channel}`;
       if (!windowClosed({ info: this.infoOf(s.channel, s.conversationId), lastMessageAt: identity.lastMessageAt }, now)) return null;
       // The business's prompt, due past their window: it goes on as that prompt nudge sent now, so the
       // agent may send a template that says it, else the fallback goes and it waits for their reply.
       if (s.origin === "api" && !s.fixedText && this.options.fallbackTemplate) {
-        const nudge = await this.recordNudge({ to: { channel: s.channel, address: identity.address }, prompt: s.instruction, idempotencyKey: `due:${s.id}:${s.nextRunAt}`, respectQuietHours: false });
-        return `outside_window: went on as nudge ${nudge.id}, as if sent now`;
+        // Recorded under a key of its own, so a second runner's tick finds the same nudge. A failure
+        // skips this one as before, never the rest of the tick's due messages.
+        const nudge = await this.recordNudge({ to: { channel: s.channel, address: identity.address }, prompt: s.instruction, idempotencyKey: `due:${s.id}:${s.nextRunAt}`, respectQuietHours: false }).catch(() => null);
+        return nudge?.id ? `outside_window: went on as nudge ${nudge.id}, as if sent now` : "outside_window";
       }
       return "outside_window";
     });
