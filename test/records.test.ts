@@ -215,6 +215,55 @@ for (const backend of backends) {
     assert.equal(await build({ notes: { people: ["about"] } }).records.forgetPerson("phone:+15550100001"), 1);
   });
 
+  // Postgres only: SQLite runs one write transaction at a time, so a put cannot be under way there.
+  if (backend.name === "postgres") {
+    test(`${backend.name}: a put under way by an agent declaring no fields is indexed by a newer start that declares one`, async () => {
+      const id = `agt_${randomUUID().slice(0, 8)}/production`;
+      const read = gate();
+      const release = gate();
+      let hold = false;
+      // The older agent's put holds its transaction once it has read the collection's declaration.
+      const held: Database = {
+        ...backend.db,
+        transaction: (work) => backend.db.transaction((tx) => work({
+          ...tx,
+          query: async (sql, params) => {
+            const rows = await tx.query(sql, params);
+            if (hold && sql.startsWith("SELECT declaration FROM record_collections")) {
+              hold = false;
+              read.open();
+              await release.promise;
+            }
+            return rows;
+          },
+        })),
+      };
+      const scanned = gate();
+      const watched: Database = { ...backend.db, query: async (sql, params) => { const rows = await backend.db.query(sql, params); if (sql.startsWith("SELECT id FROM records")) scanned.open(); return rows; } };
+      const build = (records: Record<string, { people?: string[] }>, db: Database) => createAgent({ files: { "AGENTS.md": "Test." }, model: noModel, records, scheduleCheckMs: 0, store: new Store(db, id) });
+      const older = build({ notes: {} }, held);
+      await older.records.get("notes", "n0"); // started
+      hold = true;
+      const putting = older.records.put("notes", "n1", { about: "phone:+15550100001" });
+      await read.promise;
+      const newer = build({ notes: { people: ["about"] } }, watched);
+      const starting = newer.records.get("notes", "n0");
+      // The put goes on once the newer start waits for it (a lock) or has read its records past it.
+      let watching = true;
+      const waits = (async () => {
+        while (watching) {
+          const [{ n }] = await backend.db.query("SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'");
+          if (Number(n) > 0) return;
+        }
+      })();
+      await Promise.race([scanned.promise, waits]);
+      watching = false;
+      release.open();
+      await Promise.all([putting, starting, waits]);
+      assert.equal(await newer.records.forgetPerson("phone:+15550100001"), 1);
+    });
+  }
+
   test(`${backend.name}: export returns every record of every collection, oldest first, past one page`, async () => {
     const { records } = agentOn(backend);
     for (let n = 0; n < 130; n++) await records.put(n % 2 ? "notes" : "questions", `r${String(n).padStart(3, "0")}`, n % 2 ? { about: "key:7", n } : question(n));

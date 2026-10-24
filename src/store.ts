@@ -760,8 +760,9 @@ export class Store {
 
   /**
    * At an agent's start: indexes `collection`'s records for every field declared on this store
-   * that they are not known to be indexed for. When this declaration is covered by what the
-   * records are indexed for, resolves to null at once. Otherwise the collection's declaration
+   * that they are not known to be indexed for. Makes the collection's row if there is none (what
+   * every put locks); when this declaration is covered by what the records are indexed for, then
+   * resolves to null. Otherwise the collection's declaration
    * first becomes the union of the kept one and this (a person field if either says so; it never
    * shrinks), so every put from then on, by any agent on the store, indexes it; then one page of
    * records per call is indexed for the fields the records were not indexed for, each record
@@ -774,18 +775,21 @@ export class Store {
     checkCollection(collection);
     checkFields(collection, fields, people);
     const scope = [this.agentId, collection];
-    const lock = this.db.dialect === "postgres" ? " FOR UPDATE" : "";
-    const kept = async (tx: Omit<Database, "transaction">) => {
-      const [row] = await tx.query(`SELECT declaration, indexed FROM record_collections WHERE agent_id = ? AND collection = ?${lock}`, scope);
+    const postgres = this.db.dialect === "postgres";
+    const lock = postgres ? " FOR UPDATE" : "";
+    const kept = async (db: Omit<Database, "transaction">, how: "" | " FOR SHARE" | " FOR UPDATE" = "") => {
+      const [row] = await db.query(`SELECT declaration, indexed FROM record_collections WHERE agent_id = ? AND collection = ?${postgres ? how : ""}`, scope);
       return { declared: declaredOf(row?.declaration), indexed: declaredOf(row?.indexed) };
     };
     let cursor: { after: string | null; target: Declared };
     if (after === null) {
+      // The row first, even when nothing is to be done: every put takes it (FOR SHARE), so a start
+      // widening the declaration waits for puts under way, whatever declaration started first.
+      await this.db.run("INSERT INTO record_collections (agent_id, collection, declaration, indexed) VALUES (?, ?, ?, ?) ON CONFLICT (agent_id, collection) DO NOTHING", [...scope, NONE, NONE]);
       const current = { people: [...people], fields: [...fields] };
       if (covers((await kept(this.db)).indexed, current)) return null;
-      await this.db.run("INSERT INTO record_collections (agent_id, collection, declaration, indexed) VALUES (?, ?, ?, ?) ON CONFLICT (agent_id, collection) DO NOTHING", [...scope, NONE, NONE]);
       const target = await this.db.transaction(async (tx) => {
-        const { declared } = await kept(tx);
+        const { declared } = await kept(tx, " FOR UPDATE");
         const wider = unite(declared, current);
         await tx.run("UPDATE record_collections SET declaration = ? WHERE agent_id = ? AND collection = ?", [JSON.stringify(wider), ...scope]);
         return wider;
@@ -793,10 +797,10 @@ export class Store {
       cursor = { after: null, target };
     } else cursor = cursorOf(after);
     const { indexed } = await kept(this.db);
-    // The fields the records are not known to be indexed for, each as the target declares it.
-    const missing: Array<[string, boolean]> = [
-      ...cursor.target.people.filter((f) => !indexed.people.includes(f)).map((f): [string, boolean] => [f, true]),
-      ...cursor.target.fields.filter((f) => !indexed.people.includes(f) && !indexed.fields.includes(f)).map((f): [string, boolean] => [f, false]),
+    // The fields the records are not known to be indexed for.
+    const missing = [
+      ...cursor.target.people.filter((f) => !indexed.people.includes(f)),
+      ...cursor.target.fields.filter((f) => !indexed.people.includes(f) && !indexed.fields.includes(f)),
     ];
     const ids = missing.length
       ? await this.db.query(
@@ -808,19 +812,22 @@ export class Store {
     for (const { id } of ids) {
       const key = [...scope, String(id)];
       await this.db.transaction(async (tx) => {
+        // Taken as a put takes them (the declaration, then the record), and each field indexed as the
+        // declaration is now: a person field never becomes plain again under another start's page.
+        const { declared } = await kept(tx, " FOR SHARE");
         const [row] = await tx.query(`SELECT doc FROM records WHERE agent_id = ? AND collection = ? AND id = ?${lock}`, key);
         if (!row) return; // deleted since the page was read
-        await tx.run(`DELETE FROM record_index WHERE agent_id = ? AND collection = ? AND id = ? AND field IN (${marks})`, [...key, ...missing.map(([f]) => f)]);
+        await tx.run(`DELETE FROM record_index WHERE agent_id = ? AND collection = ? AND id = ? AND field IN (${marks})`, [...key, ...missing]);
         const value = parse<RecordValue>(row.doc, {});
-        for (const [field, person] of missing) {
-          const i = indexLenient(collection, field, value[field], person);
+        for (const field of missing) {
+          const i = indexLenient(collection, field, value[field], declared.people.includes(field));
           if (i) await tx.run("INSERT INTO record_index (agent_id, collection, id, field, value, person) VALUES (?, ?, ?, ?, ?, ?)", [...key, field, i.value, i.person ? 1 : 0]);
         }
       });
     }
     if (ids.length === REINDEX_PAGE) return JSON.stringify({ after: String(ids.at(-1)!.id), target: cursor.target });
     await this.db.transaction(async (tx) => {
-      const now = await kept(tx); // read again: another start may have recorded more meanwhile
+      const now = await kept(tx, " FOR UPDATE"); // read again: another start may have recorded more meanwhile
       await tx.run("UPDATE record_collections SET indexed = ? WHERE agent_id = ? AND collection = ?", [JSON.stringify(unite(now.indexed, cursor.target)), ...scope]);
     });
     return null;
