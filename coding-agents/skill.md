@@ -571,8 +571,9 @@ createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamabl
 The same tools as commands, over the organization's MCP server, with the same sign-in and gating.
 It runs on Stricli (`@stricli/core`, the framework Sentry's CLI is built on). Every tool is already a
 command under its own name (`place_order` is `acme place-order`); a CLI file adds what needs
-judgement. Install `@modelcontextprotocol/client@2.3.1` and `@stricli/core@1.3.0` (the versions
-Flow Framework pins) and write `src/cli.ts`:
+judgement. Install `@modelcontextprotocol/client@2.3.1` and `@stricli/core@1.3.0`, plus
+`marked@12.0.2` and `marked-terminal@7.3.0` to render tools' Markdown in a terminal (the versions
+Flow Framework pins), and write `src/cli.ts`:
 
 ```ts
 #!/usr/bin/env node
@@ -609,6 +610,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
 - Installed, it is the organization's own command: `"bin": { "acme": "src/cli.ts" }` in its package
   (node runs `.ts` files outside `node_modules`; publish a compiled `.js` bin to npm). While building
   it, run it with `npm run cli -- order -h`: npm takes flags before `--` as its own.
+- A tool with `format` prints its own text, rendered at a terminal (as written when piped, for
+  `NO_COLOR`, or without `marked`); `--json`, `--fields`, `columns` and `view` show its data.
 - Every tool command takes `--json` and `--fields a,b`; one that changes things takes `--dry-run`; one
   that may delete or overwrite asks first in a terminal and needs `--yes` without one. Exit codes: 0
   done, 1 the tool failed, 2 wrong command or arguments (with the help to read), 3 sign-in needed, 4

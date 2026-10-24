@@ -1772,6 +1772,9 @@ export class Conversation {
           } finally { r.startedAt = Date.now(); authorize(); }
         })
         .then(
+          // TODO: benchmark a tool's `format` (Markdown) against this JSON for chat agents (tokens per
+          // turn, and whether the next call still finds its ids) before chats use it. Here the
+          // output is not checked against `output`, which `format` relies on.
           (output) => ({ ok: true, text: render(output) }),
           (error) => ({ ok: false, text: `Failed: ${error instanceof Error ? error.message : String(error)}` }),
         ),

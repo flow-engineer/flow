@@ -17,6 +17,7 @@ import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHt
 import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
 import { configDir, isSignedIn, signIn, signOut, storedProvider } from "./auth.ts";
 import { SKILLS_META } from "../../src/skills.ts";
+import { FORMATTED } from "../../src/tools.ts";
 import {
   BUILT_IN,
   commandTable,
@@ -554,6 +555,9 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
         throw needsSignIn(error) ? explain(config, "", error) : (badArguments(config, c.words, error, (field) => (args.includes(field) ? `<${field}>` : `--${flagName(field)}`)) ?? error);
       });
       if (result.isError) throw new CliExit(EXIT.failed, textOf(result.content as Block[]) || `${tool.name} failed.`);
+      // The tool's own text, unless the person asked for data or the CLI file chose what to show.
+      const formatted = (result._meta as Record<string, unknown> | undefined)?.[FORMATTED] === true && !parsed.json && !parsed.fields && !settings?.columns && !settings?.view;
+      if (formatted) return void io.write(`${(await forTerminal(textOf(result.content as Block[]), io)).replace(/\n*$/, "")}\n`);
       io.write(`${render(valueOf(result), { json: Boolean(parsed.json), fields: parsed.fields as string[] | undefined, columns: settings?.columns, view: settings?.view })}\n`);
     },
   });
@@ -751,6 +755,22 @@ function valueOf(result: { content?: unknown; structuredContent?: unknown; isErr
     return JSON.parse(text);
   } catch {
     return text;
+  }
+}
+
+/**
+ * A tool's Markdown, styled for a person at a terminal by marked-terminal when the CLI's package has
+ * it (optional peers, loaded only here); as written when piped, for NO_COLOR, or without them.
+ */
+async function forTerminal(markdown: string, io: CliIO): Promise<string> {
+  const env = io.env ?? process.env;
+  if (!io.interactive || env.NO_COLOR || env.TERM === "dumb") return markdown;
+  try {
+    const [{ Marked }, { markedTerminal }] = await Promise.all([import("marked"), import("marked-terminal")]);
+    // marked-terminal 7 returns an extension; its published types still say a renderer.
+    return await new Marked(markedTerminal({ showSectionPrefix: false }) as never).parse(markdown);
+  } catch {
+    return markdown;
   }
 }
 

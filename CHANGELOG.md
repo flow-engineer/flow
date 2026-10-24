@@ -2,6 +2,26 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **A tool's own text for people.** `tool({ output, format: (result) => markdown })` makes the
+  result readable where people see it: over MCP the text is the result's `content` (structured
+  content still carries the data), and the CLI prints it by default, rendered at a terminal by
+  `marked-terminal` (new optional peers: `marked@12.0.2`, `marked-terminal@7.3.0`; as written when
+  piped, for `NO_COLOR`, or when they are not installed). `--json`, `--fields` and a
+  CLI file's `columns` or `view` still show the data. `format` runs on the checked output; if it
+  throws, the result goes out as JSON, still a success, and `tool.end` carries `formatError`.
+  Chats are unchanged: the model there still reads the data. `flow check` refuses `format`
+  without `output`.
+
+### Migration notes
+
+None. A CLI on an older Flow Framework ignores the text and keeps showing the data as before. To
+render the text in a terminal, a CLI's package adds `marked@12.0.2` and `marked-terminal@7.3.0`;
+without them it prints the Markdown as written.
+
 ## 0.6.0 (2026-10-24)
 
 ### Changes
