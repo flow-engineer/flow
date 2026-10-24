@@ -1797,7 +1797,7 @@
     markUnread(lastOut);
     const zone = contact?.timeZone;
     $("theirTime").textContent = zone ? at(now, zone) : at(now);
-    $("theirZone").textContent = !contact ? "They have not written to the agent yet, so nudges to them are refused (unknown_person)."
+    $("theirZone").textContent = !contact ? "They have not written to the agent yet: only a template reaches them (text and prompt nudges are refused, unknown_person)."
       : zone ? `${city(zone)} time, set by ${contact.timeZoneSource === "person" ? "them" : "the business"}`
       : "Your time: their time zone is not known, so quiet hours don't apply to them";
     const pill = $("quietPill");

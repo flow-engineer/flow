@@ -137,7 +137,8 @@ agent serves beside its chat, such as a business's event push, answered by `agen
 (and by the test cloud with a test's events); `onTick(now)` is work of your own on the agent's clock
 (held sends, reminders timed from your data), run with each check for due scheduled messages.
 `agent.reach({ channel, address })` makes the conversation of someone the business may message
-before they have written; until they write, only a template reaches them on WhatsApp.
+before they have written; until they write, only a template reaches them on WhatsApp. A template
+nudge does this itself (below), so `reach` is for opening the conversation without sending.
 
 Models are reached through any OpenAI-compatible API. `openAICompatible()` with no key reads the
 first of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` and
@@ -283,11 +284,15 @@ and QUIT, as some US carrier rules expect; `keywords: { stop: [...] }` sets your
 Messages the business starts are nudges: `agent.nudge({ to: { channel, address }, text })` sends
 as written; `prompt` instead lets the agent write it (or decide not to); `template` sends a
 WhatsApp template you already set up. Pass `idempotencyKey` when your system may retry, and `at`
-to send later. Prefer `prompt`; use `text` only when the wording must be exact. Outside WhatsApp's
+to send later. Prefer `prompt`; use `text` only when the wording must be exact. `to` is someone
+who has written on that channel (`unknown_person` otherwise); a phone number is read as their
+messages' are, so any format of it finds them. Only a template reaches someone who never wrote: on
+WhatsApp it makes them a person (the number in full, with its country code), and their reply joins
+that conversation. Outside WhatsApp's
 24-hour window only templates go out: declare a `fallbackTemplate` ("You have a new message. Reply to
 see it.", no values) so a nudge is held until they reply instead of refused (`outside_window`); the
 agent may send a fitting template itself (`send_template`), and `template.missing` events say which
-messages want one. Held nudges (quiet hours, a closed window) settle as `held`, then `sent` or `expired`.
+messages want one. A prompt nudge with `at` that comes due past the window does the same. Held nudges (quiet hours, a closed window) settle as `held`, then `sent` or `expired`.
 For a call to action use `link` (`text` with `link: { label, url }`, or the agent's send with
 `link`), never a URL in the text: what the business starts goes with link previews off, since on
 WhatsApp a preview card's title becomes the phone's notification instead of the message.
