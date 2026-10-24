@@ -21,7 +21,7 @@ import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, trans
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
 import { indexDeclared, recordsOf, type RecordCollection, type Records } from "./records.ts";
-import { businessSchedule, claimDue, summary } from "./schedules.ts";
+import { addWakeUp, businessSchedule, claimDue, summary, wakeUpsOf, type WakeUp, type WakeUpInput, type WakeUpResult } from "./schedules.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
 import { Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
 import { clock, quietUntil, validZone } from "./time.ts";
@@ -1063,9 +1063,10 @@ export class Agent {
    * What is waiting to go to a person: their scheduled messages (theirs and the business's) and the
    * nudges held for their quiet hours or a closed window. The playground shows it.
    */
-  async outbox(conversationId: string): Promise<{ schedules: ScheduledItem[]; held: HeldItem[] }> {
+  async outbox(conversationId: string): Promise<{ schedules: ScheduledItem[]; held: HeldItem[]; wakeUps: WakeUp[] }> {
     await this.settings.ready;
-    const schedules = (await this.store.schedules(conversationId)).map((s) => ({
+    const all = await this.store.schedules(conversationId);
+    const schedules = all.filter((s): s is typeof s & { mode: ScheduledItem["mode"] } => s.mode !== "wake").map((s) => ({
       id: s.id,
       message: s.instruction,
       origin: s.origin === "person" ? ("person" as const) : ("business" as const),
@@ -1088,7 +1089,38 @@ export class Agent {
         expiresAt: b.expiresAt ?? null,
       };
     });
-    return { schedules, held };
+    return { schedules, held, wakeUps: await wakeUpsOf(this.store, conversationId) };
+  }
+
+  /**
+   * Wakes the agent later in someone's conversation, by a channel identity they have written from
+   * (as a nudge's `to`): at that time it gets a turn there with `note`, and decides what to do (look
+   * something up, message them, nothing). Nothing is sent unless the agent sends it. A wake-up due
+   * in their quiet hours waits for them to end (unless `respectQuietHours: false`), one due after
+   * they texted STOP or paused messages does not run, and one past their WhatsApp window tells the
+   * agent only a template reaches them. Refused (unknown_person) for someone who never wrote.
+   */
+  async wakeUp(input: WakeUpInput & { to: { channel: string; address: string } }): Promise<WakeUpResult> {
+    await this.settings.ready;
+    const identity = await this.nudgeIdentity(input.to, false);
+    if (!identity) return { status: "refused", reason: "unknown_person" };
+    const conversationId = identity.conversationId;
+    const zone = (await this.store.conversation(conversationId))?.timeZone ?? this.options.timeZone ?? "UTC";
+    const { to, ...wake } = input;
+    return addWakeUp({ store: this.store, conversationId, channel: () => to.channel, now: this.now, zone: () => zone }, wake);
+  }
+
+  /** Cancels the active wake-ups with this key, whoever they are for (`context.wakeUps.cancel` in a tool). Resolves to how many. */
+  async cancelWakeUp(key: string): Promise<number> {
+    await this.settings.ready;
+    return this.store.cancelWakeUps(key);
+  }
+
+  /** Someone's wake-ups still to come, soonest first, by a channel identity they have written from; [] for someone who never wrote. */
+  async listWakeUps(to: { channel: string; address: string }): Promise<WakeUp[]> {
+    await this.settings.ready;
+    const identity = await this.nudgeIdentity(to, false);
+    return identity ? wakeUpsOf(this.store, identity.conversationId) : [];
   }
 
   /** Whether the agent has a profile (get_user_profile), so the test cloud knows to play it. */
@@ -1301,6 +1333,8 @@ export class Agent {
       const provider = s.origin === "person" ? [] : onChannel.filter((i) => i.via === "provider");
       const identity = (provider.length ? provider : onChannel).sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))[0];
       if (!identity) return `no way to reach them on ${s.channel}`;
+      // A wake-up is the agent's turn, not a message: past their window it runs, told only a template reaches them.
+      if (s.mode === "wake") return null;
       if (!windowClosed({ info: this.infoOf(s.channel, s.conversationId), lastMessageAt: identity.lastMessageAt }, now)) return null;
       // The business's prompt, due past their window: it goes on as that prompt nudge sent now, so the
       // agent may send a template that says it, else the fallback goes and it waits for their reply.

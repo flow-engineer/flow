@@ -553,7 +553,7 @@
         <div class="pill" id="quietPill" hidden></div>
       </div>
       <details class="sec" id="clockSec" hidden>
-        <summary class="label">Move the clock <span class="hint">reminders and held nudges come due as it moves</span></summary>
+        <summary class="label">Move the clock <span class="hint">reminders, wake-ups and held nudges come due as it moves</span></summary>
         <div class="row2">
           <button type="button" class="ghost" data-advance="900000">+15 min</button>
           <button type="button" class="ghost" data-advance="3600000">+1 hour</button>
@@ -1863,6 +1863,7 @@
       list.push(item(`Held ${h.kind} nudge · goes on ${h.channel}`, "held", h.what, `${until}${h.expiresAt ? ` · dropped if still held at ${at(h.expiresAt, zone)}` : ""}`));
     }
     for (const sc of outbox.schedules) list.push(item(sc.origin === "person" ? "Their reminder" : "Scheduled by the business", "", sc.message, `${sc.summary}${sc.nextRunAt ? ` · next ${at(sc.nextRunAt, sc.timeZone)}` : ""}${sc.respectsQuietHours ? " · waits for quiet hours" : ""}`));
+    for (const w of outbox.wakeUps ?? []) list.push(item("The agent's wake-up", "", w.note, `${at(w.at, zone)}${w.key ? ` · key ${w.key}` : ""}${w.respectsQuietHours ? " · waits for quiet hours" : ""} · a turn for the agent, nothing sent by itself`));
     if (!list.length) { const li = document.createElement("li"); li.className = "empty"; li.textContent = "Nothing scheduled or held."; list.push(li); }
     $("waiting").replaceChildren(...list);
     $("toQuietEnd").disabled = !quietEndsAt;

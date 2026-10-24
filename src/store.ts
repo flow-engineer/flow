@@ -1,7 +1,7 @@
 // Flow Framework's own state in the database: who each person is and on which channels, every
 // conversation's history, the inbox of events not yet handled, background tools in flight,
-// scheduled messages and their runs, nudges, what each person asked not to be messaged about, and
-// the agent's own small records (records.ts). The author's other data never lives here. Every row
+// scheduled messages and their runs, the agent's wake-ups (a kind of schedule), nudges, what each
+// person asked not to be messaged about, and the agent's own small records (records.ts). The author's other data never lives here. Every row
 // carries the agent's id, so one database can hold several agents.
 
 import type { Database, Row } from "./db.ts";
@@ -124,6 +124,13 @@ const MIGRATIONS: Array<(t: Types) => string> = [
    CREATE TABLE record_collections (
      agent_id TEXT NOT NULL, collection ${t.key} NOT NULL, declaration TEXT NOT NULL, indexed TEXT NOT NULL,
      PRIMARY KEY (agent_id, collection))`,
+  // The agent's wake-ups (schedules.ts): schedules of mode "wake", each with the key its code or the
+  // model may give it, one active wake-up per key in a conversation (a done or cancelled one frees
+  // its key), found by key across conversations; and a person's active schedules found by their
+  // conversation, which every turn now reads.
+  () => `ALTER TABLE schedules ADD COLUMN wake_key TEXT;
+   CREATE UNIQUE INDEX schedules_wake_key ON schedules (agent_id, wake_key, conversation_id) WHERE status = 'active' AND wake_key IS NOT NULL;
+   CREATE INDEX schedules_conversation ON schedules (agent_id, conversation_id, status)`,
 ];
 
 /** Quiet hours, "HH:MM" to "HH:MM" in the person's own time; they may wrap midnight. */
@@ -172,9 +179,11 @@ export interface ScheduleRow {
   id: string;
   conversationId: string;
   channel: string;
+  /** What the turn is told; a wake-up's note. */
   instruction: string;
   fixedText: boolean;
-  mode: "message" | "check";
+  /** message and check: what the person asked for (or the business); wake: the agent's own wake-up. */
+  mode: "message" | "check" | "wake";
   rule: Record<string, unknown>;
   timeZone: string;
   nextRunAt: number | null;
@@ -183,11 +192,17 @@ export interface ScheduleRow {
   endsOn: string | null;
   status: "active" | "done" | "cancelled";
   version: number;
-  origin: "person" | "api";
+  /** Who set it: the person (their reminder), the business (a nudge with `at`), or the agent (a wake-up). */
+  origin: "person" | "api" | "agent";
   createdAt: number;
+  /** A wake-up's key, when it was given one: what code cancels it by. */
+  wakeKey: string | null;
 }
 
-export type NewSchedule = Omit<ScheduleRow, "version" | "runCount" | "status" | "createdAt">;
+export type NewSchedule = Omit<ScheduleRow, "version" | "runCount" | "status" | "createdAt" | "wakeKey"> & { wakeKey?: string | null };
+
+/** How addWakeUp went: added, the conversation's active wake-up with that key, or a cap reached (nothing written). */
+export type WakeUpAdded = { added: true } | { exists: ScheduleRow } | { full: "person" | "agent" };
 
 export interface NudgeRow {
   id: string;
@@ -532,10 +547,55 @@ export class Store {
   // Scheduled messages.
 
   async addSchedule(s: NewSchedule, db: Omit<Database, "transaction"> = this.db): Promise<void> {
-    await db.run(
-      `INSERT INTO schedules (agent_id, id, conversation_id, channel, instruction, fixed_text, mode, rule, time_zone, next_run_at, max_runs, ends_on, status, origin, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-      [this.agentId, s.id, s.conversationId, s.channel, s.instruction, s.fixedText ? 1 : 0, s.mode, json(s.rule), s.timeZone, s.nextRunAt, s.maxRuns, s.endsOn, s.origin, Date.now()],
+    await this.insertSchedule(s, db);
+  }
+
+  /** Inserts a schedule, unless an active one holds its wake key (or its id) already: false then. */
+  private async insertSchedule(s: NewSchedule, db: Omit<Database, "transaction">): Promise<boolean> {
+    const changed = await db.run(
+      `INSERT INTO schedules (agent_id, id, conversation_id, channel, instruction, fixed_text, mode, rule, time_zone, next_run_at, max_runs, ends_on, status, origin, created_at, wake_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)${s.wakeKey ? " ON CONFLICT DO NOTHING" : ""}`,
+      [this.agentId, s.id, s.conversationId, s.channel, s.instruction, s.fixedText ? 1 : 0, s.mode, json(s.rule), s.timeZone, s.nextRunAt, s.maxRuns, s.endsOn, s.origin, Date.now(), s.wakeKey ?? null],
+    );
+    return changed > 0;
+  }
+
+  /**
+   * Adds a wake-up (a schedule of mode wake), unless its conversation already has `perPerson` active
+   * ones or the agent `perAgent`: nothing is written then. With a key an active wake-up of the same
+   * conversation already holds, nothing is written either and that one comes back, also when two
+   * adds race. The counts take no lock, so wake-ups added at the same moment may pass a cap by up to
+   * as many as are added at once.
+   */
+  async addWakeUp(s: NewSchedule, limits: { perPerson: number; perAgent: number }): Promise<WakeUpAdded> {
+    if (s.mode !== "wake") throw new Error("flow: addWakeUp takes a schedule of mode wake");
+    const held = async (db: Omit<Database, "transaction">) => {
+      const [row] = await db.query("SELECT * FROM schedules WHERE agent_id = ? AND wake_key = ? AND conversation_id = ? AND status = 'active'", [this.agentId, s.wakeKey, s.conversationId]);
+      return row ? scheduleOf(row) : null;
+    };
+    return this.db.transaction(async (tx) => {
+      if (s.wakeKey) {
+        const existing = await held(tx);
+        if (existing) return { exists: existing };
+      }
+      const [{ n: theirs }] = await tx.query("SELECT count(*) AS n FROM schedules WHERE agent_id = ? AND conversation_id = ? AND status = 'active' AND mode = 'wake'", [this.agentId, s.conversationId]);
+      if (Number(theirs) >= limits.perPerson) return { full: "person" as const };
+      const [{ n: all }] = await tx.query("SELECT count(*) AS n FROM schedules WHERE agent_id = ? AND status = 'active' AND mode = 'wake'", [this.agentId]);
+      if (Number(all) >= limits.perAgent) return { full: "agent" as const };
+      if (await this.insertSchedule(s, tx)) return { added: true as const };
+      // Another add with the same key got there first.
+      const first = await held(tx);
+      if (first) return { exists: first };
+      throw new Error(`flow: wake-up ${s.id} could not be added`);
+    });
+  }
+
+  /** Cancels the active wake-ups with this key: in one conversation, or (none given) in every one. Resolves to how many. */
+  async cancelWakeUps(key: string, conversationId?: string): Promise<number> {
+    const one = conversationId === undefined ? "" : " AND conversation_id = ?";
+    return this.db.run(
+      `UPDATE schedules SET status = 'cancelled', version = version + 1 WHERE agent_id = ? AND wake_key = ? AND mode = 'wake' AND status = 'active'${one}`,
+      [this.agentId, key, ...(conversationId === undefined ? [] : [conversationId])],
     );
   }
 
@@ -973,6 +1033,7 @@ function scheduleOf(r: Row): ScheduleRow {
     version: Number(r.version),
     origin: r.origin as ScheduleRow["origin"],
     createdAt: Number(r.created_at),
+    wakeKey: (r.wake_key as string | null) ?? null,
   };
 }
 

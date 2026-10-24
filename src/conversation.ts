@@ -30,7 +30,8 @@
 //   confirms it.
 // - Everything is kept in the store as it happens: the history, the inbox of events not yet
 //   handled, background tools in flight. After a restart the conversation carries on.
-// - Scheduled messages and nudges arrive through the inbox and wait for the turn in progress.
+// - Scheduled messages, nudges and the agent's own wake-ups arrive through the inbox and wait for
+//   the turn in progress.
 // - A message the agent's own rules answer with no model call (its intercept, a STOP, START or
 //   HELP keyword) is kept with what was sent back, in order with the person's other messages, and
 //   starts no turn: a turn running takes it in at its next step, else it is stored at once.
@@ -46,7 +47,7 @@ import type { FlowEvents } from "./business-events/engine.ts";
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { recordsUntil, type Records } from "./records.ts";
-import { scheduleTools } from "./schedules.ts";
+import { addWakeUp, scheduleTools, wakeUpsOf, wakeUpsSection, wakeUpTools, type WakeUps } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
 import { EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
@@ -189,14 +190,14 @@ interface Task {
   startedAt: number;
 }
 
-/** A scheduled run or a prompt nudge whose turn owes the person a message. */
+/** A scheduled run, a prompt nudge or a wake-up, whose turn may owe the person a message. */
 interface Owed {
   run?: string;
   nudge?: string;
-  mode: "message" | "check" | "prompt";
+  mode: "message" | "check" | "prompt" | "wake";
   channel: string;
   address?: string;
-  /** A prompt nudge to someone whose WhatsApp window is closed: only a template reaches them. */
+  /** A prompt nudge or a wake-up for someone whose WhatsApp window is closed: only a template reaches them. */
   windowClosed?: boolean;
 }
 
@@ -284,6 +285,8 @@ export class Conversation {
   private readonly puts = new Set<Promise<unknown>>();
   /** The agent's records as this conversation's tools have them (`context.records`): no put once it is closed. */
   private readonly records: Records;
+  /** The agent's wake-ups as this conversation's tools have them (`context.wakeUps`): none added once it is closed. */
+  private readonly wakeUps: WakeUps;
   private recentChannels: string[] = [];
   private promptDestination?: { channel: string; address?: string };
   private timeZone: string | null = null;
@@ -351,6 +354,21 @@ export class Conversation {
       this.timeZone = existing.timeZone;
       this.quietHours = existing.quietHours;
     }
+    const wakeScope = {
+      store: settings.store,
+      conversationId: id,
+      channel: () => this.currentChannel(),
+      now: settings.now,
+      zone: () => this.timeZone ?? settings.timeZone ?? "UTC",
+    };
+    this.wakeUps = {
+      add: (input) => {
+        if (this.closedWhy) throw new Error(`flow: wake-ups: not added: ${this.closedWhy}`);
+        return addWakeUp(wakeScope, input);
+      },
+      cancel: (key) => settings.store.cancelWakeUps(key),
+      list: () => wakeUpsOf(settings.store, id),
+    };
     const builtins = [
       ...scheduleTools({
         store: settings.store,
@@ -362,6 +380,7 @@ export class Conversation {
         agentZone: settings.timeZone,
       }),
       ...noContactTools({ store: settings.store, conversationId: id, now: settings.now, zone: () => this.timeZone, setQuietHours: (q) => this.setQuietHours(q) }),
+      ...wakeUpTools(wakeScope),
     ];
     const fallback = settings.fallbackTemplate;
     const offered = settings.templates.filter((t) => t.name !== fallback);
@@ -651,8 +670,14 @@ export class Conversation {
     } else if (row.kind === "note") {
       this.notes.push({ text: p.text, inbox: row.id, wait: p.wait === true, ...(p.reset === true ? { reset: true } : {}) });
     } else if (row.kind === "schedule") {
+      const link = p.mode === "wake" ? this.channels.get(p.channel) : undefined;
+      const closed = !!link && windowClosed(link, this.settings.now());
       if (p.fixed) this.direct.push({ inbox: row.id, channel: p.channel, text: p.text, run: p.run, schedule: p.schedule });
-      else this.notes.push({ text: p.text, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel } });
+      else if (closed) {
+        // A wake-up past their WhatsApp window: the agent may still do its work, and only a template reaches them.
+        const how = this.builtins.has("send_template") ? "If one of the business's templates says what you have to tell them, send it with send_template, its values filled in; otherwise send them nothing." : "So send them nothing.";
+        this.notes.push({ text: `${p.text} Their WhatsApp 24-hour window is closed: no ordinary message reaches them. ${how}`, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel, windowClosed: true } });
+      } else this.notes.push({ text: p.text, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel } });
     } else if (row.kind === "nudge") {
       if (p.prompt !== undefined) {
         if (p.windowClosed) {
@@ -1174,7 +1199,9 @@ export class Conversation {
       }
     }
     const quiet = this.quietHours === "off" ? null : (this.quietHours ?? (this.settings.quietHours === false ? null : (this.settings.quietHours ?? { from: "22:00", to: "07:00" })));
-    const rules = rulesSection(noContact, this.timeZone ?? this.settings.timeZone ?? "UTC", this.timeZone ? quiet : null);
+    const zone = this.timeZone ?? this.settings.timeZone ?? "UTC";
+    const rules = rulesSection(noContact, zone, this.timeZone ? quiet : null);
+    const wakeUps = wakeUpsSection(await wakeUpsOf(store, this.id), zone);
     // A message that came while those loaded had no step to restart: it joins the first one.
     this.absorb();
     let restarts = 0;
@@ -1196,7 +1223,7 @@ export class Conversation {
       const views = this.views();
       const several = views.length > 1;
       this.sendTools = new Map(views.map((v) => [sendToolName(v.name), v.name]));
-      const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), context].filter(Boolean).join("\n\n");
+      const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, wakeUps, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), context].filter(Boolean).join("\n\n");
       const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
       const specs = [...ownSpecs, ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk)];
       const abort = new AbortController();
@@ -1783,7 +1810,7 @@ export class Conversation {
     const key = createHash("sha256").update(`${this.id}\u0000${this.turns}\u0000${call.name}\u0000${input}`).digest("hex").slice(0, 32);
     // The agent's events side as it is now (attach() may come after createAgent), only when there is one.
     const events = this.settings.events?.();
-    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal, records: this.records, ...(events ? { events } : {}) };
+    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal, records: this.records, wakeUps: this.wakeUps, ...(events ? { events } : {}) };
     const credentials = this.settings.credentialProvider?.(identityContext) ?? this.settings.credentials;
     let context = toolContext(identityContext, credentials);
     let authorize!: () => void;

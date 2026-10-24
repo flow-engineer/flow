@@ -4,6 +4,7 @@
 import { z } from "zod";
 import type { FlowEvents } from "./business-events/engine.ts";
 import type { Records } from "./records.ts";
+import type { WakeUps } from "./schedules.ts";
 import type { ToolSpec } from "./types.ts";
 
 export interface ToolContext {
@@ -47,6 +48,13 @@ export interface ToolContext {
    * none was given as mcpServer({ businessEvents: agent.events })).
    */
   events?: FlowEvents;
+  /**
+   * The agent's wake-ups in this person's conversation: `add({ note, inMs | at, key })` gives the
+   * agent a turn here then, with the note (nothing is sent unless it sends it), `cancel(key)` cancels
+   * the active ones with that key whoever they are for, `list()` reads this person's. Absent outside
+   * a conversation (a tool called over MCP).
+   */
+  wakeUps?: WakeUps;
 }
 
 /** A business supplies named backend credentials or clients, resolved afresh for the verified person. */
