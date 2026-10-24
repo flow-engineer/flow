@@ -277,8 +277,51 @@ ranges, sorting, joins, search or transactions across records; a put replaces th
   agent.records.export())`. Put them into another store with `agent.records.put(r.collection,
   r.id, r.value)`: each gets a new `createdAt` and `updatedAt` there (the time of that put), so
   put them oldest first, as export gives them, to keep their order.
-- A follow-up at a time is not a record: `agent.nudge({ to, prompt, at })` gives the agent a turn
-  then, and that turn reads the records.
+- A follow-up at a time is not a record: a wake-up (below) gives the agent a turn then, and that
+  turn reads the records.
+
+## The agent's own wake-ups
+
+When the agent must look at something later and no one will write (24 hours after a buyer's
+question, check whether the seller answered), it sets a wake-up: a row in its store, never a timer
+in memory, so it survives restarts and deploys and runs once with several runners. At its time the
+agent gets a turn in that person's conversation with its note, `[Wake-up you set for yourself, not
+from the person: <note>]`, and decides: look something up, message them, call a tool that tells someone else, or
+nothing. **A wake-up never sends anything by itself.**
+
+The model has `wake_me_up({ note, in_minutes | at, key? })` and `cancel_wake_up({ id })` built in,
+for its own conversation only, and every turn shows it the wake-ups it set there. Code sets them too:
+
+```ts
+// In a tool, for this person: context.wakeUps (absent outside a conversation, such as over MCP).
+await context.wakeUps?.add({ inMs: 24 * HOUR, note: `check question ${id}; if it still waits, remind the seller`, key: `remind:${id}` });
+// The seller answered, in their own conversation: cancel by key, whoever the wake-up is for.
+await context.wakeUps?.cancel(`remind:${id}`);   // resolves to how many
+await context.wakeUps?.list();                    // this person's, soonest first
+
+// Outside a turn (a route, your backend's event), by a channel identity they wrote from:
+await agent.wakeUp({ to: { channel: "whatsapp", address: buyer }, at: askedAt + 2 * DAY, note: `close question ${id} if it still waits, and tell them`, key: `close:${id}` });
+await agent.cancelWakeUp(`close:${id}`);
+await agent.listWakeUps({ channel: "whatsapp", address: buyer });
+```
+
+- `add` and `wakeUp` resolve to `{ status: "scheduled", wakeUp }`, `{ status: "exists", wakeUp }`
+  (an active wake-up of that person's already has the key: that one, unchanged; once it ran or was
+  cancelled the key is free again), or `{ status: "refused", reason }` (`too_many_for_person`,
+  `too_many_for_agent`, `unknown_person` for someone who never wrote). A note that is empty or
+  too long, or a time under a minute away or more than 90 days ahead, throws.
+- It keeps the person's rules: due in their quiet hours, it waits for them to end
+  (`respectQuietHours: false` runs it at its time, for work that messages no one); after they
+  texted STOP or paused messages it does not run (recorded as skipped, with why). Past their
+  WhatsApp 24-hour window it still runs, and the agent is told only a template reaches them
+  (`send_template` when templates are declared); no fallback template goes by itself.
+- Found late (the agent was down), it still runs, and the note says when it was due: unlike a
+  scheduled message, which is missed rather than sent late.
+- Limits (`WAKE_UP_LIMITS`): 10 active per person, 10,000 per agent (per environment), 90 days
+  ahead, notes of 500 characters, keys of 200. The model is told plainly when it hits one.
+- `agent.forgetPerson` deletes their wake-ups with everything else. The playground's Person tab
+  lists them beside scheduled messages, and moving its clock brings them due; in `flow test`, a
+  business run's `wait` does the same.
 
 ## Shared test numbers and privacy
 

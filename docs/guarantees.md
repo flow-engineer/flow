@@ -87,6 +87,10 @@ redelivers events it is not sure arrived. The agent takes each message once:
   `channel_timeout_unknown_outcome` (it may have arrived). Idempotency keys cannot undo that.
 - One runner works on a conversation at a time (a lease in the database), so a deploy's overlap
   never answers one message twice.
+- **Scheduled messages and wake-ups** are rows in the store. When one comes due, one runner claims
+  it and writes its turn into the conversation's inbox in one transaction, so it runs once, also
+  with several runners or across a restart. A scheduled message found more than 30 minutes late is
+  missed, never sent late; a wake-up found late still runs, and the agent is told when it was due.
 
 ## Writing your own provider
 

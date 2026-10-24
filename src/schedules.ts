@@ -376,7 +376,7 @@ export async function addWakeUp(scope: WakeUpScope, input: WakeUpInput): Promise
     origin: "agent",
     wakeKey: input.key ?? null,
   };
-  const added = await scope.store.addWakeUp(row, WAKE_UP_LIMITS);
+  const added = await scope.store.addWakeUp(row);
   if ("full" in added) return { status: "refused", reason: added.full === "person" ? "too_many_for_person" : "too_many_for_agent" };
   if ("exists" in added) return { status: "exists", wakeUp: wakeUpOf(added.exists) };
   return { status: "scheduled", wakeUp: { id: row.id, at, note: row.instruction, key: row.wakeKey ?? null, channel: row.channel, respectsQuietHours: quiet } };

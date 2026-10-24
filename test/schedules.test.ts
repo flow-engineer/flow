@@ -342,14 +342,13 @@ for (const { name, db } of engines) {
     const store = new Store(db, `agt_${Math.random().toString(36).slice(2, 10)}`);
     await store.migrate();
     const row = (id: string, conversationId: string, at = NOON_NY + HOUR) => ({ id, conversationId, channel: "sms", instruction: "check", fixedText: false, mode: "wake" as const, rule: { repeat: "once", at }, timeZone: "UTC", nextRunAt: at, maxRuns: null, endsOn: null, origin: "agent" as const, wakeKey: "remind:Q7" });
-    const limits = { perPerson: 10, perAgent: 100 };
-    const both = await Promise.all([store.addWakeUp(row("w1", "c1"), limits), store.addWakeUp(row("w2", "c1"), limits)]);
+    const both = await Promise.all([store.addWakeUp(row("w1", "c1")), store.addWakeUp(row("w2", "c1"))]);
     assert.deepEqual(both.map((r) => ("added" in r ? "added" : "exists" in r ? `exists ${r.exists.id}` : "full")).sort(), ["added", `exists ${"added" in both[0] ? "w1" : "w2"}`]);
-    assert.ok("added" in (await store.addWakeUp(row("w3", "c2"), limits)), "another conversation has its own");
+    assert.ok("added" in (await store.addWakeUp(row("w3", "c2"))), "another conversation has its own");
     await claimDue(store, NOON_NY + HOUR, async () => null, async () => null);
-    assert.ok("added" in (await store.addWakeUp(row("w4", "c1", NOON_NY + 2 * HOUR), limits)), "done: the key is free again");
+    assert.ok("added" in (await store.addWakeUp(row("w4", "c1", NOON_NY + 2 * HOUR))), "done: the key is free again");
     assert.equal(await store.cancelWakeUps("remind:Q7"), 1, "every conversation's active one (c2's came due too)");
-    assert.ok("added" in (await store.addWakeUp(row("w5", "c1", NOON_NY + 2 * HOUR), limits)), "cancelled: free again");
+    assert.ok("added" in (await store.addWakeUp(row("w5", "c1", NOON_NY + 2 * HOUR))), "cancelled: free again");
     assert.equal(await store.cancelWakeUps("remind:Q7", "c2"), 0, "one conversation's only");
     assert.deepEqual((await store.schedules("c1")).map((s) => [s.id, s.wakeKey]), [["w5", "remind:Q7"]]);
   });

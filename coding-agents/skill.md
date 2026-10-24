@@ -271,7 +271,8 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
 
 Built in, so don't build them as tools: what the business knows about the person (`profile`, as
 `get_user_profile`), scheduled messages (`schedule_message`, `list_scheduled`,
-`cancel_scheduled`, in the person's local time), and what a person asked not to be messaged about
+`cancel_scheduled`, in the person's local time), the agent's own wake-ups (`wake_me_up`,
+`cancel_wake_up`: a turn later in this conversation with a note to itself), and what a person asked not to be messaged about
 (`add_no_contact`, `remove_no_contact`), quiet hours they set (`set_quiet_hours`) and pauses
 (`pause_messages`). STOP, START and HELP are built in on `sms()` and
 `whatsapp()`: don't build them in `intercept`. STOP stops every message the business starts, with
@@ -301,6 +302,19 @@ messages want one. A prompt nudge with `at` that comes due past the window does 
 For a call to action use `link` (`text` with `link: { label, url }`, or the agent's send with
 `link`), never a URL in the text: what the business starts goes with link previews off, since on
 WhatsApp a preview card's title becomes the phone's notification instead of the message.
+
+When the agent must look again later on its own (no reply in 24 hours: remind the seller; at 48
+hours: close the question and tell the buyer), use a wake-up, never a timer or `setTimeout`: a row
+in the store that gives the agent a turn in that conversation at its time, with its note, and sends
+nothing by itself. From a tool, `context.wakeUps?.add({ inMs, note, key })` (or `at`, ms) for this
+person; `context.wakeUps?.cancel(key)` cancels the active ones with that key in any conversation
+(the seller answered); outside a turn, `agent.wakeUp({ to, inMs, note, key })`,
+`agent.cancelWakeUp(key)`, `agent.listWakeUps(to)`. The same key while one is active returns it
+(`exists`). Keys name what the wake-up waits on (`remind:<question id>`). It keeps quiet hours
+(`respectQuietHours: false` for work that messages no one), does not run after STOP or a pause,
+runs past WhatsApp's window with the agent told only a template reaches them, and runs late rather
+than never after downtime. Limits in `WAKE_UP_LIMITS` (10 a person, 10,000 an agent, 90 days).
+The wake-up's turn reads the agent's records to see whether it is still needed.
 
 When the owner's backend is a separate service, mount `nudgeHandler(agent, { token })` (from
 `@flow-engineer/flow`; a token of at least 32 characters, from a secret; `base` is `/nudges` by default) in the
@@ -402,7 +416,7 @@ any other link is "Open in app".
 
 The Person tab also moves the agent's clock when you give it one (`const clock = playgroundClock()`,
 `simulators({ clock })` and `createAgent({ now: clock.now })`), lists what is scheduled or held for
-the person, sets their time zone and quiet hours, and sends nudges with every field the API takes.
+the person and the agent's wake-ups for them, sets their time zone and quiet hours, and sends nudges with every field the API takes.
 
 To demo what your backend does (an order ships), send the nudge it would send from the Person tab.
 

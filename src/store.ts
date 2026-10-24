@@ -1,11 +1,13 @@
 // Flow Framework's own state in the database: who each person is and on which channels, every
 // conversation's history, the inbox of events not yet handled, background tools in flight,
 // scheduled messages and their runs, the agent's wake-ups (a kind of schedule), nudges, what each
-// person asked not to be messaged about, and the agent's own small records (records.ts). The author's other data never lives here. Every row
-// carries the agent's id, so one database can hold several agents.
+// person asked not to be messaged about, and the agent's own small records (records.ts). The
+// author's other data never lives here. Every row carries the agent's id, so one database can hold
+// several agents.
 
 import type { Database, Row } from "./db.ts";
 import { checkCollection, checkFields, checkId, checkPage, checkWhere, indexValue, RECORD_LIMITS, recordIndex, recordJson, type ExportedRecord, type RecordEntry, type RecordScalar, type RecordValue } from "./records.ts";
+import { WAKE_UP_LIMITS } from "./schedules.ts";
 import type { ChatMessage } from "./types.ts";
 
 /**
@@ -561,14 +563,17 @@ export class Store {
   }
 
   /**
-   * Adds a wake-up (a schedule of mode wake), unless its conversation already has `perPerson` active
-   * ones or the agent `perAgent`: nothing is written then. With a key an active wake-up of the same
-   * conversation already holds, nothing is written either and that one comes back, also when two
-   * adds race. The counts take no lock, so wake-ups added at the same moment may pass a cap by up to
-   * as many as are added at once.
+   * Adds a wake-up (a schedule of mode wake), unless its conversation already has
+   * WAKE_UP_LIMITS.perPerson active ones or the agent perAgent: nothing is written then. With a key
+   * an active wake-up of the same conversation already holds, nothing is written either and that one
+   * comes back, also when two adds race. The counts take no lock, so wake-ups added at the same
+   * moment may pass a cap by up to as many as are added at once. Its note and key are checked here
+   * too: the store may be a service whose callers send anything.
    */
-  async addWakeUp(s: NewSchedule, limits: { perPerson: number; perAgent: number }): Promise<WakeUpAdded> {
-    if (s.mode !== "wake") throw new Error("flow: addWakeUp takes a schedule of mode wake");
+  async addWakeUp(s: NewSchedule): Promise<WakeUpAdded> {
+    if (s.mode !== "wake" || s.origin !== "agent") throw new Error("flow: wake-ups: addWakeUp takes a schedule of mode wake, origin agent");
+    if (typeof s.instruction !== "string" || !s.instruction || s.instruction.length > WAKE_UP_LIMITS.noteChars) throw new Error(`flow: wake-ups: a note is 1 to ${WAKE_UP_LIMITS.noteChars} characters`);
+    if (s.wakeKey != null && (typeof s.wakeKey !== "string" || !s.wakeKey || s.wakeKey.length > WAKE_UP_LIMITS.keyChars)) throw new Error(`flow: wake-ups: a key is 1 to ${WAKE_UP_LIMITS.keyChars} characters`);
     const held = async (db: Omit<Database, "transaction">) => {
       const [row] = await db.query("SELECT * FROM schedules WHERE agent_id = ? AND wake_key = ? AND conversation_id = ? AND status = 'active'", [this.agentId, s.wakeKey, s.conversationId]);
       return row ? scheduleOf(row) : null;
@@ -579,9 +584,9 @@ export class Store {
         if (existing) return { exists: existing };
       }
       const [{ n: theirs }] = await tx.query("SELECT count(*) AS n FROM schedules WHERE agent_id = ? AND conversation_id = ? AND status = 'active' AND mode = 'wake'", [this.agentId, s.conversationId]);
-      if (Number(theirs) >= limits.perPerson) return { full: "person" as const };
+      if (Number(theirs) >= WAKE_UP_LIMITS.perPerson) return { full: "person" as const };
       const [{ n: all }] = await tx.query("SELECT count(*) AS n FROM schedules WHERE agent_id = ? AND status = 'active' AND mode = 'wake'", [this.agentId]);
-      if (Number(all) >= limits.perAgent) return { full: "agent" as const };
+      if (Number(all) >= WAKE_UP_LIMITS.perAgent) return { full: "agent" as const };
       if (await this.insertSchedule(s, tx)) return { added: true as const };
       // Another add with the same key got there first.
       const first = await held(tx);

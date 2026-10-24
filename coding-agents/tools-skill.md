@@ -32,7 +32,8 @@ export const findSlots = tool({
   sends the model the error if it doesn't fit.
 - `run` returns any JSON-able value; throw to report a failure (the agent sees `Failed: <message>`).
 - Don't make tools for talking to the person (send_<channel>, react, share_updates, edit_message, unsend_message), for reminders
-  or scheduled messages, or for opting out of messages: Flow Framework has them.
+  or scheduled messages, for waking the agent later (`wake_me_up`; from a tool, `context.wakeUps`),
+  or for opting out of messages: Flow Framework has them.
 - Key a person's data by `context.person` (who Flow Framework verified they are) or `context.conversationId`,
   never by an id the model passed. `context.person` is `key:<resolve's value>`, else
   `phone:<E.164>` (`phone:+15550100100`), else `<channel>:<address>`. To look the person up in the

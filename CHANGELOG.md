@@ -2,6 +2,52 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased (0.8.0: store migration 11 needs a new minor, so Flow's hosting runs it first)
+
+### Changes
+
+- **The agent can wake itself up.** A wake-up is a row in the agent's store, never a timer in
+  memory: at its time the agent gets a turn in that person's conversation with its note
+  (`[Wake-up you set for yourself, not from the person: <note>]`) and decides what to do: look
+  something up, message them, call a tool, or nothing. It never sends anything by itself. It
+  survives restarts and deploys and runs once with several runners, through the same claim as
+  scheduled messages.
+  - The model gets `wake_me_up({ note, in_minutes | at, key? })` and `cancel_wake_up({ id })`
+    built in, for its own conversation only, and each turn shows it the wake-ups it set there.
+  - From code: `context.wakeUps` in a tool (`add({ note, inMs | at, key?, respectQuietHours? })`,
+    `cancel(key)`, `list()`), and `agent.wakeUp({ to, ... })`, `agent.cancelWakeUp(key)`,
+    `agent.listWakeUps(to)` elsewhere. One active wake-up per key in a conversation: the same key
+    again returns it (`status: "exists"`). `cancel(key)` cancels the active ones with that key in
+    every conversation, so the seller's answer cancels the reminder set in the buyer's.
+  - It keeps the person's rules: due in their quiet hours it waits for them to end (unless
+    `respectQuietHours: false`), and after their STOP or a pause it does not run (skipped, with
+    why). Past WhatsApp's 24-hour window it still runs, and the agent is told only a template
+    reaches them (`send_template`); no fallback template goes by itself. Found late after
+    downtime, it runs and says when it was due, where a scheduled message is missed.
+  - Limits in `WAKE_UP_LIMITS`: 10 active per person, 10,000 per agent, 90 days ahead, notes of
+    500 characters and keys of 200. The model gets a plain error past one; code gets
+    `{ status: "refused", reason }` at a cap and a throw for a bad time or note.
+  - `agent.forgetPerson` deletes them. `agent.outbox(id)` has a new `wakeUps` list, and the
+    playground's Person tab shows it beside scheduled messages; moving its clock (or a business
+    run's `wait` in `flow test`) brings them due.
+- Store migration 11 adds the `wake_key` column to `schedules`, a unique index on active wake-ups'
+  keys per conversation, and an index on each conversation's schedules (every turn now reads its
+  wake-ups). It runs on the agent's first start and changes no existing row.
+- `list_scheduled` and `cancel_scheduled` see only scheduled messages, never the agent's
+  wake-ups; the 10-a-person cap on scheduled messages counts only them.
+
+### Migration notes
+
+- **`StoreApi` has two new methods, `addWakeUp` and `cancelWakeUps`.** A store of your own that
+  forwards each call to a `Store` (as Flow's hosting does) forwards them too. A hosted agent on
+  0.8 deploys once Flow's hosting runs 0.8 (until then `flow deploy` refuses it, as for any newer
+  line).
+- **`ScheduleRow` has a new field, `wakeKey`, and new values: `mode` `"wake"`, `origin`
+  `"agent"`.** Code that reads `store.schedules(...)` itself and switches on `mode` or `origin`
+  handles them, or leaves out rows with `mode === "wake"`.
+- **Every agent's model is offered two more built-in tools**, `wake_me_up` and `cancel_wake_up`. An
+  agent with a tool of its own by either name renames it.
+
 ## 0.7.0 (2026-10-24)
 
 ### Changes

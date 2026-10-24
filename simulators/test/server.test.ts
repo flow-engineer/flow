@@ -10,7 +10,7 @@ import { mcpServer } from "../../mcp/src/index.ts";
 import { createAgent, sqlite, tool, WHATSAPP_CAROUSELS, type ChannelInfo, type ChannelSummary, type Deliver, type Incoming, type Model, type TemplateDefinition } from "../../src/index.ts";
 import { WHATSAPP, call, gate, multi, respond } from "../../test/helpers.ts";
 import { IMESSAGE, TELEGRAM } from "../../flow-messaging/src/index.ts";
-import { simulators, type AgentConnection, type Line } from "../src/index.ts";
+import { playgroundClock, simulators, type AgentConnection, type Line } from "../src/index.ts";
 
 /** An agent that answers nothing by itself: the test delivers through the last `deliver` it got. */
 function fakeAgent(channels?: ChannelSummary[]) {
@@ -537,6 +537,32 @@ test("the Person panel's template reaches a test person who never wrote, in the 
     assert.equal(await h.agent.testConversation(SAM.phone), id);
     const { lines } = (await (await fetch(`${server.url}/api/transcript?${where}`)).json()) as { lines: Line[] };
     assert.deepEqual(lines.flatMap((l) => (l.kind === "in" ? [["in", l.text]] : l.kind === "out" ? [["out", l.template?.name ?? l.text]] : [])), [["out", "welcome"], ["in", "hello?"], ["out", "Hi Sam!"]]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("the Person panel lists the agent's wake-ups for the person, and moving its clock brings one due as the agent's turn", async () => {
+  const clock = playgroundClock();
+  const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true, kind: "whatsapp" } }, testPeople: [SAM], database: sqlite(), now: clock.now });
+  await h.agent.resume();
+  const server = await simulators({ clock }).listen(h.agent, 0);
+  const where = `channel=whatsapp&person=${encodeURIComponent(SAM.phone)}`;
+  try {
+    assert.equal((await fetch(`${server.url}/api/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "whatsapp", person: SAM.phone, text: "any news from the seller?" }) })).status, 202);
+    (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Not yet." }), call("wake_me_up", { note: "check whether the seller answered", in_minutes: 120 })));
+    (await h.nextCall(1)).answer(respond());
+    const id = (await h.agent.testConversation(SAM.phone))!;
+    await h.agent.conversation(id)!.whenIdle();
+    const { outbox } = (await (await fetch(`${server.url}/api/person?${where}`)).json()) as { outbox: { wakeUps: Array<{ note: string; at: number }>; schedules: unknown[] } };
+    assert.deepEqual([outbox.wakeUps.map((w) => w.note), outbox.schedules], [["check whether the seller answered"], []], "beside scheduled messages, not among them");
+
+    const moved = await fetch(`${server.url}/api/clock`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ advanceMs: 2 * 3_600_000 + 60_000 }) });
+    assert.equal(((await moved.json()) as { ran: number }).ran, 1);
+    const woke = await h.nextCall(2);
+    assert.match(String(woke.request.messages.at(-1)?.content), /^\[Wake-up you set for yourself, not from the person: check whether the seller answered\]/);
+    woke.answer(respond());
+    await h.agent.conversation(id)!.whenIdle();
   } finally {
     await server.close();
   }
