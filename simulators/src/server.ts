@@ -998,7 +998,8 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
         ...(typeof body?.idempotency_key === "string" && body.idempotency_key ? { idempotencyKey: body.idempotency_key } : {}),
       };
       try {
-        const state = await agent.recordNudge(input);
+        // A template may make a test person who never wrote a person: the playground's, so it shows here.
+        const state = await agent.recordNudge(input, person.key || person.visitor ? {} : { via: "playground" });
         announce(`Nudge (${kind ?? "prompt"}) to ${person.name}`, { ok: true, result: `${state.status}${state.reason ? `: ${state.reason}` : ""}${state.id ? ` (${state.id})` : ""}` });
         return json(res, 202, state);
       } catch (error) {

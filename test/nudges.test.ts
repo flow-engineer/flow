@@ -141,9 +141,43 @@ test("a declared template is checked before it goes, and the agent is told what 
   await h.conversation.whenIdle();
 });
 
-test("a nudge for someone who never wrote is refused", async () => {
-  const h = await withSam();
-  assert.deepEqual(await h.agent.nudge({ to: { channel: "sms", address: "+15550199999" }, text: "hi" }), { id: "", status: "refused", reason: "unknown_person" });
+test("a template to someone who never wrote makes them a person: their reply joins its conversation, and later nudges go where they wrote from", async () => {
+  const clock = { now: Date.UTC(2026, 9, 12, 16) };
+  const h = multi({ channels: { whatsapp: { info: { ...WHATSAPP, replyWindowHours: 24 }, phone: true, kind: "whatsapp" } }, now: () => clock.now, templates: [SHIPPED], defaultCountryCode: "+44" });
+  const to = { channel: "whatsapp", address: "+1 (555) 010-0177" };
+  assert.deepEqual(await h.agent.nudge({ to, text: "hi" }), { id: "", status: "refused", reason: "unknown_person" });
+  assert.deepEqual(await h.agent.nudge({ to, prompt: "Say hi" }), { id: "", status: "refused", reason: "unknown_person" });
+  await assert.rejects(h.agent.nudge({ to, template: { name: "order_shipped", body: ["Ana"] } }), /takes 2 body values, got 1/);
+  assert.equal(await h.agent.contact(to), null, "none of them made a person");
+
+  const template = { name: "order_shipped", body: ["Ana", "1042"] };
+  const [first, again] = await Promise.all([0, 1].map(() => h.agent.nudge({ to, template, idempotencyKey: "seller-17-welcome" })));
+  assert.deepEqual([first.status, again.id], ["sent", first.id]);
+  // WhatsApp's numbers are always full, so defaultCountryCode does not apply to them.
+  assert.deepEqual(h.out.map((o) => [o.address, o.outbound.type]), [["+15550100177", "template"]], "sent once, to the number in E.164");
+
+  // They reply, the way the provider writes their number: the same conversation, which knows what they were sent.
+  const reply = await h.message("whatsapp", "15550100177", "which order?");
+  const turn = await h.nextCall(0);
+  assert.ok(turn.request.messages.some((m) => m.role === "user" && m.content === '[Chinwag] The business sent them its template "order_shipped" on whatsapp. It reads:\nHi Ana, your order 1042 has shipped.'));
+  turn.answer(respond(call("send_whatsapp", { text: "Order 1042." })));
+  await h.agent.conversation(reply!.conversationId)!.whenIdle();
+  const lines = (await h.agent.transcript(reply!.conversationId)).flatMap((e) => (e.kind === "in" ? [e.text] : e.kind === "out" ? [e.template ?? e.text] : []));
+  assert.deepEqual(lines, ["order_shipped", "which order?", "Order 1042."]);
+
+  // Their window is open now: a text in the business's own format goes, to the number they wrote from.
+  assert.equal((await h.agent.nudge({ to, text: "It arrives Friday." })).status, "sent");
+  assert.deepEqual(h.out.at(-1)!.address, "15550100177");
+});
+
+test("a template to a new number joins the person that number already is (read with defaultCountryCode), and their STOP holds; SMS makes no one", async () => {
+  const h = multi({ channels: { sms: { info: { ...SMS, templates: false }, phone: true, kind: "sms", keywords: SMS_KEYWORDS }, whatsapp: { info: WHATSAPP, phone: true, kind: "whatsapp" } }, defaultCountryCode: "+1" });
+  assert.deepEqual(await h.agent.nudge({ to: { channel: "sms", address: "+15550100199" }, template: { name: "order_shipped" } }), { id: "", status: "refused", reason: "unknown_person" });
+  assert.equal(await h.message("sms", "(555) 010-0188", "STOP"), null);
+  const result = await h.agent.nudge({ to: { channel: "whatsapp", address: "+15550100188" }, template: { name: "order_shipped" } });
+  assert.equal(result.status, "dropped");
+  assert.match(result.reason!, /no-contact rule/);
+  assert.equal(h.out.filter((o) => o.outbound.type === "template").length, 0);
 });
 
 test("a nudge with a time waits for it: text goes out as written, a prompt gets a turn", async () => {
@@ -593,6 +627,36 @@ test("past the window with no template that fits, the fallback goes, the nudge w
   reply.answer(respond(call("send_whatsapp", { text: "Your refund was approved." })));
   await h.conversation.whenIdle();
   assert.equal((await h.agent.nudgeState(result.id))?.status, "sent");
+});
+
+test("a scheduled prompt nudge due past the window goes as one sent now would: a template the agent picks, else the fallback until they reply; a scheduled text is skipped", async () => {
+  const h = await samWindowClosed();
+  const hour = 3_600_000;
+  const start = h.clock.now;
+  assert.equal((await h.agent.nudge({ to: h.to, prompt: "Their order 1042 shipped", at: start + hour })).status, "scheduled");
+  await h.agent.nudge({ to: h.to, text: "Your code is 4417", at: start + hour });
+  await h.agent.nudge({ to: h.to, prompt: "Their refund was approved", at: start + 2 * hour });
+
+  h.clock.now = start + hour;
+  assert.equal(await h.agent.runDue(), 0, "neither is a scheduled turn: the prompt went on as a nudge, the text was skipped");
+  const turn = await h.nextCall(1);
+  assert.match(last(turn.request.messages).content, /Their order 1042 shipped[\s\S]*window is closed[\s\S]*send_template/);
+  turn.answer(respond(call("send_template", { name: "order_shipped", body: ["Sam", "1042"] })));
+  (await h.nextCall(2)).answer(respond());
+  await h.conversation.whenIdle();
+  assert.deepEqual(templatesSent(h), ["order_shipped"]);
+  assert.deepEqual(h.texts("whatsapp"), ["Hi!"], "the text did not go");
+
+  h.clock.now = start + 2 * hour;
+  await h.agent.runDue();
+  (await h.nextCall(3)).answer(respond());
+  await h.sentWhere((o) => o.outbound.type === "template" && (o.outbound as { name?: string }).name === "message_waiting");
+  assert.deepEqual(h.events.filter((e) => e.type === "template.missing").map((e) => e.prompt), ["Their refund was approved"]);
+  await h.message("whatsapp", SAM.address, "what's new?");
+  const { call: reply } = await h.callWith(4, (c) => JSON.stringify(c.request.messages).includes("Their refund was approved") && !/window is closed/.test(JSON.stringify(c.request.messages.at(-1))));
+  reply.answer(respond(call("send_whatsapp", { text: "Your refund was approved." })));
+  await h.conversation.whenIdle();
+  assert.deepEqual(h.texts("whatsapp"), ["Hi!", "Your refund was approved."]);
 });
 
 test("a text nudge past the window sends the fallback at once and goes as written when they reply", async () => {
