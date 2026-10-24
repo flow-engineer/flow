@@ -986,7 +986,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       if (!Number.isFinite(to)) return json(res, 400, { error: "give to (ms since the epoch) or advanceMs" });
       options.clock.set(to);
       const ran = await agent.runDue();
-      const result = `clock at ${new Date(options.clock.now()).toISOString().replace(".000Z", "Z")}; ${ran} scheduled message${ran === 1 ? "" : "s"} due`;
+      const result = `clock at ${new Date(options.clock.now()).toISOString().replace(".000Z", "Z")}; ${ran} scheduled message${ran === 1 ? "" : "s"} or wake-up${ran === 1 ? "" : "s"} due`;
       announce("Clock", { ok: true, result });
       return json(res, 200, { now: options.clock.now(), ran });
     }
@@ -1048,7 +1048,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       // When the agent wrote on each channel (its latest 20), so the page can flag a channel it is not showing.
       const lastOut: Record<string, number[]> = {};
       for (const e of id ? await agent.transcript(id) : []) if (e.kind === "out") lastOut[e.channel] = [...(lastOut[e.channel] ?? []), e.at].slice(-20);
-      return json(res, 200, { now: options.clock?.now() ?? Date.now(), contact, outbox: id ? await agent.outbox(id) : { schedules: [], held: [] }, lastOut });
+      return json(res, 200, { now: options.clock?.now() ?? Date.now(), contact, outbox: id ? await agent.outbox(id) : { schedules: [], held: [], wakeUps: [] }, lastOut });
     }
     if (req.method === "POST" && path === "/api/nudge") {
       if (!agent.recordNudge) return json(res, 404, { error: "this agent takes no nudges" });

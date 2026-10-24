@@ -21,7 +21,7 @@ import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, trans
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
 import { indexDeclared, recordsOf, type RecordCollection, type Records } from "./records.ts";
-import { businessSchedule, claimDue, summary } from "./schedules.ts";
+import { addWakeUp, businessSchedule, claimDue, summary, wakeUpsOf, type WakeUp, type WakeUpInput, type WakeUpResult } from "./schedules.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
 import { Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
 import { clock, quietUntil, validZone } from "./time.ts";
@@ -191,6 +191,12 @@ export interface AgentOptions {
    * theirs with setTimeZone, or the agent asks them.
    */
   timeZone?: string;
+  /**
+   * `false` takes the model's wake-up tools away (`wake_me_up`, `cancel_wake_up`) and the list of
+   * its wake-ups from its prompt. Wake-ups your code sets (`context.wakeUps`, `agent.wakeUp`) still
+   * run. Default: on.
+   */
+  wakeUps?: false;
   /** How often due scheduled messages are looked for. Default 5,000 ms; 0 turns the timer off. */
   scheduleCheckMs?: number;
   /**
@@ -302,7 +308,8 @@ export interface NudgeResult {
    * sent; silent (the agent chose not to); dropped (a no-contact rule, or their STOP); refused
    * (outside_window, unknown_person); failed (it could not be sent, or the model failed: `reason`
    * says why, and the person was sent nothing about it); scheduled; held (for their quiet hours,
-   * until they end or the person writes); or expired (held past its expiresAt, never sent).
+   * until they end or the person writes); expired (held past its expiresAt, never sent); or
+   * cancelled (a scheduled one, by agent.cancelNudge, before it went).
    */
   status: NudgeStatus;
   reason?: string;
@@ -314,7 +321,7 @@ export interface NudgeResult {
   messageId?: string;
 }
 
-export type NudgeStatus = "sent" | "silent" | "dropped" | "refused" | "failed" | "scheduled" | "held" | "expired";
+export type NudgeStatus = "sent" | "silent" | "dropped" | "refused" | "failed" | "scheduled" | "held" | "expired" | "cancelled";
 
 /** A scheduled message, as the playground lists it. */
 export interface ScheduledItem {
@@ -470,6 +477,7 @@ export class Agent {
       templates: options.templates ?? [],
       beforeSend: options.beforeSend,
       fallbackTemplate: options.fallbackTemplate?.name,
+      wakeUps: options.wakeUps !== false,
       windowClosed: (nudge, to) => this.windowClosed(nudge, to),
       tagChannels: (options.channels ?? []).length > 1,
       links: (id) => this.links(id),
@@ -1063,9 +1071,10 @@ export class Agent {
    * What is waiting to go to a person: their scheduled messages (theirs and the business's) and the
    * nudges held for their quiet hours or a closed window. The playground shows it.
    */
-  async outbox(conversationId: string): Promise<{ schedules: ScheduledItem[]; held: HeldItem[] }> {
+  async outbox(conversationId: string): Promise<{ schedules: ScheduledItem[]; held: HeldItem[]; wakeUps: WakeUp[] }> {
     await this.settings.ready;
-    const schedules = (await this.store.schedules(conversationId)).map((s) => ({
+    const all = await this.store.schedules(conversationId);
+    const schedules = all.filter((s): s is typeof s & { mode: ScheduledItem["mode"] } => s.mode !== "wake").map((s) => ({
       id: s.id,
       message: s.instruction,
       origin: s.origin === "person" ? ("person" as const) : ("business" as const),
@@ -1088,7 +1097,39 @@ export class Agent {
         expiresAt: b.expiresAt ?? null,
       };
     });
-    return { schedules, held };
+    return { schedules, held, wakeUps: await wakeUpsOf(this.store, conversationId) };
+  }
+
+  /**
+   * Wakes the agent later in someone's conversation, by a channel identity they have written from
+   * (as a nudge's `to`): at that time it gets a turn there with `note`, and decides what to do (look
+   * something up, message them, nothing). Nothing is sent unless the agent sends it. A wake-up due
+   * in their quiet hours waits for them to end (unless `respectQuietHours: false`). After they
+   * texted STOP or paused messages it still runs, and Flow refuses every send to them in that turn
+   * (the agent may still call its tools); past their WhatsApp window the agent is told only a
+   * template reaches them. Refused (unknown_person) for someone who never wrote.
+   */
+  async wakeUp(input: WakeUpInput & { to: { channel: string; address: string } }): Promise<WakeUpResult> {
+    await this.settings.ready;
+    const identity = await this.nudgeIdentity(input.to, false);
+    if (!identity) return { status: "refused", reason: "unknown_person" };
+    const conversationId = identity.conversationId;
+    const zone = (await this.store.conversation(conversationId))?.timeZone ?? this.options.timeZone ?? "UTC";
+    const { to, ...wake } = input;
+    return addWakeUp({ store: this.store, conversationId, channel: () => to.channel, now: this.now, zone: () => zone }, wake);
+  }
+
+  /** Cancels the active wake-ups with this key, whoever they are for (`context.wakeUps.cancel` in a tool). Resolves to how many. */
+  async cancelWakeUp(key: string): Promise<number> {
+    await this.settings.ready;
+    return this.store.cancelWakeUps(key);
+  }
+
+  /** Someone's wake-ups still to come, soonest first, by a channel identity they have written from; [] for someone who never wrote. */
+  async listWakeUps(to: { channel: string; address: string }): Promise<WakeUp[]> {
+    await this.settings.ready;
+    const identity = await this.nudgeIdentity(to, false);
+    return identity ? wakeUpsOf(this.store, identity.conversationId) : [];
   }
 
   /** Whether the agent has a profile (get_user_profile), so the test cloud knows to play it. */
@@ -1228,7 +1269,7 @@ export class Agent {
     }
     if (input.at !== undefined) {
       const zone = (await this.store.conversation(conversationId))?.timeZone ?? this.options.timeZone ?? "UTC";
-      const schedule = businessSchedule(conversationId, input.to.channel, input.at, zone, { text: input.text, prompt: input.prompt }, input.respectQuietHours !== false);
+      const schedule = businessSchedule(conversationId, input.to.channel, input.at, zone, { text: input.text, prompt: input.prompt }, input.respectQuietHours !== false, input.idempotencyKey ?? null);
       const added = await add({ ...record, body: { text: input.text, prompt: input.prompt, at: input.at }, status: "scheduled" }, schedule);
       return typeof added === "number" ? { id, status: "scheduled" } : added;
     }
@@ -1256,6 +1297,19 @@ export class Agent {
     if (typeof added !== "number") return added;
     void this.wake(conversationId, added);
     return { id, status: "queued" };
+  }
+
+  /**
+   * Cancels a nudge sent with `at`, by its idempotency key, while it is still to come: its state is
+   * then `cancelled`, and nothing goes. A nudge that is not waiting to go (it went, or it had no `at`)
+   * keeps its state, which this returns as it is; so does one scheduled before 0.8. Null when no
+   * nudge has the key.
+   */
+  async cancelNudge(key: string): Promise<NudgeState | null> {
+    await this.settings.ready;
+    await this.store.cancelScheduledNudge(key);
+    const row = await this.store.nudgeByKey(key);
+    return row && this.result(row.id, row.status, row.reason);
   }
 
   /** A nudge's state now, or null for an id the store does not hold. */
@@ -1293,6 +1347,9 @@ export class Agent {
     if (this.store.durable && !this.resumed) return 0;
     const now = this.now();
     const queued = await claimDue(this.store, now, (s) => this.quietEnd(s.conversationId, now), async (s) => {
+      // A wake-up is the agent's turn, not a message: it runs after their STOP or a pause (Flow then
+      // sends them nothing in it) and past their window (only a template reaches them).
+      if (s.mode === "wake") return null;
       const stop = s.origin === "person" ? await this.stopOf(s.conversationId) : await this.blockOf(s.conversationId);
       if (stop) return `no-contact rule ${stop.id}: ${stop.rule}`;
       // The identity on that channel they last wrote from (a template may have made another for the

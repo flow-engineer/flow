@@ -140,7 +140,8 @@ expect:
   `Flow-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "t.{t}.{body}">`, signed with the
   run's own test secret (`options.testing.eventsSecret`: check signatures with it in a business run).
   The same `id` twice is a duplicate, as it would be live.
-- A `nudge` is `agent.nudge` to the run's person; `wait` and `at` move the clock (never back).
+- A `nudge` is `agent.nudge` to the run's person; `wait` and `at` move the clock (never back), and
+  what comes due meanwhile runs: scheduled messages, held sends, and the agent's wake-ups.
 - `expect.sent` items: `at` (HH:MM on any day, or a date and time; to the minute), `template`
   (its name), `phrased: true` (the agent's own words, not a template), `carousel: true` (a carousel,
   not a message or template), `text` (in the message, the template's values, or the carousel's text
