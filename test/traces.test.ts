@@ -1,13 +1,15 @@
-// covers: src/traces.ts src/agent.ts src/conversation.ts mcp/src/server.ts
+// covers: src/traces.ts src/agent.ts src/conversation.ts mcp/src/server.ts mcp/src/terminal.ts flow-messaging/src/index.ts
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage } from "node:http";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, tool, z, type AgentOptions, type Outbound } from "../src/index.ts";
+import { createAgent, customUI, tool, z, type AgentOptions, type Channel, type Outbound } from "../src/index.ts";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { flowMessaging } from "../flow-messaging/src/index.ts";
 import { mcpServer } from "../mcp/src/index.ts";
+import { terminalServer } from "../mcp/src/terminal.ts";
 import { tracesFromEnv } from "../src/traces.ts";
 import { SMS, call, respond, scriptedModel } from "./helpers.ts";
 
@@ -35,15 +37,16 @@ async function fakeEndpoint(status = 200) {
   return { url: `http://127.0.0.1:${port}`, requests, next, close: () => server.close() };
 }
 
-/** An SMS agent with one tool, tracing to `url`. */
-function agentFor(url: string, content: boolean, intercept?: AgentOptions["intercept"], traceChannel?: string) {
+/** An SMS agent with one tool (or on `channels`, whose sends are kept, not made), tracing to `url`. */
+function agentFor(url: string, content: boolean, intercept?: AgentOptions["intercept"], channels?: Channel[]) {
   const dir = mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const sent: string[] = [];
-  const sms = { name: "sms", kind: "sms" as const, traceChannel, info: SMS, phone: true, send: (_: string, o: Outbound) => void (o.type === "message" && sent.push(o.text)) };
+  const send = (_: string, o: Outbound) => void (o.type === "message" && sent.push(o.text));
+  const sms: Channel = { name: "sms", kind: "sms", info: SMS, phone: true, send };
   const lookup = tool({ name: "lookup", description: "Finds a slot.", input: z.object({ day: z.string() }), run: async ({ day }) => `free on ${day}` });
-  const agent = createAgent({ dir, model: scripted.model, tools: [lookup], channels: [sms], debounceMs: 0, scheduleCheckMs: 0, id: "cafe", traces: { url, key: KEY, content, version: "v7" }, intercept });
+  const agent = createAgent({ dir, model: scripted.model, tools: [lookup], channels: channels?.map((c) => ({ ...c, send })) ?? [sms], debounceMs: 0, scheduleCheckMs: 0, id: "cafe", traces: { url, key: KEY, content, version: "v7" }, intercept, testPeople: [{ name: "Maria", phone: "+15550100123" }] });
   return { agent, sent, ...scripted };
 }
 
@@ -208,17 +211,47 @@ test("standalone calls export one trace each with host metadata and content only
   }
 });
 
-// Existing traces use SMS; they do not cover adapters with explicit channel attribution.
-test("explicit trace channels keep terminal and custom chat sources distinct", async () => {
-  for (const channel of ["cli", "web", "imessage", "telegram"]) {
-    const endpoint = await fakeEndpoint();
-    try {
-      const h = agentFor(endpoint.url, false, undefined, channel);
-      await playTurn(h, "+15550100123");
-      const request = await endpoint.next(1);
-      await h.agent.flushTraces();
-      const root = request.body.resourceSpans[0].scopeSpans[0].spans.find((s: any) => !s.parentSpanId);
-      assert.equal(attrs(root)["chinwag.channel"], channel);
-    } finally { endpoint.close(); }
-  }
+// The first test is SMS by hand; this one takes each channel as its adapter makes it.
+test("a trace names the platform the turn was on, the same on the root span and its send spans: Flow Messaging's own, a custom UI's web, the terminal's cli", async () => {
+  const fm = flowMessaging({ apiKey: "fk_test_key" });
+  const terminal = terminalServer({ agent: () => { throw new Error("not called"); }, auth: { verify: async () => null } }).channel;
+  const channels = [fm.telegram(), fm.imessage(), fm.whatsapp(), fm.sms(), customUI("app", { sendMessage: async () => {} }), terminal];
+  const expected = ["telegram", "imessage", "whatsapp", "sms", "web", "cli"];
+  const endpoint = await fakeEndpoint();
+  try {
+    const h = agentFor(endpoint.url, false, undefined, channels);
+    for (const [i, c] of channels.entries()) {
+      await h.agent.message({ channel: c.name, from: `+1555010020${i}`, message: "Hi" });
+      (await h.nextCall(i)).answer(respond(call(`send_${c.name}`, { text: "Hello" })));
+      await endpoint.next(i + 1);
+    }
+    const shown = endpoint.requests.map((r) => {
+      const spans = r.body.resourceSpans[0].scopeSpans[0].spans;
+      return [...new Set(spans.filter((s: any) => !s.parentSpanId || s.name.startsWith("send ")).map((s: any) => attrs(s)["chinwag.channel"]))];
+    });
+    assert.deepEqual(shown, expected.map((kind) => [kind]));
+  } finally { endpoint.close(); }
+});
+
+// The other tests are real traffic; playground turns share their process and run_kind.
+test("a playground turn's root span has chinwag.via playground, also for what is answered or sent outside a turn; a real message, from the same person, has none", async () => {
+  const endpoint = await fakeEndpoint();
+  const h = agentFor(endpoint.url, false, (_id, text) => (/chest pain/.test(text) ? "Call 911 now." : null));
+  const roots = () => endpoint.requests.flatMap((r) => r.body.resourceSpans[0].scopeSpans[0].spans.filter((s: any) => !s.parentSpanId).map(attrs));
+  try {
+    const played = await h.agent.simulate({ person: "+15550100123", channel: "sms", message: "Can I move my check-in?" });
+    (await h.nextCall(0)).answer(respond(call("send_sms", { text: "Yes, to when?" })));
+    await h.agent.conversation(played!.conversationId)!.whenIdle();
+    await h.agent.simulate({ person: "+15550100123", channel: "sms", message: "chest pain" });
+    await h.agent.flushTraces();
+    assert.deepEqual(roots().map((r) => r["chinwag.via"]), ["playground", "playground", "playground"], "the turn, the intercepted message and its answer");
+
+    await h.agent.message({ channel: "sms", from: "+15550100123", message: "Thursday then", messageId: "SM-9" });
+    (await h.nextCall(1)).answer(respond(call("send_sms", { text: "Done." })));
+    await h.agent.conversation(played!.conversationId)!.whenIdle();
+    await h.agent.flushTraces();
+    const real = roots().find((r) => r["chinwag.message_id"] === "SM-9")!;
+    assert.equal(real["chinwag.via"], undefined);
+    assert.equal(real["chinwag.channel"], "sms");
+  } finally { endpoint.close(); }
 });

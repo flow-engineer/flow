@@ -427,7 +427,7 @@ export class Agent {
     if (options.defaultCountryCode !== undefined && !/^\+?[1-9]\d{0,2}$/.test(options.defaultCountryCode.trim())) throw new Error(`flow: defaultCountryCode is a calling code such as "+91", not "${options.defaultCountryCode}"`);
     this.countryCode = options.defaultCountryCode?.trim().replace(/^\+/, "");
     const tracing = options.traces ?? tracesFromEnv();
-    this.traces = tracing ? traces(tracing, { service: options.id ?? "flow", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind }) : null;
+    this.traces = tracing ? traces(tracing, { service: options.id ?? "flow", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind, viaOf: (id, channel) => this.viaOf(id, channel) }) : null;
     const sinks = [...(options.events ?? []), ...(this.traces ? [this.traces.sink] : [])];
     this.runner = `${options.runner ?? process.env.FLOW_RUNNER ?? hostname()}:${randomUUID().slice(0, 8)}`;
     const emit = emitter(sinks, this.runner);
@@ -881,6 +881,13 @@ export class Agent {
     const channel = [...this.channelsByName.values()].find((c) => c.phone) ?? adapter;
     const owner = channel ? await this.options.resolve?.({ channel: channel.name, address: phone, ...(channel.phone ? { phone } : {}) }) : null;
     return owner ? `key:${owner}` : `phone:${phone}`;
+  }
+
+  /** How the person on a conversation's channel last wrote, when not through its provider: "playground", whose replies the deliverer sends there. */
+  private viaOf(conversationId: string, channel?: string): Via | undefined {
+    const at = this.conversations.get(conversationId)?.reachedOn(channel);
+    const via = at && this.via.get(viaKey(at.channel, at.address));
+    return via === "provider" ? undefined : via;
   }
 
   private testPerson(phone: string): TestPerson | undefined {

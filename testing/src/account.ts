@@ -413,6 +413,9 @@ async function showAccount(json: boolean, out: Out, say: Say): Promise<void> {
 const SECRET = new Set<string>([SETUP_ENV.cloud_key, SETUP_ENV.traces_key, SETUP_ENV.messaging_key, ...MODEL_KEY_NAMES]);
 const masked = (name: string, value: string) => (SECRET.has(name) ? `${/^[a-z]+_(?:test_|live_)?/.exec(value)?.[0] ?? ""}…${value.slice(-4)}` : value);
 const ENV_LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/;
+/** The setting that sends what was written with traces, and its older name (src/names.ts). */
+const TRACES_CONTENT_NAMES = ["FLOW_FRAMEWORK_TRACES_CONTENT", "CHINWAG_TRACES_CONTENT"];
+const TRACES_CONTENT_NOTE = "# The test traces key sends message text to the Staging dashboard. To send metadata only, set this to 0.";
 
 /** `--rotate`'s names and the answer field each makes again; `all` is every key. */
 const ROTATE: Record<string, string> = { key: "flow_key", cloud: "cloud_key", traces: "traces_key", messaging: "messaging_key", all: "" };
@@ -780,6 +783,13 @@ function writeEnv(file: string, lines: string[], before: Map<string, string>, en
     }
     before.set(envName, action === "kept" ? old! : value);
     written.push({ name: envName, action, value: masked(envName, action === "kept" ? old! : value) });
+    // A test traces key's chats go to the Staging dashboard with their text, so they can be read
+    // and graded there; never a live key's, and never over a line the owner has (even empty).
+    if (envName === SETUP_ENV.traces_key && action !== "unchanged" && action !== "kept" && value.startsWith("otk_test_")
+      && !lines.some((line) => TRACES_CONTENT_NAMES.includes(ENV_LINE.exec(line)?.[1] ?? ""))) {
+      lines.splice(lines.findIndex((line) => ENV_LINE.exec(line)?.[1] === envName) + 1, 0, TRACES_CONTENT_NOTE, `${TRACES_CONTENT_NAMES[0]}=1`);
+      written.push({ name: TRACES_CONTENT_NAMES[0], action: "added", value: "1" });
+    }
   }
   if (written.some((w) => w.action === "added" || w.action === "replaced")) writeFileSync(file, `${lines.join("\n")}\n`, { mode: 0o600 });
   if (existsSync(file)) chmodSync(file, 0o600); // a .env that was there keeps its old mode on write

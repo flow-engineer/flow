@@ -14,6 +14,9 @@ const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
 const TOKEN = "fcli_secret_token_1234";
 const KEYS = { cloud_key: "oci_cloudsecretvalue9Qz1", traces_key: "otk_test_tracesecret7Lm2", messaging_key: "fk_test_messagingsecretk4Tt" };
 
+/** What setup writes under a test traces key it adds: content on, with how to turn it off. */
+const CONTENT_LINES = "# The test traces key sends message text to the Staging dashboard. To send metadata only, set this to 0.\nFLOW_FRAMEWORK_TRACES_CONTENT=1\n";
+
 /** The last /cli/setup request (setup also asks the try page for its links after it). */
 const setupCall = (flow: { seen: Seen[] }) => flow.seen.filter((r) => r.path === "/cli/setup").at(-1)!;
 
@@ -278,10 +281,11 @@ test("setup merges the keys into .env, keeps the owner's lines and values, print
   assert.equal(first.code, 0, first.err);
   assert.deepEqual(setupCall(flow).body, { name: "cafe", hostname: setupCall(flow).body.hostname, channels: ["telegram", "whatsapp", "imessage"], have: ["FLOW_MESSAGING_TELEGRAM_SENDER", "OPENROUTER_API_KEY"] });
   const dotenv = readFileSync(join(cwd, ".env"), "utf8");
-  assert.equal(dotenv, `OPENROUTER_API_KEY=sk-mine\nFLOW_MESSAGING_TELEGRAM_SENDER=snd_mine\nFLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}\nFLOW_FRAMEWORK_TRACES_KEY=${KEYS.traces_key}\nFLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\nFLOW_FRAMEWORK_TRY_URL=${flow.url}/try/brave-otter-1?c=telegram\n`);
+  assert.equal(dotenv, `OPENROUTER_API_KEY=sk-mine\nFLOW_MESSAGING_TELEGRAM_SENDER=snd_mine\nFLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}\nFLOW_FRAMEWORK_TRACES_KEY=${KEYS.traces_key}\n${CONTENT_LINES}FLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\nFLOW_FRAMEWORK_TRY_URL=${flow.url}/try/brave-otter-1?c=telegram\n`);
   assert.deepEqual(first.lines[0]!.env_written[".env"], [
     { name: "FLOW_FRAMEWORK_CLOUD_KEY", action: "added", value: "oci_…9Qz1" },
     { name: "FLOW_FRAMEWORK_TRACES_KEY", action: "added", value: "otk_test_…7Lm2" },
+    { name: "FLOW_FRAMEWORK_TRACES_CONTENT", action: "added", value: "1" },
     { name: "FLOW_MESSAGING_KEY", action: "added", value: "fk_test_…k4Tt" },
     { name: "FLOW_MESSAGING_TELEGRAM_SENDER", action: "kept", value: "snd_mine" },
     { name: "FLOW_FRAMEWORK_JOIN_CODE", action: "added", value: "brave-otter-1" },
@@ -372,7 +376,7 @@ test("a setup that fails in one product still writes the keys it minted, then ex
   assert.equal(result.code, 3);
   assert.deepEqual(result.lines.at(-1)!.error.code, "messaging_failed");
   assert.equal(result.lines.at(-1)!.error.next, "npx @flow-engineer/flow setup");
-  assert.equal(readFileSync(join(cwd, ".env"), "utf8"), `FLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}\nFLOW_FRAMEWORK_TRACES_KEY=${KEYS.traces_key}\n`);
+  assert.equal(readFileSync(join(cwd, ".env"), "utf8"), `FLOW_FRAMEWORK_CLOUD_KEY=${KEYS.cloud_key}\nFLOW_FRAMEWORK_TRACES_KEY=${KEYS.traces_key}\n${CONTENT_LINES}`);
   assert.ok(!result.out.includes(KEYS.cloud_key) && !result.err.includes(KEYS.cloud_key), "no key is printed");
 });
 
@@ -453,6 +457,25 @@ test("setup fills names that .env has with no value (cp .env.example .env) in pl
   assert.equal(actions.FLOW_FRAMEWORK_CLOUD_KEY, "added");
   assert.equal(actions.FLOW_MESSAGING_KEY, "added");
   assert.equal(statSync(join(cwd, ".env")).mode & 0o777, 0o600);
+});
+
+// The first setup test covers a test key turning content on; this covers when it must not.
+test("setup turns traces content on only for a test traces key: never over the owner's own line, and never for a live key", async (t) => {
+  const flow = await flowServer();
+  t.after(flow.close);
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  const owned = agentDir();
+  writeFileSync(join(owned, ".env"), "CHINWAG_TRACES_CONTENT=0\n");
+  assert.equal((await run(["setup"], { url: flow.url, config: temp(), cwd: owned, env })).code, 0);
+  const dotenv = readFileSync(join(owned, ".env"), "utf8");
+  assert.match(dotenv, new RegExp(`^FLOW_FRAMEWORK_TRACES_KEY=${KEYS.traces_key}$`, "m"));
+  assert.doesNotMatch(dotenv, /FLOW_FRAMEWORK_TRACES_CONTENT|Staging/, "the owner's setting, under its older name, stays the only one");
+
+  const live = await flowServer([], 200, { setup: { traces_key: KEYS.traces_key.replace("otk_test_", "otk_live_") } });
+  t.after(live.close);
+  const cwd = agentDir();
+  assert.equal((await run(["setup"], { url: live.url, config: temp(), cwd, env })).code, 0);
+  assert.doesNotMatch(readFileSync(join(cwd, ".env"), "utf8"), /TRACES_CONTENT|Staging/);
 });
 
 test("a 200 setup with no join code still writes the keys it minted, then exits 3 with the server's next step", async (t) => {

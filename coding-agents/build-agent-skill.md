@@ -384,7 +384,8 @@ do not offer them to the owner as ways to test.
 link and code at once (with `--json` the first line is `{"status":"pending","verification_uri":...,
 "user_code":...,"next":...}`), waits at most 120 s (`--timeout <s>`), then exits 4 with the code
 kept: give the owner the link and code, and run `link` again (it polls the same code). Then it runs
-`setup`, which writes the test cloud, traces and Flow Messaging keys into `.env`, prints names and
+`setup`, which writes the test cloud, traces and Flow Messaging keys into `.env` (with a test traces
+key, also `FLOW_FRAMEWORK_TRACES_CONTENT=1`, so the Staging dashboard shows the chats), prints names and
 last 4 characters only, keeps values already there (`--replace` takes the new ones), and is safe to
 run again. `--channel telegram|whatsapp|imessage` picks the channel; a channel flow.engineer cannot
 open yet exits 3 with its `next`. When only observe's part of setup fails (traces and the test cloud),

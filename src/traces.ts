@@ -18,6 +18,14 @@
 // conversations and links them to their test run.
 // These two keep Chinwag's names on purpose: Flow's observe reads run attributes only as chinwag.*,
 // so a flow.* spelling waits until it reads that too.
+//
+// A playground turn (agent.simulate(), simulateVisitor(), flow chat) shares the process, and so
+// `chinwag.run_kind`, with real conversations: its root span says so instead, with `chinwag.via`
+// = "playground" (how the person reached the agent), so the endpoint can keep it apart from real
+// traffic. A real turn has no `chinwag.via`.
+//
+// `chinwag.channel` is the platform (whatsapp, sms, telegram, imessage, web, cli, voice, other),
+// the same on the root span and on every send span of the trace.
 
 import { randomBytes } from "node:crypto";
 import type { EventSink, FlowEvent } from "./events.ts";
@@ -81,6 +89,8 @@ interface Inbound {
   channel: string;
   /** The channel's own id for the message (Flow Framework's own ids are not sent: they restart). */
   messageId?: string;
+  /** How the person wrote it when not through the channel's provider: "playground". */
+  via?: string;
 }
 
 interface Turn {
@@ -101,7 +111,18 @@ export interface Traces {
 
 let warnedMetadataOnly = false;
 
-export function traces(options: TracesOptions, agent: { service: string; kindOf(channel: string): string | undefined }): Traces {
+/**
+ * What traces ask the agent: a channel's platform, and how the person on a channel of a
+ * conversation reaches the agent when not through the channel's provider ("playground"; by
+ * default on the channel of their latest message).
+ */
+export interface TracedAgent {
+  service: string;
+  kindOf(channel: string): string | undefined;
+  viaOf?(conversationId: string, channel?: string): string | undefined;
+}
+
+export function traces(options: TracesOptions, agent: TracedAgent): Traces {
   const url = options.url ?? "";
   let end = url.length;
   while (end > 0 && url.charCodeAt(end - 1) === 47) end--;
@@ -168,6 +189,10 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
     if (channel) attributes.push(attr("chinwag.channel", channel));
     const session = testRun ? setting("TEST_SESSION") : undefined;
     if (session) attributes.push(attr("chinwag.test.session", session));
+    // A turn with messages is as the latest came; one without (a wake-up, a background result, a
+    // message sent alone) is as the person is reached now.
+    const via = turn.inbound.length ? turn.inbound.at(-1)!.via : agent.viaOf?.(conversationId, turn.replyChannel);
+    if (via) attributes.push(attr("chinwag.via", via));
     if (turn.inbound.length) {
       attributes.push(attr("chinwag.messages", turn.inbound.length));
       if (turn.inbound[0].messageId) attributes.push(attr("chinwag.message_id", turn.inbound[0].messageId));
@@ -186,7 +211,9 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
 
   function reply(turn: Turn, at: number, channel: string, text: unknown): Span {
     turn.replyChannel ??= channel;
-    const attributes = [attr("chinwag.channel", channel)];
+    // The platform, as on the root span; the span's name has the channel's own name.
+    const kind = kindOf(channel);
+    const attributes = kind ? [attr("chinwag.channel", kind)] : [];
     if (content && typeof text === "string") attributes.push(attr("chinwag.agent_reply", clip(text)));
     return child(turn, `send ${channel}`, at, at, attributes);
   }
@@ -255,7 +282,8 @@ export function traces(options: TracesOptions, agent: { service: string; kindOf(
       case "message.in": {
         // A voice note's text is its transcript (and any caption).
         const text = [e.transcript, e.text].filter(Boolean).join(" ");
-        const m: Inbound = { at: e.at, text, channel: String(e.channel ?? ""), messageId: e.ownId ? String(e.messageId) : undefined };
+        const channel = String(e.channel ?? "");
+        const m: Inbound = { at: e.at, text, channel, messageId: e.ownId ? String(e.messageId) : undefined, via: agent.viaOf?.(id, channel) };
         // Answered with no model call (intercept, a keyword): a trace of its own, never part of a turn.
         if (e.answered) return record(id, { traceId: hex(16), rootId: hex(8), start: e.at, inbound: [m], spans: [], tools: new Map() }, false, e.at);
         (turn ?? waitingFor(id)).inbound.push(m);

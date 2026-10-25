@@ -2,6 +2,38 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.8.1 (unreleased)
+
+### Changes
+
+- **Playground turns are marked in traces.** A turn that comes through the playground
+  (`agent.simulate()`, `agent.simulateVisitor()`, `npm start`'s page, `flow chat`) has
+  `chinwag.via` = `"playground"` on its root span, and so do a message the playground person's
+  `intercept` or keyword answered and one sent to them outside a turn. A real turn has no
+  `chinwag.via`. These turns share their process, and so `chinwag.run_kind` (still "production",
+  or "test" under `flow test`), with real conversations; a dashboard keeps them apart by this
+  attribute.
+- **Flow Messaging's Telegram and iMessage traces name their platform.** `fm.telegram()` and
+  `fm.imessage()` are custom channels, and their turns traced as `chinwag.channel` = `web`; they now
+  set `traceChannel` (`telegram`, `imessage`). `fm.whatsapp()` and `fm.sms()` already traced as
+  `whatsapp` and `sms`.
+- **A trace's channel is the same on every span.** The `send <name>` spans' `chinwag.channel` is
+  now the platform, as on the root span (`telegram`, `web`, ...), not the channel's own name, which
+  stays in the span's name.
+- **`flow setup` turns trace content on for a test traces key.** When it writes an `otk_test_`
+  traces key (the Staging dashboard), it adds `FLOW_FRAMEWORK_TRACES_CONTENT=1` below it, under a
+  comment saying it sends message text there and that 0 sends metadata only, so playground and
+  phone chats can be read and graded. Never for a live key, never when `.env` already has the line
+  (any value, either name), and only in the run that writes the key.
+
+### Migration notes
+
+- **`send` spans' `chinwag.channel` is the platform, not the channel's name.** A dashboard or query
+  that read it as the agent's channel name: read the span name (`send <name>`) instead.
+- **`flow setup` with a test traces key now sends message text to the Staging dashboard.** To keep
+  traces metadata only, set `FLOW_FRAMEWORK_TRACES_CONTENT=0` in `.env` (setup leaves a line that is
+  there alone).
+
 ## 0.8.0 (2026-10-25)
 
 ### Changes

@@ -221,7 +221,8 @@ What it remembers (conversations, contacts, event IDs) is kept in memory, except
 first send to someone starts from the channel's sender, and Flow puts it into the open conversation
 if there is one.
 
-The framework has no Telegram or iMessage channel kind yet, so both are custom channels. On iMessage
+The framework has no Telegram or iMessage channel kind yet, so both are custom channels; their
+traces still name their platform (`chinwag.channel` is `telegram` or `imessage`, not `web`). On iMessage
 a person is their phone number, or their email address when that is their handle; they are not joined
 with the same number on WhatsApp or SMS.
 
