@@ -2,7 +2,7 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## 0.8.1 (unreleased)
+## 0.8.1 (2026-10-25)
 
 ### Changes
 
