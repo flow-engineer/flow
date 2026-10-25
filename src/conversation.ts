@@ -456,6 +456,12 @@ export class Conversation {
     return this.channels.get(channel)?.info;
   }
 
+  /** The address the person is reached at on a channel (by default their latest message's), if they have written on it. */
+  reachedOn(channel = this.currentChannel()): { channel: string; address: string } | undefined {
+    const link = this.channels.get(channel);
+    return link && { channel, address: link.address };
+  }
+
   /** Reach the person on this channel (again): a new channel, or a fresh way to deliver. */
   link(link: ChannelLink): void {
     const known = this.channels.get(link.name);

@@ -533,12 +533,16 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     ];
   }
 
-  /** A Flow channel Flow Framework has no kind for: text, quotes, buttons and links as `info` allows, photos, reactions, typing, read receipts. */
+  /**
+   * A Flow channel Flow Framework has no kind for: text, quotes, buttons and links as `info` allows,
+   * photos, reactions, typing, read receipts. Its traces name its platform (telegram, imessage), not web.
+   */
   function custom(route: Route, info: ChannelInfo, o: FlowChannelOptions): Channel {
     const p = provider(route);
     return {
       name: route.name,
       kind: "custom",
+      traceChannel: route.kind,
       info,
       instructions: o.instructions,
       send: (to, outbound) => {

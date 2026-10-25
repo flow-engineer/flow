@@ -101,6 +101,12 @@ before you hand it back; run them yourself, and do not offer them to the owner a
   and `init`, `setup`, `link` and `status` say so too, with the way to get one first in `next`.
   Each folder's `setup` makes its own `FLOW_KEY` (the credit is the account's);
   `setup --rotate key` replaces a leaked one (the old one works 24 h more; `--now` ends it at once).
+- With a test traces key (`otk_test_`, the Staging dashboard), `setup` also writes
+  `FLOW_FRAMEWORK_TRACES_CONTENT=1` below it, under a comment saying it sends message text there
+  and that 0 sends metadata only, so playground and phone chats can be read and graded. It never
+  does for a live key, or when `.env` already has the line (any value, also as
+  `CHINWAG_TRACES_CONTENT`), and only in the run that writes the key: a later run that keeps the key
+  does not put back a line the owner deleted (to keep content off across `--rotate traces`, set it to 0).
 - `setup --workspace <name|acc_id>` (and `link --workspace`) puts the agent, its cloud and traces keys in
   that observe workspace of yours and keeps its `acc_` id in `.env` as `FLOW_FRAMEWORK_WORKSPACE`, which later
   runs send; another workspace makes those two keys again (403 `not_a_member`, 409 `workspace_ambiguous`: pass the id).

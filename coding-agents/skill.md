@@ -119,10 +119,17 @@ FLOW_FRAMEWORK_TRACES_CONTENT=1                          # send what was written
 ```
 
 Without `FLOW_FRAMEWORK_TRACES_CONTENT=1` the dashboard
-gets ids, timing, model calls and tool names but no messages, so nothing to show or grade. Or in
+gets ids, timing, model calls and tool names but no messages, so nothing to show or grade. `setup`
+writes it (with a comment saying so) when the traces key it adds is a test key (`otk_test_`, the
+Staging dashboard) and `.env` does not set it already; set it to 0 for metadata only. Or in
 code: `createAgent({ ..., traces: { url, key, content: true, version: "v3" } })`. Traces are sent in the
 background after each turn and a failed send is dropped (logged once), so a dashboard outage never
 touches a chat; call `await agent.flushTraces()` before the process exits. Tests run under
 `node --test` never send from the environment. Under `flow test` the traces say they are a test's
 (`chinwag.run_kind` is "test", else "production", and each turn names the test session as
-`chinwag.test.session`), so the dashboard keeps them apart from real conversations.
+`chinwag.test.session`), so the dashboard keeps them apart from real conversations. Playground
+turns (`npm start`'s page, `flow chat`) run in the same process as real ones, so their root span
+says so instead: `chinwag.via` is "playground", and a real turn has no `chinwag.via`. Each trace's
+`chinwag.channel` is the platform (`whatsapp`, `sms`, `telegram`, `imessage`, `web` for a custom UI,
+`cli` for the terminal), the same on the root span and its send spans; a custom channel of your own
+can name its platform with `traceChannel` (one of these; any other name traces as `other`).
