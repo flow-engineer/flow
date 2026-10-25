@@ -1,4 +1,4 @@
-// covers: mcp/src/client.ts src/tools.ts
+// covers: mcp/src/client.ts mcp/src/server.ts mcp/src/describe.ts src/tools.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -39,7 +39,7 @@ const search = tool({ name: "search", description: "Search products.", input: z.
 const buy = tool({ name: "buy", description: "Buy a product.", input: z.object({ sku: z.string() }), signIn: "none", run: ({ sku }) => `bought ${sku}` });
 
 test("flow mcp update writes the server's tools into the lock, and the agent then uses exactly those", async () => {
-  const shop = await upstream([search, buy]);
+  const shop = await upstream([search, { ...buy, mcp: { deferred: true } }]);
   const lockFile = join(mkdtempSync(join(tmpdir(), "chinwag-lock-")), "mcp.lock.json");
   await update(() => mcpTools({ name: "shop", url: shop.url, lockFile }));
   const lock = JSON.parse(readFileSync(lockFile, "utf8")) as McpLock;
@@ -53,6 +53,7 @@ test("flow mcp update writes the server's tools into the lock, and the agent the
   assert.equal(await found.run({ q: "mug" }, context()), JSON.stringify({ q: "mug", color: null }), "the server's text, as its model would read it");
   assert.equal(found.hints?.readOnly, true);
   assert.equal(tools.find((t) => t.name === "buy")!.hints?.readOnly, false, "no readOnlyHint is a write");
+  assert.equal(await tools.find(t => t.name === "buy")!.run({ sku: "A1" }, context()), "bought A1", "MCP deferral does not remove imported chat tools");
 });
 
 test("a tool the server changed or removed since the lock is refused with a clear error, not run", async () => {

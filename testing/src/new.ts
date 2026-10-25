@@ -80,10 +80,11 @@ MCP server and a CLI. It starts as the café example; replace the café with the
 
 - The skills are plain Markdown files, \`.claude/skills/<skill>/SKILL.md\`. A coding agent that does not
   load them by name (or started before this folder existed) reads them as files.
-- Load the skills in \`.claude/skills/\` before changing it: \`flow-framework\` to build the agent (and its MCP
-  server and CLI), \`flow-framework-tools\` for its tools and their test files, \`flow-framework-tests\` for its test
-  scenarios, \`flow-framework-context\` to gather what the tools are written from out of an existing
-  codebase, and \`flow-framework-auth\` for sign-in.
+- Start with \`flow-framework\` in \`.claude/skills/\` for setup, names and layout. Then load only the
+  relevant guides: \`flow-framework-build-agent\` for the messaging runtime, playground and deployment;
+  \`flow-framework-mcp\` for MCP servers, CLIs and plugins; \`flow-framework-tools\` for tools and their
+  test files; \`flow-framework-tests\` for scenarios; \`flow-framework-context\` to gather the context
+  pack from an existing codebase; and \`flow-framework-auth\` for sign-in.
 - \`agent/AGENTS.md\` is the agent's own prompt, not instructions for coding agents.
 - The agent's names live in package.json, and the code reads them from there (src/name.ts):
   \`name\` is the package, the CLI command (keep the \`bin\` key the same), its \`<NAME>_SERVER\` and

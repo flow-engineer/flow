@@ -6,6 +6,20 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **Coding-agent guidance loads by task.** `flow-framework` (`coding-agents/skill.md`) now covers
+  setup, names, layout and routing. Messaging runtime, playground and deployment guidance moves
+  to `flow-framework-build-agent` (`build-agent-skill.md`); MCP, CLI and plugin guidance moves to
+  `flow-framework-mcp` (`mcp-skill.md`). `flow new` and `flow init` install all three and point the
+  coding agent to the relevant guide.
+- **MCP tools can be deferred explicitly.** `tool({ ..., mcp: { deferred: true } })` leaves that
+  tool out of the upfront MCP list and makes it discoverable through `search_tools`; unmarked
+  tools stay upfront. `execute_tool({ name, arguments })` calls the original operation with its
+  validation, sign-in, scopes, context, formatting and traces. Both generated tools appear only
+  when there are deferred operations, on standalone and plugin MCP endpoints. Chat agents keep
+  their normal tools. The CLI and `mcpTools` request the complete catalog.
+  `mcpServer({ ..., deferred: [...] })` overrides the tool flags; `deferred: []` puts everything
+  upfront. Hosting can choose this list using usage data, but selection stays fixed for each
+  server handle. Teams can customize the gateway descriptors or provide their own gateway tools.
 - **The agent can wake itself up.** A wake-up is a row in the agent's store, never a timer in
   memory: at its time the agent gets a turn in that person's conversation with its note
   (`[Wake-up you set for yourself, not from the person: <note>]`) and decides what to do: look
@@ -65,6 +79,15 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
+- Existing projects refreshing their coding-agent skills also copy `build-agent-skill.md` and
+  `mcp-skill.md` from the package's `coding-agents/` into
+  `.claude/skills/flow-framework-build-agent/SKILL.md` and
+  `.claude/skills/flow-framework-mcp/SKILL.md`, alongside the updated main skill. No runtime changes
+  are needed for the skill split.
+- MCP exposure is unchanged until tools are marked deferred or a server supplies a `deferred`
+  list. A custom MCP client that needs every original descriptor can send
+  `tools/list` with `_meta: { "flow.engineer/full-tool-catalog": true }`. Deferral changes
+  discovery, not access control; target permissions still apply to direct and indirect calls.
 - **`StoreApi` has three new methods, `addWakeUp`, `cancelWakeUps` and `cancelScheduledNudge`,**
   and `addSchedule` writes the new `key` field. A store of your own that
   forwards each call to a `Store` (as Flow's hosting does) forwards them too. A hosted agent on

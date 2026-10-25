@@ -74,8 +74,8 @@ const acme = (server: string): CliConfig =>
     },
   });
 
-test("commands come from the CLI file and the tools: positionals, flags, --json and --fields", async () => {
-  const cli = acme(await serve({ tools: [listOrders, getOrder, cancelOrder] }));
+test("commands include MCP-deferred tools: positionals, flags, --json and --fields", async () => {
+  const cli = acme(await serve({ tools: [listOrders, { ...getOrder, mcp: { deferred: true } }, cancelOrder] }));
   const view = io();
   assert.equal(await runCli(cli, ["order", "view", "BL-1042", "--json", "--fields", "order_id,status"], view.channel), 0);
   assert.deepEqual(JSON.parse(view.out), { order_id: "BL-1042", status: "ready" });

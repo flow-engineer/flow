@@ -122,6 +122,8 @@ export interface Tool<Input = any, Output = any> {
    * keep their current behaviour.
    */
   signIn?: SignIn;
+  /** MCP exposure only: discover this tool through search_tools instead of listing it upfront. Chats ignore it. */
+  mcp?: { deferred?: boolean };
   /** How the tool behaves, for hosts to decide what to ask the person first. Nothing enforces them. */
   hints?: ToolHints;
 }

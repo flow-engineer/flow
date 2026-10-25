@@ -22,8 +22,9 @@ When the owner has a product (a codebase), the agent is built from it:
    consumer app. Ask what to call the agent in the same message.
 3. `npx @flow-engineer/flow@latest new <name>-agent --display-name "<name>"` beside the product's
    code (never inside its package), then `npm install` there.
-4. Read the skills as files, `.claude/skills/<skill>/SKILL.md` in that folder: `flow-framework`,
-   `flow-framework-context`, `flow-framework-tools`, `flow-framework-auth`, `flow-framework-tests`.
+4. Read `.claude/skills/flow-framework/SKILL.md` for setup and routing. Then load only the relevant
+   skills: `flow-framework-build-agent` for messaging runtime and operations, `flow-framework-mcp` for
+   MCP, CLI and plugins, and the context, tools, auth or tests skills when those tasks apply.
 5. Replace the café with the product: context, tools, `agent/AGENTS.md`, sign-in, then check it
    (`npx @flow-engineer/flow check`, `npm run mcp` with `flow inspect`, and the phone below).
 

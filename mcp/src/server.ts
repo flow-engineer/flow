@@ -10,6 +10,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { z } from "zod";
 import {
   createMcpHandler,
   hostHeaderValidationResponse,
@@ -28,7 +29,7 @@ import { unavailableRecords, type Records } from "../../src/records.ts";
 import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, SKILLS_META, type AgentFiles } from "../../src/skills.ts";
 import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
 import { FORMATTED, render, toolContext, type CredentialProvider, type Tool, type ToolContext } from "../../src/tools.ts";
-import { describe, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
+import { describe, FULL_CATALOG_META, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
 
 export interface McpAuth {
   /** The authorization server(s) that issue tokens for this server, as hosts discover them. */
@@ -57,6 +58,8 @@ export interface McpServerOptions {
   name: string;
   version: string;
   tools: Tool[];
+  /** Replace the tools' mcp.deferred flags with this list. Omitted: use the flags; []: all upfront. */
+  deferred?: string[];
   /** The agent's folder, for its skills (AGENTS.md is the chat agent's and is not sent). Or `files`. */
   dir?: string;
   files?: AgentFiles;
@@ -110,8 +113,9 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   const problems = toolsProblems(tools);
   if (problems.length) throw new Error(`@flow-engineer/flow/mcp: these tools cannot be served as declared:\n- ${problems.join("\n- ")}`);
   const scopes = options.auth?.scopes;
-  const byName = new Map(tools.map((t) => [t.name, t]));
-  const descriptors = tools.map(t => {
+  const deferred = new Set(options.deferred ?? tools.filter(t => t.mcp?.deferred).map(t => t.name));
+  for (const name of deferred) if (!tools.some(t => t.name === name)) throw new Error(`@flow-engineer/flow/mcp: deferred tool ${name} does not exist`);
+  const sourceDescriptors = tools.map(t => {
     const generated = describe(t, scopes);
     if (t.name === "read_skill" && skills.length) generated._meta[SKILLS_META] = skills.map(({ name, description }) => ({ name, description }));
     return options.descriptor ? options.descriptor(t, generated) : generated;
@@ -122,7 +126,10 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     if (!endpoint.startsWith("/") || /[?#]/.test(endpoint)) throw new Error("@flow-engineer/flow/mcp: paths must be absolute URL paths");
   }
   if (pluginPath === path) throw new Error("@flow-engineer/flow/mcp: plugin and standalone paths must differ");
-  const pluginDescriptors = descriptors.slice(0, options.tools.length);
+  const standalone = toolSurface(tools, sourceDescriptors, deferred, options.descriptor);
+  const pluginSurface = toolSurface(options.tools, sourceDescriptors.slice(0, options.tools.length), deferred, options.descriptor);
+  const descriptors = standalone.descriptors;
+  const pluginDescriptors = pluginSurface.descriptors;
   const traceOptions = options.traces === false ? undefined : options.traces ?? tracesFromEnv();
   const trace = traceOptions ? traces(traceOptions, { service: options.name, kindOf: () => undefined }) : undefined;
   const emit = emitter([...(options.events ?? []), ...(trace ? [trace.sink] : [])]);
@@ -132,16 +139,12 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   const SESSION_TTL = 24 * 60 * 60 * 1000;
   function endpointHandler(plugin: boolean) {
     const instructions = options.instructions ?? (plugin ? "" : mcpInstructions(skills));
-    const listed = plugin ? pluginDescriptors : descriptors;
-    const available = plugin ? new Map(options.tools.map((t) => [t.name, t])) : byName;
+    const surface = plugin ? pluginSurface : standalone;
     return createMcpHandler(({ requestInfo }) => {
     const server = new Server({ name: options.name, version: options.version }, { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) });
-    server.setRequestHandler("tools/list", async () => ({ tools: listed }));
+    server.setRequestHandler("tools/list", async (_request, ctx) => ({ tools: ctx.mcpReq._meta?.[FULL_CATALOG_META] === true ? surface.full : surface.descriptors }));
     server.setRequestHandler("tools/call", async (request, ctx) => {
-      const t = available.get(request.params.name);
-      if (!t) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `No tool named ${request.params.name}.`);
-      const parsed = t.input.safeParse(request.params.arguments ?? {});
-      if (!parsed.success) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Invalid arguments for ${t.name}: ${parsed.error.message}`);
+      const { tool: t, input } = surface.resolve(request.params.name, request.params.arguments ?? {});
       const identity = identityOf(ctx.http?.authInfo);
       const person = identity ? `key:${identity.key}` : "mcp:anonymous";
       const meta = ctx.mcpReq._meta ?? {};
@@ -169,8 +172,8 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         ...(options.businessEvents ? { events: options.businessEvents } : {}),
       }, (ctx.http?.authInfo?.extra?.credentials as CredentialProvider | undefined) ?? options.credentials);
       const started = Date.now();
-      emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input: parsed.data, ...detail });
-      const { result, formatError } = await callTool(t, parsed.data, context);
+      emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input, ...detail });
+      const { result, formatError } = await callTool(t, input, context);
       emit(context.conversationId, "tool.end", { callId: context.callId, tool: t.name, ms: Date.now() - started, ok: !result.isError, output: result.structuredContent ?? result.content, error: result.isError ? result.content.filter(c => c.type === "text").map(c => c.text).join("\n") : undefined, formatError, ...detail });
       return result;
     });
@@ -225,9 +228,9 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
       }
       if (options.auth) {
         for (const message of [parsedBody].flat()) {
-          const call = message as { method?: unknown; params?: { name?: unknown } } | null;
+          const call = message as { method?: unknown; params?: { name?: unknown; arguments?: unknown } } | null;
           if (!call || call.method !== "tools/call" || typeof call.params?.name !== "string") continue;
-          const t = plugin && call.params.name === "read_skill" ? undefined : byName.get(call.params.name);
+          const t = (plugin ? pluginSurface : standalone).target(call.params.name, call.params.arguments);
           if (!t || signInOf(t) === "none") continue;
           const needed = scopesFor(t, scopes);
           if (!authInfo) {
@@ -281,6 +284,100 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     ...(pluginPath ? { plugin: { path: pluginPath, descriptors: pluginDescriptors } } : {}),
     ...(options.auth?.routes ? { paths: [...new Set([path, ...(pluginPath ? [pluginPath] : []), "/.well-known/oauth-protected-resource", ...options.auth.routes.paths])] } : {}),
   };
+}
+
+/** One endpoint's catalog. Plugin discovery never includes the standalone read_skill tool. */
+function toolSurface(
+  tools: Tool[],
+  full: McpToolDescriptor[],
+  deferred: Set<string>,
+  override: McpServerOptions["descriptor"],
+) {
+  const operations = new Map<string, Tool>();
+  const available = new Map<string, Tool>();
+  for (const [index, tool] of tools.entries()) {
+    const name = full[index].name;
+    if (available.has(name)) throw new Error(`@flow-engineer/flow/mcp: two descriptors have the name ${name}`);
+    available.set(name, tool);
+    operations.set(name, tool);
+  }
+  const catalog = full.filter((_descriptor, index) => deferred.has(tools[index].name));
+  const descriptors = full.filter((_descriptor, index) => !deferred.has(tools[index].name));
+  let execute: Tool | undefined;
+
+  function target(name: string, args: unknown): Tool | undefined {
+    const tool = available.get(name);
+    if (execute && tool === execute) {
+      const parsed = execute.input.safeParse(args ?? {});
+      return parsed.success ? operations.get(parsed.data.name) : undefined;
+    }
+    return tool;
+  }
+
+  function resolve(name: string, args: unknown): { tool: Tool; input: unknown } {
+    let tool = available.get(name);
+    if (!tool) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `No tool named ${name}.`);
+    let input = args;
+    if (execute && tool === execute) {
+      const parsed = execute.input.safeParse(input);
+      if (!parsed.success) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Invalid arguments for ${name}: ${parsed.error.message}`);
+      const requested = parsed.data.name;
+      tool = operations.get(requested);
+      if (!tool) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `No tool named ${requested}. Use search_tools to discover available tools.`);
+      input = parsed.data.arguments;
+    }
+    const parsed = tool.input.safeParse(input);
+    if (!parsed.success) throw new ProtocolError(ProtocolErrorCode.InvalidParams, `Invalid arguments for ${tool.name}: ${parsed.error.message}`);
+    return { tool, input: parsed.data };
+  }
+
+  function add(tool: Tool) {
+    const generated = describe(tool);
+    const descriptor = override ? override(tool, generated) : generated;
+    if (available.has(descriptor.name)) throw new Error(`@flow-engineer/flow/mcp: two descriptors have the name ${descriptor.name}`);
+    available.set(descriptor.name, tool);
+    descriptors.push(descriptor);
+  }
+
+  if (catalog.length) {
+    // A team's own tool with either name replaces that generated piece.
+    if (!available.has("search_tools")) add({
+      name: "search_tools",
+      description: "Find MCP tools not listed upfront. Search by the task, tool name or keywords; use the returned name and inputSchema with execute_tool.",
+      input: z.object({ query: z.string().trim().min(1).max(500), limit: z.number().int().min(1).max(20).default(5) }),
+      output: z.object({ tools: z.array(z.record(z.string(), z.unknown())), total: z.number().int().nonnegative() }),
+      signIn: "none",
+      hints: { readOnly: true, idempotent: true, openWorld: false },
+      run: ({ query, limit }) => searchCatalog(catalog, query, limit),
+    });
+    if (!available.has("execute_tool")) {
+      execute = {
+        name: "execute_tool",
+        description: "Call an MCP tool by name with arguments matching its inputSchema. Use search_tools to discover deferred tools. The target's sign-in, scopes and validation still apply.",
+        input: z.object({ name: z.string().min(1), arguments: z.record(z.string(), z.unknown()).default({}) }),
+        signIn: "optional",
+        hints: { readOnly: false, destructive: true, openWorld: true },
+        run: (args, context) => {
+          const resolved = resolve("execute_tool", args);
+          return resolved.tool.run(resolved.input, context);
+        },
+      };
+      add(execute);
+    }
+  }
+  return { descriptors, full, resolve, target };
+}
+
+function searchCatalog(catalog: McpToolDescriptor[], query: string, limit: number): { tools: McpToolDescriptor[]; total: number } {
+  const terms = [...new Set(query.toLowerCase().match(/[a-z0-9]+/g) ?? [])];
+  const matches = catalog.map(tool => {
+    const name = tool.name.toLowerCase();
+    const text = `${tool.title} ${tool.description}`.toLowerCase();
+    const score = (name === query.toLowerCase() ? 20 : 0) + terms.reduce((sum, term) => sum + (name.includes(term) ? 8 : 0) + (text.includes(term) ? 2 : 0), 0);
+    return { tool, score };
+  }).filter(({ score }) => score > 0)
+    .sort((a, b) => b.score - a.score || a.tool.name.localeCompare(b.tool.name));
+  return { tools: matches.slice(0, limit).map(({ tool }) => tool), total: matches.length };
 }
 
 function identityOf(authInfo: AuthInfo | undefined): McpIdentity | null {

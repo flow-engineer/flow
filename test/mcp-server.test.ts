@@ -55,6 +55,86 @@ test("the café's tools are served as spec-valid MCP tools, every annotation sen
   await c.close();
 });
 
+test("only manually deferred tools leave the upfront list, and search returns their executable descriptors", async () => {
+  const lookup = tool({ name: "invoice_lookup", description: "Look up an invoice.", input: z.object({ id: z.string() }), output: z.object({ id: z.string() }), mcp: { deferred: true }, signIn: "none", hints: { readOnly: true }, run: ({ id }) => ({ id }) });
+  const archive = tool({ name: "invoice_archive", description: "Archive an invoice.", input: z.object({ id: z.string() }), mcp: { deferred: true }, run: () => "done" });
+  const c = await client(await serve({ name: "test", version: "1", tools: [cafeTools[0]!, lookup, archive] }));
+  try {
+    assert.deepEqual((await c.listTools()).tools.map(t => t.name), ["get_menu", "search_tools", "execute_tool"]);
+    const found = await c.callTool({ name: "search_tools", arguments: { query: "invoice_lookup", limit: 1 } });
+    const matches = (found.structuredContent as { tools: Array<Record<string, unknown>> }).tools;
+    assert.deepEqual(matches, [mcpServer({ name: "test", version: "1", tools: [lookup], deferred: [] }).descriptors[0]]);
+    assert.deepEqual((await c.callTool({ name: "search_tools", arguments: { query: "get_menu" } })).structuredContent, { tools: [], total: 0 });
+    const limited = (await c.callTool({ name: "search_tools", arguments: { query: "invoice", limit: 1 } })).structuredContent as { tools: unknown[]; total: number };
+    assert.equal(limited.tools.length, 1);
+    assert.equal(limited.total, 2, "a limited result reports that more matching tools exist");
+    const full = await c.listTools({ _meta: { "flow.engineer/full-tool-catalog": true } }, { cacheMode: "refresh" });
+    assert.deepEqual(full.tools.map(t => t.name), ["get_menu", "invoice_lookup", "invoice_archive"]);
+    assert.deepEqual((await c.listTools({}, { cacheMode: "refresh" })).tools.map(t => t.name), ["get_menu", "search_tools", "execute_tool"]);
+  } finally { await c.close(); }
+});
+
+test("the server can replace manual deferral, including promoting every tool with an empty list", () => {
+  const marked = { ...cafeTools[0]!, mcp: { deferred: true } };
+  const options = { name: "test", version: "1", tools: [marked, cafeTools[1]!] };
+  assert.deepEqual(mcpServer({ ...options, deferred: [] }).descriptors.map(t => t.name), ["get_menu", "place_order"]);
+  assert.deepEqual(mcpServer({ ...options, deferred: ["place_order"] }).descriptors.map(t => t.name), ["get_menu", "search_tools", "execute_tool"]);
+  assert.throws(() => mcpServer({ ...options, deferred: ["missing"] }), /deferred tool missing does not exist/);
+});
+
+test("execute uses the target's validation, formatted result, context and trace name", async () => {
+  let runs = 0;
+  let seen: ToolContext | undefined;
+  const events: Array<Record<string, unknown>> = [];
+  const lookup = tool({ name: "invoice_lookup", description: "Look up an invoice.", input: z.object({ id: z.string() }), output: z.object({ id: z.string() }), mcp: { deferred: true }, signIn: "none", hints: { readOnly: true }, run: ({ id }, context) => { runs++; seen = context; return { id }; }, format: ({ id }) => `Invoice **${id}**` });
+  const c = await client(await serve({ name: "test", version: "1", tools: [lookup], events: [e => { events.push(e); }] }));
+  try {
+    const result = await c.callTool({ name: "execute_tool", arguments: { name: "invoice_lookup", arguments: { id: "i1" } }, _meta: { "chinwag/idempotency-key": "request-1" } });
+    assert.deepEqual(result, { content: [{ type: "text", text: "Invoice **i1**" }], structuredContent: { id: "i1" }, _meta: { "chinwag/formatted": true } });
+    assert.equal(seen?.idempotencyKey, "request-1");
+    assert.equal(seen?.channel, "mcp");
+    assert.deepEqual(events.filter(e => e.type === "tool.start" || e.type === "tool.end").map(e => e.tool), ["invoice_lookup", "invoice_lookup"]);
+    await assert.rejects(c.callTool({ name: "execute_tool", arguments: { name: "invoice_lookup", arguments: { id: 1 } } }), /Invalid arguments for invoice_lookup/);
+    await assert.rejects(c.callTool({ name: "execute_tool", arguments: { name: "missing", arguments: {} } }), /No tool named missing/);
+    await assert.rejects(c.callTool({ name: "execute_tool", arguments: { name: "execute_tool", arguments: {} } }), /No tool named execute_tool/);
+    assert.equal(runs, 1);
+  } finally { await c.close(); }
+});
+
+test("deferred execution challenges for the target's sign-in and read or write scope", async () => {
+  const definition = { input: z.object({}), mcp: { deferred: true }, run: () => "ok" };
+  const tools = [
+    tool({ ...definition, name: "public", description: "Public.", signIn: "none", hints: { readOnly: true } }),
+    tool({ ...definition, name: "read", description: "Read.", hints: { readOnly: true } }),
+    tool({ ...definition, name: "write", description: "Write." }),
+  ];
+  const url = await serve({ name: "test", version: "1", tools, auth: { issuer: "https://login.example.com", scopes: { read: "read", write: "write" }, verify: token => token === "reader" ? { key: "person", scopes: ["read"] } : null } });
+  const execute = (name: string) => call("execute_tool", { name, arguments: {} });
+  assert.equal((await rpc(url, execute("public"))).status, 200);
+  const anonymous = await rpc(url, execute("read"));
+  assert.equal(anonymous.status, 401);
+  assert.match(anonymous.headers.get("www-authenticate")!, /scope="read"/);
+  assert.equal((await rpc(url, execute("read"), "reader")).status, 200);
+  const write = await rpc(url, execute("write"), "reader");
+  assert.equal(write.status, 403);
+  assert.match(write.headers.get("www-authenticate")!, /insufficient_scope.*scope="read write"/);
+});
+
+test("generated discovery and execution descriptors can be renamed, or replaced with a team's tools", async () => {
+  const deferred = { ...cafeTools[0]!, mcp: { deferred: true } };
+  const c = await client(await serve({ name: "test", version: "1", tools: [deferred], descriptor: (t, d) => ({ ...d, name: t.name === "search_tools" ? "find_operations" : t.name === "execute_tool" ? "run_operation" : d.name }) }));
+  try {
+    assert.deepEqual((await c.listTools()).tools.map(t => t.name), ["find_operations", "run_operation"]);
+    assert.ok((await c.callTool({ name: "find_operations", arguments: { query: "menu" } })).structuredContent);
+    assert.equal((await c.callTool({ name: "run_operation", arguments: { name: "get_menu", arguments: {} } })).isError, undefined);
+  } finally { await c.close(); }
+  const own = ["search_tools", "execute_tool"].map(name => tool({ name, description: "Our own implementation.", input: z.object({}), signIn: "none", run: () => "ours" }));
+  const replaced = await client(await serve({ name: "test", version: "1", tools: [deferred, ...own] }));
+  try {
+    for (const t of own) assert.deepEqual((await replaced.callTool({ name: t.name, arguments: {} })).content, [{ type: "text", text: "ours" }]);
+  } finally { await replaced.close(); }
+});
+
 test("without a token a signed-in tool gets 401 before the SDK runs, and a signed-out one answers", async () => {
   const menu = tool({ name: "menu", description: "The menu.", input: z.object({}), signIn: "none", hints: { readOnly: true }, run: () => "latte" });
   const orders = tool({ name: "my_orders", description: "Their orders.", input: z.object({}), hints: { readOnly: true }, run: () => [] });
@@ -114,7 +194,7 @@ test("backend credentials are resolved by verified account, isolated across conc
     name: "test", version: "1", events: [e => { events.push(e); }],
     auth: { issuer: "https://login.example.com", verify: token => token === "sam" ? { key: token, credentials: (name, ctx) => backend(name, ctx, "request-proof") } : token === "ria" ? { key: token } : null },
     credentials: backend,
-    tools: [tool({ name: "account", description: "Read their account.", input: z.object({ claimed_user: z.string() }), run: async (_input, context) => {
+    tools: [tool({ name: "account", description: "Read their account.", input: z.object({ claimed_user: z.string() }), mcp: { deferred: true }, run: async (_input, context) => {
       const credential = await context.credentials!.get<string>("api");
       seen.push({ key: context.key, context: JSON.stringify(context), credential });
       return { account: context.key };
@@ -122,7 +202,7 @@ test("backend credentials are resolved by verified account, isolated across conc
   });
   const sam = await client(url, "sam"), ria = await client(url, "ria");
   try {
-    const calls = Promise.all([sam.callTool({ name: "account", arguments: { claimed_user: "ria" } }), ria.callTool({ name: "account", arguments: { claimed_user: "sam" } })]);
+    const calls = Promise.all([sam.callTool({ name: "execute_tool", arguments: { name: "account", arguments: { claimed_user: "ria" } } }), ria.callTool({ name: "account", arguments: { claimed_user: "sam" } })]);
     await arrived;
     release();
     const results = await calls;
@@ -134,16 +214,19 @@ test("backend credentials are resolved by verified account, isolated across conc
 });
 
 test("a tool that throws is an isError result, and output is checked and sent as structured content", async () => {
-  const fails = tool({ name: "fails", description: "Fails.", input: z.object({}), signIn: "none", run: () => { throw new Error("the till is offline"); } });
+  const fails = tool({ name: "fails", description: "Fails.", input: z.object({}), mcp: { deferred: true }, signIn: "none", run: () => { throw new Error("the till is offline"); } });
   const order = z.object({ order_id: z.string() });
   const good = tool({ name: "good", description: "Places.", input: z.object({}), output: order, signIn: "none", run: () => ({ order_id: "BL-1" }) });
-  const bad = tool({ name: "bad", description: "Places.", input: z.object({}), output: order, signIn: "none", run: () => ({ id: 1 }) });
+  const bad = tool({ name: "bad", description: "Places.", input: z.object({}), output: order, mcp: { deferred: true }, signIn: "none", run: () => ({ id: 1 }) });
   const c = await client(await serve({ name: "cafe", version: "1", tools: [fails, good, bad] }));
 
-  assert.deepEqual(await c.callTool({ name: "fails", arguments: {} }), { isError: true, content: [{ type: "text", text: "the till is offline" }] });
+  for (const indirect of [false, true]) {
+    const invoke = (name: string) => c.callTool(indirect ? { name: "execute_tool", arguments: { name, arguments: {} } } : { name, arguments: {} });
+    assert.deepEqual(await invoke("fails"), { isError: true, content: [{ type: "text", text: "the till is offline" }] });
+    assert.equal((await invoke("bad")).isError, true);
+  }
   const placed = await c.callTool({ name: "good", arguments: {} });
   assert.deepEqual(placed.structuredContent, { order_id: "BL-1" });
-  assert.equal((await c.callTool({ name: "bad", arguments: {} })).isError, true);
   await c.close();
 });
 
@@ -207,12 +290,13 @@ test("a tool that cannot be described exactly is refused when the server is made
 // Plugin skills are native files; a host must not also receive their MCP copy.
 test("plugin paths deliver tools once, share sign-in, and advertise their own resource", async () => {
   const events: unknown[] = [];
-  const status = tool({ name: "status", description: "Status.", input: z.object({}), run: () => "ready" });
+  const status = tool({ name: "status", description: "Status.", input: z.object({}), mcp: { deferred: true }, run: () => "ready" });
   const url = await serve({ name: "cafe", version: "1", tools: [status], files: { "skills/allergens/SKILL.md": "Allergy rules" }, events: [e => { events.push(e); }], auth: { issuer: "https://login.example.com", verify: token => token === "test" ? { key: "person" } : null } });
   const c = await client(`${url}/plugin`, "test");
-  assert.deepEqual((await c.listTools()).tools.map(t => t.name), ["status"]);
+  assert.deepEqual((await c.listTools()).tools.map(t => t.name), ["search_tools", "execute_tool"]);
   assert.equal(c.getInstructions(), undefined);
   await assert.rejects(c.callTool({ name: "read_skill", arguments: { name: "allergens" } }), /No tool named/);
+  await assert.rejects(c.callTool({ name: "execute_tool", arguments: { name: "read_skill", arguments: { name: "allergens" } } }), /No tool named/);
   await c.callTool({ name: "status", arguments: {} });
   assert.ok(events.some(e => (e as any).surface === "mcp-plugin"));
   await c.close();

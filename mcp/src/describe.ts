@@ -22,6 +22,9 @@ export interface Scopes {
   write?: string;
 }
 
+/** Explicit full discovery for the CLI and MCP imports; deferral is context management, not access control. */
+export const FULL_CATALOG_META = "flow.engineer/full-tool-catalog";
+
 const NAME = /^[A-Za-z0-9_.-]{1,128}$/;
 const STATUS_MAX = 64;
 /** Tools that exist only in a chat: a description naming one points a host at a tool it does not have. */
