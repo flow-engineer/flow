@@ -2,10 +2,13 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## Unreleased (0.8.0: store migration 11 needs a new minor, so Flow's hosting runs it first)
+## 0.8.0 (2026-10-25)
 
 ### Changes
 
+- Flow Messaging preserves a refusal that arrives over the stream before the send's HTTP
+  response: the send rejects with the platform's reason instead of timing out as unconfirmed.
+  Failures after a completed send still notify the agent.
 - **Coding-agent guidance loads by task.** `flow-framework` (`coding-agents/skill.md`) now covers
   setup, names, layout and routing. Messaging runtime, playground and deployment guidance moves
   to `flow-framework-build-agent` (`build-agent-skill.md`); MCP, CLI and plugin guidance moves to

@@ -221,6 +221,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   /** Sends waiting for their message's status, by Flow message id: true once settled by it. */
   const waiting = new Map<string, (status: string, error?: FlowMessage["error"]) => boolean>();
   const early = new Map<string, { status: string; error?: FlowMessage["error"] }>();
+  // A status can beat its POST response, before we know the message id to wait on.
+  const posting = new Map<string, Set<Promise<void>>>();
   const key = (channel: string, address: string) => `${channel}\u0000${address}`;
 
   function register(kind: Kind, o: FlowChannelOptions): Route {
@@ -251,6 +253,17 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * template only).
    */
   async function send(route: Route, to: string, piece: Piece, about?: string, idempotencyKey?: string): Promise<SendReceipt> {
+    const person = key(route.name, to);
+    let resolve!: () => void;
+    const ready = new Promise<void>((done) => { resolve = done; });
+    const posts = posting.get(person) ?? new Set<Promise<void>>();
+    posting.set(person, posts);
+    posts.add(ready);
+    const registered = () => {
+      if (!posts.delete(ready)) return;
+      resolve();
+      if (!posts.size) posting.delete(person);
+    };
     try {
       const conversation = await conversationFor(route.name, to, about);
       let sent: FlowMessage;
@@ -261,9 +274,13 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         sent = await client.post("/v0/messages", { sender: route.sender, to: recipient(route.kind, to), kind: first.kind, ...first.body }, undefined, idempotencyKey);
       }
       flowConversation.set(key(route.name, to), sent.conversation);
-      return await arrived(route, sent);
+      const receipt = arrived(route, sent);
+      registered();
+      return await receipt;
     } catch (error) {
       throw error instanceof FlowMessagingError ? new Error(reason(error)) : error;
+    } finally {
+      registered();
     }
   }
 
@@ -643,6 +660,16 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       const m = event.data?.message;
       if (!m?.id) return;
       const status = event.type.slice("message.".length);
+      if (status === "failed" && !waiting.has(m.id) && event.conversation) {
+        const route = routeOf(event);
+        if (route) {
+          const address = await addressOf(route, event.conversation.contact);
+          await Promise.all([
+            ...posting.get(key(route.name, address)) ?? [],
+            ...posting.get(key(route.name, event.conversation.contact)) ?? [],
+          ]);
+        }
+      }
       const settle = waiting.get(m.id);
       if (typeof settle === "function") {
         // A failure its send is waiting on is told through that send, not again as Not delivered.
