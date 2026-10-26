@@ -83,7 +83,8 @@
     "@stricli/core": "1.3.0",
     "marked": "12.0.2",
     "marked-terminal": "7.3.0",
-    "oidc-provider": "9.12.2"
+    "oidc-provider": "9.12.2",
+    "@mariozechner/pi-tui": "0.73.1"
   },
   "peerDependenciesMeta": {
     "@modelcontextprotocol/client": {
@@ -103,6 +104,9 @@
     },
     "marked-terminal": {
       "optional": true
+    },
+    "@mariozechner/pi-tui": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -115,6 +119,7 @@
     "marked": "12.0.2",
     "marked-terminal": "7.3.0",
     "oidc-provider": "9.12.2",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "@mariozechner/pi-tui": "0.73.1"
   }
 }

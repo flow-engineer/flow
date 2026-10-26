@@ -32,11 +32,35 @@ export function terminalServer(options: TerminalServerOptions) {
       if (inFlight >= 128) return Response.json({ error: "busy" }, { status: 429 });
       inFlight++;
       const previous = pending.get(identity.key) ?? Promise.resolve();
-      const work = previous.catch(() => undefined).then(() => options.agent().request({ channel: channel.name, key: identity.key, text: input.text as string, conversationId: input.conversationId as string | undefined, credentials: identity.credentials }));
-      pending.set(identity.key, work);
-      try { return Response.json(await work); }
+      const run = (callbacks: Partial<Parameters<Agent["request"]>[0]> = {}) => {
+        const work = previous.catch(() => undefined).then(() => options.agent().request({ channel: channel.name, key: identity.key, text: input.text as string, conversationId: input.conversationId as string | undefined, credentials: identity.credentials, ...callbacks }));
+        pending.set(identity.key, work);
+        return work.finally(() => { inFlight--; if (pending.get(identity.key) === work) pending.delete(identity.key); });
+      };
+      // Opt-in streaming leaves the original JSON contract unchanged for scripts and older clients.
+      if (request.headers.get("accept")?.includes("application/x-ndjson")) {
+        const encoder = new TextEncoder();
+        let closed = false;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            const push = (value: unknown) => { if (!closed) controller.enqueue(encoder.encode(`${JSON.stringify(value)}\n`)); };
+            void run({
+              onReply: reply => { if (reply.type === "message") push({ type: "reply", text: reply.text }); },
+              onActivity: event => {
+                // Deliberately project public activity fields, never a model prompt or hidden text.
+                const { type, callId, tool, input, output, ok, ms, skill } = event;
+                push({ type: "activity", event: { type, callId, tool, input, output, ok, ms, skill } });
+              },
+            }).then(result => push({ type: "done", result }), () => push({ type: "error", message: "The agent could not finish." }))
+              .finally(() => { if (!closed) { closed = true; controller.close(); } });
+          },
+          // Work already accepted by the agent continues if the client stops watching.
+          cancel() { closed = true; },
+        });
+        return new Response(body, { headers: { "content-type": "application/x-ndjson", "cache-control": "no-store", "x-content-type-options": "nosniff" } });
+      }
+      try { return Response.json(await run()); }
       catch { return Response.json({ error: "turn_failed" }, { status: 500 }); }
-      finally { inFlight--; if (pending.get(identity.key) === work) pending.delete(identity.key); }
     },
   };
 }

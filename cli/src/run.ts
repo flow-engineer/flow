@@ -6,7 +6,7 @@
 // overwrite, and fixed exit codes. The commands come from the server's tools at run time, shaped by
 // the CLI file (commands.ts).
 
-import { runTerminal } from "./terminal.ts";
+import { forTerminal, runTerminal, type ChatSession } from "./terminal.ts";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -54,6 +54,8 @@ export interface CliIO {
   interactive: boolean;
   /** Lines from an interactive terminal, with an optional input prompt; injectable for embedded CLIs and tests. */
   lines?: (prompt?: string) => AsyncIterable<string>;
+  /** Replace the full-screen chat presentation; omitted uses the injected line interface. */
+  chat?: (session: ChatSession) => Promise<number>;
   /** Ask a yes-or-no question (only when interactive). */
   confirm(question: string): Promise<boolean>;
 }
@@ -63,6 +65,10 @@ export function processIO(): CliIO {
     write: (text) => void process.stdout.write(text),
     writeError: (text) => void process.stderr.write(text),
     interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+    async chat(session) {
+      const { runChatUI } = await import("./chat-ui.ts");
+      return runChatUI(session);
+    },
     async *lines(prompt) {
       const rl = createInterface({ input: process.stdin, output: process.stderr });
       if (prompt) { rl.setPrompt(prompt); rl.prompt(); }
@@ -844,21 +850,6 @@ function valueOf(result: { content?: unknown; structuredContent?: unknown; isErr
     return JSON.parse(text);
   } catch {
     return text;
-  }
-}
-
-/**
- * A tool's Markdown, styled for a person at a terminal by marked-terminal when the CLI's package has
- * it (optional peers, loaded only here); as written when piped, for NO_COLOR, or without them.
- */
-async function forTerminal(markdown: string, io: CliIO): Promise<string> {
-  if (!atTerminal(io)) return markdown;
-  try {
-    const [{ Marked }, { markedTerminal }] = await Promise.all([import("marked"), import("marked-terminal")]);
-    // marked-terminal 7 returns an extension; its published types still say a renderer.
-    return await new Marked(markedTerminal({ showSectionPrefix: false }) as never).parse(markdown);
-  } catch {
-    return markdown;
   }
 }
 

@@ -49,6 +49,8 @@ export interface CliConfig {
   server?: string;
   /** The agent terminal URL; default the server origin plus /agent/terminal. */
   agent?: string;
+  /** Human chat inherits the terminal's colors. Optional six-digit hex accent brands its title and borders. */
+  chat?: { accent?: string };
   /** The variable a token is read from for CI and agents (default <NAME>_TOKEN). */
   tokenEnv?: string;
   /** Override the local credential/conversation/discovery directory, e.g. for an isolated embedded session. */
