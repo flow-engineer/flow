@@ -1,6 +1,6 @@
 {
   "name": "@flow-engineer/flow",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "An open-source runtime for chat agents that feel like a person texting back.",
   "license": "Apache-2.0",
   "repository": {
