@@ -2,10 +2,19 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## Unreleased
+## 0.9.0 (2026-10-26)
 
 ### Changes
 
+- **Full-screen CLI chat.** `acme chat` at a terminal opens a full-screen session: the
+  conversation above, a composer with a Send button below, Markdown replies, and tool activity that
+  updates while the agent works (Ctrl+O shows tool inputs and results, `/help` lists the keys). It
+  needs the optional peer `@mariozechner/pi-tui@0.73.1` (`flow new` includes it);
+  `defineCli({ chat: { accent: "#b85c00" } })` sets a brand accent. `CliIO.chat` replaces the
+  interface; `ChatSession` and `ChatUpdate` are exported from `@flow-engineer/flow/cli`.
+- **Live chat activity.** The terminal handler streams `reply`, `activity` and a final `done`
+  record when the request accepts `application/x-ndjson`; other requests get the same JSON as
+  before. `agent.request()` takes `onReply` and `onActivity` to observe a request while it runs.
 - **Chat without sign-in.** `terminalServer`'s `auth` is optional. Without it, or with
   `guests: true` beside it, a CLI that is not signed in chats as a guest: it keeps a random id in
   `chat.json` and sends it as the `flow-guest` header. A guest's conversation stays on the
