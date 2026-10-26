@@ -54,7 +54,7 @@ function writeAll(config: CliConfig, all: Record<string, Saved>): void {
 }
 
 /** An OAuth client provider whose state lives in the CLI's auth file, for one server. */
-export function storedProvider(config: CliConfig, server: string, redirectUrl?: string, signal?: AbortSignal): OAuthClientProvider {
+export function storedProvider(config: CliConfig, server: string, redirectUrl?: string, signal?: AbortSignal, say: (text: string) => void = (text) => void process.stderr.write(text)): OAuthClientProvider {
   const read = (): Saved => readAll(config)[server] ?? {};
   const write = (change: Partial<Saved>) => {
     signal?.throwIfAborted();
@@ -85,9 +85,11 @@ export function storedProvider(config: CliConfig, server: string, redirectUrl?: 
     state: () => { const state = randomBytes(32).toString("base64url"); write({ state }); return state; },
     discoveryState: () => read().discovery,
     saveDiscoveryState: (discovery) => write({ discovery }),
+    // The link is always printed: an opener may pick the wrong browser or profile, and the link
+    // works pasted anywhere on this computer (the state is in the auth file, not the tab).
     redirectToAuthorization: async (url) => {
-      if (config.openUrl) await config.openUrl(url.toString());
-      else console.error(`Open this link to sign in:\n  ${url}`);
+      say(config.openUrl ? `Opening the sign-in page. If it opens in the wrong browser, paste this link into the one you want:\n  ${url}\n` : `Open this link to sign in:\n  ${url}\n`);
+      if (config.openUrl) await Promise.resolve(config.openUrl(url.toString())).catch(() => {});
     },
     saveCodeVerifier: (verifier) => write({ verifier }),
     codeVerifier: () => {
@@ -155,7 +157,7 @@ export async function signedInAsOtherClient(config: CliConfig, server: string): 
 }
 
 /** Sign in: the browser goes to the organization's own login, and comes back to a loopback port. */
-export async function signIn(config: CliConfig, server: string, signal?: AbortSignal): Promise<void> {
+export async function signIn(config: CliConfig, server: string, signal?: AbortSignal, say?: (text: string) => void): Promise<void> {
   signal?.throwIfAborted();
   if (!config.clientId && !config.clientMetadataUrl) {
     // Discovery that fails here fails again in auth(), which says why.
@@ -174,7 +176,7 @@ export async function signIn(config: CliConfig, server: string, signal?: AbortSi
   const redirectUrl = `http://127.0.0.1:${port}/callback`;
   let cancel: (() => void) | undefined;
   try {
-    const provider = storedProvider(config, server, redirectUrl, signal);
+    const provider = storedProvider(config, server, redirectUrl, signal, say);
     const code = new Promise<{ code: string; iss?: string }>((resolve, reject) => {
       cancel = () => reject(new Error("Sign-in cancelled."));
       signal?.addEventListener("abort", cancel, { once: true });

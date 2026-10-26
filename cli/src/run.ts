@@ -832,7 +832,7 @@ function authRoutes(config: CliConfig, server: string | undefined, io: CliIO): R
         docs: { brief: "Sign in on the organization's own login page" },
         parameters: {},
         async func() {
-          await signIn(config, need(), io.signal);
+          await signIn(config, need(), io.signal, (text) => io.writeError(text));
           io.writeError(`Signed in to ${need()}.\n`);
         },
       }),
