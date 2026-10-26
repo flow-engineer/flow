@@ -245,6 +245,8 @@ terminal HTTP requests. Installed CLI defaults stay unchanged.
 overrides the terminal URL; the default is the MCP server's origin plus `/agent/terminal`.
 `acme chat "Which orders are ready?" --json` prints one response; `acme chat` reads a TTY until
 Ctrl-D or `/exit`. Without a TTY pass a message to `chat` (an interactive chat exits 2); sign-in failures exit 3.
+Run by a coding agent (`CLAUDECODE`, `CURSOR_AGENT`, `CODEX_CI` or `AI_AGENT` set) or with `--plain`, chat
+acts as without a TTY even at a terminal: replies print as written and the interactive view never opens.
 Human `chat` opens a dedicated full-screen session with a bottom composer, Markdown replies and
 live tool activity. Sent messages have subtle shading when the terminal reports its background. It inherits terminal colors; `defineCli({ ..., chat: { accent: "#b85c00" } })`
 sets a hex brand accent, approximated in 256 colors, without changing the background; on a 24-bit terminal sent messages take a faint wash of it. Install optional `@mariozechner/pi-tui@0.73.1` for that interface; `flow new`

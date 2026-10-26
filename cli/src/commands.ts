@@ -247,7 +247,7 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     "",
     "## Talking to the agent",
     "",
-    `\`${name} chat "<message>" --json\` sends one message to the agent; \`${name} chat\` opens an interactive loop (Ctrl-D or /exit to leave). Both need sign-in.`,
+    `\`${name} chat "<message>"\` sends one message to the agent and prints its reply as written (\`--json\` for the full response); always pass the message. \`${name} chat\` alone is for a person at a terminal. Chat needs sign-in unless the agent lets guests chat.`,
     "The CLI keeps its conversation reference in chat.json in its config folder; --new forgets that reference and preserves shared person history. chat without a message needs a terminal (otherwise exits 2).",
     "",
     "## Commands",
