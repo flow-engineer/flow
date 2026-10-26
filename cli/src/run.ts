@@ -16,7 +16,7 @@ import { createInterface } from "node:readline/promises";
 import { styleText } from "node:util";
 import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider, type Tool as McpTool } from "@modelcontextprotocol/client";
 import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
-import { configDir, isSignedIn, signIn, signOut, storedProvider } from "./auth.ts";
+import { configDir, isSignedIn, signedInAsOtherClient, signIn, signOut, storedProvider } from "./auth.ts";
 import { SKILLS_META } from "../../src/skills.ts";
 import { FORMATTED } from "../../src/tools.ts";
 import { FULL_CATALOG_META } from "../../mcp/src/describe.ts";
@@ -268,6 +268,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
       if (problem) io.writeError(`\n${problem.message}\n`);
       if (code < 0) {
         const words = rest.filter(w => !w.startsWith("-"));
+        if (code === ExitCode.UnknownCommand && server && !token && await signedInAsOtherClient(config, server)) io.writeError(`${RENEW(config)}\n`);
         io.writeError(`Run \`${[config.name, ...wordsKnown(words, config, tools)].join(" ")} --help\` to see how to use it.\n`);
         return EXIT.usage;
       }
@@ -347,11 +348,16 @@ function serverVersion(client: Client): Discovery["server"] {
   return version ? { name: version.name, version: version.version } : undefined;
 }
 
-/** Cache descriptors only, never credentials or tool results. Separate files avoid lost updates. */
+/**
+ * Cache descriptors only, never credentials or tool results. Separate files avoid lost updates. One
+ * per credential and the client it was issued to, as servers list tools per client (Tool.mcp.clients).
+ */
 async function discoveryFile(config: CliConfig, server: string, token: string | undefined): Promise<string | undefined> {
   if (config.discoveryCache === false) return undefined;
-  const credentials = token ? { token } : await storedProvider(config, server).tokens();
-  const key = createHash("sha256").update(JSON.stringify([server, config.name, config.version ?? "1", config.clientId, config.clientMetadataUrl, credentials ?? null])).digest("hex");
+  const provider = storedProvider(config, server);
+  const credentials = token ? { token } : await provider.tokens();
+  const client = token ? null : (await provider.clientInformation())?.client_id ?? null;
+  const key = createHash("sha256").update(JSON.stringify([server, config.name, config.version ?? "1", config.clientId, config.clientMetadataUrl, credentials ?? null, client])).digest("hex");
   return join(configDir(config), "discovery", `${key}.json`);
 }
 
@@ -811,6 +817,9 @@ function skillCommand(config: CliConfig, tools: ToolInfo[], call: ToolCall, io: 
   });
 }
 
+/** An old sign-in (the CLI registered itself) hides the commands kept to the CLI until the next one. */
+const RENEW = (config: CliConfig) => `Some commands need a new sign-in: run \`${config.name} auth login\` to see them.`;
+
 function authRoutes(config: CliConfig, server: string | undefined, io: CliIO): RouteMap<CliContext> {
   const need = () => {
     if (!server) throw new CliExit(EXIT.usage, noServer(config));
@@ -838,12 +847,14 @@ function authRoutes(config: CliConfig, server: string | undefined, io: CliIO): R
       status: buildCommand<{ json?: boolean }, [], CliContext>({
         docs: { brief: "Whether you are signed in, and how" },
         parameters: { flags: { json: { kind: "boolean", brief: "Print JSON", optional: true, withNegated: false } } },
-        func(flags) {
+        async func(flags) {
           const s = need();
           const env = (io.env ?? process.env)[tokenEnvOf(config)];
           const source = env ? "env" : isSignedIn(config, s) ? "login" : null;
-          if (flags.json) return void io.write(`${JSON.stringify({ server: s, signedIn: source !== null, source })}\n`);
+          const renew = source === "login" && await signedInAsOtherClient(config, s);
+          if (flags.json) return void io.write(`${JSON.stringify({ server: s, signedIn: source !== null, source, ...(source === "login" ? { renew } : {}) })}\n`);
           io.write(`${s}: ${env ? `using ${tokenEnvOf(config)}` : source ? "signed in" : "not signed in"}\n`);
+          if (renew) io.writeError(`${RENEW(config)}\n`);
         },
       }),
     },

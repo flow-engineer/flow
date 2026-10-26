@@ -30,9 +30,9 @@ import { unavailableRecords, type Records } from "../../src/records.ts";
 import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, SKILLS_META, type AgentFiles } from "../../src/skills.ts";
 import { serveNode } from "../../src/http.ts";
 import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
-import { FORMATTED, render, toolContext, type CredentialProvider, type Tool, type ToolContext } from "../../src/tools.ts";
+import { FORMATTED, render, toolContext, type CredentialProvider, type McpClientKind, type Tool, type ToolContext } from "../../src/tools.ts";
 import { terminalServer } from "./terminal.ts";
-import { describe, FULL_CATALOG_META, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
+import { describe, FULL_CATALOG_META, MCP_CLIENT_KINDS, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
 
 export interface McpAuth {
   /** The authorization server(s) that issue tokens for this server, as hosts discover them. */
@@ -55,6 +55,12 @@ export interface McpIdentity {
   scopes?: string[];
   /** Request-bound backend access, such as a brand token exchange. Never exposed to the model. */
   credentials?: CredentialProvider;
+  /**
+   * The OAuth client the token was issued to, which decides the tools kept to some clients
+   * (Tool.mcp.clients): `kind` "cli" for the agent's own CLI. The OAuth bridge fills it in; a brand
+   * with its own authorization server returns it from `verify`. Absent: a client like any host.
+   */
+  client?: { id: string; kind?: McpClientKind };
 }
 
 export interface McpServerOptions {
@@ -126,6 +132,9 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   const tools = [...options.tools, ...(skills.length ? [readSkillTool(skills)] : [])];
   const problems = toolsProblems(tools);
   if (problems.length) throw new Error(`@flow-engineer/flow/mcp: these tools cannot be served as declared:\n- ${problems.join("\n- ")}`);
+  // Only a verified token says which client is calling: without auth, such a tool reaches no one.
+  const kept = tools.filter(t => t.mcp?.clients);
+  if (kept.length && !options.auth) throw new Error(`@flow-engineer/flow/mcp: ${kept.map(t => t.name).join(", ")} ${kept.length === 1 ? "is" : "are"} kept to some clients (mcp.clients), which needs auth to tell the clients apart`);
   const scopes = options.auth?.scopes;
   const deferred = new Set(options.deferred ?? tools.filter(t => t.mcp?.deferred).map(t => t.name));
   for (const name of deferred) if (!tools.some(t => t.name === name)) throw new Error(`@flow-engineer/flow/mcp: deferred tool ${name} does not exist`);
@@ -140,10 +149,21 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     if (!endpoint.startsWith("/") || /[?#]/.test(endpoint)) throw new Error("@flow-engineer/flow/mcp: paths must be absolute URL paths");
   }
   if (pluginPath === path) throw new Error("@flow-engineer/flow/mcp: plugin and standalone paths must differ");
-  const standalone = toolSurface(tools, sourceDescriptors, deferred, options.descriptor);
-  const pluginSurface = toolSurface(options.tools, sourceDescriptors.slice(0, options.tools.length), deferred, options.descriptor);
-  const descriptors = standalone.descriptors;
-  const pluginDescriptors = pluginSurface.descriptors;
+  // One catalog per kind of client a tool is kept to, and the default for every other client, so
+  // a tool never reaches a client it is not for: not listed, not searchable, not callable.
+  const surfacesFor = (kind?: McpClientKind) => {
+    const visible = (list: Tool[]) => list.flatMap((t, i) => !t.mcp?.clients || (kind !== undefined && t.mcp.clients.includes(kind)) ? [{ tool: t, descriptor: sourceDescriptors[i]! }] : []);
+    const surface = (list: Tool[]) => { const shown = visible(list); return toolSurface(shown.map(s => s.tool), shown.map(s => s.descriptor), deferred, options.descriptor); };
+    return { standalone: surface(tools), plugin: surface(options.tools) };
+  };
+  const audiences = new Map([[undefined as McpClientKind | undefined, surfacesFor()]]);
+  for (const kind of MCP_CLIENT_KINDS) if (kept.some(t => t.mcp!.clients!.includes(kind))) audiences.set(kind, surfacesFor(kind));
+  const surfaceOf = (plugin: boolean, authInfo: AuthInfo | undefined) => {
+    const surfaces = audiences.get(authInfo?.extra?.clientKind as McpClientKind | undefined) ?? audiences.get(undefined)!;
+    return plugin ? surfaces.plugin : surfaces.standalone;
+  };
+  const descriptors = audiences.get(undefined)!.standalone.descriptors;
+  const pluginDescriptors = audiences.get(undefined)!.plugin.descriptors;
   const traceOptions = options.traces === false ? undefined : options.traces ?? tracesFromEnv();
   const trace = traceOptions ? traces(traceOptions, { service: options.name, kindOf: () => undefined }) : undefined;
   const emit = emitter([...(options.events ?? []), ...(trace ? [trace.sink] : [])]);
@@ -153,12 +173,14 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   const SESSION_TTL = 24 * 60 * 60 * 1000;
   function endpointHandler(plugin: boolean) {
     const instructions = options.instructions ?? (plugin ? "" : mcpInstructions(skills));
-    const surface = plugin ? pluginSurface : standalone;
     return createMcpHandler(({ requestInfo }) => {
     const server = new Server({ name: options.name, version: options.version }, { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) });
-    server.setRequestHandler("tools/list", async (_request, ctx) => ({ tools: ctx.mcpReq._meta?.[FULL_CATALOG_META] === true ? surface.full : surface.descriptors }));
+    server.setRequestHandler("tools/list", async (_request, ctx) => {
+      const surface = surfaceOf(plugin, ctx.http?.authInfo);
+      return { tools: ctx.mcpReq._meta?.[FULL_CATALOG_META] === true ? surface.full : surface.descriptors };
+    });
     server.setRequestHandler("tools/call", async (request, ctx) => {
-      const { tool: t, input } = surface.resolve(request.params.name, request.params.arguments ?? {});
+      const { tool: t, input } = surfaceOf(plugin, ctx.http?.authInfo).resolve(request.params.name, request.params.arguments ?? {});
       const identity = identityOf(ctx.http?.authInfo);
       const person = identity ? `key:${identity.key}` : "mcp:anonymous";
       const meta = ctx.mcpReq._meta ?? {};
@@ -233,7 +255,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     if (options.auth && bearer) {
       const identity = await options.auth.verify(bearer, request);
       if (!identity) return challenge(url, servedPath, 401, "invalid_token", "The token is not valid.", []);
-      authInfo = { token: bearer, clientId: "", scopes: identity.scopes ?? [], extra: { key: identity.key } };
+      authInfo = { token: bearer, clientId: identity.client?.id ?? "", scopes: identity.scopes ?? [], extra: { key: identity.key, ...(identity.client?.kind ? { clientKind: identity.client.kind } : {}) } };
       if (identity.credentials) Object.defineProperty(authInfo.extra!, "credentials", { value: identity.credentials, enumerable: false });
     }
     let parsedBody: unknown;
@@ -247,7 +269,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         for (const message of [parsedBody].flat()) {
           const call = message as { method?: unknown; params?: { name?: unknown; arguments?: unknown } } | null;
           if (!call || call.method !== "tools/call" || typeof call.params?.name !== "string") continue;
-          const t = (plugin ? pluginSurface : standalone).target(call.params.name, call.params.arguments);
+          const t = surfaceOf(plugin, authInfo).target(call.params.name, call.params.arguments);
           if (!t || signInOf(t) === "none") continue;
           const needed = scopesFor(t, scopes);
           if (!authInfo) {

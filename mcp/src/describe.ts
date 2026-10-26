@@ -3,7 +3,7 @@
 // tool that cannot be described exactly is a problem `flow check` reports, not a schema we bend.
 
 import { z } from "zod";
-import type { SignIn, Tool } from "../../src/tools.ts";
+import type { McpClientKind, SignIn, Tool } from "../../src/tools.ts";
 
 /** An MCP tool as `tools/list` sends it. */
 export interface McpToolDescriptor {
@@ -26,6 +26,8 @@ export interface Scopes {
 export const FULL_CATALOG_META = "flow.engineer/full-tool-catalog";
 
 const NAME = /^[A-Za-z0-9_.-]{1,128}$/;
+/** The client kinds Tool.mcp.clients may name. */
+export const MCP_CLIENT_KINDS: readonly McpClientKind[] = ["cli"];
 const STATUS_MAX = 64;
 /** Tools that exist only in a chat: a description naming one points a host at a tool it does not have. */
 export const CHAT_ONLY = /\b(send_[a-z0-9_]+|share_updates|edit_message|unsend_message|load_skill)\b/;
@@ -110,6 +112,10 @@ export function toolProblems(tool: Tool): string[] {
     }
   }
   if (tool.format && !tool.output) problems.push(`${at}: format needs output, the schema of the data it formats`);
+  const clients = tool.mcp?.clients;
+  if (clients !== undefined && (!Array.isArray(clients) || !clients.length || clients.some((c) => !MCP_CLIENT_KINDS.includes(c)))) {
+    problems.push(`${at}: mcp.clients must list one or more of ${MCP_CLIENT_KINDS.map((k) => JSON.stringify(k)).join(", ")}`);
+  }
   if (tool.hints?.readOnly && tool.hints.destructive) problems.push(`${at}: hints say readOnly and destructive; a tool that changes nothing destroys nothing`);
   for (const key of ["running", "done"] as const) {
     const line = tool.status?.[key];

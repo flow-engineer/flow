@@ -95,6 +95,46 @@ control: known tools remain directly callable with the same authorization requir
 host-visible hints are conservative (it may write or delete); its target's permissions are still
 enforced per call.
 
+### Keep a tool to the brand's own CLI
+
+`mcp: { clients: ["cli"] }` keeps a tool to the CLI built with this agent's `defineCli`, for what
+must never reach a third-party host's transcript (revealing an API key or another secret). The CLI
+lists and calls it like any tool; every other MCP client (Claude, ChatGPT, Cursor, a raw client)
+finds no trace of it: it is not in `tools/list`, the full catalog, or `search_tools`, and calling
+it, directly or through `execute_tool`, answers exactly as an unknown tool. Chats ignore it, like
+`deferred`, so give the agent and `mcpServer` the same tools; a chat or terminal chat (`acme chat`)
+can still use the tool, and what it shows is kept in that conversation and sent to the agent's model.
+
+```ts
+export const apiKeysReveal = tool({
+  name: "api_keys_reveal",
+  description: "Show one API key's value. Only when the person asks for it.",
+  input: z.object({ key_id: z.string() }),
+  output: z.object({ name: z.string(), key: z.string() }),
+  mcp: { clients: ["cli"] },
+  run: ({ key_id }, ctx) => backend.revealKey(key_id, ctx),   // the brand's existing call
+});
+```
+
+The caller is told apart by the OAuth client its token was issued to, never by anything a client
+says about itself (MCP's `clientInfo` is not a signal). It needs `mcpServer({ auth })`; without
+it `mcpServer` refuses such a tool, since no caller could be told apart.
+- **With the OAuth bridge** (`flow-framework-oauth-bridge`), nothing else to write: the bridge
+  serves the CLI's Client ID Metadata Document at `<origin>/.well-known/oauth-client/cli`,
+  advertises it as `flow_cli_client_id`, notes which client each token went to, and `verify` returns
+  `client: { id, kind: "cli" }` for the CLI's tokens. The CLI signs in as that client by itself.
+- **With the brand's own OAuth server,** register one public client for the CLI (loopback
+  redirects, no secret), set it as `defineCli({ clientId })` (or `clientMetadataUrl`), and return
+  `client: { id, kind: "cli" }` from `verify` for tokens issued to it.
+
+A CLI signed in before the server knew its client (it registered itself, as any host does) does
+not see these commands until `acme auth login`; an unknown command then says so, and `acme auth
+status --json` has `"renew": true`. Its cached tool list is never reused for the new sign-in. Other
+clients' scopes, sign-in and the brand's own checks still apply: this keeps a tool away from other
+hosts, it is not a defence against someone signing in as the CLI with their own account (a public
+client), who only gets their own data. `flow check` warns about a tool kept to the CLI when the
+agent has no `src/cli.ts`.
+
 ## A CLI for the organization
 
 The same tools as commands, over the organization's MCP server, with the same sign-in and gating.

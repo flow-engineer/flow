@@ -1,11 +1,12 @@
-// covers: oauth/src/bridge.ts oauth/src/store.ts cli/src/auth.ts mcp/src/server.ts
+// covers: oauth/src/bridge.ts oauth/src/store.ts cli/src/auth.ts cli/src/run.ts mcp/src/server.ts
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type RequestListener, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { auth, Client, StreamableHTTPClientTransport, type OAuthClientInformationMixed, type OAuthClientProvider, type OAuthTokens } from "@modelcontextprotocol/client";
 import { z } from "zod";
 import { runCli, type CliConfig, type CliIO } from "../cli/src/index.ts";
 import { mcpServer } from "../mcp/src/index.ts";
@@ -154,4 +155,104 @@ test("the CLI signs in through the bridge on the brand's own login, and the tool
 
   assert.equal(await runCli(cli, ["auth", "logout"], io()), 0);
   assert.equal(await runCli(cli, ["whoami"], io()), 3);
+});
+
+/** Signs in as a host such as Claude does: it registers itself (DCR), then the brand's login. */
+async function hostSignIn(server: string): Promise<{ client: OAuthClientInformationMixed; tokens: OAuthTokens }> {
+  let answer = new URLSearchParams();
+  const redirect = `${await listen((req, res) => { answer = new URL(req.url!, "http://host").searchParams; res.end("ok"); })}/callback`;
+  const saved: { client?: OAuthClientInformationMixed; tokens?: OAuthTokens; verifier?: string } = {};
+  const provider: OAuthClientProvider = {
+    redirectUrl: redirect,
+    clientMetadata: { client_name: "A host", redirect_uris: [redirect], grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" },
+    clientInformation: () => saved.client,
+    saveClientInformation: (client) => void (saved.client = client),
+    tokens: () => saved.tokens,
+    saveTokens: (tokens) => void (saved.tokens = tokens),
+    redirectToAuthorization: (url) => browse(url.href),
+    saveCodeVerifier: (verifier) => void (saved.verifier = verifier),
+    codeVerifier: () => saved.verifier!,
+  };
+  assert.equal(await auth(provider, { serverUrl: server }), "REDIRECT");
+  assert.equal(await auth(provider, { serverUrl: server, authorizationCode: answer.get("code")!, iss: answer.get("iss") ?? undefined }), "AUTHORIZED");
+  return { client: saved.client!, tokens: saved.tokens! };
+}
+
+// A tool kept to the CLI (mcp.clients) is told apart by the OAuth client the token went to, never by
+// what a client says about itself: the CLI's own sign-in sees it, a host's (or an old CLI sign-in,
+// which registered itself like a host) finds no trace of it.
+test("a tool kept to the CLI is listed and called only for the CLI's own sign-in", async () => {
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "flow-oauth-"));
+  const acme = brand("customer-7");
+  const loginPage = await listen(acme.page);
+  let handle: RequestListener = (_q, s) => void s.writeHead(503).end();
+  const origin = await listen((req, res) => handle(req, res));
+  const bridge = await oauthBridge({
+    issuer: origin,
+    resources: [`${origin}/mcp`],
+    storage: await databaseStorage(sqlite(), origin),
+    encryptionKey: randomBytes(32),
+    cookieKeys: [randomBytes(32).toString("hex")],
+    jwks: { keys: [{ ...generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ format: "jwk" }), kid: "k1", use: "sig", alg: "RS256" } as never] },
+    login: { url: `${loginPage}/login`, ...acme.login },
+    tokens: acme.tokens,
+    development: true,
+  });
+  const whoami = tool({ name: "whoami", description: "Who is signed in.", input: z.object({}), hints: { readOnly: true }, run: (_i, ctx) => ({ key: ctx.key }) });
+  const lookup = tool({ name: "invoice_lookup", description: "Look up an invoice.", input: z.object({ id: z.string() }), mcp: { deferred: true }, hints: { readOnly: true }, run: ({ id }) => ({ id }) });
+  const reveal = tool({ name: "api_keys_reveal", description: "Show one API key's value.", input: z.object({ key_id: z.string() }), output: z.object({ key: z.string() }), mcp: { clients: ["cli"], deferred: true }, hints: { readOnly: true }, run: ({ key_id }) => ({ key: `secret-${key_id}` }) });
+  const mcp = mcpServer({ name: "acme", version: "1", tools: [whoami, lookup, reveal], auth: bridge.auth });
+  handle = (req, res) => void mcp.node(req, res);
+  assert.deepEqual(mcp.descriptors.map((d) => d.name), ["whoami", "search_tools", "execute_tool"]);
+  assert.throws(() => mcpServer({ name: "acme", version: "1", tools: [reveal] }), /api_keys_reveal is kept to some clients \(mcp.clients\), which needs auth/);
+  const server = `${origin}/mcp`;
+
+  const document = await (await fetch(`${origin}/.well-known/oauth-client/cli`)).json();
+  assert.equal(document.client_id, `${origin}/.well-known/oauth-client/cli`);
+  assert.equal(document.token_endpoint_auth_method, "none");
+  assert.equal((await (await fetch(`${origin}/.well-known/oauth-authorization-server`)).json()).flow_cli_client_id, document.client_id);
+
+  // A host: no trace of the tool, and calling it answers as an unknown tool does.
+  const host = await hostSignIn(server);
+  const connect = async (token: string) => {
+    const client = new Client({ name: "a-host", version: "1" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(server), { authProvider: { token: async () => token } }));
+    return client;
+  };
+  const other = await connect(host.tokens.access_token);
+  assert.deepEqual((await other.listTools()).tools.map((t) => t.name), ["whoami", "search_tools", "execute_tool"]);
+  assert.deepEqual((await other.listTools({ _meta: { "flow.engineer/full-tool-catalog": true } })).tools.map((t) => t.name), ["whoami", "invoice_lookup"]);
+  const found = await other.callTool({ name: "search_tools", arguments: { query: "api keys reveal invoice" } });
+  assert.deepEqual((found.structuredContent as { tools: { name: string }[] }).tools.map((t) => t.name), ["invoice_lookup"]);
+  const unknown = async (name: string) => (await other.callTool({ name, arguments: { key_id: "k1" } }).catch((error: Error) => error)) as Error;
+  assert.equal((await unknown("api_keys_reveal")).message, (await unknown("no_such_tool")).message.replace("no_such_tool", "api_keys_reveal"));
+  const executed = await other.callTool({ name: "execute_tool", arguments: { name: "api_keys_reveal", arguments: { key_id: "k1" } } }).catch((error: Error) => error);
+  assert.match((executed as Error).message, /No tool named api_keys_reveal\./);
+  await other.close();
+
+  // An old CLI sign-in registered itself like the host: the command is not there, and the CLI says why.
+  const file = join(process.env.XDG_CONFIG_HOME, "acme", "auth.json");
+  const cli: CliConfig = { name: "acme", server, openUrl: browse };
+  assert.equal(await runCli(cli, ["whoami"], io()), 3);
+  writeFileSync(file, JSON.stringify({ [server]: { client: host.client, tokens: host.tokens, tokensSavedAt: Date.now() } }));
+  const old = io();
+  assert.equal(await runCli(cli, ["api-keys-reveal", "--key-id", "k1"], old), 2);
+  assert.match(old.err, /Some commands need a new sign-in: run `acme auth login` to see them\./);
+  const status = io();
+  assert.equal(await runCli(cli, ["auth", "status", "--json"], status), 0);
+  assert.deepEqual(JSON.parse(status.out), { server, signedIn: true, source: "login", renew: true });
+
+  // A new sign-in is the CLI's own client: the command works, and no cached list from before is reused.
+  const login = io();
+  assert.equal(await runCli(cli, ["auth", "login"], login), 0, login.err);
+  assert.equal(JSON.parse(readFileSync(file, "utf8"))[server].client.client_id, document.client_id);
+  const listed = io();
+  assert.equal(await runCli(cli, ["tools", "--json"], listed), 0, listed.err);
+  assert.ok((JSON.parse(listed.out) as { name: string }[]).some((t) => t.name === "api_keys_reveal"), listed.out);
+  const revealed = io();
+  assert.equal(await runCli(cli, ["api-keys-reveal", "--key-id", "k1", "--json"], revealed), 0, revealed.err);
+  assert.deepEqual(JSON.parse(revealed.out), { key: "secret-k1" });
+  const renewed = io();
+  assert.equal(await runCli(cli, ["auth", "status", "--json"], renewed), 0);
+  assert.equal(JSON.parse(renewed.out).renew, false);
 });

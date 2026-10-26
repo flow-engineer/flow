@@ -6,8 +6,13 @@
 // verified and revoked by the brand's `tokens` functions. The bridge stores no token a client uses.
 //
 // Its routes are served by the agent's MCP server, on the same origin: mcpServer({ auth: bridge.auth }).
+//
+// The agent's own CLI signs in as one fixed public client, whose Client ID Metadata Document the
+// bridge serves (CLI_CLIENT_PATH) and advertises (flow_cli_client_id in its metadata); every other
+// client registers itself. The bridge notes which client each access token went to (hashed, sealed),
+// so `verify` says when the caller is the CLI, for tools kept to it (Tool.mcp.clients).
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import Provider, { errors, interactionPolicy, type ClientMetadata, type Configuration, type JWKS } from "oidc-provider";
@@ -63,7 +68,9 @@ export interface OAuthBridge {
 }
 
 const ROUTES = { authorization: "/auth", token: "/token", registration: "/reg", revocation: "/token/revocation", jwks: "/jwks" };
-const PATHS = ["/.well-known/oauth-authorization-server", "/.well-known/openid-configuration", "/auth", "/reg", "/token", "/jwks", "/interaction"];
+/** Where the CLI's Client ID Metadata Document is served; its URL is the CLI's client_id. */
+const CLI_CLIENT_PATH = "/.well-known/oauth-client/cli";
+const PATHS = ["/.well-known/oauth-authorization-server", "/.well-known/openid-configuration", "/.well-known/oauth-client", "/auth", "/reg", "/token", "/jwks", "/interaction"];
 const LOOPBACK = ["127.0.0.1", "localhost", "[::1]"];
 
 function secureURL(value: string, development: boolean): URL {
@@ -87,6 +94,18 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
   const store = oauthStore(options.storage, issuer, options.encryptionKey);
   const pending = store.adapter("BrandLogin");
   const authorizations = store.adapter("BrandAuthorization");
+  const tokenClients = store.adapter("BrandTokenClient");
+  // A public client with loopback redirects on any port (RFC 8252), as the CLI signs in.
+  const cliClient: ClientMetadata = {
+    client_id: `${issuer}${CLI_CLIENT_PATH}`,
+    client_name: "CLI",
+    application_type: "native",
+    redirect_uris: ["http://127.0.0.1/callback"],
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "none",
+  };
+  if (options.clients?.some((c) => c.client_id === cliClient.client_id)) throw new Error(`@flow-engineer/flow/oauth: ${cliClient.client_id} is the CLI's own client`);
   const policy = interactionPolicy.base();
   // A provider session says who the person is; only a fresh brand decision lets a token be issued.
   policy.get("login")!.checks.add(new interactionPolicy.Check("brand_authorization", "Brand authorization is required", (ctx) => !ctx.oidc.result?.login));
@@ -94,7 +113,7 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
   const configuration: Configuration = {
     adapter: (name) => store.adapter(name),
     jwks: options.jwks,
-    clients: options.clients ?? [],
+    clients: [...(options.clients ?? []), cliClient],
     clientDefaults: { grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" },
     cookies: { keys: options.cookieKeys, long: { sameSite: "lax" }, short: { sameSite: "lax" } },
     pkce: { required: () => true },
@@ -133,6 +152,7 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
       return grant;
     },
     renderError: (ctx, out) => { ctx.type = "application/json"; ctx.body = { error: out.error }; },
+    discovery: { flow_cli_client_id: cliClient.client_id },
   };
   provider = new Provider(issuer, configuration);
   provider.proxy = !development;
@@ -142,12 +162,20 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
     }
     return { access_token: value.access_token, ...(value.refresh_token ? { refresh_token: value.refresh_token } : {}), token_type: "Bearer", expires_in: value.expires_in, scope: value.scope ?? "account" };
   };
+  // Noted before the client gets the token, so a token with no note was never issued by this bridge to a known client.
+  const issued = async (tokens: ReturnType<typeof checked>, clientId: string) => {
+    const expiresIn = Math.ceil(tokens.expires_in);
+    await tokenClients.upsert(tokens.access_token, { clientId, exp: Math.floor(Date.now() / 1000) + expiresIn }, expiresIn);
+    return tokens;
+  };
   // oidc-provider still authenticates the client and checks parameters and resource first.
   provider.registerGrantType("refresh_token", async (ctx) => {
     const resource = ctx.oidc.params!.resource, refreshToken = ctx.oidc.params!.refresh_token;
     if (typeof resource !== "string" || !resources.has(resource) || typeof refreshToken !== "string") throw new errors.InvalidGrant();
-    try { ctx.body = checked(await options.tokens.refresh({ clientId: ctx.oidc.client!.clientId, resource, refreshToken })); }
+    let tokens: ReturnType<typeof checked>;
+    try { tokens = checked(await options.tokens.refresh({ clientId: ctx.oidc.client!.clientId, resource, refreshToken })); }
     catch { throw new errors.InvalidGrant(); }
+    ctx.body = await issued(tokens, ctx.oidc.client!.clientId);
   }, ["refresh_token", "resource", "scope"]);
   // The code exchange makes a short-lived internal token; the client gets the brand's token instead.
   provider.use(async (ctx, next) => {
@@ -160,7 +188,7 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
       try {
         const proof = await store.take("BrandAuthorization", temporary.grantId!);
         if (typeof proof?.authorization !== "string") throw new errors.InvalidGrant();
-        ctx.body = checked(await options.tokens.issue({ key: temporary.accountId, clientId: temporary.clientId!, resource: temporary.aud, connection: temporary.grantId!, authorization: proof.authorization }));
+        ctx.body = await issued(checked(await options.tokens.issue({ key: temporary.accountId, clientId: temporary.clientId!, resource: temporary.aud, connection: temporary.grantId!, authorization: proof.authorization })), temporary.clientId!);
       } finally { await temporary.destroy(); }
     }
     if (ctx.path === ROUTES.revocation && typeof ctx.oidc.params?.token === "string") {
@@ -169,10 +197,30 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
   });
   const callback = provider.callback();
 
+  // Which client each token went to, read once per token and process (a miss for a while: tokens from before this bridge noted them).
+  const clientOfToken = new Map<string, { clientId?: string; until: number }>();
+  async function clientOf(token: string): Promise<McpIdentity["client"]> {
+    const id = createHash("sha256").update(token).digest("hex");
+    let known = clientOfToken.get(id);
+    if (!known || known.until <= Date.now()) {
+      const noted = await tokenClients.find(token);
+      const clientId = typeof noted?.clientId === "string" ? noted.clientId : undefined;
+      known = { clientId, until: Date.now() + (clientId && typeof noted?.exp === "number" ? Math.max(0, noted.exp * 1000 - Date.now()) : 15 * 60_000) };
+      clientOfToken.delete(id);
+      clientOfToken.set(id, known);
+      if (clientOfToken.size > 10_000) clientOfToken.delete(clientOfToken.keys().next().value!);
+    }
+    if (!known.clientId) return undefined;
+    return { id: known.clientId, ...(known.clientId === cliClient.client_id ? { kind: "cli" as const } : {}) };
+  }
+
   async function verify(token: string, resource: string) {
     if (!resources.has(resource)) return null;
     const identity = await options.tokens.verify({ token, resource });
-    return identity && (await options.login.active(identity.key)) ? identity : null;
+    if (!identity || !(await options.login.active(identity.key))) return null;
+    if (identity.client) return identity;
+    const client = await clientOf(token);
+    return client ? { ...identity, client } : identity;
   }
 
   function resourceOf(request: Request): string {
@@ -206,6 +254,10 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
       if (url.pathname === ROUTES.authorization && !url.searchParams.has("scope")) {
         url.searchParams.set("scope", "openid account");
         req.url = `${url.pathname}${url.search}`;
+      }
+      if (url.pathname === CLI_CLIENT_PATH) {
+        if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
+        return json(res, 200, cliClient);
       }
       const interactionPath = /^\/interaction\/([A-Za-z0-9_-]+)(\/callback)?$/.exec(url.pathname);
       if (!interactionPath) return void callback(req, res);

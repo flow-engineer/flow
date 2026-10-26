@@ -48,6 +48,14 @@ test("a tool that cannot be served exactly over MCP is an error, by rule", async
   ]);
 });
 
+test("a tool kept to the CLI warns without a CLI file, and an unknown client kind is an error", async () => {
+  const reveal = `tool({ name: "api_keys_reveal", description: "Show one API key.", input: z.object({ key_id: z.string() }), mcp: { clients: ["cli"] }, run: () => "key" })`;
+  const result = await check(agentFolder(`${reveal}, tool({ name: "notes", description: "Notes.", input: z.object({}), mcp: { clients: ["claude"] }, run: () => "" })`));
+  assert.deepEqual(result.errors, ['tool notes: mcp.clients must list one or more of "cli"']);
+  assert.deepEqual(result.warnings, ["tool api_keys_reveal: kept to the CLI (mcp.clients), but there is no CLI file (src/cli.ts), so no client sees it"]);
+  assert.deepEqual((await check(agentFolder(reveal, `{ name: "acme" }`))).warnings, []);
+});
+
 test("the CLI file is checked against the tools, and a tool it does not name is only a warning", async () => {
   const cli = `{ name: "acme", commands: {
     "order list": { tool: "list_orders", columns: ["order_id", "placed_at"] },
