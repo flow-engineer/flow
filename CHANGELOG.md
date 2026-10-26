@@ -25,9 +25,16 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   after the view closes and the exit code is that failure's. Stopping a wait (Escape) is not a failure.
 - **No raw SDK warning when a token refresh cannot reach the server;** the CLI's own one line naming
   the server, and exit 5, remain.
+- **The Flow Messaging stream no longer reconnects in a tight loop when Flow refuses it.** A refused
+  stream opens, sends one error frame and closes; the adapter used to start its backoff again on
+  every open, so it reconnected at once, over and over. The backoff now starts again only once a
+  connection delivers an event or stays open 30 s. Every wait has full jitter; a close with 4404 or
+  4429 waits 30 s to 5 min, a `retry_after` in Flow's error frame is always waited, and each
+  reconnect logs its close code and wait once. 4400, 4401 and 4403 still stop the stream.
 
 ### Migration notes
 
+- The stream's backoff: none.
 - Nothing changes for an agent that does not pass `agent` to `mcpServer`.
 - An agent that mounts `terminalServer` itself and wants the built-in route: remove its
   `terminalServer`, its channel and its route, then pass `agent` to `mcpServer`. Keeping both

@@ -97,14 +97,116 @@ test("a reconnect frame, a dropped socket and a failed event each reconnect from
   await live.agent.conversation(live.events.find((e) => e.type === "message.in" && e.conversationId !== live.events[0]!.conversationId)!.conversationId)!.whenIdle();
 });
 
-test("a refused key stops the stream for good, with Flow's reason, and it does not reconnect", async (t) => {
-  const flow = await fakeFlow();
-  t.after(() => flow.close());
-  const live = streamAgent(flow);
-  t.after(() => live.handle.close());
-  const refused = await flow.stream(0);
-  refused.send({ type: "error", error: { type: "authentication", message: "This API key has been revoked." } });
-  refused.close(4401, "authentication: api key revoked");
-  assert.deepEqual(await live.handle.stopped, { code: 4401, type: "authentication", message: "This API key has been revoked." });
-  assert.equal(flow.streams.length, 1);
+/**
+ * The stream's reconnect timing, on a stand-in WebSocket and fake timers: each socket the adapter
+ * opens is kept, and the test opens, feeds and closes it by hand. Math.random is fixed at 0.5, so a
+ * full-jitter wait is half its ceiling.
+ */
+function timedStream(t: import("node:test").TestContext) {
+  const sockets: Array<{ open(): void; frame(f: unknown): void; closed(code: number): void }> = [];
+  class StandIn {
+    onopen?: () => void;
+    onmessage?: (m: { data: string }) => void;
+    onerror?: () => void;
+    onclose?: (e: { code: number; reason: string }) => void;
+    constructor() {
+      sockets.push({ open: () => this.onopen?.(), frame: (f) => this.onmessage?.({ data: JSON.stringify(f) }), closed: (code) => this.onclose?.({ code, reason: "" }) });
+    }
+    close() {}
+  }
+  t.mock.property(globalThis, "WebSocket", StandIn as unknown as typeof WebSocket);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  t.mock.method(Math, "random", () => 0.5);
+  const warnings: string[] = [];
+  t.mock.method(console, "warn", (line: string) => void warnings.push(line));
+  t.mock.method(console, "debug", () => {});
+  const fm = flowMessaging({ apiKey: "fk_test_key", webhookSecret: "", baseUrl: "http://flow.test" });
+  const handle = fm.stream({} as never);
+  t.after(() => handle.close());
+  /** The latest socket: it opens, Flow refuses it with one error frame, and closes it with `code`. */
+  const refuse = (code: number, error: Record<string, unknown> = { type: "not_found" }) => {
+    const s = sockets.at(-1)!;
+    s.open();
+    s.frame({ type: "error", error });
+    s.closed(code);
+  };
+  /** Asserts the next socket opens exactly `ms` after the last close, not a millisecond sooner. */
+  const reconnectsAfter = (ms: number) => {
+    const before = sockets.length;
+    t.mock.timers.tick(ms - 1);
+    assert.equal(sockets.length, before, `no reconnect before ${ms} ms`);
+    t.mock.timers.tick(1);
+    assert.equal(sockets.length, before + 1, `a reconnect at ${ms} ms`);
+  };
+  return { sockets, handle, refuse, reconnectsAfter, warnings };
+}
+
+test("a stream refused right after it opens backs off and the wait grows: from 30 s up to 5 min after 4404 or 4429, doubling to 30 s otherwise", (t) => {
+  const s = timedStream(t);
+  // 4404 (the route is gone) with no retry_after: 30 s plus a jittered part whose ceiling doubles to 5 min.
+  s.refuse(4404);
+  s.reconnectsAfter(45_000); // 30 s + 0.5 × 30 s
+  s.refuse(4404);
+  s.reconnectsAfter(75_000); // 30 s + 0.5 × 90 s
+  s.refuse(4404);
+  s.reconnectsAfter(135_000); // 30 s + 0.5 × 210 s
+  s.refuse(4429, { type: "rate_limited" });
+  s.reconnectsAfter(165_000); // 30 s + 0.5 × 270 s: the 5 min cap
+  s.refuse(4429, { type: "rate_limited" });
+  s.reconnectsAfter(165_000);
+  assert.equal(s.warnings.at(-1), "@flow-engineer/flow/flow-messaging: the stream closed (4429 rate_limited); reconnecting in 165.0 s");
+  // Any other close (a server error, a dropped connection) doubles up to 30 s, and the count goes on.
+  s.refuse(4500, { type: "api_error" });
+  s.reconnectsAfter(15_000); // 0.5 × min(30 s, 1 s × 2^5)
 });
+
+test("a retry_after in the error frame is waited first, with the backoff on top", (t) => {
+  const s = timedStream(t);
+  s.refuse(4429, { type: "rate_limited", retry_after: 1 });
+  s.reconnectsAfter(1_500); // 1 s + 0.5 × 1 s
+  s.refuse(4503, { type: "api_error", retry_after: 20 });
+  s.reconnectsAfter(21_000); // 20 s + 0.5 × 2 s
+  s.refuse(4404, { type: "not_found", retry_after: 3 });
+  s.reconnectsAfter(5_000); // 3 s + 0.5 × 4 s
+});
+
+test("the backoff starts again only once a connection delivers an event or stays open 30 s, never on open alone", (t) => {
+  const s = timedStream(t);
+  s.refuse(4500, { type: "api_error" });
+  s.reconnectsAfter(500);
+  s.refuse(4500, { type: "api_error" });
+  s.reconnectsAfter(1_000);
+  s.refuse(4500, { type: "api_error" });
+  s.reconnectsAfter(2_000);
+
+  // Open 30 s, then dropped: the next wait is the first one again.
+  s.sockets.at(-1)!.open();
+  t.mock.timers.tick(30_000);
+  s.sockets.at(-1)!.closed(1006);
+  s.reconnectsAfter(500);
+  s.refuse(4500, { type: "api_error" });
+  s.reconnectsAfter(1_000);
+
+  // Open 29 s is not enough.
+  s.sockets.at(-1)!.open();
+  t.mock.timers.tick(29_000);
+  s.sockets.at(-1)!.closed(1006);
+  s.reconnectsAfter(2_000);
+
+  // An event is: the backoff starts again at once.
+  const last = s.sockets.at(-1)!;
+  last.open();
+  last.frame({ type: "event", event: { id: "evt_1", type: "contact.deleted", data: {} } });
+  last.closed(1006);
+  s.reconnectsAfter(500);
+});
+
+for (const [code, type] of [[4401, "authentication"], [4403, "permission"], [4400, "invalid_request"]] as const) {
+  test(`a stream refused with ${code} stops for good, with no reconnect`, async (t) => {
+    const s = timedStream(t);
+    s.refuse(code, { type, message: "No." });
+    assert.deepEqual(await s.handle.stopped, { code, type, message: "No." });
+    t.mock.timers.tick(600_000);
+    assert.equal(s.sockets.length, 1);
+  });
+}
