@@ -264,19 +264,29 @@ is scoped to the authenticated person's conversation, excluding model context an
 reference; the agent keeps its one-person history across channels. It does not erase a person's
 WhatsApp history. Teams can replace `chat` with their own Stricli command in `commands`.
 
-Mount the optional terminal handler beside MCP (no model or extra dependency in the CLI):
+Serve the optional terminal handler as one of the agent's routes (no model or extra dependency in
+the CLI). Flow's hosting and the local playground (`npm start`) both serve an agent's `routes`:
 
 ```ts
 import { terminalServer } from "@flow-engineer/flow/mcp";
-const terminal = terminalServer({ agent: () => agent, auth });
-const agent = createAgent({ ...options, channels: [...channels, terminal.channel] });
-// Route terminal.path to terminal.fetch(request), and MCP's paths to mcp.fetch(request).
+const terminal = terminalServer({ agent: () => agent, auth }); // omit auth: everyone chats as a guest
+const agent = createAgent({ ...options, channels: [...channels, terminal.channel], routes: { [terminal.path]: (r) => terminal.fetch(r) } });
 ```
 
-`terminalServer` accepts `path` and `channel` overrides. It verifies auth on every POST,
+The CLI's chat goes to the MCP server's origin plus `/agent/terminal` unless `defineCli({ agent })`
+names another URL; locally the agent and `npm run mcp` listen on different ports, so the starter's
+CLI file reads the running agent's URL with `runningAgent(dir)`.
+Without `auth`, or with `guests: true` beside it, a CLI that is not signed in chats as a guest: it
+sends a random id it keeps (header `flow-guest`), and the agent keeps that guest's conversation on
+this channel only, never joined to an account (`ctx.key` is null), so a tool that needs sign-in
+asks for it. With `auth` and no `guests`, chat answers 401 until `auth login`. Guests run turns on
+the agent's model key; limit them in front of the route if strangers can reach it.
+
+`terminalServer` accepts `path` and `channel` overrides. It verifies auth on every POST that carries a token,
 serializes concurrent requests per person, and returns `{ conversationId, replies }` after the
 turn settles. The authenticated key becomes the same person that `resolve` returns on other
 channels. A body cannot choose its own person; a conversation reference from another person is
 refused. Its custom UI uses Markdown and exports turns as channel `cli`.
 For your own HTTP adapters, `agent.request({ channel, key, text, conversationId? })` exposes this
-without the handler. Supply a verified key and serialize calls for that channel and person.
+without the handler. Supply a verified key, or `guest` (an id the client keeps) instead of `key`,
+and serialize calls for that channel and person.

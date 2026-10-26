@@ -522,15 +522,19 @@ export class Agent {
    * Optional onReply streams outbound deliveries; onActivity observes this conversation's tool,
    * skill and turn events while the request runs, excluding model context and hidden text.
    * Observer errors do not fail delivery; the request still returns the complete result.
+   * Without a key, `guest` (an id the client chose and keeps) is a signed-out person on this
+   * channel only: never joined to an account, and tools that need sign-in ask for it.
    */
-  async request(input: { channel: string; key: string; text: string; conversationId?: string; credentials?: CredentialProvider; onReply?: (reply: Outbound) => void; onActivity?: EventSink }): Promise<{ conversationId: string; replies: Outbound[] }> {
+  async request(input: { channel: string; key?: string; guest?: string; text: string; conversationId?: string; credentials?: CredentialProvider; onReply?: (reply: Outbound) => void; onActivity?: EventSink }): Promise<{ conversationId: string; replies: Outbound[] }> {
     await this.settings.ready;
     const adapter = this.channelOf(input.channel);
     if (adapter.kind !== "custom") throw new Error("chinwag: request needs a custom UI channel");
-    const identity = await this.conversationFor(adapter, input.channel, input.key, undefined, input.key);
+    if (!input.key === !input.guest) throw new Error("flow: request needs exactly one of key or guest");
+    const from = input.key ?? `guest:${input.guest}`;
+    const identity = await this.conversationFor(adapter, input.channel, from, undefined, input.key);
     if (input.conversationId && input.conversationId !== identity.conversationId) throw new Error("chinwag: conversation does not belong to this person");
     const replies: Outbound[] = [];
-    const address = viaKey(input.channel, input.key);
+    const address = viaKey(input.channel, from);
     if (input.credentials) this.requestCredentials.set(address, input.credentials);
     this.requestReplies.set(address, (reply) => {
       replies.push(reply);
@@ -539,7 +543,7 @@ export class Agent {
     const observers = this.requestEvents.get(identity.conversationId) ?? new Set<EventSink>();
     if (input.onActivity) { observers.add(input.onActivity); this.requestEvents.set(identity.conversationId, observers); }
     try {
-      await this.released(await this.take(adapter, { channel: input.channel, from: input.key, message: input.text, via: "provider", verifiedKey: input.key }));
+      await this.released(await this.take(adapter, { channel: input.channel, from, message: input.text, via: "provider", verifiedKey: input.key }));
       await this.conversation(identity.conversationId)?.whenIdle();
       return { conversationId: identity.conversationId, replies };
     } finally {

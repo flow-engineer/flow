@@ -1,4 +1,5 @@
-// An authenticated terminal channel beside MCP. Mount fetch wherever the agent's HTTP routes live.
+// A terminal channel beside MCP. Mount fetch wherever the agent's HTTP routes live. A bearer token
+// makes the person whoever auth.verify says; without one, a guest chats under the id its CLI keeps.
 import { customUI } from "../../src/channels.ts";
 import type { Agent } from "../../src/agent.ts";
 import type { McpAuth } from "./server.ts";
@@ -6,7 +7,10 @@ import type { McpAuth } from "./server.ts";
 export interface TerminalServerOptions {
   /** A getter lets the channel be declared before building the agent that uses it. */
   agent: () => Agent;
-  auth: Pick<McpAuth, "verify">;
+  /** Verifies a signed-in person's token. Without it every person is a guest. */
+  auth?: Pick<McpAuth, "verify">;
+  /** Chat without sign-in, as a guest; tools that need sign-in still ask. Default: on without `auth`, off with it. */
+  guests?: boolean;
   path?: string;
   channel?: string;
 }
@@ -24,18 +28,22 @@ export function terminalServer(options: TerminalServerOptions) {
       if (request.method !== "POST") return new Response("Method not allowed", { status: 405, headers: { allow: "POST" } });
       const token = /^Bearer\s+(.+)$/i.exec(request.headers.get("authorization") ?? "")?.[1];
       let identity;
-      try { identity = token ? await options.auth.verify(token, request) : null; } catch { identity = null; }
-      if (!identity?.key) return Response.json({ error: "sign_in_required" }, { status: 401, headers: { "www-authenticate": "Bearer" } });
+      try { identity = token && options.auth ? await options.auth.verify(token, request) : null; } catch { identity = null; }
+      const guest = !token && (options.guests ?? !options.auth) ? request.headers.get("flow-guest") : null;
+      if (!identity?.key && !guest) return Response.json({ error: "sign_in_required" }, { status: 401, headers: { "www-authenticate": "Bearer" } });
+      if (guest && !/^[A-Za-z0-9_-]{16,128}$/.test(guest)) return Response.json({ error: "invalid_request" }, { status: 400 });
+      const person = identity?.key ? { key: identity.key, credentials: identity.credentials } : { guest: guest! };
+      const queue = identity?.key ? `key:${identity.key}` : `guest:${guest}`;
       let input;
       try { input = await request.json() as { text?: unknown; conversationId?: unknown }; } catch { return Response.json({ error: "invalid_request" }, { status: 400 }); }
       if (!input || typeof input.text !== "string" || !input.text.trim() || input.text.length > 32_768 || (input.conversationId !== undefined && typeof input.conversationId !== "string")) return Response.json({ error: "invalid_request" }, { status: 400 });
       if (inFlight >= 128) return Response.json({ error: "busy" }, { status: 429 });
       inFlight++;
-      const previous = pending.get(identity.key) ?? Promise.resolve();
+      const previous = pending.get(queue) ?? Promise.resolve();
       const run = (callbacks: Partial<Parameters<Agent["request"]>[0]> = {}) => {
-        const work = previous.catch(() => undefined).then(() => options.agent().request({ channel: channel.name, key: identity.key, text: input.text as string, conversationId: input.conversationId as string | undefined, credentials: identity.credentials, ...callbacks }));
-        pending.set(identity.key, work);
-        return work.finally(() => { inFlight--; if (pending.get(identity.key) === work) pending.delete(identity.key); });
+        const work = previous.catch(() => undefined).then(() => options.agent().request({ channel: channel.name, ...person, text: input.text as string, conversationId: input.conversationId as string | undefined, ...callbacks }));
+        pending.set(queue, work);
+        return work.finally(() => { inFlight--; if (pending.get(queue) === work) pending.delete(queue); });
       };
       // Opt-in streaming leaves the original JSON contract unchanged for scripts and older clients.
       if (request.headers.get("accept")?.includes("application/x-ndjson")) {

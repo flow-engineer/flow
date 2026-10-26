@@ -1,4 +1,6 @@
-// Chat uses the agent's authenticated terminal endpoint; it never calls an MCP tool.
+// Chat uses the agent's terminal endpoint; it never calls an MCP tool. Signed out, it chats as a
+// guest under an id kept with its conversation reference, if the agent lets guests in.
+import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs, styleText, stripVTControlCharacters } from "node:util";
@@ -34,7 +36,6 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   const stored = !token && isSignedIn(config, server);
   try { if (stored) token = await storedAccessToken(config, server, false, io.signal); }
   catch { io.writeError(`Sign in again: ${config.name} auth login.\n`); return 3; }
-  if (!token) { io.writeError(`Sign in first: ${config.name} auth login (or set ${tokenEnvOf(config)}).\n`); return 3; }
   const humanChat = !single && !flags.values.json;
   const env = io.env ?? process.env;
   const styled = io.interactive && !env.NO_COLOR && env.FORCE_COLOR !== "0" && env.TERM !== "dumb";
@@ -44,16 +45,25 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   const file = join(configDir(config), "chat.json");
   let saved: Record<string, string> = {};
   try { saved = JSON.parse(readFileSync(file, "utf8")); } catch {}
-  if (flags.values.new) delete saved[endpoint];
+  if (flags.values.new) { delete saved[endpoint]; delete saved[`${endpoint}#guest`]; }
   const fullScreen = humanChat && Boolean(io.chat) && env.TERM !== "dumb";
   if (fullScreen && config.chat?.accent !== undefined && !/^#[0-9a-f]{6}$/i.test(config.chat.accent)) {
     io.writeError("chat.accent must be a six-digit hex color, for example #b85c00.\n"); return 2;
   }
-  const reset = () => {
-    delete saved[endpoint];
+  // A guest's conversation is its own; signing in later starts the account's.
+  const reference = () => token ? endpoint : `${endpoint}#guest`;
+  const save = () => {
     mkdirSync(configDir(config), { recursive: true, mode: 0o700 });
     writeFileSync(file, `${JSON.stringify(saved)}\n`, { mode: 0o600 });
     chmodSync(file, 0o600);
+  };
+  const guest = () => {
+    if (!saved.guest) { saved.guest = randomUUID(); save(); }
+    return saved.guest;
+  };
+  const reset = () => {
+    delete saved[reference()];
+    save();
   };
   async function send(text: string, update?: (event: ChatUpdate) => void, signal?: AbortSignal): Promise<number> {
     const fail = (message: string, code: number): number => {
@@ -64,7 +74,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
     const clearStatus = humanChat && !fullScreen && Boolean(process.stderr.isTTY) && (io.env ?? process.env).TERM !== "dumb";
     if (humanChat && !fullScreen) io.writeError(`${paint("dim", "  Waiting for reply…")}${clearStatus ? "" : "\n"}`);
     const requestSignal = AbortSignal.any([AbortSignal.timeout(10 * 60_000), ...[io.signal, signal].filter((s): s is AbortSignal => Boolean(s))]);
-    const request = () => fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", ...(update ? { accept: "application/x-ndjson" } : {}), authorization: `Bearer ${token}` }, body: JSON.stringify({ text, ...(saved[endpoint] ? { conversationId: saved[endpoint] } : {}) }), signal: requestSignal });
+    const request = () => fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", ...(update ? { accept: "application/x-ndjson" } : {}), ...(token ? { authorization: `Bearer ${token}` } : { "flow-guest": guest() }) }, body: JSON.stringify({ text, ...(saved[reference()] ? { conversationId: saved[reference()] } : {}) }), signal: requestSignal });
     try {
       response = await request();
       if (response.status === 401 && stored) {
@@ -76,7 +86,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
     catch { response = undefined; }
     finally { if (clearStatus) io.writeError("\r\u001b[2K"); }
     if (!response) return fail("Could not reach the agent.", 5);
-    if (response.status === 401 || response.status === 403) return fail(`Sign in first: ${config.name} auth login.`, 3);
+    if (response.status === 401 || response.status === 403) return fail(`Sign in first: ${config.name} auth login${token ? "" : ` (or set ${tokenEnvOf(config)})`}.`, 3);
     if (!response.ok) return fail(`The agent could not finish (${response.status}).`, 1);
     let result: { conversationId: string; replies: Array<{ type: string; text?: string }> } | undefined;
     try {
@@ -104,10 +114,8 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
     } catch { return fail("The agent's reply was interrupted or invalid. Work already accepted may still finish.", 1); }
     if (!result || typeof result.conversationId !== "string" || !Array.isArray(result.replies)) return fail("The agent returned an invalid reply.", 1);
     io.signal?.throwIfAborted();
-    saved[endpoint] = result.conversationId;
-    mkdirSync(configDir(config), { recursive: true, mode: 0o700 });
-    writeFileSync(file, `${JSON.stringify(saved)}\n`, { mode: 0o600 });
-    chmodSync(file, 0o600);
+    saved[reference()] = result.conversationId;
+    save();
     if (update) return 0;
     const messages = result.replies.filter(r => r.type === "message").map(r => r.text ?? "");
     if (flags.values.json) io.write(`${JSON.stringify(result)}\n`);

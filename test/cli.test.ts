@@ -684,6 +684,43 @@ test("single-message and interactive chat use the authenticated agent terminal, 
   assert.match((await terminal.fetch(new Request(`${base}/agent/terminal`, { method: "POST" }))).status.toString(), /401/);
 });
 
+// The test above signs in; only a signed-out CLI shows whether an agent without accounts lets people chat.
+test("signed out, chat is a guest the agent keeps apart from accounts, unless the agent requires sign-in", async (t) => {
+  const old = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "flow-guest-"));
+  t.after(() => { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; });
+  const scripted = scriptedModel();
+  let agent: ReturnType<typeof createAgent>;
+  let seenKey: string | null | undefined = "unset";
+  const terminal = terminalServer({ agent: () => agent });
+  const required = terminalServer({ agent: () => agent, auth: { verify: () => null } });
+  const whoami = tool({ name: "whoami", description: "Who this is.", input: z.object({}), signIn: "none", run: async (_i, ctx) => { seenKey = ctx.key; return "a guest"; } });
+  agent = createAgent({ files: { "AGENTS.md": "Test agent" }, model: scripted.model, channels: [terminal.channel], tools: [whoami], debounceMs: 0, scheduleCheckMs: 0 });
+  let handler = terminal;
+  const base = await listen(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    const result = await handler.fetch(new Request(`${base}${req.url}`, { method: req.method, headers: req.headers as Record<string, string>, body: Buffer.concat(chunks) }));
+    res.writeHead(result.status, Object.fromEntries(result.headers)).end(await result.text());
+  });
+  const cli = defineCli({ name: "guest-test", server: `${base}/mcp` });
+  const first = io();
+  const chat = runCli(cli, ["chat", "who am I?", "--json"], first.channel);
+  (await Promise.race([scripted.nextCall(0), chat.then(code => { throw new Error(`chat finished before model call: ${code} ${first.err}`); })])).answer(respond(call("send_terminal", { text: "Checking." }), call("whoami", {})));
+  (await scripted.nextCall(1)).answer(respond(call("send_terminal", { text: "You are a guest." })));
+  assert.equal(await chat, 0, first.err);
+  assert.equal(seenKey, null, "a guest is never an account");
+  const again = io();
+  const second = runCli(cli, ["chat", "still me?", "--json"], again.channel);
+  (await scripted.nextCall(2)).answer(respond(call("send_terminal", { text: "Yes." })));
+  assert.equal(await second, 0, again.err);
+  assert.equal(JSON.parse(again.out).conversationId, JSON.parse(first.out).conversationId, "the CLI keeps its guest between runs");
+  handler = required;
+  const refused = io();
+  assert.equal(await runCli(cli, ["chat", "hello", "--json"], refused.channel), 3);
+  assert.match(refused.err, /Sign in first: guest-test auth login/);
+});
+
 // Auth/state coverage above checks JSON only; it cannot catch an unlabeled human transcript.
 test("human chat distinguishes input, waiting and agent replies", async (t) => {
   const old = process.env.XDG_CONFIG_HOME;
