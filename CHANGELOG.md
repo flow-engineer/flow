@@ -2,6 +2,26 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.10.1 (2026-10-26)
+
+### Changes
+
+- **Signing in as another account in the same browser works.** When the brand's login page signs
+  in someone other than the account the bridge's session in that browser knows, the bridge now
+  replaces that session. Before, the sign-in ended on "Not found" at `/session/end/confirm` and
+  the client (the CLI, Claude) never got its code. No logout page is served.
+- **`oauthBridge({ login: { pendingTtlSeconds } })`**: how long a sign-in may stay on the brand's
+  pages before its code comes back, from 60 seconds to a day, 600 by default as before. Set it to
+  at least the login page's own window, so a first sign-up with email verification does not come
+  back to a bridge that has forgotten it. The sign-in's provider interaction lasts as long.
+- **The CLI keeps the issuer with its tokens and client from `auth login` on,** so the MCP SDK no
+  longer prints "SEP-2352: stored OAuth credential has no 'issuer' stamp" on commands. Tokens saved
+  by an earlier version take the issuer recorded with them, and keep it from their next refresh.
+
+### Migration notes
+
+None.
+
 ## 0.10.0 (2026-10-26)
 
 ### Changes

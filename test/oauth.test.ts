@@ -32,9 +32,9 @@ function io(): CliIO & { out: string; err: string } {
   return channel;
 }
 
-/** A brand with its own login page and its own tokens, as the skill asks it to build them. */
-function brand(user: string) {
-  const codes = new Map<string, { nonce: string; returnTo: string }>();
+/** A brand with its own login page and its own tokens, as the skill asks it to build them. `who` is the account its page signs in. */
+function brand(...users: string[]) {
+  const codes = new Map<string, { nonce: string; returnTo: string; key: string }>();
   const proofs = new Set<string>();
   const access = new Map<string, { key: string; resource: string; live: boolean }>();
   const refresh = new Map<string, { key: string; resource: string }>();
@@ -49,13 +49,17 @@ function brand(user: string) {
   const page: RequestListener = (req, res) => {
     const url = new URL(req.url!, "http://brand");
     const code = randomBytes(24).toString("base64url");
-    codes.set(code, { nonce: url.searchParams.get("nonce")!, returnTo: url.searchParams.get("return_to")! });
+    codes.set(code, { nonce: url.searchParams.get("nonce")!, returnTo: url.searchParams.get("return_to")!, key: brand.who });
+    brand.signingIn();
     const back = new URL(url.searchParams.get("return_to")!);
     back.searchParams.set("code", code);
     back.searchParams.set("state", url.searchParams.get("nonce")!);
     res.writeHead(303, { location: back.href }).end();
   };
-  return {
+  const brand = {
+    who: users[0]!,
+    /** Called while the person is on the login page, before the code goes back. */
+    signingIn: () => {},
     page, calls, access,
     login: {
       async exchange({ code, nonce, redirectUri }: { code: string; nonce: string; redirectUri: string }) {
@@ -65,9 +69,9 @@ function brand(user: string) {
         if (!saved || saved.nonce !== nonce || saved.returnTo !== redirectUri) throw new Error("invalid code");
         const authorization = randomBytes(16).toString("hex");
         proofs.add(authorization);
-        return { key: user, authorization };
+        return { key: saved.key, authorization };
       },
-      active: async (key: string) => key === user,
+      active: async (key: string) => users.includes(key),
     },
     tokens: {
       async issue({ key, resource, authorization }: { key: string; resource: string; authorization: string }) {
@@ -89,11 +93,11 @@ function brand(user: string) {
       },
     },
   };
+  return brand;
 }
 
 /** A browser: follows redirects and keeps each origin's cookies, as a person's browser would. */
-async function browse(start: string): Promise<void> {
-  const jar = new Map<string, string[]>();
+async function browse(start: string, jar = new Map<string, string[]>()): Promise<void> {
   let url = start;
   for (let hop = 0; hop < 20; hop++) {
     const origin = new URL(url).origin;
@@ -110,8 +114,11 @@ async function browse(start: string): Promise<void> {
 // The whole promise of the bridge, as a host such as Claude runs it: discovery, registration,
 // PKCE and the brand's own login, the brand's token reaching the tool as the brand's user id,
 // refresh through the brand, and no client token kept by the bridge. The printed sign-in link works
-// from any browser, not only the one the CLI opened.
-test("the CLI signs in through the bridge on the brand's own login, and the tool sees the brand's user id", async () => {
+// from any browser, not only the one the CLI opened. The CLI keeps the issuer with its tokens, so the
+// SDK never warns that its SEP-2352 check is off, also for tokens saved before it did.
+test("the CLI signs in through the bridge on the brand's own login, and the tool sees the brand's user id", async (t) => {
+  const warned = t.mock.method(console, "warn");
+  const unstamped = () => warned.mock.calls.filter((call) => String(call.arguments[0]).includes("SEP-2352"));
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "flow-oauth-"));
   const acme = brand("customer-7");
   const loginPage = await listen(acme.page);
@@ -152,21 +159,34 @@ test("the CLI signs in through the bridge on the brand's own login, and the tool
   assert.deepEqual(JSON.parse(signedIn.out), { key: "customer-7" });
   assert.deepEqual(acme.calls, { exchange: 1, issue: 1, refresh: 0 });
 
+  const file = join(process.env.XDG_CONFIG_HOME!, "acme", "auth.json");
+  const server = `${origin}/mcp`;
+  const issuerOf = () => JSON.parse(readFileSync(file, "utf8"))[server].tokens.issuer;
+  assert.equal(issuerOf(), origin);
+  // Tokens an older CLI saved have no issuer: they take it on their next refresh.
+  const before = JSON.parse(readFileSync(file, "utf8"));
+  delete before[server].tokens.issuer;
+  writeFileSync(file, JSON.stringify(before));
+
   for (const saved of acme.access.values()) saved.live = false; // the brand's access token expires
   const refreshed = io();
   assert.equal(await runCli(cli, ["whoami", "--json"], refreshed), 0, refreshed.err);
   assert.deepEqual(JSON.parse(refreshed.out), { key: "customer-7" });
   assert.equal(acme.calls.refresh, 1);
+  assert.equal(issuerOf(), origin);
 
   const stored = JSON.stringify(await database.query("SELECT * FROM flow_oauth_artifacts"));
   assert.doesNotMatch(stored, /brand-(at|rt)-/, "the bridge keeps none of the brand's tokens");
 
   assert.equal(await runCli(cli, ["auth", "logout"], io()), 0);
   assert.equal(await runCli(cli, ["whoami"], io()), 3);
+  assert.equal(await runCli(cli, ["auth", "login"], io()), 0);
+  assert.equal(await runCli(cli, ["whoami", "--json"], io()), 0);
+  assert.deepEqual(unstamped(), []);
 });
 
 /** Signs in as a host such as Claude does: it registers itself (DCR), then the brand's login. */
-async function hostSignIn(server: string): Promise<{ client: OAuthClientInformationMixed; tokens: OAuthTokens }> {
+async function hostSignIn(server: string, jar?: Map<string, string[]>): Promise<{ client: OAuthClientInformationMixed; tokens: OAuthTokens }> {
   let answer = new URLSearchParams();
   const redirect = `${await listen((req, res) => { answer = new URL(req.url!, "http://host").searchParams; res.end("ok"); })}/callback`;
   const saved: { client?: OAuthClientInformationMixed; tokens?: OAuthTokens; verifier?: string } = {};
@@ -177,11 +197,12 @@ async function hostSignIn(server: string): Promise<{ client: OAuthClientInformat
     saveClientInformation: (client) => void (saved.client = client),
     tokens: () => saved.tokens,
     saveTokens: (tokens) => void (saved.tokens = tokens),
-    redirectToAuthorization: (url) => browse(url.href),
+    redirectToAuthorization: (url) => browse(url.href, jar),
     saveCodeVerifier: (verifier) => void (saved.verifier = verifier),
     codeVerifier: () => saved.verifier!,
   };
   assert.equal(await auth(provider, { serverUrl: server }), "REDIRECT");
+  assert.ok(answer.get("code"), `the sign-in came back with a code: ${answer}`);
   assert.equal(await auth(provider, { serverUrl: server, authorizationCode: answer.get("code")!, iss: answer.get("iss") ?? undefined }), "AUTHORIZED");
   return { client: saved.client!, tokens: saved.tokens! };
 }
@@ -263,4 +284,56 @@ test("a tool kept to the CLI is listed and called only for the CLI's own sign-in
   const renewed = io();
   assert.equal(await runCli(cli, ["auth", "status", "--json"], renewed), 0);
   assert.equal(JSON.parse(renewed.out).renew, false);
+});
+
+/** The bridge and its MCP server for a brand, on a loopback origin of their own. */
+async function served(acme: ReturnType<typeof brand>, login: { pendingTtlSeconds?: number } = {}): Promise<string> {
+  const loginPage = await listen(acme.page);
+  let handle: RequestListener = (_q, s) => void s.writeHead(503).end();
+  const origin = await listen((req, res) => handle(req, res));
+  const bridge = await oauthBridge({
+    issuer: origin,
+    resources: [`${origin}/mcp`],
+    storage: await databaseStorage(sqlite(), origin),
+    encryptionKey: randomBytes(32),
+    cookieKeys: [randomBytes(32).toString("hex")],
+    jwks: { keys: [{ ...generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ format: "jwk" }), kid: "k1", use: "sig", alg: "RS256" } as never] },
+    login: { url: `${loginPage}/login`, ...acme.login, ...login },
+    tokens: acme.tokens,
+    development: true,
+  });
+  const mcp = mcpServer({ name: "acme", version: "1", tools: [tool({ name: "whoami", description: "Who is signed in.", input: z.object({}), hints: { readOnly: true }, run: (_i, ctx) => ({ key: ctx.key }) })], auth: bridge.auth });
+  handle = (req, res) => void mcp.node(req, res);
+  return `${origin}/mcp`;
+}
+
+async function keyOf(acme: ReturnType<typeof brand>, server: string, token: string) {
+  return (await acme.tokens.verify({ token, resource: server }))?.key;
+}
+
+// The browser keeps the bridge's session from the first sign-in; a second one as another account
+// replaces it instead of asking to confirm a logout on a page the bridge does not serve.
+test("signing in as another account in the same browser replaces the bridge's session", async () => {
+  const acme = brand("customer-7", "customer-8");
+  const server = await served(acme);
+  const jar = new Map<string, string[]>();
+  const first = await hostSignIn(server, jar);
+  assert.ok(jar.get(new URL(server).origin)?.some((c) => c.startsWith("_session=")), "the first sign-in left a session cookie");
+  acme.who = "customer-8";
+  const second = await hostSignIn(server, jar);
+  assert.notEqual(first.client.client_id, second.client.client_id);
+  assert.equal(await keyOf(acme, server, first.tokens.access_token), "customer-7");
+  assert.equal(await keyOf(acme, server, second.tokens.access_token), "customer-8");
+});
+
+// A first sign-up with email verification can keep the person on the brand's pages longer than ten
+// minutes; the bridge waits as long as the brand says its login page does.
+test("a sign-in that comes back after ten minutes finishes within login.pendingTtlSeconds", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const acme = brand("customer-7");
+  acme.signingIn = () => t.mock.timers.tick(30 * 60_000);
+  const server = await served(acme, { pendingTtlSeconds: 3600 });
+  assert.equal(await keyOf(acme, server, (await hostSignIn(server)).tokens.access_token), "customer-7");
+  await assert.rejects(hostSignIn(await served(acme)), /came back with a code/);
+  await assert.rejects(served(acme, { pendingTtlSeconds: 2 * 86400 }), /pendingTtlSeconds/);
 });
