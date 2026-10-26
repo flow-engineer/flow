@@ -838,3 +838,19 @@ test("the test cloud's simulators refuse an edit where the platform has none, or
     await server.close();
   }
 });
+
+// Flow's hosting serves an agent's routes beside it; locally only the playground runs, so it must too.
+test("the playground serves the agent's own routes beside it, streaming their answers", async () => {
+  const model: Model = { complete: async () => ({ text: null, toolCalls: [] }) };
+  const agent = createAgent({ files: { "AGENTS.md": "Test agent" }, model, channels: [], debounceMs: 0, scheduleCheckMs: 0,
+    routes: { "/v1/events": async (request) => new Response(`got ${await request.text()}\n`, { headers: { "content-type": "application/x-ndjson" } }) } });
+  const server = await simulators().listen(agent, 0);
+  try {
+    const answer = await fetch(`${server.url}/v1/events`, { method: "POST", body: "order ready" });
+    assert.equal(answer.status, 200);
+    assert.equal(await answer.text(), "got order ready\n");
+    assert.equal((await fetch(`${server.url}/v1/unknown`, { method: "POST" })).status, 404);
+  } finally {
+    await server.close();
+  }
+});

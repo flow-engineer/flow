@@ -281,3 +281,32 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }).end(JSON.stringify(value));
 }
+
+/** node:http in front of the web-standard handler, streaming the answer (event streams included). */
+export async function serveNode(serve: (request: Request) => Promise<Response>, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const abort = new AbortController();
+  res.on("close", () => abort.abort());
+  const secure = (req.socket as { encrypted?: boolean }).encrypted === true;
+  const url = `${secure ? "https" : "http"}://${req.headers.host ?? "localhost"}${req.url ?? "/"}`;
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(req.headers)) {
+    if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+  }
+  let body: ArrayBuffer | undefined;
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    const all = Buffer.concat(chunks);
+    body = all.buffer.slice(all.byteOffset, all.byteOffset + all.byteLength) as ArrayBuffer;
+  }
+  const response = await serve(new Request(url, { method: req.method, headers, body, signal: abort.signal }));
+  // Headers joins Set-Cookie values into one; node:http must get each as its own header.
+  const cookies = response.headers.getSetCookie();
+  res.writeHead(response.status, { ...Object.fromEntries(response.headers), ...(cookies.length ? { "set-cookie": cookies } : {}) });
+  if (!response.body) return void res.end();
+  try {
+    for await (const chunk of response.body) res.write(chunk);
+  } finally {
+    res.end();
+  }
+}

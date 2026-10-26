@@ -245,26 +245,48 @@ terminal HTTP requests. Installed CLI defaults stay unchanged.
 overrides the terminal URL; the default is the MCP server's origin plus `/agent/terminal`.
 `acme chat "Which orders are ready?" --json` prints one response; `acme chat` reads a TTY until
 Ctrl-D or `/exit`. Without a TTY pass a message to `chat` (an interactive chat exits 2); sign-in failures exit 3.
-Human chat shows a `You ›` input prompt, a waiting indicator and agent replies under the CLI's
-name. `--json` keeps stdout as one JSON response per line, without those labels. Embedded CLIs
-can supply `CliIO.lines(prompt?)` and their own output handlers to replace the presentation.
+Human `chat` opens a dedicated full-screen session with a bottom composer, Markdown replies and
+live tool activity. Sent messages have subtle shading when the terminal reports its background. It inherits terminal colors; `defineCli({ ..., chat: { accent: "#b85c00" } })`
+sets a hex brand accent, approximated in 256 colors, without changing the background; on a 24-bit terminal sent messages take a faint wash of it. Install optional `@mariozechner/pi-tui@0.73.1` for that interface; `flow new`
+includes it. Click Send or press Enter to send; Shift+Enter, Alt+Enter or `\` then Enter adds a line. Multiline paste
+stays in the draft. Tab completes `/help`, `/details`, `/new` and `/exit`. Ctrl+O expands tool
+inputs/results; the mouse wheel/trackpad and PageUp/PageDown scroll the transcript, preserving
+the reading position during incoming replies. Ctrl+Home/Ctrl+End jump to the start/latest reply. Escape stops waiting; accepted work may still finish.
+A failed request preserves its message for editing. `/new` clears the view and saved terminal
+reference, preserving shared person history. `--json` remains the original response format.
+Single-message calls and dumb terminals do not open the full-screen UI. Embedded clients can
+supply `CliIO.chat(session)` to replace it, or keep `CliIO.lines(prompt?)` for basic line input.
+The session exposes `send(text, update, signal)`, `reset()`, `name`, `color`, `accent` and `signal`.
+The terminal endpoint streams when the request accepts `application/x-ndjson`: `activity`, `reply`
+and a final `done` record containing `result`; older servers returning JSON still work. Activity
+is scoped to the authenticated person's conversation, excluding model context and hidden text.
 `chat.json` is mode 600 and scoped by terminal endpoint. `--new` forgets the terminal's saved
 reference; the agent keeps its one-person history across channels. It does not erase a person's
 WhatsApp history. Teams can replace `chat` with their own Stricli command in `commands`.
 
-Mount the optional terminal handler beside MCP (no model or extra dependency in the CLI):
+Serve the optional terminal handler as one of the agent's routes (no model or extra dependency in
+the CLI). Flow's hosting and the local playground (`npm start`) both serve an agent's `routes`:
 
 ```ts
 import { terminalServer } from "@flow-engineer/flow/mcp";
-const terminal = terminalServer({ agent: () => agent, auth });
-const agent = createAgent({ ...options, channels: [...channels, terminal.channel] });
-// Route terminal.path to terminal.fetch(request), and MCP's paths to mcp.fetch(request).
+const terminal = terminalServer({ agent: () => agent, auth }); // omit auth: everyone chats as a guest
+const agent = createAgent({ ...options, channels: [...channels, terminal.channel], routes: { [terminal.path]: (r) => terminal.fetch(r) } });
 ```
 
-`terminalServer` accepts `path` and `channel` overrides. It verifies auth on every POST,
+The CLI's chat goes to the MCP server's origin plus `/agent/terminal` unless `defineCli({ agent })`
+names another URL; locally the agent and `npm run mcp` listen on different ports, so the starter's
+CLI file reads the running agent's URL with `runningAgent(dir)`.
+Without `auth`, or with `guests: true` beside it, a CLI that is not signed in chats as a guest: it
+sends a random id it keeps (header `flow-guest`), and the agent keeps that guest's conversation on
+this channel only, never joined to an account (`ctx.key` is null), so a tool that needs sign-in
+asks for it. With `auth` and no `guests`, chat answers 401 until `auth login`. Guests run turns on
+the agent's model key; limit them in front of the route if strangers can reach it.
+
+`terminalServer` accepts `path` and `channel` overrides. It verifies auth on every POST that carries a token,
 serializes concurrent requests per person, and returns `{ conversationId, replies }` after the
 turn settles. The authenticated key becomes the same person that `resolve` returns on other
 channels. A body cannot choose its own person; a conversation reference from another person is
 refused. Its custom UI uses Markdown and exports turns as channel `cli`.
 For your own HTTP adapters, `agent.request({ channel, key, text, conversationId? })` exposes this
-without the handler. Supply a verified key and serialize calls for that channel and person.
+without the handler. Supply a verified key, or `guest` (an id the client keeps) instead of `key`,
+and serialize calls for that channel and person.

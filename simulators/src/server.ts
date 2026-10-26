@@ -73,7 +73,7 @@ import {
 import type { Agent } from "../../src/agent.ts";
 import type { CliConfig } from "../../cli/src/commands.ts";
 import type { CliIO } from "../../cli/src/run.ts";
-import { requireToken, sameSecret, wrongTries } from "../../src/http.ts";
+import { requireToken, sameSecret, serveNode, wrongTries } from "../../src/http.ts";
 import { PLATFORMS, channelOf, platform as platformOf, smsSegments, wirePayload, type Platform, type Wire } from "./platforms.ts";
 
 /** What the test cloud's simulators need from an agent. */
@@ -112,6 +112,8 @@ export interface PlaygroundAgent {
   setTimeZone?: Agent["setTimeZone"];
   setQuietHours?: Agent["setQuietHours"];
   runDue?: Agent["runDue"];
+  /** The agent's own HTTP routes (`createAgent({ routes })`), served beside the playground as Flow's hosting serves them. */
+  fetch?: Agent["fetch"];
   /** The Records panel (shown when collections are declared): every record the agent keeps, read only. */
   records?: Pick<Records, "export" | "collections">;
 }
@@ -948,6 +950,8 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
     if (req.method === "GET" && path === "/") return html(res, page(playPage, base));
     if (req.method === "GET" && path === "/person") return html(res, page(personPage, base));
+    // Under a base the playground is mounted in a deployed server, which serves the agent's routes itself.
+    if (!base && agent.fetch && !path.startsWith("/api/")) return serveNode((request) => agent.fetch!(request), req, res);
     if (req.method === "GET" && path === "/api/status") return json(res, 200, agent.status());
     if (req.method === "GET" && path === "/api/platforms") {
       const channels = agent.channels().map((c) => ({ name: c.name, kind: c.kind, platform: platformFor(c) }));

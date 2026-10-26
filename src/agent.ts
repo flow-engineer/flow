@@ -392,6 +392,7 @@ export class Agent {
   private readonly rows = new Map<string, ConversationRow>();
   private resumed = false;
   private readonly requestReplies = new Map<string, Deliver>();
+  private readonly requestEvents = new Map<string, Set<EventSink>>();
   private readonly requestCredentials = new Map<string, CredentialProvider>();
   private readonly arriving = new Map<string, Promise<unknown>>();
   /** Callers waiting for a queued nudge to settle: its first call, and any with the same key. */
@@ -430,6 +431,13 @@ export class Agent {
     this.traces = tracing ? traces(tracing, { service: options.id ?? "flow", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind, viaOf: (id, channel) => this.viaOf(id, channel) }) : null;
     const sinks = [...(options.events ?? []), ...(this.traces ? [this.traces.sink] : [])];
     this.runner = `${options.runner ?? process.env.FLOW_RUNNER ?? hostname()}:${randomUUID().slice(0, 8)}`;
+    // Per-request activity never includes model context or hidden model text.
+    const activity = new Set(["turn.start", "turn.end", "tool.start", "tool.end", "tool.detached", "task.done", "skill.loaded"]);
+    sinks.push(event => {
+      if (activity.has(event.type)) for (const sink of this.requestEvents.get(event.conversationId) ?? []) {
+        try { sink(event); } catch { /* A disconnected observer must not fail a turn. */ }
+      }
+    });
     const emit = emitter(sinks, this.runner);
     if ((options.dir === undefined) === (options.files === undefined)) throw new Error("flow: give an agent exactly one of dir or files");
     const files = options.files ?? readAgentFolder(options.dir!, { prompt: true });
@@ -511,22 +519,38 @@ export class Agent {
   /**
    * A signed-in HTTP channel's request. `key` must come from verified auth, never the body.
    * Uses the same person as resolve() on other channels. The caller serializes requests per key.
+   * Optional onReply streams outbound deliveries; onActivity observes this conversation's tool,
+   * skill and turn events while the request runs, excluding model context and hidden text.
+   * Observer errors do not fail delivery; the request still returns the complete result.
+   * Without a key, `guest` (an id the client chose and keeps) is a signed-out person on this
+   * channel only: never joined to an account, and tools that need sign-in ask for it.
    */
-  async request(input: { channel: string; key: string; text: string; conversationId?: string; credentials?: CredentialProvider }): Promise<{ conversationId: string; replies: Outbound[] }> {
+  async request(input: { channel: string; key?: string; guest?: string; text: string; conversationId?: string; credentials?: CredentialProvider; onReply?: (reply: Outbound) => void; onActivity?: EventSink }): Promise<{ conversationId: string; replies: Outbound[] }> {
     await this.settings.ready;
     const adapter = this.channelOf(input.channel);
     if (adapter.kind !== "custom") throw new Error("chinwag: request needs a custom UI channel");
-    const identity = await this.conversationFor(adapter, input.channel, input.key, undefined, input.key);
+    if (!input.key === !input.guest) throw new Error("flow: request needs exactly one of key or guest");
+    const from = input.key ?? `guest:${input.guest}`;
+    const identity = await this.conversationFor(adapter, input.channel, from, undefined, input.key);
     if (input.conversationId && input.conversationId !== identity.conversationId) throw new Error("chinwag: conversation does not belong to this person");
     const replies: Outbound[] = [];
-    const address = viaKey(input.channel, input.key);
+    const address = viaKey(input.channel, from);
     if (input.credentials) this.requestCredentials.set(address, input.credentials);
-    this.requestReplies.set(address, (reply) => { replies.push(reply); });
+    this.requestReplies.set(address, (reply) => {
+      replies.push(reply);
+      try { input.onReply?.(reply); } catch { /* Observers cannot interrupt delivery. */ }
+    });
+    const observers = this.requestEvents.get(identity.conversationId) ?? new Set<EventSink>();
+    if (input.onActivity) { observers.add(input.onActivity); this.requestEvents.set(identity.conversationId, observers); }
     try {
-      await this.released(await this.take(adapter, { channel: input.channel, from: input.key, message: input.text, via: "provider", verifiedKey: input.key }));
+      await this.released(await this.take(adapter, { channel: input.channel, from, message: input.text, via: "provider", verifiedKey: input.key }));
       await this.conversation(identity.conversationId)?.whenIdle();
       return { conversationId: identity.conversationId, replies };
-    } finally { this.requestReplies.delete(address); this.requestCredentials.delete(address); }
+    } finally {
+      this.requestReplies.delete(address); this.requestCredentials.delete(address);
+      if (input.onActivity) observers.delete(input.onActivity);
+      if (!observers.size) this.requestEvents.delete(identity.conversationId);
+    }
   }
 
   /**

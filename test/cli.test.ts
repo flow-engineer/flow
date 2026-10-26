@@ -1,4 +1,4 @@
-// covers: cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/skills.ts src/agent.ts src/channels.ts
+// covers: cli/src/chat-ui.ts cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/skills.ts src/agent.ts src/channels.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -6,6 +6,11 @@ import { createServer, type RequestListener, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { Readable } from "node:stream";
+import { stripVTControlCharacters } from "node:util";
+import { ChatView, runChatUI } from "../cli/src/chat-ui.ts";
+import type { ChatUpdate } from "../cli/src/terminal.ts";
+import { CURSOR_MARKER, TUI, visibleWidth, type Terminal } from "@mariozechner/pi-tui";
 import { after, test } from "node:test";
 import { z } from "zod";
 import { buildCommand } from "@stricli/core";
@@ -679,6 +684,43 @@ test("single-message and interactive chat use the authenticated agent terminal, 
   assert.match((await terminal.fetch(new Request(`${base}/agent/terminal`, { method: "POST" }))).status.toString(), /401/);
 });
 
+// The test above signs in; only a signed-out CLI shows whether an agent without accounts lets people chat.
+test("signed out, chat is a guest the agent keeps apart from accounts, unless the agent requires sign-in", async (t) => {
+  const old = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "flow-guest-"));
+  t.after(() => { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; });
+  const scripted = scriptedModel();
+  let agent: ReturnType<typeof createAgent>;
+  let seenKey: string | null | undefined = "unset";
+  const terminal = terminalServer({ agent: () => agent });
+  const required = terminalServer({ agent: () => agent, auth: { verify: () => null } });
+  const whoami = tool({ name: "whoami", description: "Who this is.", input: z.object({}), signIn: "none", run: async (_i, ctx) => { seenKey = ctx.key; return "a guest"; } });
+  agent = createAgent({ files: { "AGENTS.md": "Test agent" }, model: scripted.model, channels: [terminal.channel], tools: [whoami], debounceMs: 0, scheduleCheckMs: 0 });
+  let handler = terminal;
+  const base = await listen(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    const result = await handler.fetch(new Request(`${base}${req.url}`, { method: req.method, headers: req.headers as Record<string, string>, body: Buffer.concat(chunks) }));
+    res.writeHead(result.status, Object.fromEntries(result.headers)).end(await result.text());
+  });
+  const cli = defineCli({ name: "guest-test", server: `${base}/mcp` });
+  const first = io();
+  const chat = runCli(cli, ["chat", "who am I?", "--json"], first.channel);
+  (await Promise.race([scripted.nextCall(0), chat.then(code => { throw new Error(`chat finished before model call: ${code} ${first.err}`); })])).answer(respond(call("send_terminal", { text: "Checking." }), call("whoami", {})));
+  (await scripted.nextCall(1)).answer(respond(call("send_terminal", { text: "You are a guest." })));
+  assert.equal(await chat, 0, first.err);
+  assert.equal(seenKey, null, "a guest is never an account");
+  const again = io();
+  const second = runCli(cli, ["chat", "still me?", "--json"], again.channel);
+  (await scripted.nextCall(2)).answer(respond(call("send_terminal", { text: "Yes." })));
+  assert.equal(await second, 0, again.err);
+  assert.equal(JSON.parse(again.out).conversationId, JSON.parse(first.out).conversationId, "the CLI keeps its guest between runs");
+  handler = required;
+  const refused = io();
+  assert.equal(await runCli(cli, ["chat", "hello", "--json"], refused.channel), 3);
+  assert.match(refused.err, /Sign in first: guest-test auth login/);
+});
+
 // Auth/state coverage above checks JSON only; it cannot catch an unlabeled human transcript.
 test("human chat distinguishes input, waiting and agent replies", async (t) => {
   const old = process.env.XDG_CONFIG_HOME;
@@ -712,6 +754,310 @@ test("human chat distinguishes input, waiting and agent replies", async (t) => {
   assert.equal(out.out, "", "a reply is not printed before the server answers");
   release();
   assert.equal(await chat, 0);
-  assert.equal(out.out, "\nacme\nChecking.\n\nHere is the answer.\n\n");
+  assert.equal(out.out, "\nacme\n  Checking.\n  \n  Here is the answer.\n\n");
   assert.doesNotMatch(out.out, /typing|person-1/);
+});
+
+// Existing chat tests cover authentication/presentation; local commands must not reach the agent.
+test("chat commands stay local and /new forgets only the terminal reference; replies render Markdown", async () => {
+  const references: Array<string | undefined> = [];
+  const server = await listen(async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk as Buffer);
+    references.push(JSON.parse(Buffer.concat(chunks).toString()).conversationId);
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ conversationId: "saved-reference", replies: [{ type: "message", text: "## Your order\n\n**Ready** for pickup.\n\n- Coffee\n- Cake" }] }));
+  });
+  const directory = mkdtempSync(join(testDirectory, "chat-commands-"));
+  const out = io(true); out.channel.env = { TERM: "xterm" };
+  out.channel.lines = async function* () {
+    yield "/help"; yield "/missing"; yield "hello"; yield "again"; yield "/new";
+    assert.deepEqual(JSON.parse(readFileSync(join(directory, "chat.json"), "utf8")), {});
+    yield "after reset"; yield "/exit";
+  };
+  assert.equal(await runCli(defineCli({ name: "acme", server, directory }), ["chat", "--token", "test"], out.channel), 0);
+  assert.deepEqual(references, [undefined, "saved-reference", undefined]);
+  assert.match(out.err, /Unknown chat command/);
+  assert.match(out.err, /Shared person history stays/);
+  const plain = out.out.replace(/\u001b\[[0-9;]*m/g, "");
+  assert.match(plain, /Your order/); assert.match(plain, /Ready for pickup/);
+  assert.doesNotMatch(plain, /##|\*\*/);
+  const legacy = io(true); legacy.channel.env = { TERM: "xterm" };
+  const received: ChatUpdate[] = [];
+  legacy.channel.chat = async session => {
+    await session.send("An older JSON-only server", event => received.push(event), new AbortController().signal);
+    return 0;
+  };
+  assert.equal(await runCli(defineCli({ name: "acme", server, directory }), ["chat", "--token", "test"], legacy.channel), 0);
+  assert.ok(received.some(event => event.type === "reply" && event.text.includes("Your order")));
+  assert.equal(legacy.out + legacy.err, "", "legacy JSON replies also go through the replacement UI");
+});
+
+
+// The line-based tests cannot protect a full-screen viewport, composer or live tool detail toggle.
+function fakeChatTerminal(columns = 80, rows = 30) {
+  let input: (data: string) => void = () => {};
+  let output = "", stopped = false;
+  const terminal: Terminal = {
+    columns, rows, kittyProtocolActive: false,
+    start(onInput) { input = onInput; }, stop() { stopped = true; }, drainInput: async () => {},
+    write(data) { output += data; }, moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {},
+    clearFromCursor() {}, clearScreen() {}, setTitle() {}, setProgress() {},
+  };
+  return { terminal, input: (data: string) => input(data), get output() { return output; }, get stopped() { return stopped; } };
+}
+
+test("full-screen chat keeps the composer visible at different sizes and expands actual tool details", async () => {
+  const fake = fakeChatTerminal(90, 40);
+  const tui = new TUI(fake.terminal);
+  let update!: (event: ChatUpdate) => void, release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const view = new ChatView(tui, { name: "Acme", color: false, reset() {}, send: async (_text, callback) => { update = callback; await gate; } }, () => {});
+  tui.addChild(view); tui.setFocus(view);
+  const request = view.submit("Check order 1042");
+  try {
+    update({ type: "activity", event: { type: "tool.start", callId: "1", tool: "order_lookup", input: { order_id: "1042" } } });
+    let frame = view.render(90).map(stripVTControlCharacters).join("\n");
+    assert.match(frame, /order_lookup.*running/); assert.doesNotMatch(frame, /order_id/);
+    update({ type: "activity", event: { type: "tool.end", callId: "1", tool: "order_lookup", ok: true, output: { status: "ready" }, ms: 20 } });
+    update({ type: "reply", text: "## Your order\n\n**Ready** for pickup." });
+    view.handleInput("\x0f"); // Ctrl+O
+    frame = view.render(90).map(stripVTControlCharacters).join("\n");
+    assert.match(frame, /order_id/); assert.match(frame, /ready/); assert.match(frame, /Your order/);
+    assert.doesNotMatch(frame, /##|\*\*/);
+    assert.match(frame, /Check order 1042/);
+    assert.doesNotMatch(frame, /╭─ YOU /, "sent messages have no enclosing border");
+    assert.match(frame, /▏ order_lookup/, "tool activity sits on its own rail, apart from the reply");
+    assert.match(frame, /Send ↑/, "the composer exposes its send action");
+    assert.doesNotMatch(frame, /Enter send|Shift\+Enter newline|CHAT.*Ready/);
+    const colorful = new ChatView(tui, { name: "Acme", color: true, reset() {}, async send() {} }, () => {});
+    const coloredFrame = colorful.render(90).join("\n");
+    assert.match(coloredFrame, /\x1b\[39;49m/, "inherits the terminal's foreground and background");
+    assert.doesNotMatch(coloredFrame, /(?:38|48);(?:2|5);/, "default theme does not impose its own palette");
+    const emptyLines = colorful.render(90).map(stripVTControlCharacters);
+    const welcome = emptyLines.findIndex(line => line.includes("What can I help you with?"));
+    const composer = emptyLines.findIndex(line => line.includes("╭"));
+    assert.ok(welcome > emptyLines.length - 12 && composer - welcome <= 5, "welcome sits directly above the composer");
+    const branded = new ChatView(tui, { name: "Acme", color: true, accent: "#b85c00", reset() {}, async send() {} }, () => {});
+    const brandedFrame = branded.render(90).join("\n");
+    assert.match(brandedFrame, /38;5;130m/, "brand accent is approximated using the portable palette");
+    assert.doesNotMatch(brandedFrame, /48;(?:2|5);/, "branding does not change the terminal background");
+    view.editor.setText(Array.from({ length: 20 }, (_, i) => `Draft line ${i}`).join("\n"));
+    for (const columns of [20, 37, 80, 140]) for (const rows of [9, 24, 40]) {
+      Object.assign(fake.terminal, { columns, rows });
+      const lines = view.render(columns);
+      assert.equal(lines.length, rows);
+      assert.ok(lines.some(line => line.includes(CURSOR_MARKER)), "resizing keeps the draft cursor visible");
+      assert.ok(lines.every(line => visibleWidth(line) <= columns), `frame fits ${columns} × ${rows}`);
+      assert.match(lines.map(stripVTControlCharacters).slice(-10).join("\n"), /Send|Ctrl\+O/, "controls remain beside composer");
+    }
+  } finally { release(); await request; }
+});
+
+test("full-screen chat restores the ordinary terminal on exit", async () => {
+  const fake = fakeChatTerminal();
+  const run = runChatUI({ name: "Acme", color: false, reset() {}, async send() {} }, fake.terminal);
+  fake.input("\x04");
+  assert.equal(await run, 0); assert.equal(fake.stopped, true);
+  assert.match(fake.output, /^\x1b\[\?1049h/);
+  assert.match(fake.output, /\x1b\[\?1000h\x1b\[\?1006h/, "wheel reporting is enabled for the session");
+  assert.match(fake.output, /\x1b\[\?1006l\x1b\[\?1000l\x1b\[\?1049l$/, "mouse reporting and alternate screen are restored together");
+});
+
+// This protects the live transport: a tool and reply must arrive while the turn is still running.
+test("full-screen chat streams authenticated tool activity and replies before completion, without model context", async (t) => {
+  const scripted = scriptedModel();
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const toolStarted = new Promise<void>(resolve => { started = resolve; });
+  t.after(release);
+  const lookup = tool({ name: "lookup_order", description: "Look up an order", input: z.object({}), signIn: "none", run: async () => { started(); await gate; return { status: "ready" }; } });
+  let agent!: ReturnType<typeof createAgent>;
+  const handler = terminalServer({ agent: () => agent, auth: { verify: async token => token === "test" ? { key: "one" } : token === "other" ? { key: "two" } : null } });
+  agent = createAgent({ files: { "AGENTS.md": "Private model instructions never shown in chat" }, model: scripted.model, channels: [handler.channel], tools: [lookup], debounceMs: 0, scheduleCheckMs: 0 });
+  const base = await listen(async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk as Buffer);
+    const result = await handler.fetch(new Request(`${base}${req.url}`, { method: req.method, headers: req.headers as Record<string, string>, body: Buffer.concat(chunks) }));
+    res.writeHead(result.status, Object.fromEntries(result.headers));
+    if (result.body) Readable.fromWeb(result.body as any).pipe(res); else res.end();
+  });
+  const invalidBrand = io(true); invalidBrand.channel.env = { TERM: "xterm" };
+  invalidBrand.channel.chat = async () => { throw new Error("invalid accent must be refused before opening the UI"); };
+  assert.equal(await runCli(defineCli({ name: "stream-test", server: base, chat: { accent: "not-a-color" } }), ["chat", "--token", "test"], invalidBrand.channel), 2);
+  assert.match(invalidBrand.err, /six-digit hex/);
+  const updates: ChatUpdate[] = [];
+  let seen!: () => void;
+  const live = new Promise<void>(resolve => { seen = resolve; });
+  let sawReply = false, sawTool = false;
+  const out = io(true);
+  out.channel.chat = async session => {
+    assert.equal(session.accent, "#b85c00");
+    await session.send("check", update => {
+      updates.push(update);
+      if (update.type === "reply" && update.text === "Checking your order.") sawReply = true;
+      if (update.type === "activity" && update.event.type === "tool.start" && update.event.tool === "lookup_order") sawTool = true;
+      if (sawReply && sawTool) seen();
+    }, new AbortController().signal);
+    return 0;
+  };
+  const running = runCli(defineCli({ name: "stream-test", directory: mkdtempSync(join(testDirectory, "stream-")), server: base, chat: { accent: "#b85c00" } }), ["chat", "--token", "test"], out.channel);
+  (await scripted.nextCall(0)).answer(respond(call("send_terminal", { text: "Checking your order." }), call("lookup_order", {})));
+  await toolStarted; await live;
+  assert.ok(updates.some(event => event.type === "reply" && event.text === "Checking your order."));
+  assert.ok(!updates.some(event => event.type === "reply" && event.text === "Ready."));
+  const unrelated = handler.fetch(new Request(`${base}/agent/terminal`, { method: "POST", headers: { authorization: "Bearer other", "content-type": "application/json" }, body: JSON.stringify({ text: "Other person's request" }) }));
+  (await scripted.nextCall(1)).answer(respond(call("send_terminal", { text: "Other person's private reply." })));
+  await unrelated;
+  assert.doesNotMatch(JSON.stringify(updates), /Other person's/);
+  release();
+  (await scripted.nextCall(2)).answer(respond(call("send_terminal", { text: "Ready." })));
+  assert.equal(await running, 0);
+  assert.ok(updates.some(event => event.type === "activity" && event.event.type === "tool.end" && event.event.tool === "lookup_order"));
+  assert.ok(updates.some(event => event.type === "reply" && event.text === "Ready."));
+  assert.doesNotMatch(JSON.stringify(updates), /Private model instructions|turn.context|text.hidden/);
+  assert.equal(out.out + out.err, "", "transport does not print over the UI");
+  const completedCount = updates.length;
+  const later = handler.fetch(new Request(`${base}/agent/terminal`, { method: "POST", headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ text: "Another request" }) }));
+  (await scripted.nextCall(3)).answer(respond(call("send_terminal", { text: "Later reply." })));
+  await later;
+  assert.equal(updates.length, completedCount, "finished request observers are removed");
+  const unauthorized = await handler.fetch(new Request(`${base}/agent/terminal`, { method: "POST", headers: { accept: "application/x-ndjson" } }));
+  assert.equal(unauthorized.status, 401);
+});
+
+
+test("chat preserves a failed message for editing and can stop waiting without claiming to cancel accepted work", async () => {
+  const fake = fakeChatTerminal(90, 40);
+  const tui = new TUI(fake.terminal);
+  let failing = true;
+  const view = new ChatView(tui, { name: "Acme", color: false, reset() {}, send: async (_text, _update, signal) => {
+    if (failing) throw new Error("The agent could not finish.");
+    await new Promise<void>((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+  } }, () => {});
+  tui.addChild(view); tui.setFocus(view);
+  try {
+    await view.submit("Keep my draft");
+    assert.equal(view.editor.getText(), "Keep my draft");
+    assert.match(view.render(90).map(stripVTControlCharacters).join("\n"), /could not finish/);
+    failing = false;
+    const pending = view.submit("Try again");
+    view.handleInput("\x1b");
+    await pending;
+    assert.match(view.render(90).map(stripVTControlCharacters).join("\n"), /Work already accepted/);
+  } finally { tui.stop(); }
+});
+
+
+// Layout tests never scroll: this protects reading position while the transcript/layout changes.
+test("chat wheel and keyboard scrolling preserve the draft and reading position until returning to latest", async () => {
+  const fake = fakeChatTerminal(90, 24);
+  const tui = new TUI(fake.terminal);
+  let update!: (event: ChatUpdate) => void, release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const view = new ChatView(tui, { name: "Acme", color: false, reset() {}, send: async (_text, callback) => { update = callback; await gate; } }, () => {});
+  tui.addChild(view); tui.setFocus(view);
+  const request = view.submit("Original request");
+  const block = (prefix: string, count: number) => "```\n" + Array.from({ length: count }, (_, i) => `${prefix}-${String(i + 1).padStart(3, "0")}`).join("\n") + "\n```";
+  const frame = () => view.render(fake.terminal.columns).map(stripVTControlCharacters);
+  const firstLine = () => frame().find(line => /line-\d{3}/.test(line));
+  try {
+    update({ type: "activity", event: { type: "tool.end", callId: "1", tool: "lookup", ok: true, output: Array.from({ length: 50 }, (_, i) => `detail-${i}`).join("\n") } });
+    update({ type: "reply", text: block("line", 120) });
+    view.editor.setText("Draft stays");
+    assert.match(frame().join("\n"), /line-120/);
+    for (let i = 0; i < 3; i++) view.handleInput("\x1b[<64;10;10M");
+    const reading = firstLine();
+    assert.ok(reading);
+    assert.doesNotMatch(frame().join("\n"), /line-120/, "several wheel events accumulate before a redraw");
+    update({ type: "reply", text: block("new", 30) });
+    assert.equal(firstLine(), reading, "incoming replies leave the top visible line in place");
+    view.handleInput("\x0f");
+    assert.equal(firstLine(), reading, "expanding an earlier tool preserves the visible message");
+    Object.assign(fake.terminal, { columns: 70, rows: 30 });
+    assert.equal(firstLine()?.trim(), reading?.trim(), "resize keeps the same message and logical row");
+    view.editor.setText("Draft stays\nsecond line\nthird line");
+    assert.equal(firstLine()?.trim(), reading?.trim(), "a growing composer does not move the transcript");
+    view.handleInput("\x1bOP"); // F1 opens help at its beginning.
+    assert.match(frame().slice(2, 5).join("\n"), /Chat shortcuts/);
+    view.handleInput("\x1bOP");
+    assert.equal(firstLine()?.trim(), reading?.trim(), "closing help restores the reading position");
+    const draft = view.editor.getText();
+    for (const input of ["\x1b[<0;10;10M", "\x1b[<0;10;10m", "\x1b[<66;10;10M"]) view.handleInput(input);
+    assert.equal(view.editor.getText(), draft, "mouse packets never enter the composer");
+    assert.equal(firstLine()?.trim(), reading?.trim(), "clicks and horizontal scrolling do not move the transcript");
+    view.handleInput("\x1b[M" + String.fromCharCode(96, 42, 42)); // Legacy wheel up.
+    assert.notEqual(firstLine()?.trim(), reading?.trim());
+    view.handleInput("\x1b[1;5H"); // Ctrl+Home.
+    const top = frame();
+    assert.match(top.join("\n"), /Original request/);
+    for (let i = 0; i < 10; i++) view.handleInput("\x1b[5~");
+    assert.deepEqual(frame(), top, "scrolling above the start is clamped");
+    view.handleInput("\x1b[6~");
+    assert.notDeepEqual(frame(), top, "PageDown moves by the conversation viewport");
+    view.handleInput("\x1b[1;5F"); // Ctrl+End.
+    assert.match(frame().join("\n"), /new-030/);
+    update({ type: "reply", text: "latest-message" });
+    assert.match(frame().join("\n"), /latest-message/, "returning to latest resumes following replies");
+    assert.equal(view.editor.getText(), draft);
+    assert.match(frame().slice(-10).join("\n"), /Send ↑/);
+  } finally { release(); await request; tui.stop(); }
+});
+
+test("chat disables mouse reporting even when terminal shutdown fails", async () => {
+  const fake = fakeChatTerminal();
+  fake.terminal.stop = () => { throw new Error("shutdown failed"); };
+  const running = runChatUI({ name: "Acme", color: false, reset() {}, async send() {} }, fake.terminal);
+  fake.input("\x04");
+  await assert.rejects(running, /shutdown failed/);
+  assert.match(fake.output, /\x1b\[\?1006l\x1b\[\?1000l\x1b\[\?1049l$/);
+});
+
+
+test("chat Send clicks follow Enter submission, including resized multiline drafts", async () => {
+  const fake = fakeChatTerminal(90, 24);
+  const tui = new TUI(fake.terminal);
+  const sent: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const view = new ChatView(tui, { name: "Acme", color: false, reset() {}, async send(text) { sent.push(text); await gate; } }, () => {});
+  tui.addChild(view); tui.setFocus(view);
+  const button = () => {
+    const lines = view.render(fake.terminal.columns).map(stripVTControlCharacters);
+    const row = lines.findIndex(line => line.includes(" Send ↑ "));
+    return { x: lines[row]!.indexOf(" Send ↑ ") + 3, y: row + 1 };
+  };
+  const mouse = (x: number, y: number, release = false) => view.handleInput(`\x1b[<0;${x};${y}${release ? "m" : "M"}`);
+  try {
+    view.editor.setText("First line\nSecond line");
+    Object.assign(fake.terminal, { columns: 55, rows: 18 });
+    const { x, y } = button();
+    mouse(x, y); mouse(1, 1, true);
+    assert.deepEqual(sent, [], "releasing outside the button does not send");
+    mouse(1, 1); mouse(x, y, true);
+    assert.deepEqual(sent, [], "a click must start inside the button");
+    mouse(x, y); mouse(x, y, true); mouse(x, y, true);
+    assert.deepEqual(sent, ["First line\nSecond line"]);
+    assert.equal(view.editor.getText(), "");
+    view.editor.setText("Next draft");
+    const busy = button();
+    mouse(busy.x, busy.y); mouse(busy.x, busy.y, true);
+    assert.deepEqual(sent, ["First line\nSecond line"], "a busy request cannot be submitted twice");
+    assert.equal(view.editor.getText(), "Next draft");
+    release(); await gate; await Promise.resolve();
+    view.handleInput("\r");
+    assert.deepEqual(sent, ["First line\nSecond line", "Next draft"], "Enter shares the same submission path");
+  } finally { release(); await gate; tui.stop(); }
+});
+
+test("chat shades sent messages using the reported terminal background without recoloring replies", async () => {
+  const fake = fakeChatTerminal(90, 24);
+  const tui = new TUI(fake.terminal);
+  const view = new ChatView(tui, { name: "Acme", color: true, reset() {}, async send(_text, update) { update({ type: "reply", text: "Assistant reply" }); } }, () => {});
+  await view.submit("Sent message");
+  for (const [rgb, shade] of [["ffff/ffff/ffff", 255], ["0000/0000/0000", 233]] as const) {
+    view.handleInput(`\x1b]11;rgb:${rgb}\x07`);
+    const lines = view.render(90);
+    assert.ok(lines.find(line => line.includes("Sent message") && !line.includes("Acme"))!.includes(`\x1b[48;5;${shade}m`));
+    assert.doesNotMatch(lines.find(line => line.includes("Assistant reply"))!, /48;5;/);
+    assert.equal(view.editor.getText(), "", "terminal responses never enter the draft");
+  }
+  tui.stop();
 });

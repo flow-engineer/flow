@@ -2,7 +2,8 @@
 // model, events and (simulated) tools.
 
 import { fileURLToPath } from "node:url";
-import { createAgent, customUI, openAICompatible, sms, whatsapp, type Channel, type EventSink, type HostOptions, type Model, type Tool } from "../../../src/index.ts";
+import { terminalServer } from "../../../mcp/src/index.ts";
+import { createAgent, customUI, openAICompatible, sms, whatsapp, type Agent, type Channel, type EventSink, type HostOptions, type Model, type Tool } from "../../../src/index.ts";
 import { tools } from "./tools.ts";
 
 export interface BuildOptions {
@@ -28,13 +29,17 @@ export function buildAgent(options: BuildOptions = {}) {
   const connected = options.channels ?? [];
   // Hosted on Flow Messaging, its channels are the real ones (createAgent adds them from host.messaging).
   const unconnected = options.host?.messaging ? [] : [whatsapp(provider), sms(provider), customUI("web", provider)].filter((c) => !connected.some((k) => k.name === c.name));
-  return createAgent({
+  // `npm run cli -- chat` talks to the agent here. The café has no accounts, so anyone chats as a
+  // guest; with accounts, pass auth (the flow-framework-auth skill), and guests: true to keep guests.
+  const terminal = terminalServer({ agent: () => agent });
+  const agent: Agent = createAgent({
     dir: fileURLToPath(new URL("../agent", import.meta.url)),
     host: options.host,
     model: options.model ?? openAICompatible(),
     tools: options.tools ?? tools,
     events: options.events ?? [],
-    channels: [...unconnected, ...connected],
+    channels: [...unconnected, ...connected, terminal.channel],
+    routes: { [terminal.path]: (request) => terminal.fetch(request) },
     testPeople: [
       { name: "Maria", phone: "+15555550101" },
       { name: "Sam", phone: "+15555550102" },
@@ -42,4 +47,5 @@ export function buildAgent(options: BuildOptions = {}) {
     ],
     timeZone: "America/New_York",
   });
+  return agent;
 }

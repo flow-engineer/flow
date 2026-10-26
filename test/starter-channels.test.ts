@@ -22,7 +22,7 @@ test("Flow Messaging's channels: Telegram always, WhatsApp and iMessage when .en
 
 test("Pip builds with every Flow channel locally: Flow's WhatsApp takes the place of the unconnected one", () => {
   const agent = buildAgent({ model, channels: flowMessaging({ apiKey: "fk_test_key" }).channels({ env: senders }) });
-  assert.deepEqual(agent.channels().map((c) => c.name).sort(), ["imessage", "sms", "telegram", "web", "whatsapp"]);
+  assert.deepEqual(agent.channels().map((c) => c.name).sort(), ["imessage", "sms", "telegram", "terminal", "web", "whatsapp"]);
   assert.ok(buildAgent({ model }), "and without Flow Messaging, as before");
 });
 
@@ -32,7 +32,7 @@ test("Pip builds as Flow's hosting builds it: its store, and Flow Messaging's ch
   try {
     const host = { store: new Store(sqlite(), "hosted"), messaging: flowMessaging({ apiKey: "fk_test_key" }) };
     const agent = buildAgent({ model, host });
-    assert.deepEqual(agent.channels().map((c) => c.name), ["telegram", "whatsapp", "imessage"]);
+    assert.deepEqual(agent.channels().map((c) => c.name), ["terminal", "telegram", "whatsapp", "imessage"]);
     assert.ok(buildAgent({ model, host: { files: { "AGENTS.md": "# Pip" }, scheduleCheckMs: 0 } }), "and on a host with no file system");
   } finally {
     process.env = saved;

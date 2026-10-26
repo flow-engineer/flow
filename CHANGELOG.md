@@ -2,6 +2,33 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **Chat without sign-in.** `terminalServer`'s `auth` is optional. Without it, or with
+  `guests: true` beside it, a CLI that is not signed in chats as a guest: it keeps a random id in
+  `chat.json` and sends it as the `flow-guest` header. A guest's conversation stays on the
+  terminal channel, is never joined to an account (`ctx.key` is null), and a tool that needs
+  sign-in still asks for it. With `auth` and no `guests`, chat still answers 401.
+  `agent.request()` takes `guest` instead of `key` for this.
+- **The CLI tries chat before asking for sign-in.** `acme chat` no longer stops with "Sign in
+  first" when no token is saved; it says so only when the agent answers 401.
+- **The playground serves the agent's `routes`,** as Flow's hosting does, so a route such as the
+  terminal handler works under `npm start`.
+- **The café starter chats.** Its agent mounts `terminalServer` as a route with guests, and its CLI
+  file points `chat` at the running agent (`runningAgent`, now exported beside `markRunning`).
+- **Full-screen chat colour.** With a brand `chat.accent` and a 24-bit terminal
+  (`COLORTERM=truecolor`), sent messages sit on a faint wash of the accent; tool activity is a
+  quiet line on an accent rail, and a running tool's name shimmers instead of showing a status mark.
+
+### Migration notes
+
+- `terminalServer` without `auth` used to be a type error; it now lets everyone chat as a guest.
+  An agent that passes `auth` keeps requiring sign-in unless it adds `guests: true`.
+- An agent built from the café starter: copy the `terminalServer` lines from
+  `examples/cafe/src/agent.ts` and the `agent` line from `examples/cafe/src/cli.ts` to get chat.
+
 ## 0.8.2 (2026-10-26)
 
 ### Changes
