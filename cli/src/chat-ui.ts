@@ -19,10 +19,7 @@ const clean = (text: string) => stripVTControlCharacters(text).replace(/[\x00-\x
 const describe = (value: unknown) => clean(typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "");
 
 // Approximate brand colors with the portable 256-color palette; never require RGB support.
-function brandColor(hex?: string): string {
-  if (hex === undefined) return "36"; // The terminal profile's own cyan.
-  if (!/^#[0-9a-f]{6}$/i.test(hex)) throw new Error("chat.accent must be a six-digit hex color.");
-  const rgb = [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16));
+function nearest(rgb: number[]): number {
   const cube = [0, 95, 135, 175, 215, 255];
   let closest = 16, distance = Infinity;
   for (let index = 16; index < 256; index++) {
@@ -32,7 +29,14 @@ function brandColor(hex?: string): string {
     const delta = candidate.reduce((sum, value, channel) => sum + (value - rgb[channel]!) ** 2, 0);
     if (delta < distance) { closest = index; distance = delta; }
   }
-  return `38;5;${closest}`;
+  return closest;
+}
+
+function brandColor(hex?: string): { code: string; rgb?: number[] } {
+  if (hex === undefined) return { code: "36" }; // The terminal profile's own cyan.
+  if (!/^#[0-9a-f]{6}$/i.test(hex)) throw new Error("chat.accent must be a six-digit hex color.");
+  const rgb = [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16));
+  return { code: `38;5;${nearest(rgb)}`, rgb };
 }
 
 /** Session state and layout; the terminal is injected so layout/input tests never need a real TTY. */
@@ -48,7 +52,7 @@ export class ChatView implements Component, Focusable {
   private viewportRows = 1;
   private busy?: AbortController;
   private light?: boolean;
-  private panelBackground?: number;
+  private panelBackground?: string;
   private sendBounds?: { row: number; first: number; last: number };
   private pressedSend = false;
   private tick = 0;
@@ -58,6 +62,7 @@ export class ChatView implements Component, Focusable {
   private readonly color: (code: string, text: string) => string;
   private readonly dim: (text: string) => string;
   private readonly accent: (text: string) => string;
+  private readonly accentRgb?: number[];
 
   private tui: TUI;
   private session: ChatSession;
@@ -67,7 +72,8 @@ export class ChatView implements Component, Focusable {
     this.color = (code, text) => session.color === false ? text : `\x1b[${code}m${text}\x1b[0m`;
     this.dim = text => this.color(this.light === undefined ? "22;39" : this.light ? "22;38;5;243" : "22;38;5;247", text);
     const accent = brandColor(session.accent);
-    this.accent = text => this.color(`22;${accent}`, text);
+    this.accentRgb = accent.rgb;
+    this.accent = text => this.color(`22;${accent.code}`, text);
     this.markdown = {
       heading: text => this.color("1;39", text),
       link: this.accent, linkUrl: this.dim, code: this.accent,
@@ -98,6 +104,13 @@ export class ChatView implements Component, Focusable {
   get focused() { return this._focused; }
   set focused(value: boolean) { this._focused = value; this.editor.focused = value; }
   invalidate() { this.editor.invalidate(); for (const e of this.entries) if ("body" in e) e.body.invalidate(); }
+  /** A highlight that sweeps across a running tool's name, so progress shows without a status mark. */
+  private shimmer(text: string): string {
+    if (this.session.color === false) return text;
+    const chars = [...text], at = this.tick % (chars.length + 6) - 3;
+    return chars.map((char, i) => Math.abs(i - at) <= 1 ? this.accent(char) : this.color("22;39", char)).join("");
+  }
+
   animate() { if (this.busy) { this.tick++; this.tui.requestRender(); } }
   stop() { this.busy?.abort(); }
 
@@ -173,8 +186,12 @@ export class ChatView implements Component, Focusable {
     if (background) {
       const rgb = background.slice(1).map(part => Math.round(parseInt(part, 16) / (16 ** part.length - 1) * 255));
       this.light = rgb.reduce((sum, value) => sum + value, 0) / 3 >= 128;
+      // Sent messages sit on a faint wash of the brand accent, or a neutral shade without one.
       const gray = rgb.reduce((sum, value) => sum + value, 0) / 3 + (this.light ? -12 : 14);
-      this.panelBackground = 232 + Math.max(0, Math.min(23, Math.round((gray - 8) / 10)));
+      // The 256-color cube has no dark tints, so a wash needs a terminal that reports 24-bit color.
+      const wash = this.accentRgb && /^(truecolor|24bit)$/i.test(process.env.COLORTERM ?? "")
+        ? rgb.map((value, channel) => Math.round(value + (this.accentRgb![channel]! - value) * (this.light ? 0.12 : 0.18))) : undefined;
+      this.panelBackground = wash ? `2;${wash.join(";")}` : `5;${232 + Math.max(0, Math.min(23, Math.round((gray - 8) / 10)))}`;
       this.invalidate(); this.tui.requestRender(); return;
     }
     // ProcessTerminal buffers split escape sequences, including SGR and legacy mouse packets.
@@ -225,12 +242,11 @@ export class ChatView implements Component, Focusable {
     const contentWidth = Math.max(8, Math.min(100, width - 6));
     const margin = Math.max(1, Math.floor((width - contentWidth) / 2));
     const inset = (line: string) => " ".repeat(margin) + line;
-    const rule = (label: string) => this.dim(label);
     const panelLine = (line: string) => truncateToWidth(line, contentWidth, "", true);
     const shaded = (line: string) => {
       const body = panelLine(line);
       if (this.session.color === false || this.panelBackground === undefined) return body;
-      const background = `\x1b[48;5;${this.panelBackground}m`;
+      const background = `\x1b[48;${this.panelBackground}m`;
       return background + body.replace(/\x1b\[0m/g, `\x1b[0m${background}`) + "\x1b[49m";
     };
     const renderedEditor = this.editor.render(contentWidth - 4);
@@ -245,13 +261,12 @@ export class ChatView implements Component, Focusable {
       if (!this.editor.getText()) line = line.replace("\x1b[7m \x1b[0m", `\x1b[7m \x1b[0m${this.dim("Write a message…")}`);
       return inset(this.dim("│ ") + truncateToWidth(line, contentWidth - 4, "", true) + this.dim(" │"));
     });
-    const button = " Send ↑ ";
+    const button = " ↵ send ";
     const buttonWidth = visibleWidth(button);
     const spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][this.tick % 10];
     const actionWidth = contentWidth - 4 - buttonWidth;
-    const activity = this.busy ? this.dim(`${spinner} Working…`) : "";
-    const sendButton = this.panelBackground === undefined ? this.accent(button)
-      : this.color(`48;5;${this.panelBackground}`, this.accent(button));
+    const activity = this.busy ? `${this.accent(spinner!)} ${this.dim("Working…  Esc stops waiting")}` : "";
+    const sendButton = this.busy ? this.dim(button) : this.accent(button);
     const action = this.dim("│ ") + truncateToWidth(activity, actionWidth, "", true) + sendButton + this.dim(" │");
     const composer = [inset(this.dim(`╭${"─".repeat(contentWidth - 2)}╮`)), ...inputLines,
       inset(action), inset(this.dim(`╰${"─".repeat(contentWidth - 2)}╯`)),
@@ -272,11 +287,12 @@ export class ChatView implements Component, Focusable {
       for (const [index, entry] of this.entries.entries()) {
         const first = timeline.length;
         if (entry.kind === "tool") {
-          const icon = entry.state === "running" ? "◌" : entry.state === "failed" ? "×" : entry.state === "detached" ? "↗" : "✓";
-          const ms = entry.ms === undefined ? "" : `  ${(entry.ms / 1000).toFixed(1)}s`;
-          if (this.entries[index - 1]?.kind !== "tool") timeline.push("", rule("Activity"));
-          const stateColor = entry.state === "failed" ? "31" : entry.state === "running" ? "36" : "32";
-          timeline.push(panelLine(`  ${this.color(stateColor, icon)} ${this.color("22;39", entry.name)}  ${this.dim(entry.state + ms)}`));
+          // Tools read as a quiet sentence on an accent rail; only a failure raises its voice.
+          const ms = entry.ms === undefined ? "" : ` · ${(entry.ms / 1000).toFixed(1)}s`;
+          if (this.entries[index - 1]?.kind !== "tool") timeline.push("");
+          const name = entry.state === "running" ? this.shimmer(entry.name) : this.color("22;39", entry.name);
+          const state = entry.state === "failed" ? this.color("31", "failed") : entry.state === "running" ? this.dim("running") : entry.state === "detached" ? this.dim("still running after you stopped waiting") : "";
+          timeline.push(panelLine(`${this.accent("▏")} ${name}${state ? `  ${state}` : ""}${this.dim(ms)}`));
           if (this.details) {
             if (entry.input !== undefined) timeline.push(...new Text(`${this.color("1;39", "Input")}\n${describe(entry.input)}`, 4, 0).render(contentWidth).map(line => panelLine(line)));
             if (entry.output !== undefined) timeline.push(...new Text(`${this.color("1;39", "Result")}\n${describe(entry.output)}`, 4, 0).render(contentWidth).map(line => panelLine(line)));
@@ -287,7 +303,7 @@ export class ChatView implements Component, Focusable {
             timeline.push("");
             timeline.push(...entry.body.render(contentWidth - 4).map(line => shaded(`  ${line}`)), "");
           } else {
-            timeline.push("", rule(clean(this.session.name)), "");
+            timeline.push("", this.color("1", this.accent(clean(this.session.name))), "");
             timeline.push(...entry.body.render(contentWidth - 2).map(line => `  ${line}`), "");
           }
         }

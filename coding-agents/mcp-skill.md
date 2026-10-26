@@ -247,8 +247,8 @@ overrides the terminal URL; the default is the MCP server's origin plus `/agent/
 Ctrl-D or `/exit`. Without a TTY pass a message to `chat` (an interactive chat exits 2); sign-in failures exit 3.
 Human `chat` opens a dedicated full-screen session with a bottom composer, Markdown replies and
 live tool activity. Sent messages have subtle shading when the terminal reports its background. It inherits terminal colors; `defineCli({ ..., chat: { accent: "#b85c00" } })`
-sets a hex brand accent, approximated in 256 colors, without changing the background. Install optional `@mariozechner/pi-tui@0.73.1` for that interface; `flow new`
-includes it. Click Send or press Enter to send; Shift+Enter, Alt+Enter or `\` then Enter adds a line. Multiline paste
+sets a hex brand accent, approximated in 256 colors, without changing the background; on a 24-bit terminal sent messages take a faint wash of it. Install optional `@mariozechner/pi-tui@0.73.1` for that interface; `flow new`
+includes it. Click send or press Enter to send; Shift+Enter, Alt+Enter or `\` then Enter adds a line. Multiline paste
 stays in the draft. Tab completes `/help`, `/details`, `/new` and `/exit`. Ctrl+O expands tool
 inputs/results; the mouse wheel/trackpad and PageUp/PageDown scroll the transcript, preserving
 the reading position during incoming replies. Ctrl+Home/Ctrl+End jump to the start/latest reply. Escape stops waiting; accepted work may still finish.
