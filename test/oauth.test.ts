@@ -109,7 +109,8 @@ async function browse(start: string): Promise<void> {
 
 // The whole promise of the bridge, as a host such as Claude runs it: discovery, registration,
 // PKCE and the brand's own login, the brand's token reaching the tool as the brand's user id,
-// refresh through the brand, and no client token kept by the bridge.
+// refresh through the brand, and no client token kept by the bridge. The printed sign-in link works
+// from any browser, not only the one the CLI opened.
 test("the CLI signs in through the bridge on the brand's own login, and the tool sees the brand's user id", async () => {
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "flow-oauth-"));
   const acme = brand("customer-7");
@@ -137,8 +138,15 @@ test("the CLI signs in through the bridge on the brand's own login, and the tool
 
   const signedOut = io();
   assert.equal(await runCli(cli, ["whoami"], signedOut), 3);
+  // The opener lands somewhere the person did not want; they paste the printed link into another browser.
   const login = io();
-  assert.equal(await runCli(cli, ["auth", "login"], login), 0, login.err);
+  login.writeError = (text) => {
+    login.err += text;
+    const link = /^  (http\S+)$/m.exec(text)?.[1];
+    if (link) void browse(link);
+  };
+  assert.equal(await runCli({ ...cli, openUrl: () => {} }, ["auth", "login"], login), 0, login.err);
+  assert.match(login.err, /paste this link into the one you want/);
   const signedIn = io();
   assert.equal(await runCli(cli, ["whoami", "--json"], signedIn), 0, signedIn.err);
   assert.deepEqual(JSON.parse(signedIn.out), { key: "customer-7" });
