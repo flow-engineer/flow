@@ -39,9 +39,9 @@ test("a first response that only calls tools is held until the agent acknowledge
  * faked: every typing call is recorded, then `typing(on)` decides what it does (throw to refuse it). Tools wait 60 s
  * before they move to the background, so only typing's timers are due while the tests tick.
  */
-function typingHarness(t: TestContext, typing: (on: boolean) => void = () => {}, tools: ReturnType<typeof tool>[] = []) {
+function typingHarness(t: TestContext, typing: (on: boolean) => void = () => {}, tools: ReturnType<typeof tool>[] = [], followUps: "auto" | "manual" = "auto") {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const h = harness(tools, 60_000);
+  const h = harness(tools, 60_000, WEB, followUps);
   const deliver = (o: Outbound) => {
     h.out.push(o);
     if (o.type === "typing") typing(o.on);
@@ -91,6 +91,21 @@ test("a message hides typing; while the tools it went with run, typing shows aga
   (await h.nextCall(1)).answer(respond(say("All good.")));
   await h.agent.conversation("t2")!.whenIdle();
   assert.deepEqual(afterReaction(), [false, true, true, false]);
+});
+
+test("after a reply with no tools, typing stays hidden through a slow last model step", async (t) => {
+  const h = typingHarness(t, () => {}, [], "manual");
+  h.send("t6", "what time do you open?");
+  await h.tick(0);
+  (await h.nextCall(0)).answer(respond(say("We open at 9.")));
+  // The step Flow Framework adds after a reply that used no tool: slower than the 800 ms interval.
+  const last = await h.nextCall(1);
+  await h.tick(5_000);
+  assert.deepEqual(h.typed(), [true, false], "hidden by the answer, and not shown again");
+  last.answer(respond());
+  await h.agent.conversation("t6")!.whenIdle();
+  await h.tick(60_000);
+  assert.deepEqual(h.typed(), [true, false]);
 });
 
 test("typing refused outside the window waits for the agent's next message, then is kept up again; the refusal is logged at debug", async (t) => {

@@ -37,8 +37,9 @@ What follows from it:
   `message.failed`) comes back the same way.
 - A carousel the channel sends card by card resolves once the platform accepted its last card.
 - Typing indicators, read receipts and status lines are courtesies: their failures never fail a
-  turn, and a channel whose info says `typing: false` is never sent one. Typing is kept up while a
-  turn runs (sent again before `typingLastsMs` runs out) and never outlives it; refused outside the
+  turn, and a channel whose info says `typing: false` is never sent one. Typing is kept up while the
+  agent works (sent again before `typingLastsMs` runs out), shows again after a message only when
+  new work starts (tools, or the person's next message), and never outlives the turn; refused outside the
   person's window (`outside_window`, logged at debug) it waits for the agent's next message, and any
   other failure ends it for the turn, with a warning.
 

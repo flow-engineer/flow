@@ -11,8 +11,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   indicator lasts about 5 s) and never came back. Now, from their message until the turn ends or
   fails, it is sent again before the platform hides it: `ChannelInfo.typingLastsMs` says how long one
   indicator lasts (`WHATSAPP` 25 s; Flow Messaging's `TELEGRAM` 5 s and `IMESSAGE` 15 s), and typing
-  goes again at 80% of it (20 s, 4 s, 12 s). Each message the agent sends hides it; it shows again
-  at once while the tools that message went with run, else when it is next due. No timer outlives
+  goes again at 80% of it (20 s, 4 s, 12 s). Each message the agent sends hides it, and it shows
+  again only when new work starts (a response that calls tools, or the person's next message), never
+  just because time passed: typing after the answer would read as more to come. No timer outlives
   the turn. A channel without `typingLastsMs` (a custom UI) gets typing once, as before.
 - **A refused typing indicator waits for the agent's next message.** A typing call that rejects
   with `outside_window` (iMessage outside Flow Messaging's 5-minute window for typing) is not tried

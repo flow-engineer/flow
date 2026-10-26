@@ -1,11 +1,12 @@
 // One conversation: an actor that owns one person's history, across every channel they write
 // on, and runs one turn at a time.
 //
-// - Typing shows the moment a message arrives and is kept up until the turn ends: sent again before
-//   the platform hides it (ChannelInfo's typingLastsMs), hidden by each message the agent sends, and
-//   shown again at once while the tools that message went with still run, else when it is next due.
-//   Refused outside the person's window for it, it waits for the agent's next message; any other
-//   failure ends it for the turn.
+// - Typing shows the moment a message arrives and is kept up while the agent works: sent again
+//   before the platform hides it (ChannelInfo's typingLastsMs) and hidden by each message the agent
+//   sends. After a message it shows again only when new work starts (a response calls tools, or the
+//   person writes again), never because time passed: typing after an answer reads as more to come.
+//   It never outlives the turn. Refused outside the person's window for it, it waits for the agent's
+//   next message; any other failure ends it for the turn.
 // - Double texts fold into the reply in progress. Someone who sends another message is usually
 //   correcting themselves, so a model step in flight is aborted and runs again with every message
 //   so far; one that arrives while tools run ends the wait for them (below).
@@ -1347,8 +1348,8 @@ export class Conversation {
       const working = this.runTools(work);
       const said: Array<{ content: string; refused: boolean }> = [];
       for (const call of talk) said.push(await this.talk(call));
-      // Its messages hid the indicator, and the turn goes on with its tools: typing shows again now.
-      if (talk.length && work.length) this.typingAgain();
+      // Tools started: more is coming, so typing shows again where a message hid it.
+      if (work.length) this.typingAgain();
       const { results: done, finished } = await working;
       // A result the agent has not passed on yet: if it ends the turn without a message, it is reminded once.
       if (finished) this.resultUnsent = "returned";
@@ -1564,15 +1565,19 @@ export class Conversation {
     for (const o of this.owed.splice(0)) this.settle(o, "sent", undefined, receipt?.messageId);
   }
 
-  /** Something of the agent's reached them on `channel`: its message hid the indicator, which is due again later in the turn. */
+  /**
+   * Something of the agent's reached them on `channel`: its message hid the indicator, and it stays
+   * hidden (no repeat is due) until new work starts: tools (typingAgain) or their next message.
+   */
   private async acknowledged(channel: string): Promise<void> {
     this.unanswered.delete(channel);
     if (this.typingOn.delete(channel)) await this.send(channel, { type: "typing", on: false });
     const kept = this.typingKept.get(channel);
-    if (!kept || kept.held === "failed") return;
-    // Refused outside their window: the agent's message may have opened it (iMessage), so it is tried again.
-    kept.held = null;
-    this.typingDue(channel, kept);
+    if (!kept) return;
+    if (kept.timer) clearTimeout(kept.timer);
+    kept.timer = null;
+    // Refused outside their window: the agent's message may have opened it (iMessage), so it is tried again when work starts.
+    if (kept.held === "window") kept.held = null;
   }
 
   /** Their message on `channel`: typing shows there, and is kept up until the turn ends. */
@@ -1584,7 +1589,7 @@ export class Conversation {
     if (!kept.held && !this.typingOn.has(channel)) void this.showTyping(channel, kept);
   }
 
-  /** Shows typing on every channel it is kept up on where a message of the agent's hid it. */
+  /** New work started (tools): typing shows on every channel it is kept up on where a message of the agent's hid it. */
   private typingAgain(): void {
     for (const [channel, kept] of this.typingKept) if (!kept.held && !this.typingOn.has(channel)) void this.showTyping(channel, kept);
   }
