@@ -27,7 +27,7 @@ agent is never offered.
 | `sendCarousel?(to, carousel)` | A media carousel: `{ text, cards, replyTo?, preview?, idempotencyKey? }`, each card `{ image, text?, buttons? \| link? }`. Without it the agent is never offered one |
 | `features?` | Which parts of a message the provider can send: `{ buttons?, lists?, replies?, links?, images? }`, each `true` unless set to `false` |
 | `react?(to, messageId, emoji)` | Reactions |
-| `typing?(to, on)` | The typing indicator |
+| `typing?(to, on)` | The typing indicator. Reject with an error whose message starts with `outside_window` when the platform refuses it outside the person's window: Flow Framework tries again after the agent's next message. Any other rejection ends typing for the turn (a warning is logged) |
 | `markRead?(to, messageIds)` | Read receipts (blue ticks) |
 | `sendTemplate?(to, template, idempotencyKey?)` | Approved templates, for outside the 24-hour window: `{ name, language?, header?, body?, buttons?, variables? }` |
 
@@ -55,7 +55,7 @@ Your own web or mobile chat. `name` is the channel's name. `provider` (a `Custom
 | `info?` | What your UI can show (a `ChannelInfo` without `reactions`, `status`, `readReceipts`, `edits` and `unsends`, which come from the methods below). Default: Markdown, no buttons. See [ChannelInfo](#channelinfo) |
 | `sendCarousel?(to, carousel)` | A carousel, when `info.carousels` is set; otherwise the cards go one by one through `sendMessage` |
 | `react?(to, messageId, emoji)` | Reactions |
-| `typing?(to, on)` | The typing indicator |
+| `typing?(to, on)` | The typing indicator. Reject with an error whose message starts with `outside_window` when the platform refuses it outside the person's window: Flow Framework tries again after the agent's next message. Any other rejection ends typing for the turn (a warning is logged) |
 | `markRead?(to, messageIds)` | Read receipts |
 | `status?(to, text \| null)` | A short line of what the agent is doing, in your loading indicator; `null` clears it |
 | `editMessage?(to, messageId, text)` | New text for a message the agent sent, by the `messageId` your `sendMessage` resolved with (`{ status: "sent", messageId }`). With it the agent is offered `edit_message`; reject to refuse an edit, and the reason goes to the agent |
@@ -112,5 +112,7 @@ What a channel can show; Flow Framework offers the agent only what is set, and f
 | `carousels` | `{ maxCards, textMax, cardTextMax, buttons, labelMax }` |
 | `platform` | `whatsapp`, `telegram`, `imessage` or `sms`: whose content rules (`CONTENT_LIMITS`) every send is checked against |
 | `replyWindowHours` | The business may write first only this long after the person's last message |
+| `typing` | `false`: no typing indicator is ever sent |
+| `typingLastsMs` | How long the platform shows one typing indicator (`WHATSAPP` 25 s; Flow Messaging's Telegram 5 s and iMessage 15 s). From the person's message until the turn ends, typing is sent again at 80% of it (20 s, 4 s, 12 s); each message the agent sends hides it, and it shows again at once while the tools that message went with run, else when it is next due. Absent: it is sent once and shows until it is turned off or a message goes |
 | `reactions`, `status`, `readReceipts` | Set from the provider's methods |
 | `edits`, `unsends` | The agent can change or take back a message it sent (`edit_message`, `unsend_message`, by the id its send's result gave). Telegram and iMessage on Flow Messaging have both; a custom UI sets them from `editMessage` and `unsendMessage`; WhatsApp and SMS have neither. The platform decides how late either may come, and nothing is sent in place of one it refuses: the refusal goes back to the agent as its tool result. Flow Messaging refuses a late or unsupported one when it is made (`422 unsupported_content` with `edit_window_closed`, `unsend_window_closed`, `first_message_not_editable` or `not_on_sms`, its message stating the limit) |

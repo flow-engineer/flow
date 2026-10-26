@@ -1,7 +1,11 @@
 // One conversation: an actor that owns one person's history, across every channel they write
 // on, and runs one turn at a time.
 //
-// - Typing shows the moment a message arrives; it stops once the person has been acknowledged.
+// - Typing shows the moment a message arrives and is kept up until the turn ends: sent again before
+//   the platform hides it (ChannelInfo's typingLastsMs), hidden by each message the agent sends, and
+//   shown again at once while the tools that message went with still run, else when it is next due.
+//   Refused outside the person's window for it, it waits for the agent's next message; any other
+//   failure ends it for the turn.
 // - Double texts fold into the reply in progress. Someone who sends another message is usually
 //   correcting themselves, so a model step in flight is aborted and runs again with every message
 //   so far; one that arrives while tools run ends the wait for them (below).
@@ -157,6 +161,8 @@ export function signInNotice(channel: string, request?: string): string {
 
 /** Photos and PDFs the model is shown at once, the latest; each is resent on every model call. */
 const MEDIA_SHOWN = 3;
+/** Typing is sent again this far into the platform's indicator lifetime (typingLastsMs), before it hides. */
+const TYPING_AGAIN = 0.8;
 /** The largest photo, and the largest PDF or voice note, the agent reads (most models take 5 MB images). */
 const IMAGE_MAX_MB = 5;
 const FILE_MAX_MB = 10;
@@ -235,6 +241,14 @@ interface Note {
   reset?: boolean;
 }
 
+/** Typing kept up on one channel while a turn runs. */
+interface TypingKept {
+  /** Sends it again before the platform hides it; null when nothing is due. */
+  timer: ReturnType<typeof setTimeout> | null;
+  /** window: refused outside the person's window, until the agent's next message goes; failed: no more this turn. */
+  held: "window" | "failed" | null;
+}
+
 /** Sent without the model: a fixed-text scheduled message, or a text or template nudge. */
 interface Direct {
   /** A fixed nudge targets the address it was requested for, even if another session wrote later. */
@@ -311,7 +325,10 @@ export class Conversation {
   private readonly unanswered = new Set<string>();
   /** The next model response is the first since their latest message. */
   private firstResponse = false;
+  /** Channels where the typing indicator shows, as far as Flow Framework knows. */
   private readonly typingOn = new Set<string>();
+  /** Channels typing is kept up on until the turn ends (from the person's message). */
+  private readonly typingKept = new Map<string, TypingKept>();
   /** One challenge per channel per turn, even when the model calls several protected tools. */
   private signInPrompts = new Map<string, Promise<{ message: string; url?: string }>>();
   private authBlocked = new Set<string>();
@@ -485,7 +502,7 @@ export class Conversation {
     }
     const id = options.messageId ?? `m${++this.messageCount}`;
     this.messageIds.set(id, channel);
-    void this.typing(true, channel);
+    this.startTyping(channel);
     // A file or voice note is read before message.in. Say the message arrived first, so a test
     // run is not settled as silence while the transcript is still being made.
     if (incoming.attachments?.length) this.settings.emit(this.id, "message.arrived", { messageId: id, channel });
@@ -536,7 +553,7 @@ export class Conversation {
     this.settings.emit(this.id, "message.in", { text: incoming.text, messageId: id, ownId, channel, replyTo: incoming.replyTo, choice: incoming.choice, ...(attachments ? { attachments } : {}), ...(files.transcript !== undefined ? { transcript: files.transcript } : {}) });
     this.unanswered.add(channel);
     this.firstResponse = true;
-    void this.typing(true, channel);
+    this.startTyping(channel);
     if (this.running) {
       // Fold it in: a model step in flight is thrown away and run again with this message, and
       // tools being waited on move to the background so the agent reads it now.
@@ -820,6 +837,7 @@ export class Conversation {
     this.renewal = null;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    this.dropTyping();
     this.pending = [];
     this.notes = [];
     this.direct = [];
@@ -904,6 +922,7 @@ export class Conversation {
     this.gone = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    this.dropTyping();
     if (this.renewal) clearInterval(this.renewal);
     this.renewal = null;
     this.settings.away(this, again);
@@ -1022,6 +1041,8 @@ export class Conversation {
           } catch (error) {
             await this.turnFailed(error);
           }
+          // The turn is over: typing stops, unless a message of theirs is waiting for the next one.
+          if (!this.unread() && !this.preparing) await this.stopTyping();
           continue;
         }
         // Only messages answered with no model call: into the history, with no turn.
@@ -1047,7 +1068,7 @@ export class Conversation {
       }
     } finally {
       this.running = false;
-      for (const channel of [...this.typingOn]) await this.typing(false, channel);
+      await this.stopTyping();
       for (const link of this.channels.values()) if (link.info.status) await this.send(link.name, { type: "status", text: null });
       this.checkIdle();
     }
@@ -1060,6 +1081,7 @@ export class Conversation {
    */
   private async turnFailed(error: unknown): Promise<void> {
     this.settings.emit(this.id, "model.error", modelError(error));
+    await this.stopTyping();
     this.absorb();
     for (const o of this.owed.splice(0)) this.settle(o, "failed", `the agent's turn failed: ${errorText(error)}`);
     this.resultUnsent = false;
@@ -1070,6 +1092,8 @@ export class Conversation {
 
   private checkIdle(): void {
     if (this.busy) return;
+    // Nothing will answer them now (their message could not be read): typing is not kept up.
+    if (this.typingKept.size) void this.stopTyping();
     this.letGo();
     this.idleSince = Date.now();
     const waiting = this.settled;
@@ -1323,6 +1347,8 @@ export class Conversation {
       const working = this.runTools(work);
       const said: Array<{ content: string; refused: boolean }> = [];
       for (const call of talk) said.push(await this.talk(call));
+      // Its messages hid the indicator, and the turn goes on with its tools: typing shows again now.
+      if (talk.length && work.length) this.typingAgain();
       const { results: done, finished } = await working;
       // A result the agent has not passed on yet: if it ends the turn without a message, it is reminded once.
       if (finished) this.resultUnsent = "returned";
@@ -1538,16 +1564,74 @@ export class Conversation {
     for (const o of this.owed.splice(0)) this.settle(o, "sent", undefined, receipt?.messageId);
   }
 
+  /** Something of the agent's reached them on `channel`: its message hid the indicator, which is due again later in the turn. */
   private async acknowledged(channel: string): Promise<void> {
     this.unanswered.delete(channel);
-    await this.typing(false, channel);
+    if (this.typingOn.delete(channel)) await this.send(channel, { type: "typing", on: false });
+    const kept = this.typingKept.get(channel);
+    if (!kept || kept.held === "failed") return;
+    // Refused outside their window: the agent's message may have opened it (iMessage), so it is tried again.
+    kept.held = null;
+    this.typingDue(channel, kept);
   }
 
-  private async typing(on: boolean, channel: string): Promise<void> {
-    if (on === this.typingOn.has(channel) || this.channels.get(channel)?.info.typing === false) return;
-    if (on) this.typingOn.add(channel);
-    else this.typingOn.delete(channel);
-    await this.send(channel, { type: "typing", on });
+  /** Their message on `channel`: typing shows there, and is kept up until the turn ends. */
+  private startTyping(channel: string): void {
+    const link = this.channels.get(channel);
+    if (this.closed || !link || link.info.typing === false) return;
+    let kept = this.typingKept.get(channel);
+    if (!kept) this.typingKept.set(channel, (kept = { timer: null, held: null }));
+    if (!kept.held && !this.typingOn.has(channel)) void this.showTyping(channel, kept);
+  }
+
+  /** Shows typing on every channel it is kept up on where a message of the agent's hid it. */
+  private typingAgain(): void {
+    for (const [channel, kept] of this.typingKept) if (!kept.held && !this.typingOn.has(channel)) void this.showTyping(channel, kept);
+  }
+
+  /** Sends typing now, then again before it hides. outside_window holds it until the agent's next message; any other failure ends it for the turn. */
+  private async showTyping(channel: string, kept: TypingKept): Promise<void> {
+    if (kept.timer) clearTimeout(kept.timer);
+    kept.timer = null;
+    this.typingOn.add(channel);
+    const failure = await this.send(channel, { type: "typing", on: true });
+    // The turn ended (or the conversation closed) while it went: what came of it no longer matters.
+    if (this.typingKept.get(channel) !== kept) return;
+    if (!failure) return this.typingDue(channel, kept);
+    this.typingOn.delete(channel);
+    if (failure.startsWith("outside_window")) {
+      kept.held = "window";
+      console.debug("flow: typing on %s in conversation %s: outside_window; tried again after the agent's next message", channel, this.id);
+    } else {
+      kept.held = "failed";
+      console.warn("flow: typing on %s in conversation %s failed, so no more typing this turn: %s", channel, this.id, failure);
+    }
+  }
+
+  /** Typing goes again on `channel` just before the platform hides it, if the platform says when (typingLastsMs). */
+  private typingDue(channel: string, kept: TypingKept): void {
+    const lasts = this.channels.get(channel)?.info.typingLastsMs;
+    if (kept.timer) clearTimeout(kept.timer);
+    kept.timer = null;
+    if (!lasts || kept.held || this.closed) return;
+    kept.timer = setTimeout(() => {
+      kept.timer = null;
+      void this.showTyping(channel, kept);
+    }, lasts * TYPING_AGAIN);
+  }
+
+  /** Typing is no longer kept up: no timer is left, and nothing waits on it. */
+  private dropTyping(): void {
+    for (const kept of this.typingKept.values()) if (kept.timer) clearTimeout(kept.timer);
+    this.typingKept.clear();
+  }
+
+  /** The turn is over (or failed): typing is no longer kept up, and is hidden where it shows. */
+  private async stopTyping(): Promise<void> {
+    this.dropTyping();
+    const shown = [...this.typingOn];
+    this.typingOn.clear();
+    for (const channel of shown) await this.send(channel, { type: "typing", on: false });
   }
 
   /** Hand one outbound to a channel; returns why it failed, or null. */

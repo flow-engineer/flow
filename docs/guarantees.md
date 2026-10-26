@@ -36,8 +36,11 @@ What follows from it:
   (`message.undelivered`). A failure Flow reports after the send resolved (a late
   `message.failed`) comes back the same way.
 - A carousel the channel sends card by card resolves once the platform accepted its last card.
-- Typing indicators, read receipts and status lines are courtesies: their failures are ignored,
-  and a channel whose info says `typing: false` is never sent one.
+- Typing indicators, read receipts and status lines are courtesies: their failures never fail a
+  turn, and a channel whose info says `typing: false` is never sent one. Typing is kept up while a
+  turn runs (sent again before `typingLastsMs` runs out) and never outlives it; refused outside the
+  person's window (`outside_window`, logged at debug) it waits for the agent's next message, and any
+  other failure ends it for the turn, with a warning.
 
 ## Ordering
 

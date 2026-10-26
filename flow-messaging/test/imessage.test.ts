@@ -161,7 +161,7 @@ test("a start to a phone number on iMessage names the phone; a link goes as its 
   assert.deepEqual((await flow.request((r) => post("/v0/messages")(r) && r.body.text === "Or here")).body, { sender: "snd_IM", to: { phone: "+15550100100" }, kind: "basic", text: "Or here" });
 });
 
-test("a read receipt or typing refused outside the window is expected and not logged; any other courtesy failure is a warning; typing off sends nothing", async (t) => {
+test("a read receipt refused outside the window is not logged; typing's refusals reject for the conversation (outside_window, else Flow's type); typing off sends nothing", async (t) => {
   const flow = await fakeFlow();
   t.after(() => flow.close());
   flow.messages.msg_1 = { id: "msg_1", conversation: IM.id, direction: "in", content: { kind: "basic", text: "hi" } };
@@ -171,18 +171,20 @@ test("a read receipt or typing refused outside the window is expected and not lo
   flow.queued.push({ match: post("/v0/conversations/conv_im/read"), status: 409, body: outside });
   flow.queued.push({ match: post("/v0/conversations/conv_im/typing"), status: 409, body: outside });
   await channel.send("+15550100100", { type: "read", messageIds: ["msg_1"] });
-  await channel.send("+15550100100", { type: "typing", on: true });
+  await assert.rejects(async () => channel.send("+15550100100", { type: "typing", on: true }), { message: "outside_window" });
   assert.equal(flow.sends("/v0/conversations/conv_im/read").length, 1);
   assert.equal(flow.sends("/v0/conversations/conv_im/typing").length, 1);
-  assert.equal(warn.mock.callCount(), 0);
+  assert.equal(warn.mock.callCount(), 0, "the conversation logs typing's refusals, the adapter none");
 
   // No channel clears the indicator on request: it goes when the next message does.
   await channel.send("+15550100100", { type: "typing", on: false });
   assert.equal(flow.sends("/v0/conversations/conv_im/typing").length, 1);
 
   flow.queued.push({ match: post("/v0/conversations/conv_im/typing"), status: 400, body: { error: { type: "invalid_request", message: "Bad request.", hint: "", doc_url: "" } } });
-  await channel.send("+15550100100", { type: "typing", on: true });
-  assert.deepEqual(warn.mock.calls.map((c) => c.arguments[0]), ["@flow-engineer/flow/flow-messaging: typing on imessage failed (invalid_request)"]);
+  await assert.rejects(async () => channel.send("+15550100100", { type: "typing", on: true }), { message: "invalid_request" });
+  flow.queued.push({ match: post("/v0/conversations/conv_im/read"), status: 400, body: { error: { type: "invalid_request", message: "Bad request.", hint: "", doc_url: "" } } });
+  await channel.send("+15550100100", { type: "read", messageIds: ["msg_1"] });
+  assert.deepEqual(warn.mock.calls.map((c) => c.arguments[0]), ["@flow-engineer/flow/flow-messaging: read on imessage failed (invalid_request)"]);
 });
 
 test("an iMessage group conversation is passed over, with one warning: nothing reaches the agent, and no typing or read receipt goes to it", async (t) => {
