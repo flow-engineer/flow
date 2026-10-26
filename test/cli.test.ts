@@ -789,7 +789,7 @@ test("full-screen chat keeps the composer visible at different sizes and expands
     assert.match(frame, /Check order 1042/);
     assert.doesNotMatch(frame, /╭─ YOU /, "sent messages have no enclosing border");
     assert.match(frame, /▏ order_lookup/, "tool activity sits on its own rail, apart from the reply");
-    assert.match(frame, /↵ send/, "the composer exposes its send action");
+    assert.match(frame, /Send ↑/, "the composer exposes its send action");
     assert.doesNotMatch(frame, /Enter send|Shift\+Enter newline|CHAT.*Ready/);
     const colorful = new ChatView(tui, { name: "Acme", color: true, reset() {}, async send() {} }, () => {});
     const coloredFrame = colorful.render(90).join("\n");
@@ -810,7 +810,7 @@ test("full-screen chat keeps the composer visible at different sizes and expands
       assert.equal(lines.length, rows);
       assert.ok(lines.some(line => line.includes(CURSOR_MARKER)), "resizing keeps the draft cursor visible");
       assert.ok(lines.every(line => visibleWidth(line) <= columns), `frame fits ${columns} × ${rows}`);
-      assert.match(lines.map(stripVTControlCharacters).slice(-10).join("\n"), /send|Ctrl\+O/, "controls remain beside composer");
+      assert.match(lines.map(stripVTControlCharacters).slice(-10).join("\n"), /Send|Ctrl\+O/, "controls remain beside composer");
     }
   } finally { release(); await request; }
 });
@@ -960,7 +960,7 @@ test("chat wheel and keyboard scrolling preserve the draft and reading position 
     update({ type: "reply", text: "latest-message" });
     assert.match(frame().join("\n"), /latest-message/, "returning to latest resumes following replies");
     assert.equal(view.editor.getText(), draft);
-    assert.match(frame().slice(-10).join("\n"), /↵ send/);
+    assert.match(frame().slice(-10).join("\n"), /Send ↑/);
   } finally { release(); await request; tui.stop(); }
 });
 
@@ -984,8 +984,8 @@ test("chat Send clicks follow Enter submission, including resized multiline draf
   tui.addChild(view); tui.setFocus(view);
   const button = () => {
     const lines = view.render(fake.terminal.columns).map(stripVTControlCharacters);
-    const row = lines.findIndex(line => line.includes(" ↵ send "));
-    return { x: lines[row]!.indexOf(" ↵ send ") + 3, y: row + 1 };
+    const row = lines.findIndex(line => line.includes(" Send ↑ "));
+    return { x: lines[row]!.indexOf(" Send ↑ ") + 3, y: row + 1 };
   };
   const mouse = (x: number, y: number, release = false) => view.handleInput(`\x1b[<0;${x};${y}${release ? "m" : "M"}`);
   try {

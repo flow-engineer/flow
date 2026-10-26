@@ -261,12 +261,13 @@ export class ChatView implements Component, Focusable {
       if (!this.editor.getText()) line = line.replace("\x1b[7m \x1b[0m", `\x1b[7m \x1b[0m${this.dim("Write a message…")}`);
       return inset(this.dim("│ ") + truncateToWidth(line, contentWidth - 4, "", true) + this.dim(" │"));
     });
-    const button = " ↵ send ";
+    const button = " Send ↑ ";
     const buttonWidth = visibleWidth(button);
     const spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][this.tick % 10];
     const actionWidth = contentWidth - 4 - buttonWidth;
     const activity = this.busy ? `${this.accent(spinner!)} ${this.dim("Working…  Esc stops waiting")}` : "";
-    const sendButton = this.busy ? this.dim(button) : this.accent(button);
+    const sendButton = this.panelBackground === undefined ? this.accent(button)
+      : this.color(`48;${this.panelBackground}`, this.accent(button));
     const action = this.dim("│ ") + truncateToWidth(activity, actionWidth, "", true) + sendButton + this.dim(" │");
     const composer = [inset(this.dim(`╭${"─".repeat(contentWidth - 2)}╮`)), ...inputLines,
       inset(action), inset(this.dim(`╰${"─".repeat(contentWidth - 2)}╯`)),
