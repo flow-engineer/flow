@@ -412,3 +412,25 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
   missing file, a bad name). On an error, `--json` prints `{ ok: false, error: { code, message }, next }`.
 
 Run each answer's `next`. Promote, or deploy to production, only when the owner says so.
+
+## Send Flow feedback
+
+When Flow gets in your way, tell the Flow team directly: a command that failed or printed the
+wrong `next`, a guide that was wrong or missing, an error that did not say what to do, or a part
+that worked well. POST it as JSON; no key or account is needed.
+
+```sh
+curl -sS https://api.flow.engineer/v1/feedback \
+  -H 'content-type: application/json' \
+  -d '{"feedback": "flow link --channel imessage --json exited 0 but next was empty.", "kind": "bug", "agent": "Claude Code", "flow_version": "0.9.0", "about": "flow link"}'
+```
+
+Expected result: `201` with `{ "id": "fbk_...", "received": true }`. Only `feedback` is required (up to
+4,000 characters); `kind` is `bug`, `docs`, `feature` or `other`; `agent`, `flow_version` and
+`about` (the command, API, page or file) are optional.
+
+- Describe Flow's behaviour, not the owner's product: never include keys, tokens, `.env` values,
+  customers' data or the owner's private code. Tell the owner in one line what you sent.
+- Send one post per problem, once. The sender's IP address is kept with the feedback for 180 days.
+- `400` names the field to fix in `error.param`, `429` means too many posts (wait `Retry-After`
+  seconds), and `500` means it was not stored: try once more a minute later.
