@@ -128,6 +128,8 @@ export const TELEGRAM: ChannelInfo = {
   templates: false,
   edits: true,
   unsends: true,
+  // Telegram clears a chat action after about 5 seconds, or when the bot's message arrives.
+  typingLastsMs: 5_000,
 };
 
 /**
@@ -150,6 +152,8 @@ export const IMESSAGE: ChannelInfo = {
   templates: false,
   edits: true,
   unsends: true,
+  // Flow Messaging shows iMessage's typing for 15 seconds (its default duration), or until a message goes.
+  typingLastsMs: 15_000,
 };
 
 /** WhatsApp's most reply buttons in one message; more choices go as a list. */
@@ -376,18 +380,35 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   /**
-   * Typing and read receipts are a courtesy: Flow's spec says to ignore their failures. Outside the
-   * window (iMessage and WhatsApp until the person writes) they are expected to be refused, so that
-   * is not logged; any other failure is, once. Each call has its own Idempotency-Key, so a second
-   * typing call shows the indicator again.
+   * A read receipt is a courtesy: Flow's spec says to ignore its failures. Outside the window
+   * (iMessage until the person writes) it is expected to be refused, so that is not logged; any
+   * other failure is.
    */
-  async function courtesy(route: Route, to: string, action: "typing" | "read", body: Record<string, unknown>, messageId?: string): Promise<void> {
+  async function markRead(route: Route, to: string, body: Record<string, unknown>, messageId?: string): Promise<void> {
     try {
       const conversation = await conversationFor(route.name, to, messageId);
-      if (conversation) await client.post(`/v0/conversations/${idSegment("conv", conversation)}/${action}`, body, 1);
+      if (conversation) await client.post(`/v0/conversations/${idSegment("conv", conversation)}/read`, body, 1);
     } catch (error) {
       if (error instanceof FlowMessagingError && error.type === "outside_window") return;
-      console.warn(`@flow-engineer/flow/flow-messaging: ${action} on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
+      console.warn(`@flow-engineer/flow/flow-messaging: read on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
+    }
+  }
+
+  /**
+   * Shows the typing indicator; it clears itself when the next message goes or after a while
+   * (`typingLastsMs`), so the conversation sends it again while its turn runs, and nothing is sent
+   * for "off". Each call has its own Idempotency-Key, so a second call shows the indicator again.
+   * A refusal rejects for the conversation to act on: `outside_window` (iMessage outside Flow's
+   * 5-minute window for typing, WhatsApp past 24 hours) waits for the agent's next message, anything
+   * else ends typing for the turn. The conversation logs it.
+   */
+  async function typing(route: Route, to: string): Promise<void> {
+    try {
+      const conversation = await conversationFor(route.name, to);
+      if (conversation) await client.post(`/v0/conversations/${idSegment("conv", conversation)}/typing`, {}, 1);
+    } catch (error) {
+      if (!(error instanceof FlowMessagingError)) throw error;
+      throw new Error(error.type === "outside_window" ? "outside_window" : detailed({ type: error.type, channelCode: error.channelCode, param: error.param, channel: error.channel }));
     }
   }
 
@@ -477,10 +498,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       // An edit or unsend Flow refuses (too late, or a channel without them) rejects with its reason, for the agent.
       editMessage: (to: string, messageId: string, text: string) => change(() => client.patch(`/v0/messages/${idSegment("msg", messageId)}`, styled(route.kind, text))),
       unsendMessage: (to: string, messageId: string) => change(() => client.delete(`/v0/messages/${idSegment("msg", messageId)}`)),
-      // The indicator clears itself when the next message goes: there is nothing to send for "off".
-      typing: async (to: string, on: boolean) => (on ? courtesy(route, to, "typing", {}) : undefined),
+      typing: async (to: string, on: boolean) => (on ? typing(route, to) : undefined),
       // iMessage marks the whole conversation read, and refuses `up_to`.
-      markRead: (to: string, messageIds: string[]) => courtesy(route, to, "read", route.kind === "whatsapp" ? { up_to: messageIds.at(-1) } : {}, messageIds.at(-1)),
+      markRead: (to: string, messageIds: string[]) => markRead(route, to, route.kind === "whatsapp" ? { up_to: messageIds.at(-1) } : {}, messageIds.at(-1)),
       sendTemplate: async (to: string, wanted: Template, idempotencyKey?: string) => {
         if (!route.sender) throw new Error(`a template needs the channel's sender (set FLOW_MESSAGING_${route.kind.toUpperCase()}_SENDER)`);
         const found = await template(route.sender, wanted);

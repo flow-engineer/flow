@@ -2,6 +2,36 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.8.2 (2026-10-26)
+
+### Changes
+
+- **Typing is kept up for the whole turn.** It was sent once, when the person's message arrived, and
+  hidden once they were acknowledged, so in a long turn it lapsed after a few seconds (Telegram's
+  indicator lasts about 5 s) and never came back. Now, from their message until the turn ends or
+  fails, it is sent again before the platform hides it: `ChannelInfo.typingLastsMs` says how long one
+  indicator lasts (`WHATSAPP` 25 s; Flow Messaging's `TELEGRAM` 5 s and `IMESSAGE` 15 s), and typing
+  goes again at 80% of it (20 s, 4 s, 12 s). Each message the agent sends hides it, and it shows
+  again only when new work starts (a response that calls tools, or the person's next message), never
+  just because time passed: typing after the answer would read as more to come. No timer outlives
+  the turn. A channel without `typingLastsMs` (a custom UI) gets typing once, as before.
+- **A refused typing indicator waits for the agent's next message.** A typing call that rejects
+  with `outside_window` (iMessage outside Flow Messaging's 5-minute window for typing) is not tried
+  again until the agent's next message of the turn goes out, then is kept up again; it is logged at
+  debug (`console.debug`, the channel and conversation id, never text). Any other typing failure
+  ends typing for the turn, logged as a warning.
+- **Flow Messaging's typing rejects instead of swallowing a refusal**, so the conversation can act on
+  it: `outside_window`, or Flow's error type (`invalid_request`, ...). Read receipts are unchanged.
+
+### Migration notes
+
+- **A hand-written channel's `typing()` that rejects now ends typing for that turn, with a warning;**
+  before, its failures were ignored and every later call was still made. To have typing tried again
+  after the agent's next message, reject with an error whose message starts with `outside_window`.
+- **A custom UI whose typing indicator hides itself** can set `info.typingLastsMs` to have it sent
+  again while a turn runs. One that shows it until it is turned off needs nothing; it now also gets
+  typing again while the tools of an acknowledged turn run.
+
 ## 0.8.1 (2026-10-25)
 
 ### Changes
