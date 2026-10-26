@@ -136,7 +136,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
     let failed: { message: string; code: number } | undefined;
     const session: ChatSession = { name: config.name, signal: io.signal, color: styled, accent: config.chat?.accent, reset, send: async (text, update, signal) => {
       try { await send(text, update, signal); failed = undefined; }
-      catch (error) { failed = { message: error instanceof Error ? error.message : String(error), code: (error as { exitCode?: number }).exitCode ?? 1 }; throw error; }
+      catch (error) { failed = signal?.aborted ? undefined : { message: error instanceof Error ? error.message : String(error), code: (error as { exitCode?: number }).exitCode ?? 1 }; throw error; }
     } };
     try {
       const code = await io.chat!(session);

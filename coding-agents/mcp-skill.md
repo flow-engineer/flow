@@ -276,6 +276,7 @@ export async function mcp(agent, host) {
 }
 ```
 
+With `auth.scopes`, only a token holding every named scope may chat (a turn can call any tool).
 `terminal: { guests: true }` lets a CLI that is not signed in chat too, `terminal: false` turns it
 off, and `terminal: { path, channel }` renames them. Do not also mount `terminalServer` for the same
 agent: two channels named terminal are refused.
