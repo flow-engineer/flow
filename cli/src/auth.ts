@@ -53,6 +53,19 @@ function writeAll(config: CliConfig, all: Record<string, Saved>): void {
   chmodSync(file, 0o600);
 }
 
+/** The authorization server a sign-in was made with, as discovery recorded it beside its tokens. */
+function issuerOf(saved: Saved): string | undefined {
+  return saved.discovery?.authorizationServerMetadata?.issuer ?? saved.discovery?.authorizationServerUrl;
+}
+
+/**
+ * Tokens and client kept with the issuer they came from (SEP-2352), so the SDK checks it on every
+ * read; a value saved before the CLI kept it takes the issuer discovery recorded with it.
+ */
+function stamped<T extends { issuer?: string }>(value: T | undefined, issuer: string | undefined): T | undefined {
+  return value && value.issuer === undefined && issuer ? { ...value, issuer } : value;
+}
+
 /** An OAuth client provider whose state lives in the CLI's auth file, for one server. */
 export function storedProvider(config: CliConfig, server: string, redirectUrl?: string, signal?: AbortSignal, say: (text: string) => void = (text) => void process.stderr.write(text)): OAuthClientProvider {
   const read = (): Saved => readAll(config)[server] ?? {};
@@ -78,10 +91,10 @@ export function storedProvider(config: CliConfig, server: string, redirectUrl?: 
       return metadata;
     },
     ...(config.clientMetadataUrl ? { clientMetadataUrl: config.clientMetadataUrl } : {}),
-    clientInformation: () => config.clientId ? { client_id: config.clientId } : read().client,
-    saveClientInformation: (client) => write({ client }),
-    tokens: () => read().tokens,
-    saveTokens: (tokens) => write({ tokens, tokensSavedAt: Date.now() }),
+    clientInformation: () => { const saved = read(); return stamped(config.clientId ? { client_id: config.clientId } : saved.client, issuerOf(saved)); },
+    saveClientInformation: (client, ctx) => write({ client: stamped(client, ctx?.issuer ?? issuerOf(read())) }),
+    tokens: () => { const saved = read(); return stamped(saved.tokens, issuerOf(saved)); },
+    saveTokens: (tokens, ctx) => write({ tokens: stamped(tokens, ctx?.issuer ?? issuerOf(read())), tokensSavedAt: Date.now() }),
     state: () => { const state = randomBytes(32).toString("base64url"); write({ state }); return state; },
     discoveryState: () => read().discovery,
     saveDiscoveryState: (discovery) => write({ discovery }),
@@ -113,7 +126,7 @@ export async function storedAccessToken(config: CliConfig, server: string, force
   signal?.throwIfAborted();
   const saved = readAll(config)[server];
   if (!saved?.tokens) return undefined;
-  const { tokens } = saved;
+  const tokens = stamped(saved.tokens, issuerOf(saved))!;
   const expired = saved.tokensSavedAt !== undefined && tokens.expires_in !== undefined && saved.tokensSavedAt + tokens.expires_in * 1000 <= Date.now() + 30_000;
   if (!expired && !forceRefresh) return tokens.access_token;
   if (!tokens.refresh_token || (!saved.client && !config.clientId)) return undefined;

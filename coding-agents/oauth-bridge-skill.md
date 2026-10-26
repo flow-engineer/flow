@@ -110,6 +110,7 @@ const bridge = await oauthBridge({
       return { key: row.accountId, authorization: await brand.grants.create(row, clientId, resource) };
     },
     active: (key) => brand.accounts.isActive(key),                   // disabled or deleted → false
+    pendingTtlSeconds: 3600,  // optional: as long as the login page keeps a sign-in (sign-up, email check); 600 by default
   },
   tokens: {
     async issue({ key, clientId, resource, connection, authorization }) {
@@ -190,8 +191,8 @@ and compare; stop at the first that differs and fix it before going on.
    `development: true` and `databaseStorage(sqlite(), issuer)` (in memory is fine). The bridge
    answers only on its issuer's own host: use that exact host everywhere (`127.0.0.1` and `localhost`
    are different hosts), and allow that origin for `return_to`. Pin the port (`MCP_PORT`): the issuer
-   and the brand's allowed `return_to` follow it, so a moved port breaks sign-in. A sign-in left more than 10 minutes
-   expires at the bridge; start it again. `curl
+   and the brand's allowed `return_to` follow it, so a moved port breaks sign-in. A sign-in left longer than
+   `login.pendingTtlSeconds` (10 minutes by default) expires at the bridge; start it again. `curl
    http://127.0.0.1:<port>/.well-known/oauth-protected-resource/mcp` lists the issuer under
    `authorization_servers`, and `curl http://127.0.0.1:<port>/.well-known/oauth-authorization-server`
    answers with `registration_endpoint`.

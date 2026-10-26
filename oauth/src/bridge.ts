@@ -39,6 +39,8 @@ export interface OAuthBridgeOptions {
     exchange(input: { code: string; nonce: string; redirectUri: string; clientId: string; resource: string }): Promise<{ key: string; authorization: string }>;
     /** Whether the account may still sign in and use tokens. */
     active(key: string): Promise<boolean>;
+    /** How long a sign-in may stay on the brand's pages before its code comes back, in seconds: at least the login page's own window (sign-up, email verification). 600 by default, at most a day. */
+    pendingTtlSeconds?: number;
   };
   /** The brand mints and owns every token clients hold. */
   tokens: {
@@ -72,6 +74,8 @@ const ROUTES = { authorization: "/auth", token: "/token", registration: "/reg", 
 const CLI_CLIENT_PATH = "/.well-known/oauth-client/cli";
 const PATHS = ["/.well-known/oauth-authorization-server", "/.well-known/openid-configuration", "/.well-known/oauth-client", "/auth", "/reg", "/token", "/jwks", "/interaction"];
 const LOOPBACK = ["127.0.0.1", "localhost", "[::1]"];
+/** A provider session's life, in seconds; a sign-in in progress never outlives it. */
+const SESSION_TTL = 86400;
 
 function secureURL(value: string, development: boolean): URL {
   const url = new URL(value);
@@ -91,6 +95,8 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
   if (!options.cookieKeys.length || options.cookieKeys.some((key) => key.length < 32)) throw new Error("@flow-engineer/flow/oauth: cookie keys must be at least 32 characters");
   if (!development && !options.storage.durable) throw new Error("@flow-engineer/flow/oauth: outside development the storage must be durable");
   secureURL(options.login.url, development);
+  const pendingTtl = options.login.pendingTtlSeconds ?? 600;
+  if (!Number.isInteger(pendingTtl) || pendingTtl < 60 || pendingTtl > SESSION_TTL) throw new Error("@flow-engineer/flow/oauth: login.pendingTtlSeconds is whole seconds, from 60 to 86400");
   const store = oauthStore(options.storage, issuer, options.encryptionKey);
   const pending = store.adapter("BrandLogin");
   const authorizations = store.adapter("BrandAuthorization");
@@ -136,7 +142,8 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
     scopes: ["openid", "account"],
     // Refresh tokens are the brand's to mint and rotate.
     issueRefreshToken: () => false,
-    ttl: { AccessToken: 900, AuthorizationCode: 60, Interaction: 600, Grant: 30 * 86400, Session: 86400 },
+    // The interaction (and its cookies) lasts as long as the sign-in on the brand's pages may.
+    ttl: { AccessToken: 900, AuthorizationCode: 60, Interaction: pendingTtl, Grant: 30 * 86400, Session: SESSION_TTL },
     interactions: { policy, url: (_ctx, interaction) => `/interaction/${interaction.uid}` },
     findAccount: async (_ctx, key) => (await options.login.active(key) ? { accountId: key, claims: async () => ({ sub: key }) } : undefined),
     // The brand's default is the account's normal access, with no separate permissions screen.
@@ -270,7 +277,7 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
           return void (await provider.interactionFinished(req, res, { consent: { grantId } }, { mergeWithLastSubmission: true }));
         }
         const nonce = randomBytes(32).toString("base64url");
-        await pending.upsert(interaction.uid, { nonce }, 600);
+        await pending.upsert(interaction.uid, { nonce }, pendingTtl);
         const login = new URL(options.login.url);
         login.searchParams.set("nonce", nonce);
         login.searchParams.set("return_to", `${issuer}/interaction/${interaction.uid}/callback`);
@@ -287,6 +294,16 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
       await pending.destroy(interaction.uid);
       const grantId = await fullAccountGrant(result.key, interaction.params);
       await authorizations.upsert(grantId, { authorization: result.authorization }, 600);
+      // Someone else signed in on the brand's page than this browser's provider session knows (an
+      // account switch): the new login replaces that session, where oidc-provider would otherwise
+      // ask to confirm a logout on a page the bridge does not serve.
+      const current = await provider.Session.get(provider.createContext(req, res) as never);
+      if (current.accountId && current.accountId !== result.key) await current.destroy();
+      if (interaction.session && interaction.session.accountId !== result.key) {
+        await (await provider.Session.findByUid(interaction.session.uid!))?.destroy();
+        delete interaction.session;
+        await interaction.save(interaction.exp - Math.floor(Date.now() / 1000));
+      }
       await provider.interactionFinished(req, res, { login: { accountId: result.key, amr: ["brand-login"], remember: true }, consent: { grantId } }, { mergeWithLastSubmission: false });
     } catch {
       // Errors from the brand's functions may carry tokens or personal data: keep them out of answers.
