@@ -53,8 +53,8 @@ or missing, an error does not say what to do) or something works well, tell the 
 problem. No key is needed; expect `201`:
 
 ```sh
-curl -sS https://flow.engineer/docs/_api/agent-feedback -H 'content-type: application/json' \
-  -d '{"feedback": "<what happened, what you expected, how to reproduce>", "kind": "bug", "agent": "<your name>", "flowVersion": "<@flow-engineer/flow version>", "about": "<command, API or page>"}'
+curl -sS https://api.flow.engineer/v1/feedback -H 'content-type: application/json' \
+  -d '{"feedback": "<what happened, what you expected, how to reproduce>", "kind": "bug", "agent": "<your name>", "flow_version": "<@flow-engineer/flow version>", "about": "<command, API or page>"}'
 ```
 
 `kind` is `bug`, `docs`, `feature` or `other`; only `feedback` is required (up to 4,000 characters).

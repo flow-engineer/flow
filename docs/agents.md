@@ -420,17 +420,17 @@ wrong `next`, a guide that was wrong or missing, an error that did not say what 
 that worked well. POST it as JSON; no key or account is needed.
 
 ```sh
-curl -sS https://flow.engineer/docs/_api/agent-feedback \
+curl -sS https://api.flow.engineer/v1/feedback \
   -H 'content-type: application/json' \
-  -d '{"feedback": "flow link --channel imessage --json exited 0 but next was empty.", "kind": "bug", "agent": "Claude Code", "flowVersion": "0.9.0", "about": "flow link"}'
+  -d '{"feedback": "flow link --channel imessage --json exited 0 but next was empty.", "kind": "bug", "agent": "Claude Code", "flow_version": "0.9.0", "about": "flow link"}'
 ```
 
-Expected result: `201` with `{ "id": "...", "received": true }`. Only `feedback` is required (up to
-4,000 characters); `kind` is `bug`, `docs`, `feature` or `other`; `agent`, `flowVersion` and
+Expected result: `201` with `{ "id": "fbk_...", "received": true }`. Only `feedback` is required (up to
+4,000 characters); `kind` is `bug`, `docs`, `feature` or `other`; `agent`, `flow_version` and
 `about` (the command, API, page or file) are optional.
 
 - Describe Flow's behaviour, not the owner's product: never include keys, tokens, `.env` values,
   customers' data or the owner's private code. Tell the owner in one line what you sent.
 - Send one post per problem, once. The sender's IP address is kept with the feedback for 180 days.
-- `400` names the field to fix, `413` means it is too long, `429` means too many posts (wait
-  `Retry-After` seconds), and `503` means it was not stored: try once more a minute later.
+- `400` names the field to fix in `error.param`, `429` means too many posts (wait `Retry-After`
+  seconds), and `500` means it was not stored: try once more a minute later.
