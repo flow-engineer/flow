@@ -12,7 +12,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   terminal channel to the agent itself. A hosted `mcp(agent, host)` factory passes the agent it
   receives. Signed in only by default; `terminal: { guests: true }` lets a CLI that is not signed
   in chat too, `terminal: false` turns it off, and `terminal: { path, channel }` renames them. With
-  `agent` and no `auth`, chat is served only when `terminal` is given (everyone a guest).
+  `agent` and no `auth`, chat is served only when `terminal` is given (everyone a guest). When
+  `auth.scopes` names read or write scopes, only a token holding every one of them may chat, since a
+  chat turn can call any tool.
 - **`agent.addChannel(channel)`** adds a channel after the agent is built; the same channel again
   does nothing and another of that name is refused.
 - **Chat on a server without it says so.** A 404 or 405 at the terminal URL prints "This server
@@ -20,7 +22,7 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - **Chat without pi-tui falls back to line chat,** with one line on how to get the full-screen view,
   instead of stopping.
 - **Full-screen chat never exits silently.** When the last message failed, the reason is printed
-  after the view closes and the exit code is that failure's.
+  after the view closes and the exit code is that failure's. Stopping a wait (Escape) is not a failure.
 - **No raw SDK warning when a token refresh cannot reach the server;** the CLI's own one line naming
   the server, and exit 5, remain.
 

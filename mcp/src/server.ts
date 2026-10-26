@@ -313,7 +313,15 @@ function terminalOf(options: McpServerOptions) {
     built.addChannel(terminal.channel);
     return built;
   };
-  const terminal = terminalServer({ agent, ...(options.auth ? { auth: options.auth } : {}), ...settings });
+  // Chat can lead to any tool, and the chat runner checks sign-in, not scopes: only a token with every
+  // scope the server names may chat. One without them is refused as if it were not valid.
+  const auth = options.auth;
+  const needed = [auth?.scopes?.read, auth?.scopes?.write].filter((s): s is string => Boolean(s));
+  const verify = auth && (async (token: string, request: Request) => {
+    const identity = await auth.verify(token, request);
+    return identity && needed.every(s => identity.scopes?.includes(s)) ? identity : null;
+  });
+  const terminal = terminalServer({ agent, ...(verify ? { auth: { verify } } : {}), ...settings });
   if (typeof given !== "function") given.addChannel(terminal.channel);
   return terminal;
 }

@@ -746,6 +746,8 @@ test("mcpServer with auth and the agent serves terminal chat on its origin, sign
   (await scripted.nextCall(1)).answer(respond(call("send_terminal", { text: "Yours." })));
   assert.equal(await chat, 0, out.err);
   assert.equal(seenKey, "user-9");
+  const scoped = mcpServer({ name: "t", version: "1", tools: [mine], auth: { ...auth, scopes: { read: "read", write: "write" }, verify: (token: string) => token === "read-only" ? { key: "user-9", scopes: ["read"] } : null }, agent, terminal: { channel: "terminal-scoped" } });
+  assert.equal((await scoped.fetch(new Request("http://127.0.0.1/agent/terminal", { method: "POST", headers: { authorization: "Bearer read-only" }, body: JSON.stringify({ text: "write something" }) }))).status, 401, "chat can reach write tools, so a read-only token cannot chat");
   const off = mcpServer({ name: "t", version: "1", tools: [mine], auth, agent, terminal: false });
   assert.equal(off.paths?.includes("/agent/terminal"), false);
   assert.equal((await off.fetch(new Request("http://127.0.0.1/agent/terminal", { method: "POST" }))).status, 404);
@@ -770,9 +772,13 @@ test("chat says a running server has no chat, falls back to line chat without pi
   assert.equal(lines, 1, "line chat starts");
   assert.match(missing.err, /Install @mariozechner\/pi-tui@0\.73\.1 beside this CLI for the full-screen chat/);
   const failed = io(true);
-  Object.assign(failed.channel, { env, chat: async (session: { send(text: string, update: () => void): Promise<void> }) => { await session.send("hi", () => {}).catch(() => {}); return 0; } });
+  Object.assign(failed.channel, { env, chat: async (session: { send(text: string, update: () => void, signal?: AbortSignal): Promise<void> }) => { await session.send("hi", () => {}).catch(() => {}); return 0; } });
   assert.equal(await runCli(cli, ["chat"], failed.channel), 5);
   assert.match(failed.err, /This server does not serve terminal chat/);
+  const stopped = io(true);
+  Object.assign(stopped.channel, { env, chat: async (session: { send(text: string, update: () => void, signal?: AbortSignal): Promise<void> }) => { await session.send("hi", () => {}, AbortSignal.abort()).catch(() => {}); return 0; } });
+  assert.equal(await runCli(cli, ["chat"], stopped.channel), 0, "stopping a wait is not a failure");
+  assert.equal(stopped.err, "");
 });
 
 // Auth/state coverage above checks JSON only; it cannot catch an unlabeled human transcript.
