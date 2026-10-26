@@ -115,6 +115,9 @@ export const placeOrder = tool({
   Unmarked tools stay upfront. This changes neither chat access nor generated CLI commands.
   `mcpServer({ deferred: [...] })` replaces the flags for that server; `deferred: []` puts all tools
   upfront. Read `flow-framework-mcp` (`mcp-skill.md`) for discovery, execution and customization.
+- `mcp: { clients: ["cli"] }` keeps a tool to the brand's own CLI: other MCP hosts never list,
+  find or call it (a secret's reveal, say). Chats ignore it. Needs `mcpServer({ auth })`; read
+  `mcp-skill.md`, "Keep a tool to the brand's own CLI".
 - `hints` describe the tool to hosts, which ask the person before risky calls; nothing enforces
   them. `readOnly` (default false: a tool counts as a write), `destructive` (a write that may delete
   or overwrite; default true for writes), `idempotent` (calling again with the same input changes

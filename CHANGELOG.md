@@ -2,6 +2,41 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.10.0 (2026-10-26)
+
+### Changes
+
+- **A tool can be kept to the brand's own CLI.** `mcp: { clients: ["cli"] }` on a tool lists it and
+  lets it be called only for the CLI built with `defineCli`. Claude, ChatGPT and every other MCP
+  client find no trace of it: not in `tools/list`, the full catalog or `search_tools`, and calling
+  it (directly or through `execute_tool`) answers exactly as an unknown tool. Plugin endpoints
+  follow the same rule. Chats ignore it, like `deferred`. It needs `mcpServer({ auth })`, which
+  refuses such a tool without it. For a secret's reveal, say, that must never reach a third-party
+  host's transcript.
+- **`McpIdentity.client`** (`{ id, kind?: "cli" }`): the OAuth client a token was issued to, which
+  `mcpServer` uses per request to choose the tools a caller sees. A brand with its own
+  authorization server returns it from `verify`.
+- **The OAuth bridge knows the CLI.** It serves the CLI's Client ID Metadata Document at
+  `<origin>/.well-known/oauth-client/cli` (a public client, loopback redirects only, no secret),
+  advertises it as `flow_cli_client_id` in its metadata, notes which client each access token
+  went to (hashed and sealed), and fills in `client` from `verify` (`kind: "cli"` for the CLI's).
+- **The CLI signs in as that client** when the server advertises one, instead of registering
+  itself, unless `defineCli` sets `clientId` or `clientMetadataUrl`. A sign-in made before still
+  works but sees no CLI-only commands until `auth login`: an unknown command then says so, and
+  `auth status --json` has `renew`. The tool list cache is kept per sign-in and client, so it is
+  never reused across them.
+- **`flow check`** errors on an `mcp.clients` value other than `"cli"`, and warns about a tool kept
+  to the CLI when the agent has no `src/cli.ts`.
+- `McpClientKind` is exported from `@flow-engineer/flow`.
+
+### Migration notes
+
+None: a tool without `mcp.clients` behaves as before for every client. Hosts' sign-ins are
+unchanged. A CLI signed in through the bridge before this release keeps working; it signs in as the
+CLI's own client at its next `auth login`, which is needed only to see tools kept to the CLI.
+An agent passing `clients` to `oauthBridge` must not register `<origin>/.well-known/oauth-client/cli`
+itself (refused).
+
 ## 0.9.2 (2026-10-26)
 
 ### Changes

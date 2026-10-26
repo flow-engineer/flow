@@ -122,13 +122,21 @@ export interface Tool<Input = any, Output = any> {
    * keep their current behaviour.
    */
   signIn?: SignIn;
-  /** MCP exposure only: discover this tool through search_tools instead of listing it upfront. Chats ignore it. */
-  mcp?: { deferred?: boolean };
+  /**
+   * MCP exposure only; chats ignore it. `deferred`: discover this tool through search_tools instead of
+   * listing it upfront. `clients`: only these kinds of MCP client see and call it ("cli": the CLI
+   * built with defineCli, known by the OAuth client its token was issued to); to every other client
+   * it is an unknown tool. Omitted: every client.
+   */
+  mcp?: { deferred?: boolean; clients?: McpClientKind[] };
   /** How the tool behaves, for hosts to decide what to ask the person first. Nothing enforces them. */
   hints?: ToolHints;
 }
 
 export type SignIn = "required" | "optional" | "none";
+
+/** A kind of MCP client a tool can be kept to (Tool.mcp.clients). */
+export type McpClientKind = "cli";
 
 export interface ToolHints {
   /** It changes nothing (default false: a tool counts as a write). */

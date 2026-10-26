@@ -71,6 +71,10 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
     }
   }
 
+  if (!existsSync(cliFile)) {
+    for (const t of tools) if (t.mcp?.clients?.includes("cli")) warnings.push(`tool ${t.name}: kept to the CLI (mcp.clients), but there is no CLI file (src/cli.ts), so no client sees it`);
+  }
+
   if (json) console.log(JSON.stringify({ ok: errors.length === 0, errors, warnings }));
   else {
     for (const e of errors) console.log(`error  ${e}`);

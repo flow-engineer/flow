@@ -138,6 +138,12 @@ The rules each function keeps:
 - `revoke` ends that token. `active` false makes every later `verify` and refresh fail.
 - `verify` may also return `credentials` (`McpIdentity`'s): that request's backend access for the
   tools, so they call the brand's API as the person without decrypting the token a second time.
+- The agent's own CLI signs in as one fixed public client, `<agent origin>/.well-known/oauth-client/cli`
+  (its Client ID Metadata Document, served and advertised by the bridge); hosts register their own.
+  `clientId` in `issue`, `refresh`, `revoke` and the login page's `client` is that URL for the CLI.
+  The bridge notes which client each access token went to (hashed and sealed, never the token) and
+  adds `client: { id, kind? }` to what `verify` returns, so tools kept to the CLI
+  (`mcp: { clients: ["cli"] }`) reach only it. A `client` `verify` returns itself is kept as is.
 
 **What the brand's backend must offer.** Check this before writing the functions, and tell the
 owner on day one what is missing: each gap is a change to the brand's backend (the

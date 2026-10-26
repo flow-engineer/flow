@@ -2,6 +2,10 @@
 // server, as a native app with a loopback redirect, so people sign in on the organization's own
 // pages. Tokens are kept per server in ~/.config/<name>/auth.json (XDG_CONFIG_HOME), mode 600, and
 // refreshed by the SDK. A token in <NAME>_TOKEN (CI, agents) is used as is and never stored.
+//
+// When the server's authorization server advertises the CLI's own client (the OAuth bridge's
+// flow_cli_client_id), the CLI signs in as that client instead of registering itself, so the server
+// knows the caller is this CLI and lists the tools kept to it (Tool.mcp.clients).
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -129,9 +133,41 @@ export function signOut(config: CliConfig, server: string): void {
   writeAll(config, all);
 }
 
+/** The CLI's own client_id, when the server's authorization server advertises one on its own origin. */
+async function advertisedClient(server: string): Promise<string | undefined> {
+  const { authorizationServerMetadata: metadata } = await discoverOAuthServerInfo(server);
+  const id = (metadata as Record<string, unknown> | undefined)?.flow_cli_client_id;
+  if (typeof id !== "string" || !metadata?.issuer || !URL.canParse(id) || !URL.canParse(metadata.issuer)) return undefined;
+  return new URL(id).origin === new URL(metadata.issuer).origin ? id : undefined;
+}
+
+/**
+ * Whether this computer's sign-in predates the server's CLI client (it registered itself, as any
+ * host does), so the tools kept to the CLI stay hidden until `auth login`. False when unsure.
+ */
+export async function signedInAsOtherClient(config: CliConfig, server: string): Promise<boolean> {
+  const saved = readAll(config)[server];
+  if (!saved?.tokens || config.clientId || config.clientMetadataUrl) return false;
+  try {
+    const id = await advertisedClient(server);
+    return id !== undefined && saved.client?.client_id !== id;
+  } catch { return false; }
+}
+
 /** Sign in: the browser goes to the organization's own login, and comes back to a loopback port. */
 export async function signIn(config: CliConfig, server: string, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
+  if (!config.clientId && !config.clientMetadataUrl) {
+    // Discovery that fails here fails again in auth(), which says why.
+    const id = await advertisedClient(server).catch(() => undefined);
+    const saved = readAll(config)[server];
+    // A sign-in made as another client is replaced, not refreshed: its tokens belong to that client.
+    if (id && saved?.client?.client_id !== id) {
+      const all = readAll(config);
+      all[server] = { client: { client_id: id } };
+      writeAll(config, all);
+    }
+  }
   const callback = createServer();
   await new Promise<void>((resolve, reject) => { callback.once("error", reject); callback.listen(config.redirectPort ?? 0, "127.0.0.1", resolve); });
   const { port } = callback.address() as { port: number };
