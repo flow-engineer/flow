@@ -2,6 +2,35 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.10.0 (unreleased)
+
+### Changes
+
+- **Terminal chat beside authenticated MCP, with no terminal code.** `mcpServer({ auth, agent })`
+  serves `/agent/terminal` on its own origin, checks each request with the same `auth.verify` as
+  `/mcp`, lists the path in `paths` (so Flow's hosting mounts it beside `/mcp`), and adds the
+  terminal channel to the agent itself. A hosted `mcp(agent, host)` factory passes the agent it
+  receives. Signed in only by default; `terminal: { guests: true }` lets a CLI that is not signed
+  in chat too, `terminal: false` turns it off, and `terminal: { path, channel }` renames them. With
+  `agent` and no `auth`, chat is served only when `terminal` is given (everyone a guest).
+- **`agent.addChannel(channel)`** adds a channel after the agent is built; the same channel again
+  does nothing and another of that name is refused.
+- **Chat on a server without it says so.** A 404 or 405 at the terminal URL prints "This server
+  does not serve terminal chat (<url>)." "Is it running?" is kept for a server that cannot be reached.
+- **Chat without pi-tui falls back to line chat,** with one line on how to get the full-screen view,
+  instead of stopping.
+- **Full-screen chat never exits silently.** When the last message failed, the reason is printed
+  after the view closes and the exit code is that failure's.
+- **No raw SDK warning when a token refresh cannot reach the server;** the CLI's own one line naming
+  the server, and exit 5, remain.
+
+### Migration notes
+
+- Nothing changes for an agent that does not pass `agent` to `mcpServer`.
+- An agent that mounts `terminalServer` itself and wants the built-in route: remove its
+  `terminalServer`, its channel and its route, then pass `agent` to `mcpServer`. Keeping both
+  is refused when the server is made ("already has a channel named terminal").
+
 ## 0.9.0 (2026-10-26)
 
 ### Changes

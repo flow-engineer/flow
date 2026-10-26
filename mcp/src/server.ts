@@ -23,6 +23,7 @@ import {
   type AuthInfo,
   type CallToolResult,
 } from "@modelcontextprotocol/server";
+import type { Agent } from "../../src/agent.ts";
 import type { FlowEvents } from "../../src/business-events/engine.ts";
 import { emitter, type EventSink } from "../../src/events.ts";
 import { unavailableRecords, type Records } from "../../src/records.ts";
@@ -30,6 +31,7 @@ import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, SKILLS_MET
 import { serveNode } from "../../src/http.ts";
 import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
 import { FORMATTED, render, toolContext, type CredentialProvider, type Tool, type ToolContext } from "../../src/tools.ts";
+import { terminalServer } from "./terminal.ts";
 import { describe, FULL_CATALOG_META, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
 
 export interface McpAuth {
@@ -84,6 +86,17 @@ export interface McpServerOptions {
   /** Add your own handlers (resources, prompts, ...) to each server the SDK makes; one level down. */
   extend?: (server: Server) => void;
   events?: EventSink[];
+  /**
+   * The agent, for terminal chat (`<cli> chat`) on this origin, checked with `auth` like MCP. Flow's
+   * hosting passes it to the `mcp(agent, host)` factory. A getter lets this server be made first.
+   */
+  agent?: Agent | (() => Agent);
+  /**
+   * Terminal chat at /agent/terminal. Default: served when `agent` and `auth` are both given, signed
+   * in only. `guests: true` lets a CLI that is not signed in chat too (on the agent's model key).
+   * false turns it off. An object serves it with `agent` even without `auth` (everyone a guest).
+   */
+  terminal?: false | { path?: string; channel?: string; guests?: boolean };
   /** Traces from FLOW_FRAMEWORK_TRACES_* (or legacy CHINWAG_TRACES_*) by default; false disables them. */
   traces?: TracesOptions | false;
 }
@@ -184,6 +197,8 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   }
   const handler = endpointHandler(false);
   const pluginHandler = pluginPath ? endpointHandler(true) : undefined;
+  const terminal = terminalOf(options);
+  if (terminal && [path, pluginPath, ...(options.auth?.routes?.paths ?? [])].includes(terminal.path)) throw new Error(`@flow-engineer/flow/mcp: the terminal path ${terminal.path} is already served`);
 
   async function serve(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -192,6 +207,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     const servedPath = plugin ? pluginPath! : path;
     const routes = options.auth?.routes;
     if (routes?.paths.some((p) => url.pathname === p || url.pathname.startsWith(`${p}/`))) return routes.fetch(request);
+    if (terminal && url.pathname === terminal.path) return terminal.fetch(request);
     if (request.method === "GET" && (url.pathname === metadataPrefix || url.pathname === `${metadataPrefix}${servedPath}`)) {
       if (!options.auth) return new Response("Not found", { status: 404 });
       return Response.json({
@@ -283,8 +299,23 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     descriptors,
     flushTraces: () => trace?.flush() ?? Promise.resolve(),
     ...(pluginPath ? { plugin: { path: pluginPath, descriptors: pluginDescriptors } } : {}),
-    ...(options.auth?.routes ? { paths: [...new Set([path, ...(pluginPath ? [pluginPath] : []), "/.well-known/oauth-protected-resource", ...options.auth.routes.paths])] } : {}),
+    ...(options.auth?.routes || terminal ? { paths: [...new Set([path, ...(pluginPath ? [pluginPath] : []), "/.well-known/oauth-protected-resource", ...(options.auth?.routes?.paths ?? []), ...(terminal ? [terminal.path] : [])])] } : {}),
   };
+}
+
+/** The terminal route mcpServer serves, with its auth; its channel is added to the agent before the first turn. */
+function terminalOf(options: McpServerOptions) {
+  const given = options.agent;
+  if (!given || options.terminal === false || (!options.auth && !options.terminal)) return undefined;
+  const settings = options.terminal || {};
+  const agent = (): Agent => {
+    const built = typeof given === "function" ? given() : given;
+    built.addChannel(terminal.channel);
+    return built;
+  };
+  const terminal = terminalServer({ agent, ...(options.auth ? { auth: options.auth } : {}), ...settings });
+  if (typeof given !== "function") given.addChannel(terminal.channel);
+  return terminal;
 }
 
 /** One endpoint's catalog. Plugin discovery never includes the standalone read_skill tool. */

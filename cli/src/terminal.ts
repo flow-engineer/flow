@@ -86,8 +86,8 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
     catch { response = undefined; }
     finally { if (clearStatus) io.writeError("\r\u001b[2K"); }
     if (!response) return fail(`Could not reach the agent at ${endpoint}. Is it running?`, 5);
-    // Another server on that port (a playground, the MCP server alone) has no chat.
-    if (response.status === 404 || response.status === 405 || (response.status === 403 && !token)) return fail(`No agent chat at ${endpoint}. Is the agent running?`, 5);
+    // The server answered, so it is running; it has no chat route (a playground, an MCP server without the agent).
+    if (response.status === 404 || response.status === 405 || (response.status === 403 && !token)) return fail(`This server does not serve terminal chat (${endpoint}).`, 5);
     if (response.status === 401 || response.status === 403) return fail(`Sign in first: ${config.name} auth login${token ? "" : ` (or set ${tokenEnvOf(config)})`}.`, 3);
     if (!response.ok) return fail(`The agent could not finish (${response.status}).`, 1);
     let result: { conversationId: string; replies: Array<{ type: string; text?: string }> } | undefined;
@@ -132,13 +132,20 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   }
   if (single) return send(flags.positionals[0]!);
   if (fullScreen) {
-    const session: ChatSession = { name: config.name, signal: io.signal, color: styled, accent: config.chat?.accent, reset, send: async (text, update, signal) => { await send(text, update, signal); } };
-    try { return await io.chat!(session); }
+    // The full-screen view clears its screen on leaving, so the last failure is printed again after it.
+    let failed: { message: string; code: number } | undefined;
+    const session: ChatSession = { name: config.name, signal: io.signal, color: styled, accent: config.chat?.accent, reset, send: async (text, update, signal) => {
+      try { await send(text, update, signal); failed = undefined; }
+      catch (error) { failed = { message: error instanceof Error ? error.message : String(error), code: (error as { exitCode?: number }).exitCode ?? 1 }; throw error; }
+    } };
+    try {
+      const code = await io.chat!(session);
+      if (failed) { io.writeError(`${failed.message}\n`); return failed.code; }
+      return code;
+    }
     catch (error) {
-      io.writeError(error instanceof Error && "code" in error && error.code === "ERR_MODULE_NOT_FOUND"
-        ? "Full-screen chat needs the optional @mariozechner/pi-tui@0.73.1 package. Install it in this CLI's project.\n"
-        : "Could not open the chat interface.\n");
-      return 1;
+      if (!(error instanceof Error && "code" in error && error.code === "ERR_MODULE_NOT_FOUND" && io.lines)) { io.writeError("Could not open the chat interface.\n"); return 1; }
+      io.writeError(paint("dim", "Install @mariozechner/pi-tui@0.73.1 beside this CLI for the full-screen chat.\n"));
     }
   }
   if (!io.lines) { io.writeError("This CLI input does not support chat.\n"); return 2; }

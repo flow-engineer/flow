@@ -449,6 +449,7 @@ export class Agent {
     if (options.store && (options.database || options.id)) throw new Error("flow: give an agent a store or a database (and id), not both");
     this.store = options.store ?? new Store(options.database ?? sqlite(), options.id ?? "default");
     this.records = recordsOf(this.store, options.records, () => this.settings.ready);
+    const channels = this.channelsByName;
     this.settings = {
       model: options.model,
       transcribe: options.transcribe,
@@ -487,7 +488,7 @@ export class Agent {
       fallbackTemplate: options.fallbackTemplate?.name,
       wakeUps: options.wakeUps !== false,
       windowClosed: (nudge, to) => this.windowClosed(nudge, to),
-      tagChannels: (options.channels ?? []).length > 1,
+      get tagChannels() { return channels.size > 1; },
       links: (id) => this.links(id),
       settle: (target, status, reason, messageId) => this.settle(target, status, reason, messageId),
     };
@@ -1237,6 +1238,18 @@ export class Agent {
         return store.saveEventState!(...args);
       },
     };
+  }
+
+  /**
+   * Add a channel after the agent is built, such as the terminal chat mcpServer serves with its
+   * own auth. Adding the same channel again does nothing; another channel of that name is refused.
+   */
+  addChannel(channel: Channel): void {
+    const existing = this.channelsByName.get(channel.name);
+    if (existing === channel) return;
+    if (existing) throw new Error(`flow: the agent already has a channel named ${channel.name}`);
+    if (channel.name === "key" || channel.name === "phone") throw new Error(`flow: "${channel.name}" is reserved; give the channel another name`);
+    this.channelsByName.set(channel.name, channel);
   }
 
   /** A channel the agent was given, by name, as it was given (the test cloud plays a copy of it). */

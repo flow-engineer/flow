@@ -302,11 +302,25 @@ async function connect(config: CliConfig, server: string, token: string | undefi
   signal?.addEventListener("abort", abort, { once: true });
   try {
     signal?.throwIfAborted();
-    await client.connect(new StreamableHTTPClientTransport(new URL(server), provider ? { authProvider: provider } : {}), { signal });
+    await withoutRefreshWarning(() => client.connect(new StreamableHTTPClientTransport(new URL(server), provider ? { authProvider: provider } : {}), { signal }));
     signal?.throwIfAborted();
   } catch (error) { await client.close(); throw error; }
   finally { signal?.removeEventListener("abort", abort); }
   return client;
+}
+
+// The SDK prints a raw console warning when a token refresh cannot reach the server; the CLI says
+// so itself in one line (explain), so that warning is dropped while connecting, and nothing else.
+const REFRESH_WARNING = "[mcp-sdk] Could not refresh OAuth tokens";
+let connecting = 0;
+let consoleWarn: typeof console.warn | undefined;
+async function withoutRefreshWarning<T>(run: () => Promise<T>): Promise<T> {
+  if (connecting++ === 0) {
+    const warn = consoleWarn = console.warn;
+    console.warn = (...args: unknown[]) => { if (!(typeof args[0] === "string" && args[0].startsWith(REFRESH_WARNING))) warn.apply(console, args); };
+  }
+  try { return await run(); }
+  finally { if (--connecting === 0) { console.warn = consoleWarn!; consoleWarn = undefined; } }
 }
 
 async function listTools(client: Client): Promise<ToolInfo[]> {

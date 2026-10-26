@@ -721,6 +721,60 @@ test("signed out, chat is a guest the agent keeps apart from accounts, unless th
   assert.match(refused.err, /Sign in first: guest-test auth login/);
 });
 
+// The tests above mount terminalServer by hand; only this shows an agent with authenticated MCP gets
+// chat on the MCP origin with no terminal code, as Flow's hosting serves the server's paths.
+test("mcpServer with auth and the agent serves terminal chat on its origin, signed in only, unless turned off", async (t) => {
+  const old = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "flow-mcp-terminal-"));
+  t.after(() => { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; });
+  const scripted = scriptedModel();
+  let seenKey: string | null = null;
+  const mine = tool({ name: "mine", description: "Who this is for.", input: z.object({}), run: async (_i, ctx) => { seenKey = ctx.key; return "yours"; } });
+  const agent = createAgent({ files: { "AGENTS.md": "Test agent" }, model: scripted.model, tools: [mine], debounceMs: 0, scheduleCheckMs: 0 });
+  const auth = { issuer: "https://login.example", verify: (token: string) => token === "test" ? { key: "user-9" } : null, routes: { paths: ["/oauth"], fetch: async () => new Response("bridge") } };
+  const mcp = mcpServer({ name: "t", version: "1", tools: [mine], auth, agent });
+  assert.ok(mcp.paths?.includes("/agent/terminal"), "hosting mounts the server's paths");
+  assert.equal(agent.channel("terminal")?.traceChannel, "cli");
+  const base = await listen((req, res) => void mcp.node(req, res));
+  const signedOut = await fetch(`${base}/agent/terminal`, { method: "POST" });
+  assert.equal(signedOut.status, 401);
+  assert.equal(signedOut.headers.get("www-authenticate"), "Bearer");
+  const cli = defineCli({ name: "mcp-terminal-test", server: `${base}/mcp` });
+  const out = io();
+  const chat = runCli(cli, ["chat", "whose?", "--json", "--token", "test"], out.channel);
+  (await Promise.race([scripted.nextCall(0), chat.then(code => { throw new Error(`chat finished before model call: ${code} ${out.err}`); })])).answer(respond(call("send_terminal", { text: "Checking." }), call("mine", {})));
+  (await scripted.nextCall(1)).answer(respond(call("send_terminal", { text: "Yours." })));
+  assert.equal(await chat, 0, out.err);
+  assert.equal(seenKey, "user-9");
+  const off = mcpServer({ name: "t", version: "1", tools: [mine], auth, agent, terminal: false });
+  assert.equal(off.paths?.includes("/agent/terminal"), false);
+  assert.equal((await off.fetch(new Request("http://127.0.0.1/agent/terminal", { method: "POST" }))).status, 404);
+});
+
+// No test above serves a running server without chat, or a full-screen view that is missing or failed;
+// each once made a working setup look broken.
+test("chat says a running server has no chat, falls back to line chat without pi-tui, and never exits silently", async (t) => {
+  const old = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "flow-chat-edges-"));
+  t.after(() => { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; });
+  const base = await listen((_req, res) => void res.writeHead(404).end());
+  const cli = defineCli({ name: "edges", server: `${base}/mcp` });
+  const env = { TERM: "xterm", NO_COLOR: "1" };
+  const single = io();
+  assert.equal(await runCli(cli, ["chat", "hi"], single.channel), 5);
+  assert.equal(single.err, `This server does not serve terminal chat (${base}/agent/terminal).\n`);
+  const missing = io(true);
+  let lines = 0;
+  Object.assign(missing.channel, { env, chat: async () => { throw Object.assign(new Error("Cannot find package"), { code: "ERR_MODULE_NOT_FOUND" }); }, lines: async function* () { lines++; yield "/exit"; } });
+  assert.equal(await runCli(cli, ["chat"], missing.channel), 0);
+  assert.equal(lines, 1, "line chat starts");
+  assert.match(missing.err, /Install @mariozechner\/pi-tui@0\.73\.1 beside this CLI for the full-screen chat/);
+  const failed = io(true);
+  Object.assign(failed.channel, { env, chat: async (session: { send(text: string, update: () => void): Promise<void> }) => { await session.send("hi", () => {}).catch(() => {}); return 0; } });
+  assert.equal(await runCli(cli, ["chat"], failed.channel), 5);
+  assert.match(failed.err, /This server does not serve terminal chat/);
+});
+
 // Auth/state coverage above checks JSON only; it cannot catch an unlabeled human transcript.
 test("human chat distinguishes input, waiting and agent replies", async (t) => {
   const old = process.env.XDG_CONFIG_HOME;
