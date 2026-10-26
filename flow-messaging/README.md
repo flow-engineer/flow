@@ -150,8 +150,11 @@ adapter picks the kind each channel takes:
   with buttons needs a text). Each part has its own Idempotency-Key, the carousel's plus `:text` or
   `:card:<i>`. On iMessage the agent is not offered one.
 - Quotes (`reply_to`), reactions (tapbacks on iMessage), typing (`{}`: it clears itself when the next
-  message goes, so nothing is sent when the agent stops typing), and read receipts (WhatsApp up to
-  the message read; iMessage marks the whole conversation).
+  message goes, so nothing is sent when the agent stops typing, or after a while: Telegram about 5 s,
+  iMessage 15 s, WhatsApp 25 s, each channel's `typingLastsMs`, so the conversation sends it again
+  while its turn runs; a refusal rejects, `outside_window` when the channel's window for typing is
+  closed, and the conversation decides and logs), and read receipts (WhatsApp up to the message
+  read; iMessage marks the whole conversation).
 - Edits and unsends (Telegram, iMessage): the agent's `edit_message` is `PATCH /v0/messages/{id}`
   with the new text styled as a send's would be (`telegram.parse_mode` HTML, `imessage.styles`), its
   `unsend_message` `DELETE /v0/messages/{id}`, by the id its send resolved with

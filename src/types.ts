@@ -296,6 +296,12 @@ export interface ChannelInfo {
   /** A typing indicator while the agent writes. Absent: not known, so typing is handed to the channel, as before. */
   typing?: boolean;
   /**
+   * How long the platform shows one typing indicator, in ms (WhatsApp 25 s, Telegram 5 s, iMessage
+   * on Flow Messaging 15 s). While a turn runs, Flow Framework sends typing again at 80% of it, so the
+   * indicator does not lapse. Absent: it shows until it is turned off or a message goes, and is sent once.
+   */
+  typingLastsMs?: number;
+  /**
    * The agent can change the text of a message it sent (Telegram, iMessage): it is offered
    * edit_message. The platform decides how late an edit may come; a refused one goes back to the agent.
    */

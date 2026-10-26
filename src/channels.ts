@@ -126,6 +126,7 @@ export interface WhatsAppProvider {
   /** Which parts of a message this provider can send. Default: all. */
   features?: { buttons?: boolean; lists?: boolean; replies?: boolean; links?: boolean; images?: boolean };
   react?(to: string, messageId: string, emoji: string): Promise<void>;
+  /** Shows (or hides) the typing indicator. Reject with an error whose message starts with `outside_window` when the platform refuses it outside the person's window: typing is tried again after the agent's next message. Any other rejection ends typing for the turn. */
   typing?(to: string, on: boolean): Promise<void>;
   markRead?(to: string, messageIds: string[]): Promise<void>;
   sendTemplate?(to: string, template: Template, idempotencyKey?: string): Promise<void | SendReceipt>;
@@ -148,6 +149,7 @@ export interface CustomUIProvider {
   /** A carousel, on a UI whose info declares carousels; without it the cards go one by one through sendMessage. */
   sendCarousel?(to: string, carousel: Carousel): Promise<void | SendReceipt>;
   react?(to: string, messageId: string, emoji: string): Promise<void>;
+  /** Shows (or hides) the typing indicator; rejections as WhatsAppProvider's typing. Set `info.typingLastsMs` if your UI hides it on its own after a while. */
   typing?(to: string, on: boolean): Promise<void>;
   markRead?(to: string, messageIds: string[]): Promise<void>;
   /** A short line of what the agent is doing, in your loading indicator; null clears it. */
@@ -176,6 +178,8 @@ export const WHATSAPP: ChannelInfo = {
   // An image's caption is at most 1,024 characters (as is an interactive message's body).
   images: { captionMax: 1024 },
   readReceipts: true,
+  // Typing shows until the reply, or for up to 25 seconds.
+  typingLastsMs: 25_000,
   replyWindowHours: 24,
 };
 
