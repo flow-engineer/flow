@@ -264,8 +264,25 @@ is scoped to the authenticated person's conversation, excluding model context an
 reference; the agent keeps its one-person history across channels. It does not erase a person's
 WhatsApp history. Teams can replace `chat` with their own Stricli command in `commands`.
 
-Serve the optional terminal handler as one of the agent's routes (no model or extra dependency in
-the CLI). Flow's hosting and the local playground (`npm start`) both serve an agent's `routes`:
+With sign-in, give `mcpServer` the agent and it serves chat itself: `/agent/terminal` on the MCP
+server's origin, checked with the same `auth.verify` as `/mcp`, listed in `paths` so Flow's hosting
+mounts it, and the terminal channel added to the agent (`agent.addChannel`). On Flow's hosting the
+`mcp(agent, host)` factory already has the agent:
+
+```ts
+export async function mcp(agent, host) {
+  const bridge = await oauthBridge({ ...options, storage: host.oauthStorage });
+  return mcpServer({ name, version, tools, auth: bridge.auth, agent });   // chat at /agent/terminal, signed in only
+}
+```
+
+`terminal: { guests: true }` lets a CLI that is not signed in chat too, `terminal: false` turns it
+off, and `terminal: { path, channel }` renames them. Do not also mount `terminalServer` for the same
+agent: two channels named terminal are refused.
+
+Without sign-in, or to serve chat from the agent's own port, mount the terminal handler as one of
+the agent's routes (no model or extra dependency in the CLI). Flow's hosting and the local
+playground (`npm start`) both serve an agent's `routes`:
 
 ```ts
 import { terminalServer } from "@flow-engineer/flow/mcp";

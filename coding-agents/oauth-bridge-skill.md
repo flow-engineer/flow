@@ -229,9 +229,12 @@ On Flow's hosting, `src/mcp.ts` exports a factory and the runtime passes the bri
 ```ts
 export async function mcp(agent, host) {
   const bridge = await oauthBridge({ ...options, storage: host.oauthStorage });
-  return mcpServer({ name, version, tools, auth: bridge.auth });   // its paths include the bridge's routes
+  return mcpServer({ name, version, tools, auth: bridge.auth, agent });   // its paths: the bridge's routes and /agent/terminal
 }
 ```
+
+Passing `agent` serves `<cli> chat` at `/agent/terminal` with the same sign-in as `/mcp`
+(`mcp-skill.md`, "Terminal conversations"); leave it out for MCP and CLI commands only.
 
 The signing key, encryption key and cookie key go in as secrets (`npx @flow-engineer/flow deploy
 secrets`). Self-hosted, deploy with durable storage (`databaseStorage(postgres(pool), issuer)`).
