@@ -70,10 +70,14 @@ each, in log order, to the same handler as the webhook.
   The adapter moves its cursor past an event only once the agent has taken it, so an event that
   fails, or arrives as the socket drops, comes again.
 - **Reconnects.** A dropped socket, Flow's `reconnect` frame (it restarts, or a connection reaches
-  24 hours) and a failed event reconnect with `after` set to the last handled event: at once the
-  first time, then backing off to 30 s, or after Flow's `retry_after` (too many streams for the
-  key, Flow busy). An event that fails 5 times in a row is passed over, so it cannot hold up every
-  later one; it stays in Flow's log (`GET /v0/events`).
+  24 hours) and a failed event reconnect with `after` set to the last handled event. After a
+  `reconnect` frame, at once; otherwise after a random wait (full jitter) up to 1 s, its ceiling
+  doubling per close to 30 s. A stream closed with 4404 (the route is gone) or 4429 (too many
+  streams opened) waits 30 s to 5 min. When Flow's error frame gives `retry_after`, the wait is at
+  least that long. The backoff starts again only once a connection delivers an event or stays open
+  30 s, so a stream refused right after it opens never reconnects in a tight loop. Each wait is
+  logged once (`console.warn`, with the close code). An event that fails 5 times in a row is passed
+  over, so it cannot hold up every later one; it stays in Flow's log (`GET /v0/events`).
 - **Offline messages.** With `cursorFile`, the last handled event's ID is kept on disk, so after a
   restart Flow replays everything that came while the agent was stopped, for as long as your plan
   keeps events (30 days by default). Without it, a dropped stream still resumes, but a restart

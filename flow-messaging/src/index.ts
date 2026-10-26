@@ -172,8 +172,16 @@ const EARLY_MAX = 1_000;
 /** A send waiting for its status reads the message back after this, then twice as long each time, up to POLL_MAX (ms). */
 const POLL_FIRST = 500;
 const POLL_MAX = 5_000;
-/** The longest wait between two tries to reconnect the stream (ms). */
+/** The stream's reconnect backoff: up to 1 s after the first close, doubling per close, up to STREAM_BACKOFF_MAX (ms), with full jitter. */
+const STREAM_BACKOFF_FIRST = 1_000;
 const STREAM_BACKOFF_MAX = 30_000;
+/** A connection is healthy once it delivers an event or stays open this long (ms); only then does the backoff start again. */
+const STREAM_HEALTHY_MS = 30_000;
+/** Close codes after which reconnecting soon fails again: the route is gone (4404), too many streams opened (4429). */
+const STREAM_HARD = new Set([4404, 4429]);
+/** After those, with no retry_after: at least STREAM_HARD_MIN, its ceiling doubling per close up to STREAM_HARD_MAX (ms). */
+const STREAM_HARD_MIN = 30_000;
+const STREAM_HARD_MAX = 300_000;
 /** Tries of one event before the stream gives up on it and goes on to the next. */
 const STREAM_EVENT_TRIES = 5;
 /** Close codes after which reconnecting unchanged fails again: authentication, permission, a bad request. */
@@ -808,16 +816,19 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * for events: the stream resumes from `after`, so an event counts as acknowledged once the agent
    * has handled it and the cursor (in memory, or `cursorFile`) has moved past it. A failed event, a
    * dropped socket or Flow's `reconnect` frame reconnects from that cursor, and Flow replays what
-   * came after it: at once the first time, then with a backoff up to 30 s, or after Flow's
-   * retry_after. An event that fails 5 times in a row is passed over, so it cannot hold up every
-   * later one. A refused key or request stops the stream (`stopped`). Replies go over HTTP
-   * (with Idempotency-Keys), so they do not depend on the stream being up.
+   * came after it: at once after a reconnect frame, else after a jittered backoff (up to 1 s, doubling
+   * to 30 s; 30 s to 5 min after 4404 or 4429), never sooner than Flow's retry_after. The backoff starts
+   * again only once a connection delivers an event or stays open 30 s, so a stream refused right after
+   * it opens never reconnects in a tight loop. An event that fails 5 times in a row is passed over, so
+   * it cannot hold up every later one. A refused key or request stops the stream (`stopped`). Replies
+   * go over HTTP (with Idempotency-Keys), so they do not depend on the stream being up.
    */
   function stream(agent: WebhookAgent, o: StreamOptions = {}): StreamHandle {
     if (!apiKey) throw new Error("@flow-engineer/flow/flow-messaging: set FLOW_MESSAGING_KEY (or pass apiKey) to open the stream");
     let cursor = o.cursorFile ? readCursor(o.cursorFile) : undefined;
     let socket: WebSocket | undefined;
     let timer: NodeJS.Timeout | undefined;
+    let healthy: NodeJS.Timeout | undefined;
     let closed = false;
     let tries = 0;
     let failing: { id: string; times: number } | undefined;
@@ -840,8 +851,13 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       const ws = new WebSocket(url, ["flow", `flow.key.${apiKey}`]);
       socket = ws;
       let refusal: { type?: string; message?: string; param?: string; retry_after?: number } | undefined;
+      // A socket that opens is not yet healthy: a refused stream opens, sends an error frame and closes.
+      // The backoff starts again once the connection delivers an event or stays open STREAM_HEALTHY_MS;
+      // a failing event keeps its backoff across reconnects.
       ws.onopen = () => {
-        if (!failing) tries = 0; // a failing event keeps its backoff across reconnects
+        healthy = setTimeout(() => {
+          if (!failing) tries = 0;
+        }, STREAM_HEALTHY_MS);
       };
       ws.onmessage = (message) => {
         let frame: { type?: string; event?: FlowEvent; error?: typeof refusal; ref?: string };
@@ -851,12 +867,14 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
           return;
         }
         if (frame.type === "event" && frame.event && typeof frame.event.id === "string") {
+          if (!failing) tries = 0;
           const event = frame.event;
           queue = queue.then(() => take(event, mine, ws));
         } else if (frame.type === "error" && !frame.ref) refusal = frame.error ?? {};
       };
       ws.onerror = () => {}; // a close always follows
       ws.onclose = ({ code, reason }) => {
+        clearTimeout(healthy);
         if (socket === ws) socket = undefined;
         if (closed || mine !== generation) return;
         if (STREAM_FINAL.has(code)) {
@@ -872,11 +890,14 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
           console.warn(`@flow-engineer/flow/flow-messaging: the stream stopped: ${type} (${code})`);
           return void stop({ code, type, message: why });
         }
-        // 1012 follows a reconnect frame: at once. 4429 and 45xx say when (retry_after). Else back off.
-        if (code === 1012) return void later(0);
-        if (refusal?.retry_after !== undefined) return void later(refusal.retry_after * 1000);
-        later(Math.min(STREAM_BACKOFF_MAX, tries === 0 ? 0 : 1000 * 2 ** (tries - 1)));
-        tries++;
+        // 1012 follows a reconnect frame: at once. Else back off, never less than Flow's retry_after.
+        if (code === 1012) {
+          console.debug("@flow-engineer/flow/flow-messaging: the stream closed (1012) after a reconnect frame; reconnecting now");
+          return void later(0);
+        }
+        const ms = streamWait(code, refusal?.retry_after, tries++);
+        console.warn(`@flow-engineer/flow/flow-messaging: the stream closed (${code}${refusal?.type ? ` ${refusal.type}` : ""}); reconnecting in ${(ms / 1000).toFixed(1)} s`);
+        later(ms);
       };
     }
 
@@ -911,6 +932,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       async close() {
         closed = true;
         clearTimeout(timer);
+        clearTimeout(healthy);
         socket?.close(1000, "closing");
         await queue;
       },
@@ -928,6 +950,18 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   return { whatsapp, telegram, imessage, sms, channels, webhook, receive, stream, start };
+}
+
+/**
+ * How long to wait before reconnecting the stream after its `tries`-th close in a row (from 0), in ms.
+ * Full jitter: a random wait up to a ceiling that doubles per close. 4404 and 4429 wait at least
+ * STREAM_HARD_MIN. A retry_after from Flow is waited first, with the jittered backoff on top.
+ */
+function streamWait(code: number, retryAfter: number | undefined, tries: number): number {
+  const normal = Math.random() * Math.min(STREAM_BACKOFF_MAX, STREAM_BACKOFF_FIRST * 2 ** tries);
+  if (typeof retryAfter === "number" && retryAfter >= 0) return retryAfter * 1000 + normal;
+  if (!STREAM_HARD.has(code)) return normal;
+  return STREAM_HARD_MIN + Math.random() * (Math.min(STREAM_HARD_MAX, STREAM_HARD_MIN * 2 ** (tries + 1)) - STREAM_HARD_MIN);
 }
 
 function readCursor(file: string): string | undefined {
