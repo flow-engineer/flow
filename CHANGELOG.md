@@ -2,6 +2,30 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.10.2 (2026-10-26)
+
+### Changes
+
+- **`defineCli({ exclude: [...] })`: tools that get no command of their own.** An excluded tool is
+  not in the CLI's help, completion or skill, and `flow check` no longer warns that it has no
+  command. It stays on the server, so a command of the team's own can still call it with
+  `this.cli.call`: a `keys reveal` that copies a key without printing it no longer leaves the raw
+  `api-keys-reveal` beside it. `flow check` refuses an excluded name the server has no tool for,
+  and a `{ tool }` command naming an excluded tool.
+- **Terminal chat recovers after signing in as another account.** The CLI kept one conversation
+  reference per agent, so after `auth login` as someone else (or another token) every `chat` sent
+  the previous account's conversation and failed with "The agent's reply was interrupted or
+  invalid". The agent still refuses a conversation that is not the person's, now with
+  `409 { "error": "conversation_mismatch" }` (a stream's `error` event carries
+  `code: "conversation_mismatch"`), before any turn starts; the CLI then forgets the reference and
+  sends the message once more, starting the account's own conversation. No other failure is sent
+  again. `auth login` and `auth logout` also forget the signed-in reference.
+
+### Migration notes
+
+None. A client of the terminal endpoint that read a mismatched conversation as `500 turn_failed`
+now gets `409 conversation_mismatch`.
+
 ## 0.10.1 (2026-10-26)
 
 ### Changes

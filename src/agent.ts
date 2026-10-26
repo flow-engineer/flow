@@ -533,7 +533,7 @@ export class Agent {
     if (!input.key === !input.guest) throw new Error("flow: request needs exactly one of key or guest");
     const from = input.key ?? `guest:${input.guest}`;
     const identity = await this.conversationFor(adapter, input.channel, from, undefined, input.key);
-    if (input.conversationId && input.conversationId !== identity.conversationId) throw new Error("chinwag: conversation does not belong to this person");
+    if (input.conversationId && input.conversationId !== identity.conversationId) throw Object.assign(new Error("chinwag: conversation does not belong to this person"), { code: "conversation_mismatch" });
     const replies: Outbound[] = [];
     const address = viaKey(input.channel, from);
     if (input.credentials) this.requestCredentials.set(address, input.credentials);

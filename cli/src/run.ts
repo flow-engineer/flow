@@ -6,7 +6,7 @@
 // overwrite, and fixed exit codes. The commands come from the server's tools at run time, shaped by
 // the CLI file (commands.ts).
 
-import { forTerminal, runTerminal, type ChatSession } from "./terminal.ts";
+import { forgetChat, forTerminal, runTerminal, type ChatSession } from "./terminal.ts";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -833,6 +833,7 @@ function authRoutes(config: CliConfig, server: string | undefined, io: CliIO): R
         parameters: {},
         async func() {
           await signIn(config, need(), io.signal, (text) => io.writeError(text));
+          forgetChat(config, need());
           io.writeError(`Signed in to ${need()}.\n`);
         },
       }),
@@ -841,6 +842,7 @@ function authRoutes(config: CliConfig, server: string | undefined, io: CliIO): R
         parameters: {},
         func() {
           signOut(config, need());
+          forgetChat(config, need());
           io.writeError(`Signed out of ${need()}.\n`);
         },
       }),

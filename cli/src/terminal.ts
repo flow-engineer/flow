@@ -44,7 +44,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   const styled = io.interactive && !env.NO_COLOR && env.FORCE_COLOR !== "0" && env.TERM !== "dumb";
   const paint = (format: Parameters<typeof styleText>[0], text: string) => styled ? styleText(format, text, { validateStream: false }) : text;
   const safe = (text: string) => stripVTControlCharacters(text).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
-  const endpoint = config.agent ?? new URL("/agent/terminal", server).href;
+  const endpoint = chatEndpoint(config, server);
   const file = join(configDir(config), "chat.json");
   let saved: Record<string, string> = {};
   try { saved = JSON.parse(readFileSync(file, "utf8")); } catch {}
@@ -73,50 +73,62 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
       if (update) throw Object.assign(new Error(message), { exitCode: code });
       io.writeError(`${message}\n`); return code;
     };
-    let response;
     const clearStatus = humanChat && !fullScreen && Boolean(process.stderr.isTTY) && (io.env ?? process.env).TERM !== "dumb";
     if (humanChat && !fullScreen) io.writeError(`${paint("dim", "  Waiting for reply…")}${clearStatus ? "" : "\n"}`);
     const requestSignal = AbortSignal.any([AbortSignal.timeout(10 * 60_000), ...[io.signal, signal].filter((s): s is AbortSignal => Boolean(s))]);
-    const request = () => fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", ...(update ? { accept: "application/x-ndjson" } : {}), ...(token ? { authorization: `Bearer ${token}` } : { "flow-guest": guest() }) }, body: JSON.stringify({ text, ...(saved[reference()] ? { conversationId: saved[reference()] } : {}) }), signal: requestSignal });
-    try {
-      response = await request();
-      if (response.status === 401 && stored) {
-        await response.body?.cancel();
-        token = await storedAccessToken(config, server!, true, requestSignal);
-        if (token) response = await request();
-      }
-    }
-    catch { response = undefined; }
-    finally { if (clearStatus) io.writeError("\r\u001b[2K"); }
-    if (!response) return fail(`Could not reach the agent at ${endpoint}. Is it running?`, 5);
-    // The server answered, so it is running; it has no chat route (a playground, an MCP server without the agent).
-    if (response.status === 404 || response.status === 405 || (response.status === 403 && !token)) return fail(`This server does not serve terminal chat (${endpoint}).`, 5);
-    if (response.status === 401 || response.status === 403) return fail(`Sign in first: ${config.name} auth login${token ? "" : ` (or set ${tokenEnvOf(config)})`}.`, 3);
-    if (!response.ok) return fail(`The agent could not finish (${response.status}).`, 1);
     let result: { conversationId: string; replies: Array<{ type: string; text?: string }> } | undefined;
-    try {
-      if (update && response.headers.get("content-type")?.includes("application/x-ndjson")) {
-        if (!response.body) throw new Error("Missing stream");
-        let pending = "";
-        for await (const chunk of response.body.pipeThrough(new TextDecoderStream())) {
-          pending += chunk;
-          if (pending.length > 4_000_000) throw new Error("Reply too large");
-          let end: number;
-          while ((end = pending.indexOf("\n")) >= 0) {
-            const line = pending.slice(0, end); pending = pending.slice(end + 1);
-            if (!line.trim()) continue;
-            const event = JSON.parse(line);
-            if (event.type === "done") result = event.result;
-            else if (event.type === "error") throw new Error("Turn failed");
-            else if (event.type === "reply" || event.type === "activity") update(event);
-          }
+    // A conversation another account started (signed in as someone else since) is refused before
+    // the turn starts, so it is forgotten and the message sent once more without it; nothing else is retried.
+    for (let retried = false; ; retried = true) {
+      const conversationId = saved[reference()];
+      const forget = () => { delete saved[reference()]; save(); };
+      const request = () => fetch(endpoint, { method: "POST", headers: { "content-type": "application/json", ...(update ? { accept: "application/x-ndjson" } : {}), ...(token ? { authorization: `Bearer ${token}` } : { "flow-guest": guest() }) }, body: JSON.stringify({ text, ...(conversationId ? { conversationId } : {}) }), signal: requestSignal });
+      let response;
+      try {
+        response = await request();
+        if (response.status === 401 && stored) {
+          await response.body?.cancel();
+          token = await storedAccessToken(config, server!, true, requestSignal);
+          if (token) response = await request();
         }
-        if (pending.trim() || !result) throw new Error("Incomplete stream");
-      } else {
-        result = await response.json() as { conversationId: string; replies: Array<{ type: string; text?: string }> };
-        if (update) for (const reply of result.replies ?? []) if (reply.type === "message") update({ type: "reply", text: reply.text ?? "" });
       }
-    } catch { return fail("The agent's reply was interrupted or invalid. Work already accepted may still finish.", 1); }
+      catch { response = undefined; }
+      finally { if (clearStatus) io.writeError("\r\u001b[2K"); }
+      if (!response) return fail(`Could not reach the agent at ${endpoint}. Is it running?`, 5);
+      // The server answered, so it is running; it has no chat route (a playground, an MCP server without the agent).
+      if (response.status === 404 || response.status === 405 || (response.status === 403 && !token)) return fail(`This server does not serve terminal chat (${endpoint}).`, 5);
+      if (response.status === 401 || response.status === 403) return fail(`Sign in first: ${config.name} auth login${token ? "" : ` (or set ${tokenEnvOf(config)})`}.`, 3);
+      if (response.status === 409 && conversationId && !retried && (await response.json().catch(() => null) as { error?: unknown } | null)?.error === "conversation_mismatch") { forget(); continue; }
+      if (!response.ok) return fail(`The agent could not finish (${response.status}).`, 1);
+      let mismatch = false;
+      try {
+        if (update && response.headers.get("content-type")?.includes("application/x-ndjson")) {
+          if (!response.body) throw new Error("Missing stream");
+          let pending = "";
+          for await (const chunk of response.body.pipeThrough(new TextDecoderStream())) {
+            pending += chunk;
+            if (pending.length > 4_000_000) throw new Error("Reply too large");
+            let end: number;
+            while ((end = pending.indexOf("\n")) >= 0) {
+              const line = pending.slice(0, end); pending = pending.slice(end + 1);
+              if (!line.trim()) continue;
+              const event = JSON.parse(line);
+              if (event.type === "done") result = event.result;
+              else if (event.type === "error") { mismatch = event.code === "conversation_mismatch"; throw new Error("Turn failed"); }
+              else if (event.type === "reply" || event.type === "activity") update(event);
+            }
+          }
+          if (pending.trim() || !result) throw new Error("Incomplete stream");
+        } else {
+          result = await response.json() as { conversationId: string; replies: Array<{ type: string; text?: string }> };
+          if (update) for (const reply of result.replies ?? []) if (reply.type === "message") update({ type: "reply", text: reply.text ?? "" });
+        }
+      } catch {
+        if (mismatch && conversationId && !retried) { forget(); continue; }
+        return fail("The agent's reply was interrupted or invalid. Work already accepted may still finish.", 1);
+      }
+      break;
+    }
     if (!result || typeof result.conversationId !== "string" || !Array.isArray(result.replies)) return fail("The agent returned an invalid reply.", 1);
     io.signal?.throwIfAborted();
     saved[reference()] = result.conversationId;
@@ -169,6 +181,21 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
     if (text) { const code = await send(text); if (code) return code; }
   }
   return 0;
+}
+
+function chatEndpoint(config: CliConfig, server: string): string {
+  return config.agent ?? new URL("/agent/terminal", server).href;
+}
+
+/** Forgets the signed-in conversation reference for a server: a new sign-in may be another account. */
+export function forgetChat(config: CliConfig, server: string): void {
+  const file = join(configDir(config), "chat.json");
+  let saved: Record<string, string>;
+  try { saved = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  const endpoint = chatEndpoint(config, server);
+  if (!(endpoint in saved)) return;
+  delete saved[endpoint];
+  writeFileSync(file, `${JSON.stringify(saved)}\n`, { mode: 0o600 });
 }
 
 /** The same optional Markdown renderer for chat and tool output. Pipes retain the source. */
