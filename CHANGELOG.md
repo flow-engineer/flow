@@ -28,6 +28,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - **`flow check`** errors on an `mcp.clients` value other than `"cli"`, and warns about a tool kept
   to the CLI when the agent has no `src/cli.ts`.
 - `McpClientKind` is exported from `@flow-engineer/flow`.
+- **A brand CLI's `auth login` always prints the sign-in link,** so it can be pasted into another
+  browser when the page opens in the wrong one.
 
 ### Migration notes
 
