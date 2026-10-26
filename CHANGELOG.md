@@ -2,10 +2,15 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## 0.10.0 (unreleased)
+## 0.9.1 (2026-10-26)
 
 ### Changes
 
+- **Text in full-screen chat can be selected and copied.** Chat no longer captures the mouse, so
+  the terminal selects and copies as usual. The wheel still scrolls: terminals send it as Up/Down
+  in chat's screen, and Up/Down now scroll the conversation unless a multi-line draft needs them.
+  Ctrl+P/Ctrl+N recall sent messages (Up/Down did). The Send button shows what Enter does; it no
+  longer takes clicks.
 - **Terminal chat beside authenticated MCP, with no terminal code.** `mcpServer({ auth, agent })`
   serves `/agent/terminal` on its own origin, checks each request with the same `auth.verify` as
   `/mcp`, lists the path in `paths` (so Flow's hosting mounts it beside `/mcp`), and adds the
@@ -34,25 +39,11 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
-- The stream's backoff: none.
+- The stream's backoff and copying text: none.
 - Nothing changes for an agent that does not pass `agent` to `mcpServer`.
 - An agent that mounts `terminalServer` itself and wants the built-in route: remove its
   `terminalServer`, its channel and its route, then pass `agent` to `mcpServer`. Keeping both
   is refused when the server is made ("already has a channel named terminal").
-
-## 0.9.1 (2026-10-26)
-
-### Changes
-
-- **Text in full-screen chat can be selected and copied.** Chat no longer captures the mouse, so
-  the terminal selects and copies as usual. The wheel still scrolls: terminals send it as Up/Down
-  in chat's screen, and Up/Down now scroll the conversation unless a multi-line draft needs them.
-  Ctrl+P/Ctrl+N recall sent messages (Up/Down did). The Send button shows what Enter does; it no
-  longer takes clicks.
-
-### Migration notes
-
-None.
 
 ## 0.9.0 (2026-10-26)
 
