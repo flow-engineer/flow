@@ -24,12 +24,16 @@ export interface ChatSession {
 }
 
 export async function runTerminal(config: CliConfig, server: string | undefined, token: string | undefined, argv: string[], io: CliIO): Promise<number> {
-  const usage = `${config.name} chat ["<message>"] [--json] [--new]`;
-  let flags: { values: { json?: boolean; new?: boolean; help?: boolean }; positionals: string[] };
-  try { flags = parseArgs({ args: argv.slice(1), allowPositionals: true, options: { json: { type: "boolean" }, new: { type: "boolean" }, help: { type: "boolean", short: "h" } } }); }
+  const usage = `${config.name} chat ["<message>"] [--json] [--plain] [--new]`;
+  let flags: { values: { json?: boolean; plain?: boolean; new?: boolean; help?: boolean }; positionals: string[] };
+  try { flags = parseArgs({ args: argv.slice(1), allowPositionals: true, options: { json: { type: "boolean" }, plain: { type: "boolean" }, new: { type: "boolean" }, help: { type: "boolean", short: "h" } } }); }
   catch { io.writeError(`Usage: ${usage}\n`); return 2; }
-  if (flags.values.help) { io.write(`${usage}\nTalk to the agent. --new forgets this terminal's saved conversation reference; shared person history stays with the agent.\n\nInteractive chat opens a full-screen session. Enter sends; Shift+Enter, Alt+Enter or \\ then Enter adds a line.\nCtrl+O expands tool details; PageUp/PageDown scroll. Tab completes /help, /details, /new and /exit.\nEscape stops waiting; accepted work may still finish. Ctrl-D leaves an empty prompt.\n`); return 0; }
+  if (flags.values.help) { io.write(`${usage}\nTalk to the agent. --new forgets this terminal's saved conversation reference; shared person history stays with the agent.\n--plain prints replies as written and never opens the interactive view; it is on when a coding agent runs this.\n\nInteractive chat opens a full-screen session. Enter sends; Shift+Enter, Alt+Enter or \\ then Enter adds a line.\nCtrl+O expands tool details; PageUp/PageDown scroll. Tab completes /help, /details, /new and /exit.\nEscape stops waiting; accepted work may still finish. Ctrl-D leaves an empty prompt.\n`); return 0; }
   if (flags.positionals.length > 1) { io.writeError(`Usage: ${usage}\n`); return 2; }
+  const env = io.env ?? process.env;
+  // A coding agent's shell can be a terminal (Cursor's is), yet it cannot drive a full-screen view
+  // and pays for every styled line: Claude Code, Cursor and Codex mark their commands' environment.
+  if (flags.values.plain || env.CLAUDECODE || env.CURSOR_AGENT || env.CODEX_CI || env.AI_AGENT) io = { ...io, interactive: false };
   const single = flags.positionals.length === 1;
   if (!single && !io.interactive) { io.writeError(`chat needs a terminal; for a single reply use ${config.name} chat "<message>".\n`); return 2; }
   if (!server) { io.writeError("Pass --server <url> or configure the MCP server.\n"); return 5; }
@@ -37,7 +41,6 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   try { if (stored) token = await storedAccessToken(config, server, false, io.signal); }
   catch { io.writeError(`Sign in again: ${config.name} auth login.\n`); return 3; }
   const humanChat = !single && !flags.values.json;
-  const env = io.env ?? process.env;
   const styled = io.interactive && !env.NO_COLOR && env.FORCE_COLOR !== "0" && env.TERM !== "dumb";
   const paint = (format: Parameters<typeof styleText>[0], text: string) => styled ? styleText(format, text, { validateStream: false }) : text;
   const safe = (text: string) => stripVTControlCharacters(text).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");

@@ -20,6 +20,9 @@ import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/ind
 import { scriptedModel, respond, call } from "./helpers.ts";
 import { createAgent, tool } from "../src/index.ts";
 
+// These tests drive chat as a person would; a coding agent running them must not switch chat to plain.
+for (const name of ["CLAUDECODE", "CURSOR_AGENT", "CODEX_CI", "AI_AGENT"]) delete process.env[name];
+
 const servers: Server[] = [];
 const testDirectory = mkdtempSync(join(tmpdir(), "flow-cli-tests-"));
 after(() => servers.forEach((s) => s.close()));
@@ -816,6 +819,27 @@ test("human chat distinguishes input, waiting and agent replies", async (t) => {
   assert.equal(await chat, 0);
   assert.equal(out.out, "\nacme\n  Checking.\n  \n  Here is the answer.\n\n");
   assert.doesNotMatch(out.out, /typing|person-1/);
+});
+
+// The test above is a person at a terminal; a coding agent's shell can be a terminal too (Cursor's is).
+test("a coding agent at a terminal gets chat replies as written and never the interactive view", async (t) => {
+  const old = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "flow-agent-chat-"));
+  t.after(() => { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; });
+  const base = await listen((_req, res) => void res.writeHead(200, { "content-type": "application/json" })
+    .end(JSON.stringify({ conversationId: "person-1", replies: [{ type: "message", text: "| Order | Status |\n| --- | --- |\n| 1042 | **Ready** |" }] })));
+  const cli = defineCli({ name: "acme", server: `${base}/mcp` });
+  for (const env of [{ CLAUDECODE: "1" }, { CURSOR_AGENT: "1" }, { CODEX_CI: "1" }, {}]) {
+    const flag = Object.keys(env).length ? [] : ["--plain"];
+    const loop = io(true);
+    Object.assign(loop.channel, { env, chat: async () => { throw new Error("opened the interactive view"); } });
+    assert.equal(await runCli(cli, ["chat", ...flag, "--token", "test"], loop.channel), 2, JSON.stringify(env));
+    assert.match(loop.err, /for a single reply use acme chat "<message>"/);
+    const one = io(true);
+    one.channel.env = env;
+    assert.equal(await runCli(cli, ["chat", "orders?", ...flag, "--token", "test"], one.channel), 0);
+    assert.equal(one.out, "| Order | Status |\n| --- | --- |\n| 1042 | **Ready** |\n", "the reply as written, with nothing for a person around it");
+  }
 });
 
 // Existing chat tests cover authentication/presentation; local commands must not reach the agent.

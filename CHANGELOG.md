@@ -2,6 +2,20 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.9.2 (2026-10-26)
+
+### Changes
+
+- **Chat run by a coding agent is plain.** When `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_CI` or
+  `AI_AGENT` is set, or with the new `--plain`, `acme chat` acts as without a terminal even when the
+  agent's shell is one (Cursor's is): replies print as written, the interactive view never opens,
+  and `chat` with no message exits 2 instead of waiting for input that never comes.
+- **The CLI's skill says chat may not need sign-in,** and tells agents to always pass the message.
+
+### Migration notes
+
+None.
+
 ## 0.9.1 (2026-10-26)
 
 ### Changes
