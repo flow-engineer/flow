@@ -85,7 +85,9 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
     }
     catch { response = undefined; }
     finally { if (clearStatus) io.writeError("\r\u001b[2K"); }
-    if (!response) return fail("Could not reach the agent.", 5);
+    if (!response) return fail(`Could not reach the agent at ${endpoint}. Is it running?`, 5);
+    // Another server on that port (a playground, the MCP server alone) has no chat.
+    if (response.status === 404 || response.status === 405 || (response.status === 403 && !token)) return fail(`No agent chat at ${endpoint}. Is the agent running?`, 5);
     if (response.status === 401 || response.status === 403) return fail(`Sign in first: ${config.name} auth login${token ? "" : ` (or set ${tokenEnvOf(config)})`}.`, 3);
     if (!response.ok) return fail(`The agent could not finish (${response.status}).`, 1);
     let result: { conversationId: string; replies: Array<{ type: string; text?: string }> } | undefined;

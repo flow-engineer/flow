@@ -17,8 +17,8 @@ export const cli = defineCli({
   name,
   server: process.env[serverEnv] ?? "http://127.0.0.1:8790/mcp",
   // Chat is the agent itself (npm start, wherever it found a port), not the MCP server; a deployed
-  // server answers both on one origin.
-  agent: process.env[serverEnv] ? undefined : `${runningAgent(fileURLToPath(new URL("..", import.meta.url)))?.url ?? "http://127.0.0.1:8788"}/agent/terminal`,
+  // server answers both on one origin. Not running, chat says to start it.
+  agent: process.env[serverEnv] ? undefined : (running => running && `${running.url}/agent/terminal`)(runningAgent(fileURLToPath(new URL("..", import.meta.url)))),
   description: "The menu and pickup orders",
   groups: { order: "Place and track pickup orders" },
   commands: {
