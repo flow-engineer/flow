@@ -53,8 +53,6 @@ export class ChatView implements Component, Focusable {
   private busy?: AbortController;
   private light?: boolean;
   private panelBackground?: string;
-  private sendBounds?: { row: number; first: number; last: number };
-  private pressedSend = false;
   private tick = 0;
   private title = "New conversation";
   private _focused = false;
@@ -194,30 +192,6 @@ export class ChatView implements Component, Focusable {
       this.panelBackground = wash ? `2;${wash.join(";")}` : `5;${232 + Math.max(0, Math.min(23, Math.round((gray - 8) / 10)))}`;
       this.invalidate(); this.tui.requestRender(); return;
     }
-    // ProcessTerminal buffers split escape sequences, including SGR and legacy mouse packets.
-    const mouse = /^\x1b\[<(\d+);(\d+);(\d+)([mM])$/.exec(data);
-    const legacyMouse = data.startsWith("\x1b[M") && data.length === 6;
-    if (mouse || legacyMouse) {
-      const button = mouse ? Number(mouse[1]) : data.charCodeAt(3) - 32;
-      if ((!mouse || mouse[4] === "M") && (button & 64)) {
-        const direction = button & 3;
-        if (direction <= 1) this.scrollDelta += direction === 0 ? -3 : 3;
-      }
-      const x = mouse ? Number(mouse[2]) : data.charCodeAt(4) - 32;
-      const y = mouse ? Number(mouse[3]) : data.charCodeAt(5) - 32;
-      const within = this.sendBounds && y === this.sendBounds.row && x >= this.sendBounds.first && x <= this.sendBounds.last;
-      if (!(button & 64)) {
-        const released = mouse ? mouse[4] === "m" : (button & 3) === 3;
-        if ((button & 3) === 0 && !released) this.pressedSend = Boolean(within);
-        else if (released) {
-          const send = this.pressedSend && within;
-          this.pressedSend = false;
-          if (send) this.editor.handleInput("\r");
-        }
-      }
-      // Other clicks and horizontal wheel events never become text in the composer.
-      this.tui.requestRender(); return;
-    }
     if (matchesKey(data, "ctrl+c")) {
       if (this.busy) this.busy.abort();
       else if (this.editor.getText()) this.editor.setText("");
@@ -226,6 +200,11 @@ export class ChatView implements Component, Focusable {
     else if (matchesKey(data, "ctrl+o")) this.details = !this.details;
     else if (matchesKey(data, "f1")) this.toggleHelp();
     else if (matchesKey(data, "escape") && this.busy) this.busy.abort();
+    // The terminal keeps the mouse, so selecting and copying work as anywhere else. Terminals send the
+    // wheel as Up/Down in this screen; they scroll unless a multi-line draft needs them.
+    else if ((matchesKey(data, "up") || matchesKey(data, "down")) && !this.editor.getText().includes("\n")) this.scrollDelta += matchesKey(data, "up") ? -3 : 3;
+    else if (matchesKey(data, "ctrl+p")) this.editor.handleInput("\x1b[A");
+    else if (matchesKey(data, "ctrl+n")) this.editor.handleInput("\x1b[B");
     else if (matchesKey(data, "pageUp")) this.scrollDelta -= Math.max(1, this.viewportRows - 2);
     else if (matchesKey(data, "pageDown")) this.scrollDelta += Math.max(1, this.viewportRows - 2);
     else if (matchesKey(data, "ctrl+end")) { this.jump = "bottom"; this.scrollDelta = 0; }
@@ -236,7 +215,6 @@ export class ChatView implements Component, Focusable {
   }
 
   render(width: number): string[] {
-    this.sendBounds = undefined;
     const rows = Math.max(1, this.tui.terminal.rows);
     if (width < 16 || rows < 9) return [truncateToWidth("Enlarge the terminal to chat.", width), ...Array(Math.max(0, rows - 1)).fill("")];
     const contentWidth = Math.max(8, Math.min(100, width - 6));
@@ -273,15 +251,13 @@ export class ChatView implements Component, Focusable {
       inset(action), inset(this.dim(`╰${"─".repeat(contentWidth - 2)}╯`)),
       ...suggestions.slice(0, suggestionCount).map(line => inset(`  ${line}`))];
     const footer = [...composer, inset(this.dim(`Ctrl+O details${this.details ? " on" : ""}`))];
-    this.sendBounds = { row: rows - footer.length + 1 + inputLines.length + 1,
-      first: margin + 2 + actionWidth + 1, last: margin + 2 + actionWidth + buttonWidth };
     let header = inset(this.accent(clean(this.session.name)) + this.color("22;39", `  /  ${this.title}`));
     const available = Math.max(1, rows - footer.length - 3);
     this.viewportRows = available;
     let timeline: string[] = [];
     const anchors: ScrollAnchor[] = [];
     if (this.help) {
-      timeline = new Markdown("## Chat shortcuts\n\n- **Enter** sends; **Shift+Enter**, **Alt+Enter**, or **\\\\ then Enter** adds a line.\n- **Up/Down** recall previous messages when at the edge of the editor.\n- **Tab** completes slash commands.\n- **Ctrl+O** or `/details` expands tool inputs and results.\n- **Mouse wheel/trackpad** and **PageUp/PageDown** scroll the conversation. **Ctrl+Home** jumps to the start; **Ctrl+End** returns to the latest reply.\n- **Escape** stops waiting for the current request. Accepted work may still finish.\n- **Ctrl+C** clears a draft, stops waiting, or exits on an empty prompt.\n- `/new` clears this view and forgets the saved terminal reference. Shared person history stays.\n- `/exit` leaves chat. **F1** toggles this help.", 0, 0, this.markdown).render(contentWidth);
+      timeline = new Markdown("## Chat shortcuts\n\n- **Enter** sends; **Shift+Enter**, **Alt+Enter**, or **\\\\ then Enter** adds a line.\n- **Ctrl+P/Ctrl+N** recall previous messages.\n- **Tab** completes slash commands.\n- **Ctrl+O** or `/details` expands tool inputs and results.\n- **Mouse wheel/trackpad**, **Up/Down** and **PageUp/PageDown** scroll the conversation; select text with the mouse to copy it. **Ctrl+Home** jumps to the start; **Ctrl+End** returns to the latest reply.\n- **Escape** stops waiting for the current request. Accepted work may still finish.\n- **Ctrl+C** clears a draft, stops waiting, or exits on an empty prompt.\n- `/new` clears this view and forgets the saved terminal reference. Shared person history stays.\n- `/exit` leaves chat. **F1** toggles this help.", 0, 0, this.markdown).render(contentWidth);
     } else if (!this.entries.length) {
       timeline = [this.color("1", "What can I help you with?"), this.dim("Ask a question, describe a task, or paste some context.")];
     } else {
@@ -354,7 +330,6 @@ export async function runChatUI(session: ChatSession, terminal: Terminal = new P
   terminal.write("\x1b[?1049h\x1b[H");
   try {
     tui.start();
-    terminal.write("\x1b[?1000h\x1b[?1006h");
     if (session.color !== false) terminal.write("\x1b]11;?\x07");
     timer = setInterval(() => view.animate(), 100);
     await done;
@@ -363,7 +338,7 @@ export async function runChatUI(session: ChatSession, terminal: Terminal = new P
     if (timer) clearInterval(timer);
     try { view.stop(); tui.stop(); }
     finally {
-      terminal.write("\x1b[?1006l\x1b[?1000l\x1b[?1049l");
+      terminal.write("\x1b[?1049l");
       session.signal?.removeEventListener("abort", abort);
     }
   }

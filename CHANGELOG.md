@@ -40,6 +40,20 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `terminalServer`, its channel and its route, then pass `agent` to `mcpServer`. Keeping both
   is refused when the server is made ("already has a channel named terminal").
 
+## 0.9.1 (2026-10-26)
+
+### Changes
+
+- **Text in full-screen chat can be selected and copied.** Chat no longer captures the mouse, so
+  the terminal selects and copies as usual. The wheel still scrolls: terminals send it as Up/Down
+  in chat's screen, and Up/Down now scroll the conversation unless a multi-line draft needs them.
+  Ctrl+P/Ctrl+N recall sent messages (Up/Down did). The Send button shows what Enter does; it no
+  longer takes clicks.
+
+### Migration notes
+
+None.
+
 ## 0.9.0 (2026-10-26)
 
 ### Changes

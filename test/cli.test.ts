@@ -918,8 +918,8 @@ test("full-screen chat restores the ordinary terminal on exit", async () => {
   fake.input("\x04");
   assert.equal(await run, 0); assert.equal(fake.stopped, true);
   assert.match(fake.output, /^\x1b\[\?1049h/);
-  assert.match(fake.output, /\x1b\[\?1000h\x1b\[\?1006h/, "wheel reporting is enabled for the session");
-  assert.match(fake.output, /\x1b\[\?1006l\x1b\[\?1000l\x1b\[\?1049l$/, "mouse reporting and alternate screen are restored together");
+  assert.doesNotMatch(fake.output, /\x1b\[\?100[0-6]h/, "the terminal keeps the mouse, so text can be selected and copied");
+  assert.match(fake.output, /\x1b\[\?1049l$/, "the alternate screen is restored");
 });
 
 // This protects the live transport: a tool and reply must arrive while the turn is still running.
@@ -1007,7 +1007,7 @@ test("chat preserves a failed message for editing and can stop waiting without c
 
 
 // Layout tests never scroll: this protects reading position while the transcript/layout changes.
-test("chat wheel and keyboard scrolling preserve the draft and reading position until returning to latest", async () => {
+test("chat wheel (Up/Down) and keyboard scrolling preserve the draft and reading position until returning to latest", async () => {
   const fake = fakeChatTerminal(90, 24);
   const tui = new TUI(fake.terminal);
   let update!: (event: ChatUpdate) => void, release!: () => void;
@@ -1023,7 +1023,7 @@ test("chat wheel and keyboard scrolling preserve the draft and reading position 
     update({ type: "reply", text: block("line", 120) });
     view.editor.setText("Draft stays");
     assert.match(frame().join("\n"), /line-120/);
-    for (let i = 0; i < 3; i++) view.handleInput("\x1b[<64;10;10M");
+    for (let i = 0; i < 3; i++) view.handleInput("\x1b[A"); // The wheel, as the terminal sends it.
     const reading = firstLine();
     assert.ok(reading);
     assert.doesNotMatch(frame().join("\n"), /line-120/, "several wheel events accumulate before a redraw");
@@ -1040,11 +1040,12 @@ test("chat wheel and keyboard scrolling preserve the draft and reading position 
     view.handleInput("\x1bOP");
     assert.equal(firstLine()?.trim(), reading?.trim(), "closing help restores the reading position");
     const draft = view.editor.getText();
-    for (const input of ["\x1b[<0;10;10M", "\x1b[<0;10;10m", "\x1b[<66;10;10M"]) view.handleInput(input);
-    assert.equal(view.editor.getText(), draft, "mouse packets never enter the composer");
-    assert.equal(firstLine()?.trim(), reading?.trim(), "clicks and horizontal scrolling do not move the transcript");
-    view.handleInput("\x1b[M" + String.fromCharCode(96, 42, 42)); // Legacy wheel up.
+    view.handleInput("\x1b[A");
+    assert.equal(firstLine()?.trim(), reading?.trim(), "Up moves within a multi-line draft, not the transcript");
+    view.editor.setText("One line");
+    view.handleInput("\x1b[A");
     assert.notEqual(firstLine()?.trim(), reading?.trim());
+    view.editor.setText(draft);
     view.handleInput("\x1b[1;5H"); // Ctrl+Home.
     const top = frame();
     assert.match(top.join("\n"), /Original request/);
@@ -1061,50 +1062,13 @@ test("chat wheel and keyboard scrolling preserve the draft and reading position 
   } finally { release(); await request; tui.stop(); }
 });
 
-test("chat disables mouse reporting even when terminal shutdown fails", async () => {
+test("chat restores the ordinary screen even when terminal shutdown fails", async () => {
   const fake = fakeChatTerminal();
   fake.terminal.stop = () => { throw new Error("shutdown failed"); };
   const running = runChatUI({ name: "Acme", color: false, reset() {}, async send() {} }, fake.terminal);
   fake.input("\x04");
   await assert.rejects(running, /shutdown failed/);
-  assert.match(fake.output, /\x1b\[\?1006l\x1b\[\?1000l\x1b\[\?1049l$/);
-});
-
-
-test("chat Send clicks follow Enter submission, including resized multiline drafts", async () => {
-  const fake = fakeChatTerminal(90, 24);
-  const tui = new TUI(fake.terminal);
-  const sent: string[] = [];
-  let release!: () => void;
-  const gate = new Promise<void>(resolve => { release = resolve; });
-  const view = new ChatView(tui, { name: "Acme", color: false, reset() {}, async send(text) { sent.push(text); await gate; } }, () => {});
-  tui.addChild(view); tui.setFocus(view);
-  const button = () => {
-    const lines = view.render(fake.terminal.columns).map(stripVTControlCharacters);
-    const row = lines.findIndex(line => line.includes(" Send ↑ "));
-    return { x: lines[row]!.indexOf(" Send ↑ ") + 3, y: row + 1 };
-  };
-  const mouse = (x: number, y: number, release = false) => view.handleInput(`\x1b[<0;${x};${y}${release ? "m" : "M"}`);
-  try {
-    view.editor.setText("First line\nSecond line");
-    Object.assign(fake.terminal, { columns: 55, rows: 18 });
-    const { x, y } = button();
-    mouse(x, y); mouse(1, 1, true);
-    assert.deepEqual(sent, [], "releasing outside the button does not send");
-    mouse(1, 1); mouse(x, y, true);
-    assert.deepEqual(sent, [], "a click must start inside the button");
-    mouse(x, y); mouse(x, y, true); mouse(x, y, true);
-    assert.deepEqual(sent, ["First line\nSecond line"]);
-    assert.equal(view.editor.getText(), "");
-    view.editor.setText("Next draft");
-    const busy = button();
-    mouse(busy.x, busy.y); mouse(busy.x, busy.y, true);
-    assert.deepEqual(sent, ["First line\nSecond line"], "a busy request cannot be submitted twice");
-    assert.equal(view.editor.getText(), "Next draft");
-    release(); await gate; await Promise.resolve();
-    view.handleInput("\r");
-    assert.deepEqual(sent, ["First line\nSecond line", "Next draft"], "Enter shares the same submission path");
-  } finally { release(); await gate; tui.stop(); }
+  assert.match(fake.output, /\x1b\[\?1049l$/);
 });
 
 test("chat shades sent messages using the reported terminal background without recoloring replies", async () => {

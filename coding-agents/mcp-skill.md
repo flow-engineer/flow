@@ -248,10 +248,11 @@ Ctrl-D or `/exit`. Without a TTY pass a message to `chat` (an interactive chat e
 Human `chat` opens a dedicated full-screen session with a bottom composer, Markdown replies and
 live tool activity. Sent messages have subtle shading when the terminal reports its background. It inherits terminal colors; `defineCli({ ..., chat: { accent: "#b85c00" } })`
 sets a hex brand accent, approximated in 256 colors, without changing the background; on a 24-bit terminal sent messages take a faint wash of it. Install optional `@mariozechner/pi-tui@0.73.1` for that interface; `flow new`
-includes it. Click Send or press Enter to send; Shift+Enter, Alt+Enter or `\` then Enter adds a line. Multiline paste
+includes it. Press Enter to send; Shift+Enter, Alt+Enter or `\` then Enter adds a line. Multiline paste
 stays in the draft. Tab completes `/help`, `/details`, `/new` and `/exit`. Ctrl+O expands tool
-inputs/results; the mouse wheel/trackpad and PageUp/PageDown scroll the transcript, preserving
-the reading position during incoming replies. Ctrl+Home/Ctrl+End jump to the start/latest reply. Escape stops waiting; accepted work may still finish.
+inputs/results; the mouse wheel/trackpad, Up/Down (outside a multi-line draft) and PageUp/PageDown
+scroll the transcript, preserving the reading position during incoming replies. Ctrl+P/Ctrl+N
+recall sent messages. Chat leaves the mouse to the terminal, so text selects and copies as usual. Ctrl+Home/Ctrl+End jump to the start/latest reply. Escape stops waiting; accepted work may still finish.
 A failed request preserves its message for editing. `/new` clears the view and saved terminal
 reference, preserving shared person history. `--json` remains the original response format.
 Single-message calls and dumb terminals do not open the full-screen UI. Embedded clients can
