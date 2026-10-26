@@ -59,7 +59,7 @@ export function terminalServer(options: TerminalServerOptions) {
                 const { type, callId, tool, input, output, ok, ms, skill } = event;
                 push({ type: "activity", event: { type, callId, tool, input, output, ok, ms, skill } });
               },
-            }).then(result => push({ type: "done", result }), () => push({ type: "error", message: "The agent could not finish." }))
+            }).then(result => push({ type: "done", result }), error => push(mismatch(error) ? { type: "error", code: "conversation_mismatch", message: "That conversation is another person's." } : { type: "error", message: "The agent could not finish." }))
               .finally(() => { if (!closed) { closed = true; controller.close(); } });
           },
           // Work already accepted by the agent continues if the client stops watching.
@@ -68,7 +68,12 @@ export function terminalServer(options: TerminalServerOptions) {
         return new Response(body, { headers: { "content-type": "application/x-ndjson", "cache-control": "no-store", "x-content-type-options": "nosniff" } });
       }
       try { return Response.json(await run()); }
-      catch { return Response.json({ error: "turn_failed" }, { status: 500 }); }
+      catch (error) { return mismatch(error) ? Response.json({ error: "conversation_mismatch" }, { status: 409 }) : Response.json({ error: "turn_failed" }, { status: 500 }); }
     },
   };
+}
+
+/** The conversation sent is not this person's (the CLI kept another account's): refused before any turn work. */
+function mismatch(error: unknown): boolean {
+  return (error as { code?: unknown } | null)?.code === "conversation_mismatch";
 }

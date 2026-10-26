@@ -14,7 +14,7 @@ import { CURSOR_MARKER, TUI, visibleWidth, type Terminal } from "@mariozechner/p
 import { after, test } from "node:test";
 import { z } from "zod";
 import { buildCommand } from "@stricli/core";
-import { cliProblems, defineCli, runCli, type CliConfig, type CliIO } from "../cli/src/index.ts";
+import { cliProblems, commandTable, defineCli, runCli, skillFile, type CliConfig, type CliIO } from "../cli/src/index.ts";
 import { signOut, storedProvider } from "../cli/src/auth.ts";
 import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
 import { scriptedModel, respond, call } from "./helpers.ts";
@@ -472,6 +472,18 @@ test("custom commands work without discovery, override derived names and are nev
 });
 
 // An in-process scheduled promise cannot prove refresh survives bins that call process.exit().
+// The test above overrides a derived name; only exclude takes a tool off the CLI with no command in its place.
+test("an excluded tool gets no command, help or skill entry, and flow check holds exclude to the server's tools", () => {
+  const tools = [{ name: "reveal_key", inputSchema: {} }, { name: "list_keys", inputSchema: {} }];
+  const reveal = buildCommand({ docs: { brief: "Copy a key without printing it" }, parameters: {}, func() {} });
+  const cli = defineCli({ name: "acme", commands: { "keys reveal": { command: reveal } }, exclude: ["reveal_key"] });
+  assert.deepEqual(commandTable(cli, tools).map(c => c.words.join(" ")), ["keys reveal", "list-keys"]);
+  assert.doesNotMatch(skillFile(cli, tools), /reveal-key|MCP tool: `reveal_key`/);
+  assert.deepEqual(cliProblems(cli, tools), { errors: [], warnings: ['tool list_keys has no command in the CLI file; it is reachable as "list-keys"'] });
+  assert.deepEqual(cliProblems({ ...cli, exclude: ["reveal_keys"] }, tools).errors, ["exclude names reveal_keys, but there is no tool named reveal_keys on the server"]);
+  assert.deepEqual(cliProblems({ ...cli, commands: { "keys show": { tool: "reveal_key" } } }, tools).errors, ['command "keys show": reveal_key is in exclude, so it has no command']);
+});
+
 test("detached discovery finishes after the CLI exits and refreshes tools even without a server version bump", async t => {
   let release!: () => void, arrived!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
@@ -683,7 +695,7 @@ test("single-message and interactive chat use the authenticated agent terminal, 
   assert.equal(interactive.err, "Type /exit or press Ctrl-D to leave.\n", "JSON chat has no presentation or progress text");
   assert.equal(statSync(join(process.env.XDG_CONFIG_HOME!, "terminal-test/chat.json")).mode & 0o777, 0o600);
   const other = await terminal.fetch(new Request(`${base}/agent/terminal`, { method: "POST", headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify({ text: "stolen", conversationId: "another-person" }) }));
-  assert.equal(other.status, 500);
+  assert.equal(other.status, 409);
   assert.match((await terminal.fetch(new Request(`${base}/agent/terminal`, { method: "POST" }))).status.toString(), /401/);
 });
 
@@ -722,6 +734,67 @@ test("signed out, chat is a guest the agent keeps apart from accounts, unless th
   const refused = io();
   assert.equal(await runCli(cli, ["chat", "hello", "--json"], refused.channel), 3);
   assert.match(refused.err, /Sign in first: guest-test auth login/);
+});
+
+// The test above keeps one account; only a switch of account sends a conversation the agent refuses as another person's.
+test("chat after switching accounts starts the new account's conversation once, never reads the old one, and retries nothing else", async () => {
+  const scripted = scriptedModel();
+  let agent!: ReturnType<typeof createAgent>;
+  const terminal = terminalServer({ agent: () => agent, auth: { verify: async token => token === "a" ? { key: "account-a" } : token === "b" ? { key: "account-b" } : null } });
+  agent = createAgent({ files: { "AGENTS.md": "Test agent" }, model: scripted.model, channels: [terminal.channel], debounceMs: 0, scheduleCheckMs: 0 });
+  let requests = 0;
+  let broken: "json" | "stream" | null = null;
+  const base = await listen(async (req, res) => {
+    requests++;
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    const result = broken === "json" ? Response.json({ error: "turn_failed" }, { status: 500 })
+      : broken === "stream" ? new Response(`${JSON.stringify({ type: "error", message: "The agent could not finish." })}\n`, { headers: { "content-type": "application/x-ndjson" } })
+      : await terminal.fetch(new Request(`${base}${req.url}`, { method: req.method, headers: req.headers as Record<string, string>, body: Buffer.concat(chunks) }));
+    res.writeHead(result.status, Object.fromEntries(result.headers)).end(await result.text());
+  });
+  const directory = mkdtempSync(join(testDirectory, "switch-"));
+  const cli = defineCli({ name: "switch-test", server: `${base}/mcp`, directory });
+  const saved = () => JSON.parse(readFileSync(join(directory, "chat.json"), "utf8"))[`${base}/agent/terminal`];
+  const first = io();
+  const chatA = runCli(cli, ["chat", "account A's secret plan", "--json", "--token", "a"], first.channel);
+  (await scripted.nextCall(0)).answer(respond(call("send_terminal", { text: "Noted." })));
+  assert.equal(await chatA, 0, first.err);
+  const conversationA = JSON.parse(first.out).conversationId;
+  requests = 0;
+  const second = io();
+  const chatB = runCli(cli, ["chat", "hi", "--json", "--token", "b"], second.channel);
+  const turnB = await scripted.nextCall(1);
+  assert.doesNotMatch(JSON.stringify(turnB.request.messages), /secret plan/, "account A's conversation is never read");
+  turnB.answer(respond(call("send_terminal", { text: "Hello B." })));
+  assert.equal(await chatB, 0, second.err);
+  const conversationB = JSON.parse(second.out).conversationId;
+  assert.notEqual(conversationB, conversationA);
+  assert.equal(saved(), conversationB);
+  assert.equal(requests, 2, "refused once with the old reference, then sent once without it");
+  // The full-screen chat streams, so the refusal arrives as a stream event; switching back to A recovers the same way.
+  requests = 0;
+  const streamed = io(true); streamed.channel.env = { TERM: "xterm" };
+  const replies: string[] = [];
+  streamed.channel.chat = async session => { await session.send("back as A", update => { if (update.type === "reply") replies.push(update.text); }, new AbortController().signal); return 0; };
+  const chatAgain = runCli(cli, ["chat", "--token", "a"], streamed.channel);
+  (await scripted.nextCall(2)).answer(respond(call("send_terminal", { text: "Welcome back." })));
+  assert.equal(await chatAgain, 0, streamed.err);
+  assert.deepEqual(replies, ["Welcome back."]);
+  assert.equal(saved(), conversationA, "account A continues its own conversation");
+  assert.equal(requests, 2);
+  for (const kind of ["json", "stream"] as const) {
+    broken = kind; requests = 0;
+    const failed = io(kind === "stream"); failed.channel.env = { TERM: "xterm" };
+    failed.channel.chat = async session => { await session.send("again", () => {}, new AbortController().signal).catch(() => {}); return 0; };
+    assert.equal(await runCli(cli, kind === "json" ? ["chat", "again", "--json", "--token", "a"] : ["chat", "--token", "a"], failed.channel), 1);
+    assert.match(failed.err, kind === "json" ? /The agent could not finish \(500\)/ : /The agent's reply was interrupted or invalid/);
+    assert.equal(requests, 1, "a real failure is never sent again");
+    assert.equal(saved(), conversationA, "nor forgets the conversation");
+  }
+  broken = null;
+  assert.equal(await runCli(cli, ["auth", "logout"], io().channel), 0);
+  assert.equal(saved(), undefined, "signing out forgets the account's conversation reference");
 });
 
 // The tests above mount terminalServer by hand; only this shows an agent with authenticated MCP gets

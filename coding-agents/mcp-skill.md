@@ -182,6 +182,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
 - A command of the team's own is any Stricli command: `"report daily": { command: buildCommand({ ... }) }`
   with `buildCommand` from `@stricli/core`; inside it, `this.cli.call(tool, input)` calls the server's
   tools and `this.cli.print(value, { json })` prints like the rest.
+- `exclude: ["api_keys_reveal"]` gives those tools no command of their own: not in help, completion
+  or the CLI's skill. Use it when a command of the team's own wraps a tool (one that copies a key
+  without printing it), or a tool has no place on the command line. The tools stay on the server,
+  so `this.cli.call` still reaches them; `flow check` refuses a name the server has no tool for.
 - Installed, it is the organization's own command: `"bin": { "acme": "src/cli.ts" }` in its package
   (node runs `.ts` files outside `node_modules`; publish a compiled `.js` bin to npm). While building
   it, run it with `npm run cli -- order -h`: npm takes flags before `--` as its own.

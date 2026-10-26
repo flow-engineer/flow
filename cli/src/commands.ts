@@ -60,6 +60,11 @@ export interface CliConfig {
   description?: string;
   /** Commands by their words ("order place"): the first words are groups. Tools no command names keep their own name. */
   commands?: Record<string, CommandConfig>;
+  /**
+   * Tools that get no command of their own (["api_keys_reveal"]): not in help, completion or the
+   * CLI's skill. They stay on the server, so a command of the team's own can still call them.
+   */
+  exclude?: string[];
   /** One line about each group, shown in help ("order": "Place and track orders"). Default: its subcommands. */
   groups?: Record<string, string>;
   /**
@@ -127,7 +132,7 @@ export function derivedName(tool: string): string {
 export function commandTable(config: CliConfig, tools: ToolInfo[]): Command[] {
   const byName = new Map(tools.map((t) => [t.name, t]));
   const commands: Command[] = [];
-  const named = new Set<string>();
+  const named = new Set<string>(config.exclude);
   for (const [words, c] of Object.entries(config.commands ?? {})) {
     const split = words.trim().split(/\s+/);
     if (isCustom(c)) {
@@ -135,7 +140,7 @@ export function commandTable(config: CliConfig, tools: ToolInfo[]): Command[] {
       continue;
     }
     const tool = byName.get(c.tool);
-    if (!tool) continue;
+    if (!tool || config.exclude?.includes(c.tool)) continue;
     named.add(c.tool);
     commands.push({ words: split, summary: c.summary ?? tool.title ?? tool.name, tool, config: c });
     if (c.alias) commands.push({ words: c.alias.trim().split(/\s+/), summary: `Same as ${words}`, tool, config: c });
@@ -180,6 +185,10 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
     else words.set(key, owner);
   };
   const named = new Set<string>();
+  for (const t of config.exclude ?? []) {
+    if (!byName.has(t)) errors.push(`exclude names ${t}, but there is no tool named ${t} on the server`);
+    named.add(t);
+  }
   for (const [w, c] of Object.entries(config.commands ?? {})) {
     claim(w, `"${w}"`);
     if (isCustom(c)) continue;
@@ -189,6 +198,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
       errors.push(`command "${w}": no tool named ${c.tool} on the server`);
       continue;
     }
+    if (config.exclude?.includes(c.tool)) errors.push(`command "${w}": ${c.tool} is in exclude, so it has no command`);
     named.add(c.tool);
     const input = new Set(Object.keys(tool.inputSchema.properties ?? {}));
     for (const a of c.args ?? []) if (!input.has(a)) errors.push(`command "${w}": args names ${a}, which ${c.tool}'s input does not have`);
