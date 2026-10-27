@@ -1,6 +1,7 @@
 // covers: src/traces.ts src/agent.ts src/conversation.ts mcp/src/server.ts mcp/src/terminal.ts flow-messaging/src/index.ts
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage } from "node:http";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,7 +11,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { flowMessaging } from "../flow-messaging/src/index.ts";
 import { mcpServer } from "../mcp/src/index.ts";
 import { terminalServer } from "../mcp/src/terminal.ts";
-import { tracesFromEnv } from "../src/traces.ts";
+import { agentVersion, tracesFromEnv } from "../src/traces.ts";
 import { SMS, call, respond, scriptedModel } from "./helpers.ts";
 
 const KEY = "trace_key_do-not-log-me";
@@ -38,7 +39,7 @@ async function fakeEndpoint(status = 200) {
 }
 
 /** An SMS agent with one tool (or on `channels`, whose sends are kept, not made), tracing to `url`. */
-function agentFor(url: string, content: boolean, intercept?: AgentOptions["intercept"], channels?: Channel[]) {
+function agentFor(url: string, content: boolean, intercept?: AgentOptions["intercept"], channels?: Channel[], version: string | null = "v7") {
   const dir = mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
@@ -46,7 +47,7 @@ function agentFor(url: string, content: boolean, intercept?: AgentOptions["inter
   const send = (_: string, o: Outbound) => void (o.type === "message" && sent.push(o.text));
   const sms: Channel = { name: "sms", kind: "sms", info: SMS, phone: true, send };
   const lookup = tool({ name: "lookup", description: "Finds a slot.", input: z.object({ day: z.string() }), run: async ({ day }) => `free on ${day}` });
-  const agent = createAgent({ dir, model: scripted.model, tools: [lookup], channels: channels?.map((c) => ({ ...c, send })) ?? [sms], debounceMs: 0, scheduleCheckMs: 0, id: "cafe", traces: { url, key: KEY, content, version: "v7" }, intercept, testPeople: [{ name: "Maria", phone: "+15550100123" }] });
+  const agent = createAgent({ dir, model: scripted.model, tools: [lookup], channels: channels?.map((c) => ({ ...c, send })) ?? [sms], debounceMs: 0, scheduleCheckMs: 0, id: "cafe", traces: { url, key: KEY, content, version: version ?? undefined }, intercept, testPeople: [{ name: "Maria", phone: "+15550100123" }] });
   return { agent, sent, ...scripted };
 }
 
@@ -254,4 +255,75 @@ test("a playground turn's root span has chinwag.via playground, also for what is
     assert.equal(real["chinwag.via"], undefined);
     assert.equal(real["chinwag.channel"], "sms");
   } finally { endpoint.close(); }
+});
+
+test("the agent's version needs no setting: the option, FLOW_AGENT_VERSION, AGENT_VERSION (Flow's hosting), the CI's commit, the folder's git commit (+dirty), package.json's version, in that order", () => {
+  const folder = (version?: string) => {
+    const dir = mkdtempSync(join(tmpdir(), "flow-version-"));
+    writeFileSync(join(dir, "package.json"), JSON.stringify(version ? { version } : {}));
+    return dir;
+  };
+  const committed = (dirty: boolean) => {
+    const dir = folder("0.1.0");
+    const git = (...a: string[]) => execFileSync("git", ["-C", dir, ...a], { stdio: "pipe" }).toString().trim();
+    git("init", "-q");
+    git("add", ".");
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init");
+    if (dirty) writeFileSync(join(dir, "package.json"), "{}");
+    return { dir, sha: git("rev-parse", "HEAD") };
+  };
+  const clean = committed(false);
+  const all = { FLOW_AGENT_VERSION: "release-3", AGENT_VERSION: "hosted-2", GITHUB_SHA: "ci1", CI_COMMIT_SHA: "ci2", BUILDKITE_COMMIT: "ci3", CIRCLE_SHA1: "ci4", GIT_COMMIT: "ci5" };
+  const order: Array<[keyof typeof all | undefined, string]> = [];
+  const env: Record<string, string> = { ...all };
+  for (const name of [...Object.keys(all), undefined] as Array<keyof typeof all | undefined>) {
+    order.push([name, agentVersion({ dir: clean.dir, env })!.version]);
+    if (name) delete env[name];
+  }
+  assert.deepEqual(order.map(([, v]) => v), ["release-3", "hosted-2", "ci1", "ci2", "ci3", "ci4", "ci5", clean.sha]);
+  assert.match(clean.sha, /^[0-9a-f]{40}$/, "the full commit, as a CI names it");
+  assert.deepEqual(agentVersion({ given: "mine", dir: clean.dir, env: all }), { version: "mine", from: "given" });
+  const dirty = committed(true);
+  assert.deepEqual(agentVersion({ dir: dirty.dir, env: {} }), { version: `${dirty.sha}+dirty`, from: "git" });
+  // No repository (Flow's hosting packs the folder without .git): package.json's version, else none.
+  assert.deepEqual(agentVersion({ dir: folder("1.4.0"), env: {} }), { version: "1.4.0", from: "package.json" });
+  assert.equal(agentVersion({ dir: folder(), env: {} }), undefined);
+});
+
+test("a version Flow does not keep is never sent: the next one is, with a warning for one set by hand", (t) => {
+  const warn = t.mock.method(console, "warn", () => {});
+  const env = { FLOW_AGENT_VERSION: "+15550100123", AGENT_VERSION: "has spaces", GITHUB_SHA: "x".repeat(101), CI_COMMIT_SHA: "abc1234" };
+  assert.deepEqual(agentVersion({ given: "v1;rm", env }), { version: "abc1234", from: "CI_COMMIT_SHA" });
+  const lines = warn.mock.calls.map((c) => String(c.arguments[0]));
+  assert.deepEqual(lines, [
+    "flow: the version given is not sent: a version is 1 to 100 letters, digits and . _ : / + -",
+    "flow: the version in FLOW_AGENT_VERSION is not sent: a version is 1 to 100 letters, digits and . _ : / + -",
+    "flow: the version in AGENT_VERSION is not sent: a version is 1 to 100 letters, digits and . _ : / + -",
+  ]);
+  assert.ok(!lines.some((l) => l.includes("+15550100123")), "the value itself is never logged");
+});
+
+test("with no version option, traces carry the agent's version as service.version, its status says it, and it is logged once when the agent starts", async (t) => {
+  const saved = { version: process.env.FLOW_AGENT_VERSION, context: process.env.NODE_TEST_CONTEXT };
+  const warn = t.mock.method(console, "warn", () => {});
+  process.env.FLOW_AGENT_VERSION = "build-42";
+  delete process.env.NODE_TEST_CONTEXT; // the line is left out of an agent's own tests
+  const endpoint = await fakeEndpoint();
+  let h: ReturnType<typeof agentFor>;
+  try {
+    h = agentFor(endpoint.url, false, undefined, undefined, null);
+    agentFor(endpoint.url, false, undefined, undefined, null);
+  } finally {
+    process.env.NODE_TEST_CONTEXT = saved.context;
+    if (saved.version === undefined) delete process.env.FLOW_AGENT_VERSION;
+    else process.env.FLOW_AGENT_VERSION = saved.version;
+  }
+  let request;
+  try {
+    assert.equal(h.agent.status().version, "build-42");
+    assert.deepEqual(warn.mock.calls.map((c) => c.arguments[0]).filter((l) => String(l).includes("agent version")), ["flow: agent version build-42 (from FLOW_AGENT_VERSION)"]);
+    await playTurn(h, "+15550100123");
+    request = await endpoint.next(1);
+  } finally { endpoint.close(); }
+  assert.equal(attrs(request.body.resourceSpans[0].resource)["service.version"], "build-42");
 });

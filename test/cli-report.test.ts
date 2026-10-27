@@ -1,4 +1,4 @@
-// covers: testing/src/cli.ts testing/src/suite.ts testing/src/client.ts testing/src/report.ts testing/src/show.ts testing/src/print-run.ts testing/src/protocol.ts
+// covers: testing/src/cli.ts testing/src/suite.ts testing/src/client.ts testing/src/report.ts testing/src/show.ts testing/src/print-run.ts testing/src/protocol.ts src/traces.ts
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -42,13 +42,13 @@ function agentDir(more: Record<string, string> = {}): string {
 function cloud(hold: boolean, frames: unknown[] = [run], sessionId = "s", answer: Record<string, unknown> = {}) {
   let release: (() => void) | undefined;
   const opened = new Promise<void>((done) => { release = done; });
-  const opens: Array<{ files: Array<{ path: string }>; runs: number; flaky?: boolean; fresh?: boolean }> = [];
+  const opens: Array<{ files: Array<{ path: string }>; runs: number; flaky?: boolean; fresh?: boolean; agentVersion?: string }> = [];
   const server = createServer((req, res) => {
     if (req.url === "/api/sessions") {
       let body = "";
       req.on("data", (chunk) => { body += chunk; });
       req.on("end", () => {
-        opens.push(JSON.parse(body));
+        opens.push({ ...JSON.parse(body), agentVersion: req.headers["x-chinwag-agent-version"] as string | undefined });
         res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ sessionId, token: "t", missing: [], dashboard: `http://dash/${sessionId}`, ...answer }));
       });
       return;
@@ -73,10 +73,12 @@ function cloud(hold: boolean, frames: unknown[] = [run], sessionId = "s", answer
   });
 }
 
+/** The developer's and CI's settings that would change what a run sends: the cloud, and the agent's version. */
+const MACHINE = ["FLOW_FRAMEWORK_CLOUD", "FLOW_FRAMEWORK_CLOUD_KEY", "FLOW_AGENT_VERSION", "AGENT_VERSION", "GITHUB_SHA", "CI_COMMIT_SHA", "BUILDKITE_COMMIT", "CIRCLE_SHA1", "GIT_COMMIT"];
+
 function runCli(url: string, dir: string, extra: string[] = []) {
   const env = { ...process.env };
-  delete env.FLOW_FRAMEWORK_CLOUD;
-  delete env.FLOW_FRAMEWORK_CLOUD_KEY;
+  for (const name of MACHINE) delete env[name];
   return spawn(process.execPath, [cli, "test", "--cloud", url, ...extra], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
 }
 
@@ -123,7 +125,7 @@ test("a session the cloud ends before every run played says so, with the cloud's
   } finally { short.close(); }
 });
 
-/** Runs the CLI with these arguments, without the developer's cloud settings, and gives its exit code and output. */
+/** Runs the CLI with these arguments, without the developer's cloud and version settings, and gives its exit code and output. */
 async function cliOutput(args: string[], dir: string, node: string[] = []): Promise<{ code: number | null; out: string }> {
   const { code, out } = await cliStreams(args, dir, {}, node);
   return { code, out };
@@ -132,8 +134,7 @@ async function cliOutput(args: string[], dir: string, node: string[] = []): Prom
 /** The same, with `env` added, and stdout and stderr also apart. */
 async function cliStreams(args: string[], dir: string, env: NodeJS.ProcessEnv = {}, node: string[] = []) {
   const full: NodeJS.ProcessEnv = { ...process.env, OPENROUTER_API_KEY: "test-key" };
-  delete full.FLOW_FRAMEWORK_CLOUD;
-  delete full.FLOW_FRAMEWORK_CLOUD_KEY;
+  for (const name of MACHINE) delete full[name];
   const child = spawn(process.execPath, [...node, cli, ...args], { cwd: dir, env: { ...full, ...env }, stdio: ["ignore", "pipe", "pipe"] });
   let out = "";
   let stdout = "";
@@ -280,7 +281,7 @@ test("with --json, every exit prints one report on stdout and every other line o
   const report = JSON.parse(result.stdout);
   assert.match(report.suiteHash, /^[0-9a-f]{64}$/);
   assert.deepEqual({ ...report, suiteHash: undefined }, {
-    version: 1, outcome: "failed", exitCode: 1, sessionId: "s1", agent: "agt_1", dashboard: "http://dash/s1", suiteHash: undefined, error: null,
+    version: 1, outcome: "failed", exitCode: 1, sessionId: "s1", agentVersion: null, agent: "agt_1", dashboard: "http://dash/s1", suiteHash: undefined, error: null,
     counts: { runs: 2, passed: 1, failed: 1, flaky: 0, errored: 0, notPlayed: 0, credit: 0, infra: 0 },
     scenarios: [
       { scenario: "bee", path: "scenarios/b.yaml", channel: "sms", runs: 1, passedRuns: 0, credit: 0, infra: 0 },
@@ -333,6 +334,27 @@ test("the cloud's limits are printed on one line when the session opens and kept
   } finally { uncapped.close(); }
   assert.equal(result.code, 0, result.stderr);
   assert.match(result.stdout + result.stderr, /^Up to 8 runs at once · daily test budget: uncapped · 20 sessions at once on this workspace$/m);
+});
+
+test("flow test keeps the agent's version with the session, as its traces carry it: --agent-version, else the CI's commit, else package.json's; printed, in --json and in .flow/last-session.json", { timeout: 20_000 }, async () => {
+  const dir = agentDir();
+  const finished = { type: "finished", summary: { sessionId: "s1", suiteHash: "h", testModel: "m", runs: [runOf({ passed: true })], dashboard: "http://dash/s1" } };
+  const versions: Array<string | undefined> = [];
+  for (const [args, env] of [[[], { GITHUB_SHA: "0123abc" }], [["--agent-version", "v2.1"], { GITHUB_SHA: "0123abc" }], [[], {}]] as Array<[string[], NodeJS.ProcessEnv]>) {
+    if (!args.length && !Object.keys(env).length) writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture", version: "0.3.0" }));
+    const local = await cloud(false, [finished], "s1");
+    let result;
+    try {
+      result = await cliStreams(["test", "--cloud", local.url, "--json", ...args], dir, env);
+    } finally { local.close(); }
+    assert.equal(result.code, 0, result.stderr);
+    const version = local.opens[0]!.agentVersion;
+    versions.push(version);
+    assert.match(result.stderr, new RegExp(`^Agent version: ${version!.replaceAll(".", "\\.")}$`, "m"));
+    assert.equal(JSON.parse(result.stdout).agentVersion, version);
+    assert.equal(lastSession(dir).agentVersion, version);
+  }
+  assert.deepEqual(versions, ["0123abc", "v2.1", "0.3.0"]);
 });
 
 test("a run the cloud names an error for is errored, whatever it ended as: ERROR on its line, errored in --json and the results, and exit 2 when none failed", { timeout: 20_000 }, async () => {

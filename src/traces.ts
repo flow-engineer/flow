@@ -26,8 +26,15 @@
 //
 // `chinwag.channel` is the platform (whatsapp, sms, telegram, imessage, web, cli, voice, other),
 // the same on the root span and on every send span of the trace.
+//
+// The resource's `service.version` is the agent's version (agentVersion below), with no setting:
+// the same label `flow test` keeps with its session and `flow deploy` with the deploy, so a reply
+// can be matched to the code that wrote it.
 
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { EventSink, FlowEvent } from "./events.ts";
 import { setting } from "./names.ts";
 
@@ -38,7 +45,7 @@ export interface TracesOptions {
   key: string;
   /** Send what was written (messages, tool inputs and results). Default false: metadata only. */
   content?: boolean;
-  /** This agent's version, sent as `service.version`. */
+  /** This agent's version, sent as `service.version`. Default: {@link agentVersion}'s. */
   version?: string;
 }
 
@@ -146,7 +153,8 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
 
   const testRun = setting("RUN_KIND") === "test";
   const resource: Attr[] = [attr("service.name", agent.service), attr("telemetry.sdk.name", "chinwag"), attr("chinwag.run_kind", testRun ? "test" : "production")];
-  if (options.version) resource.push(attr("service.version", options.version));
+  const version = agentVersion({ given: options.version })?.version;
+  if (version) resource.push(attr("service.version", version));
 
   function warnOnce(kind: string, message: string) {
     if (warned.has(kind)) return;
@@ -381,6 +389,80 @@ function attr(key: string, value: string | number | boolean): Attr {
 const hex = (bytes: number) => randomBytes(bytes).toString("hex");
 const nanos = (ms: number) => (BigInt(Math.round(ms)) * 1_000_000n).toString();
 const clip = (text: string) => (text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT)}… [truncated]` : text);
+
+/** The commit a CI system builds, by the variables it sets (as observe's flow test CLI reads them). */
+const CI_COMMITS = ["GITHUB_SHA", "CI_COMMIT_SHA", "BUILDKITE_COMMIT", "CIRCLE_SHA1", "GIT_COMMIT"];
+
+/**
+ * Whether Flow keeps this as a version: 1 to 100 letters, digits and . _ : / + - (what observe keeps
+ * as `service.version`, within the 100 the test cloud and hosting take), never shaped like a phone
+ * number (+ and digits only).
+ */
+export function validVersion(version: string): boolean {
+  return /^[A-Za-z0-9._:/+-]{1,100}$/.test(version) && !/^\+[0-9]+$/.test(version);
+}
+
+export interface AgentVersion {
+  version: string;
+  /** Where it came from: "given", an environment variable's name, "git" or "package.json". */
+  from: string;
+}
+
+/** The process's own folder's version, read once: an agent is made per conversation under `flow test`. */
+let ownFolder: { version: AgentVersion | undefined } | undefined;
+const warnedVersions = new Set<string>();
+
+/**
+ * This agent's version: the one label traces send (`service.version`), `flow test` keeps with its
+ * session and `flow deploy` with the deploy, for the same folder. The first of: `given` (an option
+ * or flag), FLOW_AGENT_VERSION, AGENT_VERSION (Flow's hosting sets it to the deploy's version), the
+ * CI's commit (GITHUB_SHA, CI_COMMIT_SHA, BUILDKITE_COMMIT, CIRCLE_SHA1, GIT_COMMIT), the folder's
+ * git commit (with +dirty when the folder has changes not committed), its package.json `version`.
+ * A value Flow does not keep ({@link validVersion}) is skipped, with a warning for one set by hand.
+ * `dir` is the agent's folder (default: this process's, whose part is read once); no git, or no
+ * repository, is no version from git.
+ */
+export function agentVersion(options: { given?: string; dir?: string; env?: NodeJS.ProcessEnv } = {}): AgentVersion | undefined {
+  const env = options.env ?? process.env;
+  const candidates: Array<[string, string | undefined]> = [["given", options.given], ["FLOW_AGENT_VERSION", env.FLOW_AGENT_VERSION], ["AGENT_VERSION", env.AGENT_VERSION], ...CI_COMMITS.map((name): [string, string | undefined] => [name, env[name]])];
+  for (const [from, value] of candidates) {
+    const version = value?.trim();
+    if (!version) continue;
+    if (validVersion(version)) return { version, from };
+    if (CI_COMMITS.includes(from) || warnedVersions.has(from)) continue;
+    warnedVersions.add(from);
+    console.warn(`flow: the version ${from === "given" ? "given" : `in ${from}`} is not sent: a version is 1 to 100 letters, digits and . _ : / + -`);
+  }
+  if (options.dir) return gitVersion(options.dir) ?? packageVersion(options.dir);
+  ownFolder ??= { version: gitVersion(process.cwd()) ?? packageVersion(process.cwd()) };
+  return ownFolder.version;
+}
+
+/** The folder's git commit, with +dirty when the folder has changes not committed. */
+function gitVersion(dir: string): AgentVersion | undefined {
+  const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { stdio: ["ignore", "pipe", "ignore"], timeout: 5_000 }).toString().trim();
+  let sha: string;
+  try {
+    sha = git("rev-parse", "HEAD");
+  } catch {
+    return undefined; // no git, or not a repository (Flow's hosting packs the folder without .git)
+  }
+  if (!validVersion(sha)) return undefined;
+  try {
+    return { version: git("status", "--porcelain", "--", ".") ? `${sha}+dirty` : sha, from: "git" };
+  } catch {
+    return { version: sha, from: "git" };
+  }
+}
+
+function packageVersion(dir: string): AgentVersion | undefined {
+  try {
+    const version = (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { version?: unknown }).version;
+    return typeof version === "string" && validVersion(version.trim()) ? { version: version.trim(), from: "package.json" } : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function allowedUrl(url: string): boolean {
   try {
