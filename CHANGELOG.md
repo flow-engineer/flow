@@ -2,6 +2,20 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.10.6 (unreleased)
+
+### Changes
+
+- **iMessage has no 24-hour window, and the text now says so.** `flow link --channel imessage`
+  says the agent can reply after you write first, any time later; `docs/agents.md` and the
+  flow-messaging README no longer put iMessage under WhatsApp's 24-hour rule. On iMessage the only
+  timing rule is for typing indicators and read receipts: 5 minutes after the line's last message
+  to that person.
+
+### Migration notes
+
+None.
+
 ## 0.10.5 (2026-10-27)
 
 ### Changes

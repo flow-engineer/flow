@@ -11,8 +11,8 @@
 // user id on Telegram, the phone number on iMessage, else the email address that is the person's
 // handle there. A reply goes into the Flow conversation the person last wrote in; with none known
 // yet (a nudge, or after a restart) it starts one from the channel's sender, which Flow puts into the
-// open conversation if there is one. On Flow's shared iMessage sender, as on WhatsApp after 24
-// hours, the agent can only answer someone who wrote first: a start to anyone else fails. What this process learns (conversations, contacts,
+// open conversation if there is one. On Flow's shared iMessage sender the agent can message only
+// someone who wrote first, any time later (iMessage has no 24-hour window): a start to anyone else fails. What this process learns (conversations, contacts,
 // event ids) is kept in memory only.
 //
 // A send resolves once the channel has the message: Flow answers a send with 202 (queued), and the
@@ -389,8 +389,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   /**
    * A read receipt is a courtesy: Flow's spec says to ignore its failures. Outside the window
-   * (iMessage until the person writes) it is expected to be refused, so that is not logged; any
-   * other failure is.
+   * (on iMessage, more than 5 minutes after the line's last message to that person) it is expected
+   * to be refused, so that is not logged; any other failure is.
    */
   async function markRead(route: Route, to: string, body: Record<string, unknown>, messageId?: string): Promise<void> {
     try {
@@ -406,9 +406,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * Shows the typing indicator; it clears itself when the next message goes or after a while
    * (`typingLastsMs`), so the conversation sends it again while its turn runs, and nothing is sent
    * for "off". Each call has its own Idempotency-Key, so a second call shows the indicator again.
-   * A refusal rejects for the conversation to act on: `outside_window` (iMessage outside Flow's
-   * 5-minute window for typing, WhatsApp past 24 hours) waits for the agent's next message, anything
-   * else ends typing for the turn. The conversation logs it.
+   * A refusal rejects for the conversation to act on: `outside_window` waits for the agent's
+   * next message, anything else ends typing for the turn. On iMessage typing works for 5 minutes after
+   * the line's last message to that person. On WhatsApp it works within 24 hours of their last message. The conversation logs it.
    */
   async function typing(route: Route, to: string): Promise<void> {
     try {

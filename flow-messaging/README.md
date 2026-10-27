@@ -233,10 +233,11 @@ traces still name their platform (`chinwag.channel` is `telegram` or `imessage`,
 a person is their phone number, or their email address when that is their handle; they are not joined
 with the same number on WhatsApp or SMS.
 
-**iMessage replies only.** On Flow's shared iMessage sender (as on WhatsApp after 24 hours) the agent
-can only answer someone who wrote first. A nudge or scheduled message to anyone else fails, and
-reaches the agent as "Not delivered" (`outside_window`). Ask people to write first with the line's
-opt-in link. Text takes up to 9999 characters; there are no buttons, lists or templates.
+**On iMessage the person writes first.** iMessage has no 24-hour window: once someone has texted
+your line, your agent can message them any time. On Flow's shared iMessage sender the agent cannot
+message someone who has never written: a nudge or scheduled message to them fails, and reaches the
+agent as "Not delivered" (`outside_window`). Ask people to write first with the line's opt-in link.
+Typing indicators and read receipts work for 5 minutes after the line's last message to that person. Text takes up to 9999 characters; there are no buttons, lists or templates.
 
 ## Also exported
 
