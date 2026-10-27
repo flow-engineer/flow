@@ -199,7 +199,7 @@ and compare; stop at the first that differs and fix it before going on.
 2. **Signed out.** `inspect call <tool>` on a `signIn: "required"` tool. Expected: exit 3, "Sign in
    first".
 3. **Sign in once, end to end.** `inspect auth` (in the background) prints the link; it opens the
-   brand's own login page, then shows "Signed in. You can close this tab". Expected: exit 0, and the
+   brand's own login page, then shows "Head back to your terminal" once the code is exchanged. Expected: exit 0, and the
    token's scope printed.
 4. **The right person.** Call a required tool that returns `context.key` (add a `whoami` tool while
    testing). Expected: the brand's user id for the account just used.

@@ -5,7 +5,7 @@ import { mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs, styleText, stripVTControlCharacters } from "node:util";
 import { configDir, isSignedIn, storedAccessToken } from "./auth.ts";
-import { tokenEnvOf, type CliConfig } from "./commands.ts";
+import { brandOf, HEX, tokenEnvOf, type CliConfig } from "./commands.ts";
 import type { CliIO } from "./run.ts";
 import { codingAgent } from "./welcome.ts";
 
@@ -51,8 +51,9 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   try { saved = JSON.parse(readFileSync(file, "utf8")); } catch {}
   if (flags.values.new) { delete saved[endpoint]; delete saved[`${endpoint}#guest`]; }
   const fullScreen = humanChat && Boolean(io.chat) && env.TERM !== "dumb";
-  if (fullScreen && config.chat?.accent !== undefined && !/^#[0-9a-f]{6}$/i.test(config.chat.accent)) {
-    io.writeError("chat.accent must be a six-digit hex color, for example #b85c00.\n"); return 2;
+  const accent = brandOf(config).accent;
+  if (fullScreen && accent !== undefined && !HEX.test(accent)) {
+    io.writeError("brand.accent must be a six-digit hex color, for example #b85c00.\n"); return 2;
   }
   // A guest's conversation is its own; signing in later starts the account's.
   const reference = () => token ? endpoint : `${endpoint}#guest`;
@@ -150,7 +151,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   if (fullScreen) {
     // The full-screen view clears its screen on leaving, so the last failure is printed again after it.
     let failed: { message: string; code: number } | undefined;
-    const session: ChatSession = { name: config.name, signal: io.signal, color: styled, accent: config.chat?.accent, reset, send: async (text, update, signal) => {
+    const session: ChatSession = { name: config.name, signal: io.signal, color: styled, accent, reset, send: async (text, update, signal) => {
       try { await send(text, update, signal); failed = undefined; }
       catch (error) { failed = signal?.aborted ? undefined : { message: error instanceof Error ? error.message : String(error), code: (error as { exitCode?: number }).exitCode ?? 1 }; throw error; }
     } };

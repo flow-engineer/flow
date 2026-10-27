@@ -74,10 +74,11 @@ pipes get the help instead, so the welcome costs them nothing. Make it the team'
 ```ts
 version: "2.4.0",
 description: "Scrape any page from your terminal.",  // the welcome's second line
-chat: { accent: "#e8833a" },                           // the banner's color
+brand: { name: "Acme", logo: "https://acme.com/logo.svg", accent: "#e8833a" },  // banner, chat and sign-in page
 welcome: { title: "Welcome to Acme", tips: ["acme scrape <url>    Scrape a page", "acme keys list       Your API keys"] },
 ```
 
+Set `brand` once: the banner, the chat and the page a browser sign-in ends on all read it.
 Tips should be the two or three commands from step 1, as people will type them. `banner` takes the
 team's own ASCII art (or `false` for none); `welcome: false` shows the help instead.
 

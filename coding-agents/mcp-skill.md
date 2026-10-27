@@ -218,8 +218,17 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   or the CLI's skill. Use it when a command of the team's own wraps a tool (one that copies a key
   without printing it), or a tool has no place on the command line. The tools stay on the server,
   so `this.cli.call` still reaches them; `flow check` refuses a name the server has no tool for.
+- `brand: { name, logo, accent }` is set once and read everywhere the CLI shows the brand: the chat,
+  the welcome banner and the browser page a sign-in ends on. `name` is how people see it written
+  (default the command's name), `logo` an https or `data:image` URL, `accent` a six-digit hex color
+  (`chat.accent` is its older name and still works); `flow check` refuses a bad color or logo.
+- `auth login` ends on a branded page in the browser: the logo (else the name's initial), the
+  accent, and "Head back to your terminal" only once the code is exchanged and the tokens are
+  saved, else what went wrong and the command to try again. It tries to close the tab and stays up
+  where the browser refuses. `signInPage: ({ status, brand, cli, message }) => html` replaces it
+  with the team's own; it never gets the code, token or state, and is sent with no caching.
 - Run with no command at a terminal, the CLI shows a welcome: its name in block letters (in
-  `chat.accent` when set), `version`, "Welcome to <name>", `description`, whether the person is signed
+  the brand's accent when set), `version`, "Welcome to <name>", `description`, whether the person is signed
   in, and how to start. `welcome: { banner, title, text, tips }` replaces any part (`banner` is the
   team's own ASCII art, `false` for none; `tips` are lines as written); `welcome: false` shows the
   help instead. Coding agents (Claude Code, Codex, Cursor), scripts and pipes always get the help.
@@ -334,7 +343,7 @@ Ctrl-D or `/exit`. Without a TTY pass a message to `chat` (an interactive chat e
 Run by a coding agent (`CLAUDECODE`, `CURSOR_AGENT`, `CODEX_CI` or `AI_AGENT` set) or with `--plain`, chat
 acts as without a TTY even at a terminal: replies print as written and the interactive view never opens.
 Human `chat` opens a dedicated full-screen session with a bottom composer, Markdown replies and
-live tool activity. Sent messages have subtle shading when the terminal reports its background. It inherits terminal colors; `defineCli({ ..., chat: { accent: "#b85c00" } })`
+live tool activity. Sent messages have subtle shading when the terminal reports its background. It inherits terminal colors; `defineCli({ ..., brand: { accent: "#b85c00" } })`
 sets a hex brand accent, approximated in 256 colors, without changing the background; on a 24-bit terminal sent messages take a faint wash of it. Install optional `@mariozechner/pi-tui@0.73.1` for that interface; `flow new`
 includes it. Press Enter to send; Shift+Enter, Alt+Enter or `\` then Enter adds a line. Multiline paste
 stays in the draft. Tab completes `/help`, `/details`, `/new` and `/exit`. Ctrl+O expands tool
