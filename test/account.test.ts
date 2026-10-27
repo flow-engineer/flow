@@ -596,7 +596,7 @@ test("setup saves each open channel's sender and prints its link; link --channel
   const imessage = await run(["link", "--channel", "imessage", "--json"], { url: flow.url, config: temp(), cwd });
   assert.equal(imessage.code, 0, imessage.err);
   assert.equal(imessage.lines[0]!.reply_only, true);
-  assert.match(imessage.lines[0]!.say_to_person, /only reply after you write to it first/);
+  assert.match(imessage.lines[0]!.say_to_person, /can reply after you write to it first, any time later/);
   assert.equal(imessage.lines[0]!.url, "sms:+15550100002?&body=Hi%20cafe%20%28ref%20brave-otter-1%29");
   assert.match(imessage.lines[0]!.say_to_person, /^Your iMessage link: sms:\+15550100002\?&body=\S+ Open it on an iPhone or a Mac/);
   assert.match(imessage.err, /cannot message you first/);

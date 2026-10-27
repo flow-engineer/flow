@@ -436,7 +436,7 @@ const SENDER_ENV: Record<string, string> = { telegram: SETUP_ENV.telegram_sender
 /** What a channel on Flow's shared senders cannot do: start a conversation. */
 const REPLY_ONLY: Record<string, string> = {
   whatsapp: "The agent can only reply after you write to it first, within 24 hours of your last message; it cannot message you first.",
-  imessage: "The agent can only reply after you write to it first; it cannot message you first.",
+  imessage: "The agent can reply after you write to it first, any time later; it cannot message you first.",
 };
 
 /** Refuses a folder that is not an agent's (no package.json), before anything signs in or is minted. */

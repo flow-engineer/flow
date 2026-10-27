@@ -135,8 +135,8 @@ before you hand it back; run them yourself, and do not offer them to the owner a
   as usual, and exits 0; `link --json` has the line in `warnings`, on setup's line and on its own.
   Give it to the owner; `setup` makes the missing keys once it is fixed. Run again, `link` finds
   Messaging's part in `.env` and does not run setup. `setup` on its own still exits 3 for it.
-- On WhatsApp and iMessage the agent can only reply after the owner writes first (WhatsApp: within
-  24 hours of their last message); it cannot message them first. `link --json` says so
+- On iMessage the agent can reply after the owner writes first, any time later. On WhatsApp it can
+  reply within 24 hours of the owner's last message. On both it cannot message them first. `link --json` says so
   (`reply_only: true`, and in `say_to_person`): tell the owner.
 - The starter's `npm start` is on Telegram, plus WhatsApp and iMessage when `.env` has their senders
   (`FLOW_MESSAGING_WHATSAPP_SENDER`, `FLOW_MESSAGING_IMESSAGE_SENDER`), and reads `.env` once.
