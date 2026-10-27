@@ -147,7 +147,7 @@ Flow Framework pins), and write `src/cli.ts`:
 ```ts
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url";
-import { defineCli, runCli } from "@flow-engineer/flow/cli";
+import { command, defineCli, runCli } from "@flow-engineer/flow/cli";
 
 export const cli = defineCli({
   name: "acme",
@@ -158,6 +158,7 @@ export const cli = defineCli({
   commands: {
     "order list": { tool: "list_orders", columns: ["order_id", "status", "total"], alias: "orders" },
     "order view": { tool: "get_order", args: ["order_id"], examples: ["acme order view BL-1042 --json"] },
+    "order recent": command("list_orders").short("n", "limit").flag("state", "status").default("limit", 5),
     "order place": { tool: "place_order" },
   },
 });
@@ -179,6 +180,18 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   flag (`order_id` is `--order-id`); a list is a repeatable or comma-separated flag; an object or a
   list of objects takes JSON, or `@file.json`, and its help shows the shape
   (`JSON list of {item, size, milk?}`).
+- `command(tool)` writes a tool's command as code, one step per choice: `.arg("order_id")`
+  positional, `.short("n", "limit")` a one-letter flag (`-n 5`), `.flag("state", "status")` the
+  flag's name (`--state`; `--status` still works), `.default("limit", 5)` sent when left out, and
+  `.map((input, options) => ({ ...input, ... }))` the team's own code over what is sent, run last
+  (throw to refuse: exit 2 with its message); `.hide("source")` no flag for an input (fix it with
+  `.default`), `.help("tag", "...")` one flag's help line, `.option("from-file", { help, kind,
+  short })` a flag that is not a tool input, read in `map`'s `options`, `.print((result) => "...")`
+  the output people see (`--json` still prints data); a list input as the only `.arg` takes every
+  word (`<urls...>`); `.columns()`, `.view()`, `.alias()`, `.summary()` and `.examples()` as the
+  object's keys. Help, completion, the skill and `flow check` read it like the object form (keys
+  `shorthands`, `defaults`, `hidden`, `help`, `options`, `input`, `print`). Keep these in the CLI
+  file, or a file it imports: tools never carry CLI choices.
 - A command of the team's own is any Stricli command: `"report daily": { command: buildCommand({ ... }) }`
   with `buildCommand` from `@stricli/core`; inside it, `this.cli.call(tool, input)` calls the server's
   tools and `this.cli.print(value, { json })` prints like the rest.
@@ -206,7 +219,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   empty descriptions. Workflow bodies are fetched through `read_skill` only when selected.
   For any MCP server without a CLI file, `npx @flow-engineer/flow cli --server <url> -h`.
 - `npx @flow-engineer/flow check` checks the CLI file against the tools: a command naming a tool that does not
-  exist, an `args` field the input lacks, a `columns` or `view` field the output lacks, two commands
+  exist, an `args`, `shorthands` or `defaults` field the input lacks, a shorthand for a positional
+  argument or one of the CLI's own flags (`-h`, `--json`, ...), a `columns` or `view` field the output lacks, two commands
   with one name, a word that is both a command and a group, or one of the CLI's own words (`auth`,
   `tools`, `skill`) is an error; a tool no command names is a warning (it keeps its own name).
 - MCP-backed commands need a shipped MCP server. Cached definitions (including server name/version)

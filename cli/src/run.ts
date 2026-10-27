@@ -22,11 +22,14 @@ import { FORMATTED } from "../../src/tools.ts";
 import { FULL_CATALOG_META } from "../../mcp/src/describe.ts";
 import {
   BUILT_IN,
+  commandEntries,
   commandTable,
   flagKind,
   flagName,
+  flagsOf,
   findCommand,
   isCustom,
+  OWN_FLAGS,
   skillFile,
   tokenEnvOf,
   typeHint,
@@ -143,7 +146,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
   const local = findCommand(commandTable(config, []), rest);
   const custom = Boolean(local?.command.config && isCustom(local.command.config));
   const prefix = rest.filter(w => w !== "--help" && w !== "-h").join(" ");
-  const children = Object.entries(config.commands ?? {}).filter(([words]) => words.startsWith(`${prefix} `));
+  const children = commandEntries(config).filter(([words]) => words.startsWith(`${prefix} `));
   const localOnly = custom || Boolean(prefix && children.length && children.every(([, command]) => isCustom(command)));
   const asksHelp = rest.length === 0 || rest[0] === "-h" || rest[0] === "--help";
 
@@ -621,9 +624,6 @@ function helpCommand(config: CliConfig, tools: ToolInfo[], top: Record<string, T
   });
 }
 
-/** Flags the CLI puts on tool commands itself. */
-const OWN_FLAGS = ["json", "fields", "dry-run", "yes", "refresh-tools"];
-
 /** A tool as a Stricli command: its input as flags (and the CLI file's positional arguments). */
 function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) => Promise<void>, call: ToolCall, io: CliIO): StricliCommand<CliContext> {
   const tool = c.tool!;
@@ -633,15 +633,33 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
   const required = new Set(tool.inputSchema.required ?? []);
   const writes = tool.annotations?.readOnlyHint !== true;
   const destructive = writes && tool.annotations?.destructiveHint !== false;
+  const defaults = settings?.defaults ?? {};
   const byFlag = new Map<string, string>();
   const flags: Record<string, unknown> = {};
-  for (const [field, schema] of Object.entries(props)) {
-    if (args.includes(field)) continue;
-    const key = flagName(field);
-    if (OWN_FLAGS.includes(key)) throw new Error(`${config.name}: ${tool.name}'s input ${field} clashes with the CLI's --${key}.`);
-    byFlag.set(key, field);
-    flags[key] = flagSpec(field, schema, !required.has(field));
+  const aliases: Record<string, string> = {};
+  const specs = flagsOf(tool, settings);
+  for (const { field, flag, letters, long } of specs) {
+    for (const key of [flag, ...(long ? [long] : [])]) {
+      if (OWN_FLAGS.includes(key)) throw new Error(`${config.name}: ${tool.name}'s input ${field} clashes with the CLI's --${key}.`);
+      if (byFlag.has(key)) throw new Error(`${config.name}: --${key} is both ${byFlag.get(key)} and ${field} in "${c.words.join(" ")}".`);
+      byFlag.set(key, field);
+    }
+    const spec = flagSpec(field, settings?.help?.[field] ? { ...props[field]!, description: settings.help[field] } : props[field]!, !required.has(field) || field in defaults || Boolean(long), defaults[field]);
+    flags[flag] = spec;
+    // The field's own flag still works beside a word shorthand, out of help.
+    if (long) flags[long] = { ...(spec as object), optional: true, hidden: true };
+    for (const letter of letters) aliases[letter] = flag;
   }
+  const options = Object.entries(settings?.options ?? {});
+  for (const [name, o] of options) {
+    if (OWN_FLAGS.includes(name) || byFlag.has(name)) throw new Error(`${config.name}: option --${name} clashes with another flag in "${c.words.join(" ")}".`);
+    flags[name] = o.kind === "boolean" ? { kind: "boolean", brief: o.help, optional: true, withNegated: false } : { kind: "parsed", parse: o.kind === "number" ? numberParser : String, brief: o.help, placeholder: o.kind ?? "text", optional: true };
+    if (o.short) aliases[o.short] = name;
+  }
+  // A list as the only argument takes every word (`scrape <urls...>`).
+  const rest = args.length === 1 && flagKind(props[args[0]!] ?? {}) === "list" ? args[0]! : undefined;
+  const optionalArg = (field: string) => !required.has(field) || field in defaults;
+  const argBrief = (field: string) => withDefault(settings?.help?.[field] ?? props[field]?.description ?? field.replace(/_/g, " "), defaults[field]);
   flags.json = { kind: "boolean", brief: "Print JSON: for scripts and agents", optional: true, withNegated: false };
   flags.fields = { kind: "parsed", parse: (v: string) => v.split(",").map((f) => f.trim()).filter(Boolean), brief: "Only these fields, comma-separated (a.b for nested ones)", placeholder: "a,b", optional: true };
   if (writes) flags["dry-run"] = { kind: "boolean", brief: "Show the call it would make, and send nothing", optional: true, withNegated: false };
@@ -652,14 +670,26 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
     docs: { brief: c.summary, fullDescription: `${tool.description ?? c.summary}${examples}` },
     parameters: {
       flags: flags as never,
-      positional: { kind: "tuple", parameters: args.map((field) => ({ brief: props[field]?.description ?? field.replace(/_/g, " "), placeholder: field, parse: parserFor(field, props[field] ?? {}), optional: !required.has(field) })) } as never,
+      aliases: aliases as never,
+      positional: (rest
+        ? { kind: "array", parameter: { brief: argBrief(rest), placeholder: rest, parse: parserFor(rest, props[rest]!.items ?? {}) }, minimum: optionalArg(rest) ? 0 : 1 }
+        : { kind: "tuple", parameters: args.map((field) => ({ brief: argBrief(field), placeholder: field, parse: parserFor(field, props[field] ?? {}), optional: optionalArg(field) })) }) as never,
     },
     async func(this: CliContext, parsed: Record<string, unknown>, ...positional: unknown[]) {
-      const input: Record<string, unknown> = {};
-      args.forEach((field, i) => {
-        if (positional[i] !== undefined) input[field] = positional[i];
-      });
+      let input: Record<string, unknown> = { ...defaults };
+      const refuse = (error: unknown) => new CliExit(EXIT.usage, `${error instanceof Error ? error.message : String(error)}\nRun \`${usage} --help\` to see how to use it.`);
+      if (rest) {
+        if (positional.length) input[rest] = positional;
+      } else {
+        args.forEach((field, i) => {
+          if (positional[i] !== undefined) input[field] = positional[i];
+        });
+      }
       for (const [key, field] of byFlag) if (parsed[key] !== undefined) input[field] = parsed[key];
+      if (settings?.input) {
+        const given = Object.fromEntries(options.map(([name]) => [name, parsed[name]]).filter(([, v]) => v !== undefined));
+        try { input = await settings.input(input, given); } catch (error) { throw refuse(error); }
+      }
       if (writes && parsed["dry-run"]) return void io.write(`${JSON.stringify({ dryRun: true, tool: tool.name, arguments: input }, null, parsed.json ? undefined : 2)}\n`);
       await prepare(tool);
       if (destructive && !parsed.yes) {
@@ -667,10 +697,11 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
         if (!(await io.confirm(`${usage} may delete or overwrite. Go ahead?`))) throw new CliExit(EXIT.approval, "Stopped; nothing was sent.");
       }
       const result = await call(tool.name, input, c.words.join(" ")).catch((error: unknown) => {
-        throw needsSignIn(error) ? explain(config, "", error) : (badArguments(config, c.words, error, (field) => (args.includes(field) ? `<${field}>` : `--${flagName(field)}`)) ?? error);
+        throw needsSignIn(error) ? explain(config, "", error) : (badArguments(config, c.words, error, (field) => (args.includes(field) ? `<${field}>` : `--${specs.find((f) => f.field === field)?.flag ?? flagName(field)}`)) ?? error);
       });
       if (result.isError) throw new CliExit(EXIT.failed, textOf(result.content as Block[]) || `${tool.name} failed.`);
       // The tool's own text, unless the person asked for data or the CLI file chose what to show.
+      if (settings?.print && !parsed.json && !parsed.fields) return void io.write(`${(await settings.print(valueOf(result))).replace(/\n*$/, "")}\n`);
       const formatted = (result._meta as Record<string, unknown> | undefined)?.[FORMATTED] === true && !parsed.json && !parsed.fields && !settings?.columns && !settings?.view;
       if (formatted) return void io.write(`${(await forTerminal(textOf(result.content as Block[]), io)).replace(/\n*$/, "")}\n`);
       io.write(`${render(valueOf(result), { json: Boolean(parsed.json), fields: parsed.fields as string[] | undefined, columns: settings?.columns, view: settings?.view })}\n`);
@@ -678,8 +709,13 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
   });
 }
 
-function flagSpec(field: string, schema: JsonSchema, optional: boolean): unknown {
-  const brief = schema.description ?? field.replace(/_/g, " ");
+/** A brief that says what is sent when the input is left out. */
+function withDefault(brief: string, value: unknown): string {
+  return value === undefined ? brief : `${brief} (default ${JSON.stringify(value)})`;
+}
+
+function flagSpec(field: string, schema: JsonSchema, optional: boolean, fallback?: unknown): unknown {
+  const brief = withDefault(schema.description ?? field.replace(/_/g, " "), fallback);
   const kind = flagKind(schema);
   if (schema.enum && schema.enum.every((v) => typeof v === "string")) return { kind: "enum", values: schema.enum, brief, optional };
   if (kind === "boolean") return optional ? { kind: "boolean", brief, optional: true, withNegated: false } : { kind: "parsed", parse: parseBoolean, brief, placeholder: "true|false" };
