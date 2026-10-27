@@ -178,7 +178,7 @@ function onAccent(hex: string): string {
   return 0.2126 * r! + 0.7152 * g! + 0.0722 * b! > 0.18 ? "#111111" : "#ffffff";
 }
 
-/** Flow's sign-in page: the brand's logo (else its initial) and accent, the outcome, and the way back to the terminal. */
+/** Flow's sign-in page: the brand's logo (else its initial and name) on a quiet grid, the outcome, and the way back to the terminal. */
 export function signInPageHtml(page: SignInPage, nonce: string): string {
   const { brand, status } = page;
   const accent = brand.accent && HEX.test(brand.accent) ? brand.accent : "#4f5bd5";
@@ -186,46 +186,55 @@ export function signInPageHtml(page: SignInPage, nonce: string): string {
   const name = escape(brand.name);
   const logo = brand.logo && !logoProblem(brand.logo)
     ? `<img class="logo" src="${escape(brand.logo)}" alt="${name}">`
-    : `<div class="logo initial" aria-hidden="true">${escape([...brand.name.trim()][0]?.toUpperCase() ?? "")}</div>`;
-  const icon = ok
-    ? `<path d="M7 12.5l3.2 3.2L17 9" />`
-    : `<path d="M8.5 8.5l7 7M15.5 8.5l-7 7" />`;
+    : `<div class="wordmark"><span class="initial" aria-hidden="true">${escape([...brand.name.trim()][0]?.toUpperCase() ?? "")}</span>${name}</div>`;
+  const icon = ok ? `<path d="M5 12.5l4.5 4.5L19 7.5" />` : `<path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />`;
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>${ok ? `Signed in to ${name}` : "Sign-in didn't finish"}</title>
+<title>${ok ? `Signed in to ${name}` : `${name}: sign-in didn't finish`}</title>
 <style nonce="${nonce}">
-:root { --accent: ${accent}; --on-accent: ${onAccent(accent)}; --bg: #f6f6f8; --card: #ffffff; --text: #16161a; --muted: #5d5d68; --line: #e6e6ec; --bad: #d4382c; color-scheme: light dark; }
-@media (prefers-color-scheme: dark) { :root { --bg: #0f0f12; --card: #18181d; --text: #f2f2f5; --muted: #a3a3ae; --line: #2a2a31; --bad: #ff6b5e; } }
+:root { --accent: ${accent}; --on-accent: ${onAccent(accent)}; --bg: #f8f8f7; --text: #1a1a1a; --muted: #6b6b6b; --faint: #8a8a8a; --line: #e7e7e5; --code: #ffffff; --ok: #22a55b; --bad: #d93a2b; --col: min(320px, 50vw - 16px); color-scheme: light dark; }
+@media (prefers-color-scheme: dark) { :root { --bg: #111111; --text: #ededed; --muted: #a1a1a1; --faint: #7d7d7d; --line: #262626; --code: #181818; --ok: #3ecf7a; --bad: #ff6b5e; } }
 * { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: var(--bg); color: var(--text); font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-body::before { content: ""; position: fixed; inset: 0 0 auto; height: 4px; background: var(--accent); }
-main { width: 100%; max-width: 420px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 36px 32px 28px; text-align: center; box-shadow: 0 1px 2px rgb(0 0 0 / 4%), 0 12px 32px rgb(0 0 0 / 6%); }
-.logo { display: block; margin: 0 auto 24px; max-height: 44px; max-width: 180px; }
-.initial { width: 44px; height: 44px; border-radius: 12px; background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: 22px; line-height: 44px; }
-.status { width: 64px; height: 64px; margin: 0 auto 18px; border-radius: 50%; display: grid; place-items: center; background: color-mix(in srgb, var(--mark) 14%, transparent); }
-.status svg { width: 44px; height: 44px; fill: none; stroke: var(--mark); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.ok { --mark: var(--accent); } .bad { --mark: var(--bad); }
-h1 { margin: 0 0 8px; font-size: 22px; line-height: 1.3; letter-spacing: -0.01em; }
-p { margin: 0; color: var(--muted); }
-.terminal { margin: 22px 0 0; padding: 12px 14px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); text-align: left; overflow-wrap: anywhere; }
-.terminal span { color: var(--accent); }
-.close { margin-top: 20px; font-size: 14px; }
-.terminal + .close, .close + .terminal { margin-top: 10px; }
+html, body { margin: 0; min-height: 100%; }
+body { min-height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+body::before { content: ""; position: fixed; inset: 0 calc(50% - var(--col)); border-left: 1px solid var(--line); border-right: 1px solid var(--line); pointer-events: none; }
+.row { position: relative; border-bottom: 1px solid var(--line); padding: 0 calc(50% - var(--col) + 24px); text-align: center; }
+.row::before, .row::after { content: ""; position: absolute; bottom: -4px; width: 7px; height: 7px; background: var(--bg); border: 1px solid var(--line); transform: rotate(45deg); z-index: 1; }
+.row::before { left: calc(50% - var(--col) - 3.5px); } .row::after { right: calc(50% - var(--col) - 3.5px); }
+.top { height: 16vh; min-height: 40px; }
+.brand { padding-top: 64px; padding-bottom: 64px; display: flex; justify-content: center; }
+.logo { display: block; height: 52px; max-width: 100%; object-fit: contain; }
+.wordmark { display: flex; align-items: center; gap: 14px; font-size: 34px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; overflow-wrap: anywhere; }
+.initial { flex: none; width: 48px; height: 48px; border-radius: 12px; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; font-size: 26px; font-weight: 700; }
+.outcome { padding-top: 88px; padding-bottom: 80px; }
+.mark { display: block; width: 40px; height: 40px; margin: 0 auto 44px; fill: none; stroke: var(--mark); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.ok { --mark: var(--ok); } .bad { --mark: var(--bad); }
+h1 { margin: 0 0 14px; font-size: 34px; line-height: 1.2; font-weight: 600; letter-spacing: -0.025em; }
+.message { margin: 0; font-size: 18px; color: var(--muted); }
+.next { margin: 18px 0 0; font-size: 15px; color: var(--faint); }
+.command { display: inline-block; margin-top: 22px; padding: 10px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--code); font: 15px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); overflow-wrap: anywhere; }
+.command span { color: var(--accent); margin-right: 8px; }
+.foot { padding-top: 28px; padding-bottom: 28px; font-size: 14px; color: var(--faint); }
+.rest { flex: 1; }
+@media (max-width: 480px) { .brand { padding-top: 44px; padding-bottom: 44px; } .outcome { padding-top: 56px; padding-bottom: 56px; } h1 { font-size: 28px; } .message { font-size: 17px; } .top { height: 6vh; } }
 </style>
 </head>
 <body>
-<main>
-${logo}
-<div class="status ${ok ? "ok" : "bad"}"><svg viewBox="0 0 24 24" aria-hidden="true">${icon}</svg></div>
-<h1>${ok ? `You're signed in to ${name}` : "Sign-in didn't finish"}</h1>
-<p>${escape(page.message)}</p>
-${ok ? `<p class="close">You can close this tab.</p>` : `<p class="close">To try again, run this in your terminal:</p>
-<div class="terminal"><span>$</span> ${escape(page.cli)} auth login</div>`}
+<div class="row top"></div>
+<div class="row brand">${logo}</div>
+<main class="row outcome">
+<svg class="mark ${ok ? "ok" : "bad"}" viewBox="0 0 24 24" aria-hidden="true">${icon}</svg>
+<h1>${ok ? "You're all set" : "Sign-in didn't finish"}</h1>
+<p class="message">${escape(page.message)}</p>
+${ok ? `<p class="next">You can close this tab.</p>` : `<p class="next">To try again, run this in your terminal:</p>
+<div class="command"><span>$</span>${escape(page.cli)} auth login</div>`}
 </main>
+<div class="row foot">${ok ? `Signed in to ${name} from the <strong>${escape(page.cli)}</strong> command line` : `Nothing was saved on this computer`}</div>
+<div class="rest"></div>
 <script nonce="${nonce}">
 history.replaceState(null, "", location.pathname);
 ${ok ? "setTimeout(function () { window.close(); }, 1500);" : ""}
