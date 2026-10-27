@@ -151,7 +151,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   if (fullScreen) {
     // The full-screen view clears its screen on leaving, so the last failure is printed again after it.
     let failed: { message: string; code: number } | undefined;
-    const session: ChatSession = { name: config.name, signal: io.signal, color: styled, accent, reset, send: async (text, update, signal) => {
+    const session: ChatSession = { name: brandOf(config).name, signal: io.signal, color: styled, accent, reset, send: async (text, update, signal) => {
       try { await send(text, update, signal); failed = undefined; }
       catch (error) { failed = signal?.aborted ? undefined : { message: error instanceof Error ? error.message : String(error), code: (error as { exitCode?: number }).exitCode ?? 1 }; throw error; }
     } };

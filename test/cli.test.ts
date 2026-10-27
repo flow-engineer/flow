@@ -836,6 +836,7 @@ test("the sign-in page shows the brand, and says signed in only once the code is
   assert.equal(page.headers.get("referrer-policy"), "no-referrer");
   const html = await page.text();
   assert.match(html, /Head back to your terminal[\s\S]*Signed in to Acme &#60;Coffee&#62;/, "the brand's name, escaped");
+  assert.match(html, /Acme &#60;Coffee&#62; is ready\./, "people read the brand's name, not the command's");
   assert.match(html, /--accent: #645bff/);
   assert.match(html, /src="https:\/\/acme\.test\/logo\.svg"/);
   assert.match(html, /window\.close\(\)/, "it tries to close the tab; the page stays if the browser refuses");
@@ -882,6 +883,9 @@ test("a bare run at a terminal welcomes a person; agents and pipes get the help,
     assert.match(agent.out, /THIS CLI/, "a coding agent or a pipe gets the help");
     assert.doesNotMatch(agent.out, /██|Welcome/);
   }
+  const branded = io(true); branded.channel.env = { NO_COLOR: "1" };
+  assert.equal(await runCli({ ...cli, brand: { name: "Acme Coffee" } }, [], branded.channel), 0);
+  assert.match(branded.out, /Welcome to Acme Coffee\n/, "the brand's name, as people see it written");
   const off = io(true); off.channel.env = { NO_COLOR: "1" };
   assert.equal(await runCli({ ...cli, welcome: false }, [], off.channel), 0);
   assert.match(off.out, /THIS CLI/);
