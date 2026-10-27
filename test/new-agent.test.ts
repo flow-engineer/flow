@@ -1,4 +1,4 @@
-// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/src/main.ts examples/cafe/src/mcp.ts src/local.ts examples/cafe/src/agent.ts examples/cafe/src/tools.ts examples/cafe/src/channels.ts examples/cafe/src/name.ts examples/cafe/src/cli.ts coding-agents/skill.md coding-agents/build-agent-skill.md coding-agents/mcp-skill.md
+// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/src/main.ts examples/cafe/src/mcp.ts src/local.ts examples/cafe/src/agent.ts examples/cafe/src/tools.ts examples/cafe/src/channels.ts examples/cafe/src/name.ts examples/cafe/src/cli.ts coding-agents/skill.md coding-agents/build-agent-skill.md coding-agents/mcp-skill.md coding-agents/cli-design-skill.md
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer as createHttpServer } from "node:http";
