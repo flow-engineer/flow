@@ -2,6 +2,23 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.10.3 (2026-10-27)
+
+### Changes
+
+- **CLI shorthands and defaults.** A `{ tool }` command in the CLI file takes `shorthands`, each
+  naming an input field: a letter is a short flag (`{ n: "limit" }` → `-n 5`), a word is the flag's
+  name (`{ all: "include_revoked" }` → `--all` in help, completion and the CLI's skill). The field's
+  own flag keeps working. `defaults` gives values sent when the person leaves an input out
+  (`{ limit: 20 }`), shown in help and the skill; a required input with a default may be left out.
+  Positional inputs stay `args`. `flow check` refuses a shorthand or default naming an input the
+  tool lacks, a shorthand for a positional argument, `-h`/`-H` or one of the CLI's own flags, and
+  two flags of one name.
+
+### Migration notes
+
+None.
+
 ## 0.10.2 (2026-10-26)
 
 ### Changes

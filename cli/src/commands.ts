@@ -16,6 +16,14 @@ export interface ToolCommand {
   columns?: string[];
   /** For one record: the fields people see, in order. */
   view?: string[];
+  /**
+   * Shorter ways to type its input flags, each naming an input field: a letter is a short flag
+   * ({ n: "limit" } → `-n 5`), a word is the flag's name ({ all: "include_revoked" } → `--all`).
+   * The field's own flag keeps working.
+   */
+  shorthands?: Record<string, string>;
+  /** Values sent for inputs the person leaves out ({ limit: 20 }); they can still pass their own. */
+  defaults?: Record<string, unknown>;
   /** Another name for the command. */
   alias?: string;
   /** One line under the command in help (default: the tool's title). */
@@ -128,6 +136,33 @@ export function derivedName(tool: string): string {
   return tool.replace(/_/g, "-");
 }
 
+/** Flags the CLI puts on tool commands itself. */
+export const OWN_FLAGS = ["json", "fields", "dry-run", "yes", "refresh-tools"];
+
+/** Letters the CLI keeps for itself: -h and -H are help. */
+const OWN_LETTERS = new Set(["h", "H"]);
+
+/** How one input field is typed as a flag: its flag's name, its letters, and the long name a word shorthand stands in for. */
+export interface FlagSpec {
+  field: string;
+  flag: string;
+  letters: string[];
+  long?: string;
+}
+
+/** The flags of a tool command: every input field not taken positionally, with the CLI file's shorthands. */
+export function flagsOf(tool: ToolInfo, settings?: ToolCommand): FlagSpec[] {
+  const args = settings?.args ?? [];
+  const shorthands = Object.entries(settings?.shorthands ?? {});
+  return Object.keys(tool.inputSchema.properties ?? {})
+    .filter((field) => !args.includes(field))
+    .map((field) => {
+      const mine = shorthands.filter(([, f]) => f === field).map(([s]) => s);
+      const word = mine.find((s) => s.length > 1);
+      return { field, flag: word ?? flagName(field), letters: mine.filter((s) => s.length === 1), ...(word ? { long: flagName(field) } : {}) };
+    });
+}
+
 /** Every command: the CLI file's, then each tool it does not name, under the tool's own name. */
 export function commandTable(config: CliConfig, tools: ToolInfo[]): Command[] {
   const byName = new Map(tools.map((t) => [t.name, t]));
@@ -202,6 +237,22 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
     named.add(c.tool);
     const input = new Set(Object.keys(tool.inputSchema.properties ?? {}));
     for (const a of c.args ?? []) if (!input.has(a)) errors.push(`command "${w}": args names ${a}, which ${c.tool}'s input does not have`);
+    for (const [short, field] of Object.entries(c.shorthands ?? {})) {
+      const typed = short.length === 1 ? `-${short}` : `--${short}`;
+      if (!/^[a-zA-Z]$|^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(short)) errors.push(`command "${w}": shorthand "${short}" must be one letter or a lowercase word (a-z, 0-9, -)`);
+      else if (!input.has(field)) errors.push(`command "${w}": shorthand ${typed} names ${field}, which ${c.tool}'s input does not have`);
+      else if (c.args?.includes(field)) errors.push(`command "${w}": shorthand ${typed} names ${field}, which is a positional argument`);
+      else if (OWN_LETTERS.has(short) || OWN_FLAGS.includes(short)) errors.push(`command "${w}": shorthand ${typed} is the CLI's own`);
+    }
+    const flags = new Map<string, string>();
+    for (const f of flagsOf(tool, c)) {
+      if (Object.entries(c.shorthands ?? {}).filter(([s, field]) => field === f.field && s.length > 1).length > 1) errors.push(`command "${w}": ${f.field} has more than one word shorthand`);
+      for (const name of [f.flag, ...(f.long ? [f.long] : [])]) {
+        if (flags.has(name) && flags.get(name) !== f.field) errors.push(`command "${w}": --${name} would be both ${flags.get(name)} and ${f.field}`);
+        flags.set(name, f.field);
+      }
+    }
+    for (const field of Object.keys(c.defaults ?? {})) if (!input.has(field)) errors.push(`command "${w}": defaults names ${field}, which ${c.tool}'s input does not have`);
     const output = outputFields(tool);
     for (const key of ["columns", "view"] as const) {
       for (const f of c[key] ?? []) {
@@ -271,8 +322,9 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     if (c.tool) {
       lines.push("", `MCP tool: \`${c.tool.name}\``);
       if (c.tool.description && c.tool.description !== c.summary) lines.push("", c.tool.description);
-      const args = c.config && !isCustom(c.config) ? (c.config.args ?? []) : [];
-      const flags = flagList(c.tool, args);
+      const settings = c.config && !isCustom(c.config) ? c.config : undefined;
+      const args = settings?.args ?? [];
+      const flags = flagList(c.tool, settings);
       if (args.length || flags.length) lines.push("", `Usage: \`${name} ${c.words.join(" ")}${args.map((a) => ` <${a}>`).join("")}${flags.length ? " [flags]" : ""}\``);
       for (const f of flags) lines.push(`- ${f}`);
       if (c.tool.annotations?.readOnlyHint !== true) lines.push(`- Changes things${c.tool.annotations?.destructiveHint === false ? "" : " and may delete or overwrite: needs --yes"}.`);
@@ -291,15 +343,17 @@ export function flagName(field: string): string {
   return field.replace(/_/g, "-").replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 }
 
-/** One line per flag: its name, type and what it is for. */
-export function flagList(tool: ToolInfo, args: string[] = []): string[] {
+/** One line per flag: its names, type, default and what it is for. */
+export function flagList(tool: ToolInfo, settings?: ToolCommand): string[] {
   const required = new Set(tool.inputSchema.required ?? []);
-  return Object.entries(tool.inputSchema.properties ?? {})
-    .filter(([field]) => !args.includes(field))
-    .map(([field, s]) => {
-      const kind = s.enum ? s.enum.join("|") : flagKind(s) === "json" ? `JSON: ${typeHint(s)} (or @file.json)` : flagKind(s);
-      return `\`--${flagName(field)}\` ${kind}${required.has(field) ? ", required" : ""}${s.description ? `: ${s.description}` : ""}`;
-    });
+  const defaults = settings?.defaults ?? {};
+  return flagsOf(tool, settings).map(({ field, flag, letters, long }) => {
+    const s = tool.inputSchema.properties![field]!;
+    const kind = s.enum ? s.enum.join("|") : flagKind(s) === "json" ? `JSON: ${typeHint(s)} (or @file.json)` : flagKind(s);
+    const names = [...letters.map((l) => `-${l}`), `--${flag}`].join(", ");
+    const given = field in defaults ? `, default ${JSON.stringify(defaults[field])}` : required.has(field) ? ", required" : "";
+    return `\`${names}\`${long ? ` (or \`--${long}\`)` : ""} ${kind}${given}${s.description ? `: ${s.description}` : ""}`;
+  });
 }
 
 /** A short picture of a JSON value's shape: "list of {item, size, milk?, quantity?}". */

@@ -93,6 +93,47 @@ test("commands include MCP-deferred tools: positionals, flags, --json and --fiel
   assert.equal(table.out, "ORDER_ID  STATUS  TOTAL\nBL-1043   making  9.6\n");
 });
 
+test("shorthands give inputs short and renamed flags, the long name still works, and defaults fill what is left out", async () => {
+  const cli = defineCli({
+    ...acme(await serve({ tools: [listOrders, getOrder, cancelOrder] })),
+    commands: { "order list": { tool: "list_orders", shorthands: { n: "limit", state: "status", s: "status" }, defaults: { limit: 1 } } },
+  });
+  const sent = async (argv: string[]) => {
+    const out = io();
+    assert.equal(await runCli(cli, ["order", "list", ...argv, "--json"], out.channel), 0, out.err);
+    return (JSON.parse(out.out) as { orders: { order_id: string }[] }).orders.map((o) => o.order_id);
+  };
+  assert.deepEqual(await sent([]), ["BL-1042"], "the default limit is sent");
+  assert.deepEqual(await sent(["-n", "2"]), ["BL-1042", "BL-1043"]);
+  assert.deepEqual(await sent(["--state", "making", "-n", "5"]), ["BL-1043"]);
+  assert.deepEqual(await sent(["-s", "making"]), ["BL-1043"]);
+  assert.deepEqual(await sent(["--status", "making", "--limit", "5"]), ["BL-1043"], "the input's own flags still work");
+
+  const help = io();
+  await runCli(cli, ["order", "list", "--help"], help.channel);
+  assert.match(help.out, /-n \[--limit\]/);
+  assert.match(help.out, /--state/);
+  assert.doesNotMatch(help.out, /--status/);
+  assert.match(help.out, /default 1/);
+  const skill = skillFile(cli, [{ name: "list_orders", inputSchema: { properties: { status: { enum: ["ready", "making"] }, limit: { type: "integer" } } } }]);
+  assert.match(skill, /`-s, --state` \(or `--status`\) ready\|making/);
+  assert.match(skill, /`-n, --limit` integer, default 1/);
+});
+
+test("flow check holds shorthands and defaults to the tool's input and away from the CLI's own flags", () => {
+  const tools = [{ name: "list_keys", inputSchema: { properties: { project: { type: "string" }, limit: { type: "integer" }, include_revoked: { type: "boolean" } } } }];
+  const problems = (command: object) => cliProblems(defineCli({ name: "acme", commands: { "keys list": { tool: "list_keys", ...command } } }), tools).errors;
+  assert.deepEqual(problems({ args: ["project"], shorthands: { n: "limit", all: "include_revoked" }, defaults: { limit: 20 } }), []);
+  assert.deepEqual(problems({ shorthands: { n: "count" }, defaults: { count: 1 } }), [
+    'command "keys list": shorthand -n names count, which list_keys\'s input does not have',
+    'command "keys list": defaults names count, which list_keys\'s input does not have',
+  ]);
+  assert.deepEqual(problems({ args: ["project"], shorthands: { p: "project" } }), ['command "keys list": shorthand -p names project, which is a positional argument']);
+  assert.deepEqual(problems({ shorthands: { h: "limit", json: "include_revoked" } }), ['command "keys list": shorthand -h is the CLI\'s own', 'command "keys list": shorthand --json is the CLI\'s own']);
+  assert.deepEqual(problems({ shorthands: { project: "limit" } }), ['command "keys list": --project would be both project and limit']);
+  assert.deepEqual(problems({ shorthands: { "Max": "limit" } }), ['command "keys list": shorthand "Max" must be one letter or a lowercase word (a-z, 0-9, -)']);
+});
+
 test("a tool's format is what people see, rendered at a terminal; --json, --fields and the CLI file's view show its data", async () => {
   const createKey = tool({
     name: "create_key",

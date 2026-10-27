@@ -158,6 +158,7 @@ export const cli = defineCli({
   commands: {
     "order list": { tool: "list_orders", columns: ["order_id", "status", "total"], alias: "orders" },
     "order view": { tool: "get_order", args: ["order_id"], examples: ["acme order view BL-1042 --json"] },
+    "order recent": { tool: "list_orders", shorthands: { n: "limit", s: "status" }, defaults: { limit: 5 } },
     "order place": { tool: "place_order" },
   },
 });
@@ -179,6 +180,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   flag (`order_id` is `--order-id`); a list is a repeatable or comma-separated flag; an object or a
   list of objects takes JSON, or `@file.json`, and its help shows the shape
   (`JSON list of {item, size, milk?}`).
+- `shorthands` makes inputs quicker to type, each naming an input field: a letter is a short flag
+  (`{ n: "limit" }` → `-n 5`), a word replaces the flag's name in help (`{ all: "include_revoked" }`
+  → `--all`); the field's own flag still works. `defaults` are values sent when an input is left out
+  (`{ limit: 5 }`), overridable and shown in help. To take an input without a flag, put it in `args`.
 - A command of the team's own is any Stricli command: `"report daily": { command: buildCommand({ ... }) }`
   with `buildCommand` from `@stricli/core`; inside it, `this.cli.call(tool, input)` calls the server's
   tools and `this.cli.print(value, { json })` prints like the rest.
@@ -206,7 +211,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   empty descriptions. Workflow bodies are fetched through `read_skill` only when selected.
   For any MCP server without a CLI file, `npx @flow-engineer/flow cli --server <url> -h`.
 - `npx @flow-engineer/flow check` checks the CLI file against the tools: a command naming a tool that does not
-  exist, an `args` field the input lacks, a `columns` or `view` field the output lacks, two commands
+  exist, an `args`, `shorthands` or `defaults` field the input lacks, a shorthand for a positional
+  argument or one of the CLI's own flags (`-h`, `--json`, ...), a `columns` or `view` field the output lacks, two commands
   with one name, a word that is both a command and a group, or one of the CLI's own words (`auth`,
   `tools`, `skill`) is an error; a tool no command names is a warning (it keeps its own name).
 - MCP-backed commands need a shipped MCP server. Cached definitions (including server name/version)

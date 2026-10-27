@@ -25,8 +25,10 @@ import {
   commandTable,
   flagKind,
   flagName,
+  flagsOf,
   findCommand,
   isCustom,
+  OWN_FLAGS,
   skillFile,
   tokenEnvOf,
   typeHint,
@@ -621,9 +623,6 @@ function helpCommand(config: CliConfig, tools: ToolInfo[], top: Record<string, T
   });
 }
 
-/** Flags the CLI puts on tool commands itself. */
-const OWN_FLAGS = ["json", "fields", "dry-run", "yes", "refresh-tools"];
-
 /** A tool as a Stricli command: its input as flags (and the CLI file's positional arguments). */
 function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) => Promise<void>, call: ToolCall, io: CliIO): StricliCommand<CliContext> {
   const tool = c.tool!;
@@ -633,14 +632,22 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
   const required = new Set(tool.inputSchema.required ?? []);
   const writes = tool.annotations?.readOnlyHint !== true;
   const destructive = writes && tool.annotations?.destructiveHint !== false;
+  const defaults = settings?.defaults ?? {};
   const byFlag = new Map<string, string>();
   const flags: Record<string, unknown> = {};
-  for (const [field, schema] of Object.entries(props)) {
-    if (args.includes(field)) continue;
-    const key = flagName(field);
-    if (OWN_FLAGS.includes(key)) throw new Error(`${config.name}: ${tool.name}'s input ${field} clashes with the CLI's --${key}.`);
-    byFlag.set(key, field);
-    flags[key] = flagSpec(field, schema, !required.has(field));
+  const aliases: Record<string, string> = {};
+  const specs = flagsOf(tool, settings);
+  for (const { field, flag, letters, long } of specs) {
+    for (const key of [flag, ...(long ? [long] : [])]) {
+      if (OWN_FLAGS.includes(key)) throw new Error(`${config.name}: ${tool.name}'s input ${field} clashes with the CLI's --${key}.`);
+      if (byFlag.has(key)) throw new Error(`${config.name}: --${key} is both ${byFlag.get(key)} and ${field} in "${c.words.join(" ")}".`);
+      byFlag.set(key, field);
+    }
+    const spec = flagSpec(field, props[field]!, !required.has(field) || field in defaults || Boolean(long), defaults[field]);
+    flags[flag] = spec;
+    // The field's own flag still works beside a word shorthand, out of help.
+    if (long) flags[long] = { ...(spec as object), optional: true, hidden: true };
+    for (const letter of letters) aliases[letter] = flag;
   }
   flags.json = { kind: "boolean", brief: "Print JSON: for scripts and agents", optional: true, withNegated: false };
   flags.fields = { kind: "parsed", parse: (v: string) => v.split(",").map((f) => f.trim()).filter(Boolean), brief: "Only these fields, comma-separated (a.b for nested ones)", placeholder: "a,b", optional: true };
@@ -652,10 +659,11 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
     docs: { brief: c.summary, fullDescription: `${tool.description ?? c.summary}${examples}` },
     parameters: {
       flags: flags as never,
-      positional: { kind: "tuple", parameters: args.map((field) => ({ brief: props[field]?.description ?? field.replace(/_/g, " "), placeholder: field, parse: parserFor(field, props[field] ?? {}), optional: !required.has(field) })) } as never,
+      aliases: aliases as never,
+      positional: { kind: "tuple", parameters: args.map((field) => ({ brief: withDefault(props[field]?.description ?? field.replace(/_/g, " "), defaults[field]), placeholder: field, parse: parserFor(field, props[field] ?? {}), optional: !required.has(field) || field in defaults })) } as never,
     },
     async func(this: CliContext, parsed: Record<string, unknown>, ...positional: unknown[]) {
-      const input: Record<string, unknown> = {};
+      const input: Record<string, unknown> = { ...defaults };
       args.forEach((field, i) => {
         if (positional[i] !== undefined) input[field] = positional[i];
       });
@@ -667,7 +675,7 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
         if (!(await io.confirm(`${usage} may delete or overwrite. Go ahead?`))) throw new CliExit(EXIT.approval, "Stopped; nothing was sent.");
       }
       const result = await call(tool.name, input, c.words.join(" ")).catch((error: unknown) => {
-        throw needsSignIn(error) ? explain(config, "", error) : (badArguments(config, c.words, error, (field) => (args.includes(field) ? `<${field}>` : `--${flagName(field)}`)) ?? error);
+        throw needsSignIn(error) ? explain(config, "", error) : (badArguments(config, c.words, error, (field) => (args.includes(field) ? `<${field}>` : `--${specs.find((f) => f.field === field)?.flag ?? flagName(field)}`)) ?? error);
       });
       if (result.isError) throw new CliExit(EXIT.failed, textOf(result.content as Block[]) || `${tool.name} failed.`);
       // The tool's own text, unless the person asked for data or the CLI file chose what to show.
@@ -678,8 +686,13 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
   });
 }
 
-function flagSpec(field: string, schema: JsonSchema, optional: boolean): unknown {
-  const brief = schema.description ?? field.replace(/_/g, " ");
+/** A brief that says what is sent when the input is left out. */
+function withDefault(brief: string, value: unknown): string {
+  return value === undefined ? brief : `${brief} (default ${JSON.stringify(value)})`;
+}
+
+function flagSpec(field: string, schema: JsonSchema, optional: boolean, fallback?: unknown): unknown {
+  const brief = withDefault(schema.description ?? field.replace(/_/g, " "), fallback);
   const kind = flagKind(schema);
   if (schema.enum && schema.enum.every((v) => typeof v === "string")) return { kind: "enum", values: schema.enum, brief, optional };
   if (kind === "boolean") return optional ? { kind: "boolean", brief, optional: true, withNegated: false } : { kind: "parsed", parse: parseBoolean, brief, placeholder: "true|false" };
