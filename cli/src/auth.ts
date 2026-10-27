@@ -76,7 +76,7 @@ export function storedProvider(config: CliConfig, server: string, redirectUrl?: 
     writeAll(config, all);
   };
   const metadata: OAuthClientMetadata = {
-    client_name: `${config.name} CLI`,
+    client_name: `${brandOf(config).name} CLI`,
     application_type: "native",
     redirect_uris: redirectUrl ? [redirectUrl] : [],
     grant_types: ["authorization_code", "refresh_token"],
@@ -324,7 +324,7 @@ export async function signIn(config: CliConfig, server: string, signal?: AbortSi
       finish({ ok: false, message: "The sign-in came back but could not be completed. Your terminal says why." });
       throw error;
     }
-    finish({ ok: true, message: `${config.name} is ready. Pick up where you left off.` });
+    finish({ ok: true, message: `${brandOf(config).name} is ready. Pick up where you left off.` });
   } finally {
     finish({ ok: false, message: "The sign-in was stopped in the terminal." });
     // The page reaches the browser before the CLI exits.

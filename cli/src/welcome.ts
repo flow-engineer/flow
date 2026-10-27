@@ -80,7 +80,7 @@ export function welcomeScreen(config: CliConfig, state: WelcomeState, io: CliIO,
   const blocks: string[] = [];
   if (art) blocks.push(accent(config, io, paint)(indent(art.trimEnd())));
   blocks.push(indent([paint("bold", config.name), config.version ? paint("dim", `v${config.version}`) : ""].filter(Boolean).join(" ")));
-  const title = options.title ?? `Welcome to ${config.name}`;
+  const title = options.title ?? `Welcome to ${brandOf(config).name}`;
   const text = options.text ?? config.description;
   blocks.push(indent([paint("bold", title), ...(text ? [text] : [])].join("\n")));
   if (!top) {
@@ -121,7 +121,7 @@ export function waitsForSignIn(config: CliConfig, words: string[]): boolean {
 }
 
 export function signInQuestion(config: CliConfig): string {
-  return (typeof config.signInFirst === "object" && config.signInFirst.message) || `Please sign in to ${config.name} to continue.`;
+  return (typeof config.signInFirst === "object" && config.signInFirst.message) || `Please sign in to ${brandOf(config).name} to continue.`;
 }
 
 /**
