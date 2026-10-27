@@ -252,6 +252,9 @@ export function derivedName(tool: string): string {
 /** Flags the CLI puts on tool commands itself. */
 export const OWN_FLAGS = ["json", "fields", "dry-run", "yes", "refresh-tools"];
 
+/** Flags the CLI takes out of every command before parsing it (they pick the server and the token). */
+const CONNECTION_FLAGS = ["server", "token"];
+
 /** Letters the CLI keeps for itself: -h and -H are help. */
 const OWN_LETTERS = new Set(["h", "H"]);
 
@@ -271,7 +274,7 @@ export function flagsOf(tool: ToolInfo, settings?: ToolCommand): FlagSpec[] {
     .filter((field) => !args.includes(field) && !settings?.hidden?.includes(field))
     .map((field) => {
       const mine = shorthands.filter(([, f]) => f === field).map(([s]) => s);
-      const word = mine.find((s) => s.length > 1);
+      const word = mine.find((s) => s.length > 1 && s !== flagName(field));
       return { field, flag: word ?? flagName(field), letters: mine.filter((s) => s.length === 1), ...(word ? { long: flagName(field) } : {}) };
     });
 }
@@ -355,7 +358,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
       if (!/^[a-zA-Z]$|^[a-z][a-z0-9]*(-[a-z0-9]+)*$/.test(short)) errors.push(`command "${w}": shorthand "${short}" must be one letter or a lowercase word (a-z, 0-9, -)`);
       else if (!input.has(field)) errors.push(`command "${w}": shorthand ${typed} names ${field}, which ${c.tool}'s input does not have`);
       else if (c.args?.includes(field)) errors.push(`command "${w}": shorthand ${typed} names ${field}, which is a positional argument`);
-      else if (OWN_LETTERS.has(short) || OWN_FLAGS.includes(short)) errors.push(`command "${w}": shorthand ${typed} is the CLI's own`);
+      else if (OWN_LETTERS.has(short) || OWN_FLAGS.includes(short) || CONNECTION_FLAGS.includes(short)) errors.push(`command "${w}": shorthand ${typed} is the CLI's own`);
     }
     const flags = new Map<string, string>();
     for (const f of flagsOf(tool, c)) {
@@ -375,7 +378,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
     for (const field of Object.keys(c.help ?? {})) if (!input.has(field) || c.hidden?.includes(field)) errors.push(`command "${w}": help names ${field}, which is not one of its flags or arguments`);
     const letters = new Set(Object.keys(c.shorthands ?? {}).filter((k) => k.length === 1));
     for (const [name, option] of Object.entries(c.options ?? {})) {
-      if (flags.has(name) || OWN_FLAGS.includes(name)) errors.push(`command "${w}": option --${name} clashes with ${flags.has(name) ? `${flags.get(name)}'s flag` : "the CLI's own"}`);
+      if (flags.has(name) || OWN_FLAGS.includes(name) || CONNECTION_FLAGS.includes(name)) errors.push(`command "${w}": option --${name} clashes with ${flags.has(name) ? `${flags.get(name)}'s flag` : "the CLI's own"}`);
       if (option.short && (letters.has(option.short) || OWN_LETTERS.has(option.short))) errors.push(`command "${w}": option --${name}'s -${option.short} is already taken`);
       if (option.short) letters.add(option.short);
     }

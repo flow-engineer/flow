@@ -98,6 +98,7 @@ test("a command written as code: short and renamed flags, the long name still wo
     ...acme(await serve({ tools: [listOrders, getOrder, cancelOrder] })),
     commands: {
       "order list": command("list_orders").short("n", "limit").flag("state", "status").short("s", "status").default("limit", 1),
+      "order view": command("get_order").flag("order-id", "order_id"), // a word that is the flag's own name changes nothing
       "order last": command("list_orders").arg("status").map((input) => ({ ...input, limit: 1 })),
     },
   });
@@ -181,6 +182,7 @@ test("flow check holds shorthands and defaults to the tool's input and away from
   ]);
   assert.deepEqual(problems({ args: ["project"], shorthands: { p: "project" } }), ['command "keys list": shorthand -p names project, which is a positional argument']);
   assert.deepEqual(problems({ shorthands: { h: "limit", json: "include_revoked" } }), ['command "keys list": shorthand -h is the CLI\'s own', 'command "keys list": shorthand --json is the CLI\'s own']);
+  assert.deepEqual(problems({ shorthands: { "include-revoked": "include_revoked", token: "limit" } }), ['command "keys list": shorthand --token is the CLI\'s own']);
   assert.deepEqual(problems({ shorthands: { project: "limit" } }), ['command "keys list": --project would be both project and limit']);
   assert.deepEqual(problems({ shorthands: { "Max": "limit" } }), ['command "keys list": shorthand "Max" must be one letter or a lowercase word (a-z, 0-9, -)']);
   assert.deepEqual(problems({ hidden: ["project"], help: { project: "x" } }), [
