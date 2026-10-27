@@ -320,7 +320,8 @@ export function findCommand(commands: Command[], words: string[]): { command: Co
 
 /** The words with a group's default subcommand put in where they name none of its subcommands. */
 export function withDefaults(config: CliConfig, commands: Command[], words: string[]): string[] {
-  const paths = commands.map((c) => c.words.join(" "));
+  // The CLI file's words too: before discovery, tool commands are not in the table yet.
+  const paths = [...commands.map((c) => c.words.join(" ")), ...commandEntries(config).map(([w]) => w.trim().split(/\s+/).join(" "))];
   for (let i = words.length - 1; i >= 0; i--) {
     const group = words.slice(0, i + 1).join(" ");
     const sub = config.defaultCommands?.[group];
@@ -484,7 +485,8 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
       const flags = flagList(c.tool, settings);
       const group = c.words.slice(0, -1).join(" ");
       const usageArgs = args.map((a) => ` <${a}${flagKind(c.tool!.inputSchema.properties?.[a] ?? {}) === "list" ? "..." : ""}>`).join("");
-      if (group && config.defaultCommands?.[group] === c.words[c.words.length - 1]) lines.push("", `The default of \`${name} ${group}\`: \`${name} ${group}${usageArgs}\` runs it too.`);
+      // Bare, a group shows its help, so only a default with arguments runs from the group's name.
+      if (group && args.length && config.defaultCommands?.[group] === c.words[c.words.length - 1]) lines.push("", `The default of \`${name} ${group}\`: \`${name} ${group}${usageArgs}\` runs it too.`);
       if (args.length || flags.length) lines.push("", `Usage: \`${name} ${c.words.join(" ")}${args.map((a) => ` <${a}${flagKind(c.tool!.inputSchema.properties?.[a] ?? {}) === "list" ? "..." : ""}>`).join("")}${flags.length ? " [flags]" : ""}\``);
       for (const f of flags) lines.push(`- ${f}`);
       if (c.tool.annotations?.readOnlyHint !== true) lines.push(`- Changes things${c.tool.annotations?.destructiveHint === false ? "" : " and may delete or overwrite: needs --yes"}.`);

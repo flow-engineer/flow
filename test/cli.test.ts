@@ -198,6 +198,14 @@ test("a group's default subcommand runs for words naming none of its subcommands
   assert.equal(missing.code, 2);
   assert.match(missing.err, /order_id/);
   assert.match(skillFile(cli, [{ name: "get_order", inputSchema: { properties: { order_id: { type: "string" } } } }]), /The default of `acme order`: `acme order <order_id>` runs it too\./);
+  assert.doesNotMatch(skillFile({ ...cli, defaultCommands: { order: "list" } }, [{ name: "list_orders", inputSchema: {} }]), /The default of/, "bare, the group shows help, so no default without arguments is offered");
+
+  // A handwritten default beside a tool command: naming the tool command, before discovery, still runs it.
+  const custom = buildCommand({ docs: { brief: "Make an order" }, parameters: {}, func() {} });
+  const mixed = defineCli({ ...cli, commands: { "order create": { command: custom }, "order view": command("get_order").arg("order_id") }, defaultCommands: { order: "create" } });
+  const named = io();
+  assert.equal(await runCli(mixed, ["order", "view", "BL-1042", "--json", "--fields", "order_id"], named.channel), 0, named.err);
+  assert.deepEqual(JSON.parse(named.out), { order_id: "BL-1042" });
 });
 
 test("flow check holds shorthands and defaults to the tool's input and away from the CLI's own flags", () => {
