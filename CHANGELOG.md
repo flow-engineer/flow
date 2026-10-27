@@ -25,6 +25,10 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   given with it is also the one the agent's traces carry for that run.
 - **`flow deploy`'s default version** is that version too: the full commit (it was the short one),
   `FLOW_AGENT_VERSION` or the CI's commit when set, `package.json`'s `version` outside git.
+- **The coding-agent skills keep one version per build.** `build-agent-skill.md` ("Deploy it") says the
+  git commit is the version, to pass it as `FLOW_AGENT_VERSION` to a process with no `.git` (a
+  container image), how CI records a deploy on the owner's own servers (`POST /v1/deployments` with
+  `FLOW_KEY` on stdin), and how to compare two versions offline; `test-skill.md` points there.
 
 ### Migration notes
 
