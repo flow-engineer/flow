@@ -6,6 +6,7 @@
 // it never judges taste.
 
 import type { Command as StricliCommand, CommandContext } from "@stricli/core";
+import { FEEDBACK_NUDGE } from "../../src/skills.ts";
 
 export interface ToolCommand {
   /** The tool this command calls. */
@@ -334,6 +335,19 @@ export function commandTable(config: CliConfig, tools: ToolInfo[]): Command[] {
   return commands;
 }
 
+/**
+ * How to send feedback from this CLI, when the server has its built-in feedback tool (a tool named
+ * feedback with an `about`): `acme feedback --about tooling|product --message "<what happened>"`.
+ */
+export function feedbackUsage(config: CliConfig, tools: ToolInfo[]): string | undefined {
+  const c = commandTable(config, tools).find((x) => x.tool?.name === "feedback" && x.tool.inputSchema.properties?.about && x.tool.inputSchema.properties?.message);
+  if (!c) return undefined;
+  const settings = c.config && !isCustom(c.config) ? c.config : undefined;
+  const flag = (field: string) => (settings?.args?.includes(field) ? undefined : `--${flagsOf(c.tool!, settings).find((f) => f.field === field)?.flag ?? flagName(field)}`);
+  const about = flag("about"), message = flag("message");
+  return `${config.name} ${c.words.join(" ")} ${about ? `${about} ` : ""}tooling|product ${message ? `${message} ` : ""}"<what happened>"`;
+}
+
 /** The command the words start with, the longest match first, and the words left after it. */
 export function findCommand(commands: Command[], words: string[]): { command: Command; rest: string[] } | null {
   let best: Command | null = null;
@@ -472,6 +486,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
 /** The CLI's SKILL.md for coding agents, made from the tools and the CLI file, never written by hand. */
 export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
   const name = config.name;
+  const feedback = feedbackUsage(config, tools);
   const lines = [
     "---",
     `name: ${name}-cli`,
@@ -489,6 +504,7 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     "",
     "Exit codes: 0 done, 1 the tool failed (its message on stderr), 2 wrong command or arguments, 3 sign-in needed, 4 needs --yes, 5 the server could not be reached.",
     "",
+    ...(feedback ? ["## Sharing feedback", "", FEEDBACK_NUDGE(`\`${feedback}\``), ""] : []),
     "## Talking to the agent",
     "",
     `\`${name} chat "<message>"\` sends one message to the agent and prints its reply as written (\`--json\` for the full response); always pass the message. \`${name} chat\` alone is for a person at a terminal. Chat needs sign-in unless the agent lets guests chat.`,

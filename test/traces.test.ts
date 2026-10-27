@@ -181,7 +181,7 @@ test("from the environment: a trace key goes to flow.engineer/observe unless a U
 });
 
 // Turn trace tests never exercise standalone calls, which have no conversation to attach to.
-test("standalone calls export one trace each with host metadata and content only when enabled", async (t) => {
+test("standalone calls export one trace each with host metadata and content only when enabled, and feedback always", async (t) => {
   for (const content of [false, true]) {
     const endpoint = await fakeEndpoint();
     t.after(endpoint.close);
@@ -208,6 +208,14 @@ test("standalone calls export one trace each with host metadata and content only
       assert.equal(root["chinwag.conversation_id"], undefined);
       assert.equal(root["openinference.span.kind"], "TOOL");
       assert.equal(JSON.stringify(spans).includes("private-tool-data"), content);
+
+      await c.callTool({ name: "feedback", arguments: { about: "tooling", message: "lookup needs a limit", tool: "lookup" } });
+      await mcp.flushTraces();
+      const feedback = attrs(endpoint.requests.flatMap(r => r.body.resourceSpans[0].scopeSpans[0].spans).at(-1));
+      assert.equal(feedback["gen_ai.tool.name"], "feedback");
+      assert.equal(feedback["flow.feedback.about"], "tooling");
+      assert.equal(feedback["flow.feedback.message"], "lookup needs a limit", "written for the team, so sent with content off too");
+      assert.equal(feedback["flow.feedback.tool"], "lookup");
     } finally { await c.close(); }
   }
 });

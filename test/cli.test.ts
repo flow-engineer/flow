@@ -16,6 +16,7 @@ import { z } from "zod";
 import { buildCommand } from "@stricli/core";
 import { cliProblems, command, commandTable, defineCli, runCli, skillFile, type CliConfig, type CliIO } from "../cli/src/index.ts";
 import { signOut, storedProvider } from "../cli/src/auth.ts";
+import { feedbackUsage } from "../cli/src/commands.ts";
 import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
 import { scriptedModel, respond, call } from "./helpers.ts";
 import { createAgent, tool } from "../src/index.ts";
@@ -81,6 +82,26 @@ const acme = (server: string): CliConfig =>
       "order view": { tool: "get_order", args: ["order_id"] },
     },
   });
+
+test("the CLI tells agents how to send feedback: in its help, its skill and a failed command's error, and acme feedback sends it", async () => {
+  const events: Array<Record<string, unknown>> = [];
+  const failing = tool({ name: "refund_order", description: "Refund an order.", input: z.object({ order_id: z.string() }), signIn: "none", hints: { destructive: false }, run: () => { throw new Error("Refunds are closed."); } });
+  const cli = acme(await serve({ tools: [listOrders, failing], events: [e => { events.push(e); }] }));
+  const usage = 'acme feedback --about tooling|product --message "<what happened>"';
+  const help = io();
+  assert.equal(await runCli(cli, ["--help"], help.channel), 0);
+  assert.match(help.out, /FEEDBACK\n  Something failed, missing or confusing\? acme feedback --about tooling\|product --message "<what happened>"/);
+  const skill = io();
+  assert.equal(await runCli(cli, ["skill", "get", "acme-cli"], skill.channel), 0, skill.err);
+  assert.ok(skill.out.includes(`## Sharing feedback\n\nWhen a tool fails, is missing or is confusing, or the product cannot do what is needed, tell the team with \`${usage}\``));
+  const failed = io();
+  assert.equal(await runCli(cli, ["refund-order", "--order-id", "BL-1"], failed.channel), 1);
+  assert.match(failed.err, /Refunds are closed\.\nIf this looks wrong, tell the team: acme feedback --about tooling --message "<what happened>"/);
+  const sent = io();
+  assert.equal(await runCli(cli, ["feedback", "--about", "product", "--message", "Let me refund part of an order", "--json"], sent.channel), 0, sent.err);
+  assert.deepEqual(events.find(e => e.type === "tool.end" && e.tool === "feedback")?.feedback, { about: "product", message: "Let me refund part of an order" });
+  assert.equal(feedbackUsage(cli, [{ name: "list_orders", inputSchema: {} }]), undefined, "a server without it is told nothing");
+});
 
 test("commands include MCP-deferred tools: positionals, flags, --json and --fields", async () => {
   const cli = acme(await serve({ tools: [listOrders, { ...getOrder, mcp: { deferred: true } }, cancelOrder] }));
@@ -274,7 +295,7 @@ test("a group's help lists its subcommands, and the top level lists groups and c
   const top = io();
   assert.equal(await runCli(cli, ["--help"], top.channel), 0);
   const headings = (out: string) => out.split("\n").filter((l) => /^[A-Z][A-Z ]+$/.test(l));
-  assert.deepEqual(headings(top.out), ["USAGE", "ASK ANYTHING", "COMMANDS", "THIS CLI", "FLAGS"], "chat first, the CLI's own last, each command once");
+  assert.deepEqual(headings(top.out), ["USAGE", "ASK ANYTHING", "COMMANDS", "THIS CLI", "FEEDBACK", "FLAGS"], "chat first, the CLI's own last, each command once");
   assert.match(top.out, /^USAGE\n {2}acme <command> \[flags\]\n {2}acme <command> --help\n\n/, "one usage line, not one per command");
   assert.match(top.out, /ASK ANYTHING\n {2}acme chat "<request>" +Ask for anything/);
   assert.match(top.out, /\n {2}order +list, view\n/, "the group, with its subcommands as its line");
@@ -289,7 +310,7 @@ test("a group's help lists its subcommands, and the top level lists groups and c
 
   const sectioned = io();
   assert.equal(await runCli({ ...cli, sections: { Orders: ["order"] } }, ["--help"], sectioned.channel), 0);
-  assert.deepEqual(headings(sectioned.out), ["USAGE", "ASK ANYTHING", "ORDERS", "OTHER", "THIS CLI", "FLAGS"]);
+  assert.deepEqual(headings(sectioned.out), ["USAGE", "ASK ANYTHING", "ORDERS", "OTHER", "THIS CLI", "FEEDBACK", "FLAGS"]);
   assert.match(sectioned.out, /ORDERS\n {2}order +list, view\n\nOTHER\n {2}orders +Same as order list\n {2}cancel-order +Cancel order\n/, "what no section names is under Other");
 });
 
