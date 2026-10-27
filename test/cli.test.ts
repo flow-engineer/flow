@@ -172,6 +172,42 @@ test("a command's code hides inputs, words its flags, adds its own options, take
   assert.doesNotMatch(help.out, /--source/);
 });
 
+test("a group's default subcommand runs for words naming none of its subcommands; bare, the group shows its help", async () => {
+  const events: any[] = [];
+  const cli = defineCli({
+    ...acme(await serve({ tools: [listOrders, getOrder], events: [e => { events.push(e); }] })),
+    defaultCommands: { order: "view" },
+    commands: { "order view": command("get_order").arg("order_id"), "order list": command("list_orders") },
+  });
+  const run = async (argv: string[]) => {
+    const out = io();
+    return { code: await runCli(cli, argv, out.channel), out: out.out, err: out.err };
+  };
+  assert.deepEqual(JSON.parse((await run(["order", "BL-1042", "--json", "--fields", "order_id"])).out), { order_id: "BL-1042" });
+  assert.equal(events.find(e => e.type === "tool.start").command, "order view", "the call names the default it ran");
+  assert.deepEqual(JSON.parse((await run(["order", "view", "BL-1043", "--json", "--fields", "status"])).out), { status: "making" });
+  assert.equal((await run(["order", "list", "--json"])).code, 0, "a named subcommand wins over the default");
+
+  for (const argv of [["order"], ["order", "--help"]]) {
+    const help = await run(argv);
+    assert.equal(help.code, 0);
+    assert.match(help.out, /`acme order <order_id>` runs `acme order view`/);
+    assert.match(help.out, /COMMANDS[\s\S]*view[\s\S]*list/);
+  }
+  const missing = await run(["order", "--json"]);
+  assert.equal(missing.code, 2);
+  assert.match(missing.err, /order_id/);
+  assert.match(skillFile(cli, [{ name: "get_order", inputSchema: { properties: { order_id: { type: "string" } } } }]), /The default of `acme order`: `acme order <order_id>` runs it too\./);
+  assert.doesNotMatch(skillFile({ ...cli, defaultCommands: { order: "list" } }, [{ name: "list_orders", inputSchema: {} }]), /The default of/, "bare, the group shows help, so no default without arguments is offered");
+
+  // A handwritten default beside a tool command: naming the tool command, before discovery, still runs it.
+  const custom = buildCommand({ docs: { brief: "Make an order" }, parameters: {}, func() {} });
+  const mixed = defineCli({ ...cli, commands: { "order create": { command: custom }, "order view": command("get_order").arg("order_id") }, defaultCommands: { order: "create" } });
+  const named = io();
+  assert.equal(await runCli(mixed, ["order", "view", "BL-1042", "--json", "--fields", "order_id"], named.channel), 0, named.err);
+  assert.deepEqual(JSON.parse(named.out), { order_id: "BL-1042" });
+});
+
 test("flow check holds shorthands and defaults to the tool's input and away from the CLI's own flags", () => {
   const tools = [{ name: "list_keys", inputSchema: { properties: { project: { type: "string" }, limit: { type: "integer" }, include_revoked: { type: "boolean" }, tags: { type: "array", items: { type: "string" } } }, required: ["project"] } }];
   const problems = (command: object) => cliProblems(defineCli({ name: "acme", commands: { "keys list": { tool: "list_keys", ...command } } }), tools).errors;
@@ -189,6 +225,10 @@ test("flow check holds shorthands and defaults to the tool's input and away from
     'command "keys list": project is required and hidden, so it needs a default or input code',
     'command "keys list": help names project, which is not one of its flags or arguments',
   ]);
+  const defaults = (defaultCommands: Record<string, string>) => cliProblems(defineCli({ name: "acme", defaultCommands, commands: { "keys list": { tool: "list_keys" }, "keys admin add": { tool: "list_keys" } } }), tools).errors;
+  assert.deepEqual(defaults({ keys: "list" }), []);
+  assert.deepEqual(defaults({ key: "list", keys: "show" }), ['defaultCommands: "key" is not a group', 'defaultCommands: "keys show" is not a command of the group "keys"']);
+  assert.deepEqual(defaults({ keys: "admin" }), ['defaultCommands: "keys admin" is not a command of the group "keys"']);
   assert.deepEqual(problems({ args: ["project", "tags"] }), ['command "keys list": tags takes many values, so it must be the only positional argument']);
   assert.deepEqual(problems({ options: { limit: { help: "x" }, mine: { help: "y", short: "h" } } }), [
     'command "keys list": option --limit clashes with limit\'s flag',

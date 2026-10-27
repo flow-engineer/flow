@@ -24,6 +24,12 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   argument, `-h`/`-H` or one of the CLI's own flags, two flags of one name, a required hidden input
   with neither a default nor input code, options with no input code, and a list argument beside
   other arguments.
+- **A group's default subcommand: `defineCli({ defaultCommands: { scrape: "create" } })`.** Words
+  after `scrape` that name none of its subcommands go to `scrape create`, so `acme scrape <url>`,
+  `acme scrape create <url>` and `acme scrape get <id>` all work; a named subcommand wins. Bare
+  `acme scrape` shows the group's help, which says what the default runs; the CLI's skill names it
+  on the default command. A word is still a command or a group, never both. `flow check` refuses a
+  default for a name that is not a group, or one that is not a command of that group.
 
 ### Migration notes
 
