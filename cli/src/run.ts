@@ -28,6 +28,7 @@ import {
   flagName,
   flagsOf,
   findCommand,
+  withDefaults,
   isCustom,
   OWN_FLAGS,
   skillFile,
@@ -115,7 +116,8 @@ function connectionFlags(config: CliConfig, argv: string[]): { rest: string[]; s
     if (!m) rest.push(argv[i]!);
     else found[m[1]!] = m[2] ?? argv[++i] ?? "";
   }
-  const command = findCommand(commandTable(config, []), rest.filter(w => w !== "--refresh-tools"))?.command.config;
+  const table = commandTable(config, []);
+  const command = findCommand(table, withDefaults(config, table, rest.filter(w => w !== "--refresh-tools")))?.command.config;
   // A handwritten command can own this flag too; framework defaults must not consume it.
   if (!(command && isCustom(command) && command.command.usesFlag("refresh-tools", "original"))) {
     for (let i = rest.length - 1; i >= 0; i--) if (rest[i] === "--refresh-tools") { rest.splice(i, 1); refresh = true; }
@@ -140,10 +142,13 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
   io.signal?.throwIfAborted();
   const env = io.env ?? process.env;
   const { rest, server: given, token: givenToken, refresh } = connectionFlags(config, argv);
+  // A group with a default subcommand, alone, shows its help rather than running the default.
+  if (rest.length && config.defaultCommands?.[rest.join(" ")] !== undefined) rest.push("--help");
   const server = given ?? config.server ?? env[envName(config, "SERVER")];
   const token = givenToken ?? env[tokenEnvOf(config)];
   if (rest[0] === "chat" && !config.commands?.[rest[0]]) return runTerminal(config, server, token, rest, io);
-  const local = findCommand(commandTable(config, []), rest);
+  const table = commandTable(config, []);
+  const local = findCommand(table, withDefaults(config, table, rest));
   const custom = Boolean(local?.command.config && isCustom(local.command.config));
   const prefix = rest.filter(w => w !== "--help" && w !== "-h").join(" ");
   const children = commandEntries(config).filter(([words]) => words.startsWith(`${prefix} `));
@@ -231,7 +236,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
         exitCode: undefined as number | string | null | undefined,
       };
       const context: CliContext = { process: stricliProcess, cli: {
-        call: async (tool, input) => valueOf(await call(tool, input, findCommand(commandTable(config, tools), rest)?.command.words.join(" ") ?? "custom")),
+        call: async (tool, input) => valueOf(await call(tool, input, findCommand(commandTable(config, tools), withDefaults(config, commandTable(config, tools), rest))?.command.words.join(" ") ?? "custom")),
         print: (value, options = {}) => output.write(`${render(value, options)}\n`),
       } };
       const refused = (error: unknown) => badArguments(config, wordsKnown(rest.filter(w => !w.startsWith("-")), config, tools), error, field => field);
@@ -531,7 +536,11 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
       if (child.command) out[word] = child.command;
       else {
         const sub = build(child, here);
-        out[word] = buildRouteMap({ routes: sub, docs: { brief: config.groups?.[here.join(" ")] ?? Object.keys(sub).join(", ") } });
+        const fallback = config.defaultCommands?.[here.join(" ")];
+        const brief = config.groups?.[here.join(" ")] ?? Object.keys(sub).join(", ");
+        out[word] = fallback && sub[fallback]
+          ? buildRouteMap({ routes: sub, defaultCommand: fallback, docs: { brief, fullDescription: `${brief}\n\n\`${config.name} ${here.join(" ")}${defaultArgs(config, `${here.join(" ")} ${fallback}`)}\` runs \`${config.name} ${here.join(" ")} ${fallback}\`.` } })
+          : buildRouteMap({ routes: sub, docs: { brief } });
       }
     }
     return out;
@@ -551,6 +560,13 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
     routes: all,
     docs: { brief: config.description ?? config.name, fullDescription: `${overview(config, all, theirs, Object.keys(own), paint)}\n\n${paint("dim", `${notice}\n--server <url>, --token <token> and --refresh-tools (bypass discovery cache) work on every command.`)}` },
   });
+}
+
+/** A default subcommand's positional arguments, as help shows them (" <url>"), else " ...". */
+function defaultArgs(config: CliConfig, words: string): string {
+  const c = commandEntries(config).find(([w]) => w.trim().split(/\s+/).join(" ") === words)?.[1];
+  const args = c && !isCustom(c) ? (c.args ?? []) : [];
+  return args.length ? args.map((a) => ` <${a}>`).join("") : " ...";
 }
 
 const CHAT_BRIEF = "Ask for anything in plain words, and the agent gets it done";

@@ -99,6 +99,12 @@ export interface CliConfig {
   /** One line about each group, shown in help ("order": "Place and track orders"). Default: its subcommands. */
   groups?: Record<string, string>;
   /**
+   * A group's default subcommand ({ scrape: "create" }): words after the group that name none of
+   * its subcommands go to it, so `scrape <url>` runs `scrape create <url>`. Bare `scrape` shows the
+   * group's help.
+   */
+  defaultCommands?: Record<string, string>;
+  /**
    * Headings for the top-level help, each with its groups and commands in order
    * ({ Orders: ["order", "menu"] }). Those not placed are listed under Other. Default: one list.
    */
@@ -312,6 +318,20 @@ export function findCommand(commands: Command[], words: string[]): { command: Co
   return best ? { command: best, rest: words.slice(best.words.length) } : null;
 }
 
+/** The words with a group's default subcommand put in where they name none of its subcommands. */
+export function withDefaults(config: CliConfig, commands: Command[], words: string[]): string[] {
+  const paths = commands.map((c) => c.words.join(" "));
+  for (let i = words.length - 1; i >= 0; i--) {
+    const group = words.slice(0, i + 1).join(" ");
+    const sub = config.defaultCommands?.[group];
+    if (!sub || !paths.includes(`${group} ${sub}`)) continue;
+    const next = words[i + 1];
+    if (next === undefined || paths.some((p) => p === `${group} ${next}` || p.startsWith(`${group} ${next} `))) return words;
+    return [...words.slice(0, i + 1), sub, ...words.slice(i + 1)];
+  }
+  return words;
+}
+
 /** Fields a list's rows or a record carry: the output schema's, or for an array, its items'. */
 function outputFields(tool: ToolInfo): Set<string> | null {
   const schema = tool.outputSchema;
@@ -399,6 +419,11 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
     claim(derivedName(t.name), `tool ${t.name}`);
     if (config.commands) warnings.push(`tool ${t.name} has no command in the CLI file; it is reachable as "${derivedName(t.name)}"`);
   }
+  for (const [group, sub] of Object.entries(config.defaultCommands ?? {})) {
+    const key = group.trim().split(/\s+/).join(" ");
+    if (![...words.keys()].some((w) => w.startsWith(`${key} `))) errors.push(`defaultCommands: "${key}" is not a group`);
+    else if (/\s/.test(sub.trim()) || !words.has(`${key} ${sub.trim()}`)) errors.push(`defaultCommands: "${key} ${sub}" is not a command of the group "${key}"`);
+  }
   const tops = new Set([...words.keys()].map((key) => key.split(" ")[0]!));
   const placed = new Map<string, string>();
   for (const [heading, entries] of Object.entries(config.sections ?? {})) {
@@ -457,6 +482,9 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
       const settings = c.config && !isCustom(c.config) ? c.config : undefined;
       const args = settings?.args ?? [];
       const flags = flagList(c.tool, settings);
+      const group = c.words.slice(0, -1).join(" ");
+      const usageArgs = args.map((a) => ` <${a}${flagKind(c.tool!.inputSchema.properties?.[a] ?? {}) === "list" ? "..." : ""}>`).join("");
+      if (group && config.defaultCommands?.[group] === c.words[c.words.length - 1]) lines.push("", `The default of \`${name} ${group}\`: \`${name} ${group}${usageArgs}\` runs it too.`);
       if (args.length || flags.length) lines.push("", `Usage: \`${name} ${c.words.join(" ")}${args.map((a) => ` <${a}${flagKind(c.tool!.inputSchema.properties?.[a] ?? {}) === "list" ? "..." : ""}>`).join("")}${flags.length ? " [flags]" : ""}\``);
       for (const f of flags) lines.push(`- ${f}`);
       if (c.tool.annotations?.readOnlyHint !== true) lines.push(`- Changes things${c.tool.annotations?.destructiveHint === false ? "" : " and may delete or overwrite: needs --yes"}.`);

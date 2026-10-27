@@ -155,6 +155,7 @@ export const cli = defineCli({
   description: "Acme's orders and customers",
   groups: { order: "Place and track orders" },
   sections: { Orders: ["order"] },                 // headings in `acme -h`; the rest go under Other
+  defaultCommands: { order: "view" },              // `acme order BL-1042` runs `order view`
   commands: {
     "order list": { tool: "list_orders", columns: ["order_id", "status", "total"], alias: "orders" },
     "order view": { tool: "get_order", args: ["order_id"], examples: ["acme order view BL-1042 --json"] },
@@ -169,7 +170,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
 - Words are groups then a verb: `order` is a **command group**, `list`, `view` and `place` its
   subcommands. `acme order` and `acme order -h` list the group's subcommands, `acme order place -h`
   that command's flags and examples, and `acme -h` the groups and top-level commands. A word is a
-  group or a command, never both. `groups` gives each group its line in help.
+  group or a command, never both. `groups` gives each group its line in help. `defaultCommands`
+  names a group's default subcommand: words naming none of its subcommands go to it (`acme order
+  BL-1042` is `acme order view BL-1042`), bare `acme order` still shows the group's help.
 - `acme -h` puts `chat` first (ask for anything in plain words), then the groups and commands,
   then the CLI's own (`tools`, `skill`, `auth`, `help`). With many groups, `sections` puts them
   under headings in the order given; those no section names are listed under Other. `acme help
