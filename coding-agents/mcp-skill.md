@@ -210,7 +210,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   (default the command's name), `logo` an https or `data:image` URL, `accent` a six-digit hex color
   (`chat.accent` is its older name and still works); `flow check` refuses a bad color or logo.
 - `auth login` ends on a branded page in the browser: the logo (else the name's initial), the
-  accent, and "You're all set" only once the code is exchanged and the tokens are
+  accent, and "Head back to your terminal" only once the code is exchanged and the tokens are
   saved, else what went wrong and the command to try again. It tries to close the tab and stays up
   where the browser refuses. `signInPage: ({ status, brand, cli, message }) => html` replaces it
   with the team's own; it never gets the code, token or state, and is sent with no caching.

@@ -47,8 +47,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `chat.accent` keeps working as the older name for `brand.accent`. `flow check` refuses an accent
   that is not a six-digit hex color and a logo that is not https or `data:image`.
 - **A branded page at the end of `auth login`.** The browser no longer gets the plain text "Signed
-  in. You can close this tab": it gets a page with the brand's logo (else its initial and name) on a quiet grid,
-  in light and dark, that says "You're all set" and tries to close the tab, staying up
+  in. You can close this tab": it gets a page with the brand's logo (else its initial and name) and accent,
+  in light and dark, that shows the sign-in finishing in a small terminal, says "Head back to your terminal", and tries to close the tab, staying up
   where the browser refuses. A failure says what went wrong and shows `<name> auth login` to try
   again. `defineCli({ signInPage: ({ status, brand, cli, message }) => html })` replaces it with the
   team's own; it gets only what the page shows, never the code, token or state. Pages are sent with

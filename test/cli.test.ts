@@ -814,7 +814,7 @@ test("the sign-in page shows the brand, and says signed in only once the code is
   assert.equal(page.headers.get("cache-control"), "no-store");
   assert.equal(page.headers.get("referrer-policy"), "no-referrer");
   const html = await page.text();
-  assert.match(html, /You're all set[\s\S]*Signed in to Acme &#60;Coffee&#62;/, "the brand's name, escaped");
+  assert.match(html, /Head back to your terminal[\s\S]*Signed in to Acme &#60;Coffee&#62;/, "the brand's name, escaped");
   assert.match(html, /--accent: #645bff/);
   assert.match(html, /src="https:\/\/acme\.test\/logo\.svg"/);
   assert.match(html, /window\.close\(\)/, "it tries to close the tab; the page stays if the browser refuses");

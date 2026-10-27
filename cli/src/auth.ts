@@ -178,16 +178,16 @@ function onAccent(hex: string): string {
   return 0.2126 * r! + 0.7152 * g! + 0.0722 * b! > 0.18 ? "#111111" : "#ffffff";
 }
 
-/** Flow's sign-in page: the brand's logo (else its initial and name) on a quiet grid, the outcome, and the way back to the terminal. */
+/** Flow's sign-in page: the brand's logo (else its initial and name) and accent, the outcome, and the terminal it hands back to. */
 export function signInPageHtml(page: SignInPage, nonce: string): string {
   const { brand, status } = page;
   const accent = brand.accent && HEX.test(brand.accent) ? brand.accent : "#4f5bd5";
   const ok = status === "signed-in";
   const name = escape(brand.name);
+  const cli = escape(page.cli);
   const logo = brand.logo && !logoProblem(brand.logo)
     ? `<img class="logo" src="${escape(brand.logo)}" alt="${name}">`
     : `<div class="wordmark"><span class="initial" aria-hidden="true">${escape([...brand.name.trim()][0]?.toUpperCase() ?? "")}</span>${name}</div>`;
-  const icon = ok ? `<path d="M5 12.5l4.5 4.5L19 7.5" />` : `<path d="M6.5 6.5l11 11M17.5 6.5l-11 11" />`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -196,45 +196,51 @@ export function signInPageHtml(page: SignInPage, nonce: string): string {
 <meta name="robots" content="noindex">
 <title>${ok ? `Signed in to ${name}` : `${name}: sign-in didn't finish`}</title>
 <style nonce="${nonce}">
-:root { --accent: ${accent}; --on-accent: ${onAccent(accent)}; --bg: #f8f8f7; --text: #1a1a1a; --muted: #6b6b6b; --faint: #8a8a8a; --line: #e7e7e5; --code: #ffffff; --ok: #22a55b; --bad: #d93a2b; --col: min(320px, 50vw - 16px); color-scheme: light dark; }
-@media (prefers-color-scheme: dark) { :root { --bg: #111111; --text: #ededed; --muted: #a1a1a1; --faint: #7d7d7d; --line: #262626; --code: #181818; --ok: #3ecf7a; --bad: #ff6b5e; } }
+:root { --accent: ${accent}; --on-accent: ${onAccent(accent)}; --bg: #fbfbfa; --text: #18181b; --muted: #5f5f66; --faint: #8b8b93; --wash: 16%; --ok: #1f9d55; --bad: #d4382c; color-scheme: light dark; }
+@media (prefers-color-scheme: dark) { :root { --bg: #0e0e10; --text: #f1f1f3; --muted: #a6a6ae; --faint: #7c7c85; --wash: 22%; --ok: #3ecf7a; --bad: #ff6b5e; } }
 * { box-sizing: border-box; }
-html, body { margin: 0; min-height: 100%; }
-body { min-height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
-body::before { content: ""; position: fixed; inset: 0 calc(50% - var(--col)); border-left: 1px solid var(--line); border-right: 1px solid var(--line); pointer-events: none; }
-.row { position: relative; border-bottom: 1px solid var(--line); padding: 0 calc(50% - var(--col) + 24px); text-align: center; }
-.row::before, .row::after { content: ""; position: absolute; bottom: -4px; width: 7px; height: 7px; background: var(--bg); border: 1px solid var(--line); transform: rotate(45deg); z-index: 1; }
-.row::before { left: calc(50% - var(--col) - 3.5px); } .row::after { right: calc(50% - var(--col) - 3.5px); }
-.top { height: 16vh; min-height: 40px; }
-.brand { padding-top: 64px; padding-bottom: 64px; display: flex; justify-content: center; }
-.logo { display: block; height: 52px; max-width: 100%; object-fit: contain; }
-.wordmark { display: flex; align-items: center; gap: 14px; font-size: 34px; font-weight: 600; letter-spacing: -0.02em; line-height: 1; overflow-wrap: anywhere; }
-.initial { flex: none; width: 48px; height: 48px; border-radius: 12px; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; font-size: 26px; font-weight: 700; }
-.outcome { padding-top: 88px; padding-bottom: 80px; }
-.mark { display: block; width: 40px; height: 40px; margin: 0 auto 44px; fill: none; stroke: var(--mark); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 48px 16px; color: var(--text); font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased;
+  background: radial-gradient(1100px 520px at 50% -140px, color-mix(in srgb, var(--accent) var(--wash), transparent), transparent 70%), var(--bg); }
+main { width: 100%; max-width: 540px; }
+.logo { display: block; height: 40px; max-width: 220px; object-fit: contain; object-position: left; }
+.wordmark { display: flex; align-items: center; gap: 12px; font-size: 24px; font-weight: 650; letter-spacing: -0.02em; line-height: 1; overflow-wrap: anywhere; }
+.initial { flex: none; width: 40px; height: 40px; border-radius: 11px; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; font-size: 21px; font-weight: 700; }
+.state { display: inline-flex; align-items: center; gap: 8px; margin: 56px 0 18px; padding: 5px 12px 5px 10px; border-radius: 999px; font-size: 14px; font-weight: 600; color: var(--mark); background: color-mix(in srgb, var(--mark) 12%, transparent); }
+.state::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--mark); }
 .ok { --mark: var(--ok); } .bad { --mark: var(--bad); }
-h1 { margin: 0 0 14px; font-size: 34px; line-height: 1.2; font-weight: 600; letter-spacing: -0.025em; }
+h1 { margin: 0 0 12px; font-size: 40px; line-height: 1.12; font-weight: 650; letter-spacing: -0.03em; }
 .message { margin: 0; font-size: 18px; color: var(--muted); }
-.next { margin: 18px 0 0; font-size: 15px; color: var(--faint); }
-.command { display: inline-block; margin-top: 22px; padding: 10px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--code); font: 15px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); overflow-wrap: anywhere; }
-.command span { color: var(--accent); margin-right: 8px; }
-.foot { padding-top: 28px; padding-bottom: 28px; font-size: 14px; color: var(--faint); }
-.rest { flex: 1; }
-@media (max-width: 480px) { .brand { padding-top: 44px; padding-bottom: 44px; } .outcome { padding-top: 56px; padding-bottom: 56px; } h1 { font-size: 28px; } .message { font-size: 17px; } .top { height: 6vh; } }
+.terminal { margin-top: 36px; border-radius: 14px; overflow: hidden; background: #141417; color: #e7e7ea; box-shadow: 0 1px 0 rgb(255 255 255 / 6%) inset, 0 24px 48px -20px color-mix(in srgb, var(--accent) 45%, rgb(0 0 0 / 40%)); font: 14.5px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.bar { display: flex; align-items: center; gap: 7px; padding: 11px 14px; background: #1c1c20; border-bottom: 1px solid #26262b; color: #8b8b93; font-size: 12.5px; }
+.bar i { width: 11px; height: 11px; border-radius: 50%; background: #3a3a40; }
+.bar span { margin-left: 8px; }
+.lines { padding: 16px 18px 18px; overflow-wrap: anywhere; }
+.lines div { white-space: pre-wrap; }
+.prompt { color: var(--accent); filter: brightness(1.35) saturate(1.1); }
+.good { color: #3ecf7a; } .fail { color: #ff7a6e; } .dim { color: #8b8b93; }
+.cursor { display: inline-block; width: 9px; height: 1.15em; vertical-align: -0.2em; background: #e7e7ea; animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
+.close { margin: 22px 0 0; font-size: 14px; color: var(--faint); }
+@media (max-width: 480px) { h1 { font-size: 32px; } .state { margin-top: 40px; } .message { font-size: 17px; } }
 </style>
 </head>
 <body>
-<div class="row top"></div>
-<div class="row brand">${logo}</div>
-<main class="row outcome">
-<svg class="mark ${ok ? "ok" : "bad"}" viewBox="0 0 24 24" aria-hidden="true">${icon}</svg>
-<h1>${ok ? "You're all set" : "Sign-in didn't finish"}</h1>
+<main>
+${logo}
+<div class="state ${ok ? "ok" : "bad"}">${ok ? "Signed in" : "Not signed in"}</div>
+<h1>${ok ? "Head back to your terminal." : "Sign-in didn't finish."}</h1>
 <p class="message">${escape(page.message)}</p>
-${ok ? `<p class="next">You can close this tab.</p>` : `<p class="next">To try again, run this in your terminal:</p>
-<div class="command"><span>$</span>${escape(page.cli)} auth login</div>`}
+<div class="terminal" aria-hidden="true">
+<div class="bar"><i></i><i></i><i></i><span>${cli}</span></div>
+<div class="lines">
+<div><span class="prompt">$</span> ${cli} auth login</div>
+${ok ? `<div class="good">✓ Signed in to ${name}</div>` : `<div class="fail">✕ Sign-in didn't finish</div><div class="dim"># run it again to try once more</div>`}
+<div><span class="prompt">$</span> ${ok ? "" : `${cli} auth login`}<span class="cursor"></span></div>
+</div>
+</div>
+<p class="close">${ok ? "You can close this tab." : `Run <strong>${cli} auth login</strong> in your terminal to try again.`}</p>
 </main>
-<div class="row foot">${ok ? `Signed in to ${name} from the <strong>${escape(page.cli)}</strong> command line` : `Nothing was saved on this computer`}</div>
-<div class="rest"></div>
 <script nonce="${nonce}">
 history.replaceState(null, "", location.pathname);
 ${ok ? "setTimeout(function () { window.close(); }, 1500);" : ""}
@@ -318,7 +324,7 @@ export async function signIn(config: CliConfig, server: string, signal?: AbortSi
       finish({ ok: false, message: "The sign-in came back but could not be completed. Your terminal says why." });
       throw error;
     }
-    finish({ ok: true, message: `Return to your terminal to keep using ${config.name}.` });
+    finish({ ok: true, message: `${config.name} is ready. Pick up where you left off.` });
   } finally {
     finish({ ok: false, message: "The sign-in was stopped in the terminal." });
     // The page reaches the browser before the CLI exits.
