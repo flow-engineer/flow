@@ -78,7 +78,7 @@ export function welcomeScreen(config: CliConfig, state: WelcomeState, io: CliIO,
   const indent = (text: string) => text.split("\n").map((line) => (line ? `  ${line}` : line)).join("\n");
   const art = options.banner === false ? undefined : options.banner ?? banner(config.name, io.columns || 80);
   const blocks: string[] = [];
-  if (art) blocks.push(accent(config, io, paint)(indent(art.replace(/\n+$/, ""))));
+  if (art) blocks.push(accent(config, io, paint)(indent(art.trimEnd())));
   blocks.push(indent([paint("bold", config.name), config.version ? paint("dim", `v${config.version}`) : ""].filter(Boolean).join(" ")));
   const title = options.title ?? `Welcome to ${config.name}`;
   const text = options.text ?? config.description;
