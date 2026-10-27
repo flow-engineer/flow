@@ -867,6 +867,23 @@ test("flow check refuses a brand color or logo a browser cannot use", () => {
   assert.deepEqual(cliProblems(defineCli({ name: "acme", chat: { accent: "red" } }), []).errors, ["brand.accent must be a six-digit hex color, for example #b85c00"]);
 });
 
+// No test replaces one of the CLI's own commands; this is the one that may be.
+test("a command of the team's own replaces auth status; login and logout stay the CLI's", async () => {
+  const status = buildCommand({ docs: { brief: "Your Acme account" }, parameters: {}, func(this: import("../cli/src/commands.ts").CliContext) { this.cli.print({ plan: "pro" }, { json: true }); } });
+  const cli = defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "flow-cli-status-")), commands: { "auth status": { command: status } } });
+  assert.deepEqual(cliProblems(cli, []).errors, []);
+  const ran = io();
+  assert.equal(await runCli(cli, ["auth", "status"], ran.channel), 0);
+  assert.deepEqual(JSON.parse(ran.out), { plan: "pro" });
+  const help = io();
+  assert.equal(await runCli(cli, ["auth", "--help"], help.channel), 0);
+  assert.match(help.out, /login[\s\S]*logout[\s\S]*status +Your Acme account/);
+  assert.deepEqual(cliProblems(defineCli({ name: "acme", commands: { "auth status": { tool: "whoami" }, "auth login": { command: status } } }), [{ name: "whoami", inputSchema: {} }]).errors, [
+    'command "auth status": only a command of your own (buildCommand) can replace the CLI\'s auth status',
+    'command "auth login": auth is the CLI\'s own (auth, tools, skill)',
+  ]);
+});
+
 // The help tests cover --help; a bare run is the one place a person and an agent see different things.
 test("a bare run at a terminal welcomes a person; agents and pipes get the help, and every part can be replaced", async () => {
   const cli = { ...acme(await serve({ tools: [listOrders] })), version: "1.2.0", description: "Order coffee." };

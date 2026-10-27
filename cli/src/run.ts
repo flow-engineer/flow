@@ -23,6 +23,7 @@ import { FORMATTED } from "../../src/tools.ts";
 import { FULL_CATALOG_META } from "../../mcp/src/describe.ts";
 import {
   BUILT_IN,
+  REPLACEABLE,
   commandEntries,
   feedbackUsage,
   commandTable,
@@ -554,7 +555,13 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
   }
   const root: Node = { children: new Map() };
   const feedback = feedbackUsage(config, tools);
+  const replaced = new Map<string, StricliCommand<CliContext>>();
   for (const c of commandTable(config, tools)) {
+    const words = c.words.join(" ");
+    if (REPLACEABLE.has(words) && c.config && isCustom(c.config)) {
+      replaced.set(words, c.config.command);
+      continue;
+    }
     let node = root;
     for (const word of c.words) {
       if (!node.children.has(word)) node.children.set(word, { children: new Map() });
@@ -585,7 +592,7 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
   const paint = painter(io);
   // chat and help are the CLI's, unless the CLI file has its own.
   const own: Record<string, Target> = {
-    tools: toolsCommand(tools, io), skill: skillCommand(config, tools, call, io, server ? refresh : undefined), auth: authRoutes(config, server, io),
+    tools: toolsCommand(tools, io), skill: skillCommand(config, tools, call, io, server ? refresh : undefined), auth: authRoutes(config, server, io, replaced.get("auth status")),
   };
   if (!top.help) own.help = helpCommand(config, tools, top, own, io);
   const all = { chat: top.chat ?? buildCommand({ docs: { brief: CHAT_BRIEF }, parameters: {}, func() {} }), ...top, ...own };
@@ -910,7 +917,7 @@ function skillCommand(config: CliConfig, tools: ToolInfo[], call: ToolCall, io: 
 /** An old sign-in (the CLI registered itself) hides the commands kept to the CLI until the next one. */
 const RENEW = (config: CliConfig) => `Some commands need a new sign-in: run \`${config.name} auth login\` to see them.`;
 
-function authRoutes(config: CliConfig, server: string | undefined, io: CliIO): RouteMap<CliContext> {
+function authRoutes(config: CliConfig, server: string | undefined, io: CliIO, status?: StricliCommand<CliContext>): RouteMap<CliContext> {
   const need = () => {
     if (!server) throw new CliExit(EXIT.usage, noServer(config));
     return server;
@@ -936,7 +943,8 @@ function authRoutes(config: CliConfig, server: string | undefined, io: CliIO): R
           io.writeError(`Signed out of ${need()}.\n`);
         },
       }),
-      status: buildCommand<{ json?: boolean }, [], CliContext>({
+      // The CLI file's own "auth status" replaces this one.
+      status: status ?? buildCommand<{ json?: boolean }, [], CliContext>({
         docs: { brief: "Whether you are signed in, and how" },
         parameters: { flags: { json: { kind: "boolean", brief: "Print JSON", optional: true, withNegated: false } } },
         async func(flags) {

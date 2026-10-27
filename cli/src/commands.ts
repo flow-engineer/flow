@@ -308,6 +308,9 @@ const HOST_ONLY = new Set(["read_skill"]);
 /** Words the CLI keeps for itself. */
 export const BUILT_IN = new Set(["auth", "tools", "skill"]);
 
+/** The CLI's own commands a command of the team's own (buildCommand) may replace. */
+export const REPLACEABLE = new Set(["auth status"]);
+
 /** "place_order" → "place-order". */
 export function derivedName(tool: string): string {
   return tool.replace(/_/g, "-");
@@ -517,9 +520,11 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
       else placed.set(entry, heading);
     }
   }
+  const own = new Set(commandEntries(config).filter(([, c]) => isCustom(c)).map(([w]) => w.trim().split(/\s+/).join(" ")));
   for (const [key, owner] of words) {
     const first = key.split(" ")[0]!;
-    if (BUILT_IN.has(first)) errors.push(`command "${key}": ${first} is the CLI's own (${[...BUILT_IN].join(", ")})`);
+    if (REPLACEABLE.has(key) && !own.has(key)) errors.push(`command "${key}": only a command of your own (buildCommand) can replace the CLI's ${key}`);
+    else if (BUILT_IN.has(first) && !REPLACEABLE.has(key)) errors.push(`command "${key}": ${first} is the CLI's own (${[...BUILT_IN].join(", ")})`);
     for (const other of words.keys()) {
       if (other !== key && other.startsWith(`${key} `)) errors.push(`command "${key}" (${owner}): it is also the group of "${other}"; a word is a command or a group, not both`);
     }
