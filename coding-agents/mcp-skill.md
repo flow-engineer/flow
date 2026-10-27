@@ -183,10 +183,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
 - `command(tool)` writes a tool's command as code, one step per choice: `.arg("order_id")`
   positional, `.short("n", "limit")` a one-letter flag (`-n 5`), `.flag("state", "status")` the
   flag's name (`--state`; `--status` still works), `.default("limit", 5)` sent when left out, and
-  `.map((input) => ({ ...input, ... }))` the team's own code over what is sent, run last;
-  `.columns()`, `.view()`, `.alias()`, `.summary()` and `.examples()` as the object's keys. Help,
-  completion, the skill and `flow check` read it like the object form (whose keys are `shorthands`,
-  `defaults` and `input`).
+  `.map((input, options) => ({ ...input, ... }))` the team's own code over what is sent, run last
+  (throw to refuse: exit 2 with its message); `.hide("source")` no flag for an input (fix it with
+  `.default`), `.help("tag", "...")` one flag's help line, `.option("from-file", { help, kind,
+  short })` a flag that is not a tool input, read in `map`'s `options`, `.print((result) => "...")`
+  the output people see (`--json` still prints data); a list input as the only `.arg` takes every
+  word (`<urls...>`); `.columns()`, `.view()`, `.alias()`, `.summary()` and `.examples()` as the
+  object's keys. Help, completion, the skill and `flow check` read it like the object form (keys
+  `shorthands`, `defaults`, `hidden`, `help`, `options`, `input`, `print`). Keep these in the CLI
+  file, or a file it imports: tools never carry CLI choices.
 - A command of the team's own is any Stricli command: `"report daily": { command: buildCommand({ ... }) }`
   with `buildCommand` from `@stricli/core`; inside it, `this.cli.call(tool, input)` calls the server's
   tools and `this.cli.print(value, { json })` prints like the rest.

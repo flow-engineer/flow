@@ -126,8 +126,53 @@ test("a command written as code: short and renamed flags, the long name still wo
   assert.match(skill, /`-n, --limit` integer, default 1/);
 });
 
+test("a command's code hides inputs, words its flags, adds its own options, takes many values, refuses cleanly and prints its own way", async () => {
+  const tagOrders = tool({
+    name: "tag_orders",
+    description: "Tag orders.",
+    input: z.object({ order_ids: z.array(z.string()), tag: z.string(), source: z.string() }),
+    signIn: "none",
+    hints: { readOnly: true },
+    run: (input) => input,
+  });
+  const cli = defineCli({
+    ...acme(await serve({ tools: [tagOrders] })),
+    commands: {
+      "order tag": command("tag_orders")
+        .arg("order_ids")
+        .hide("source")
+        .default("source", "cli")
+        .help("tag", "The label to put on them")
+        .option("shout", { help: "Upper-case the tag", kind: "boolean", short: "S" })
+        .map((input, options) => {
+          if ((input.tag as string).includes(" ")) throw new Error("a tag is one word");
+          return { ...input, tag: options.shout ? (input.tag as string).toUpperCase() : input.tag };
+        })
+        .print((result) => `tagged ${(result as { order_ids: string[] }).order_ids.join(", ")} as ${(result as { tag: string }).tag}`),
+    },
+  });
+  const human = io();
+  assert.equal(await runCli(cli, ["order", "tag", "BL-1", "BL-2", "--tag", "rush", "-S"], human.channel), 0, human.err);
+  assert.equal(human.out, "tagged BL-1, BL-2 as RUSH\n");
+  const data = io();
+  assert.equal(await runCli(cli, ["order", "tag", "BL-1", "--tag", "rush", "--json"], data.channel), 0, data.err);
+  assert.deepEqual(JSON.parse(data.out), { order_ids: ["BL-1"], tag: "rush", source: "cli" }, "a hidden input is sent from its default; --json prints the data");
+
+  const hidden = io();
+  assert.equal(await runCli(cli, ["order", "tag", "BL-1", "--tag", "rush", "--source", "web"], hidden.channel), 2);
+  const refused = io();
+  assert.equal(await runCli(cli, ["order", "tag", "BL-1", "--tag", "two words"], refused.channel), 2);
+  assert.match(refused.err, /^a tag is one word\nRun `acme order tag --help`/);
+
+  const help = io();
+  await runCli(cli, ["order", "tag", "--help"], help.channel);
+  assert.match(help.out, /The label to put on them/);
+  assert.match(help.out, /-S \[--shout\]\s+Upper-case the tag/);
+  assert.doesNotMatch(help.out, /--source/);
+});
+
 test("flow check holds shorthands and defaults to the tool's input and away from the CLI's own flags", () => {
-  const tools = [{ name: "list_keys", inputSchema: { properties: { project: { type: "string" }, limit: { type: "integer" }, include_revoked: { type: "boolean" } } } }];
+  const tools = [{ name: "list_keys", inputSchema: { properties: { project: { type: "string" }, limit: { type: "integer" }, include_revoked: { type: "boolean" }, tags: { type: "array", items: { type: "string" } } }, required: ["project"] } }];
   const problems = (command: object) => cliProblems(defineCli({ name: "acme", commands: { "keys list": { tool: "list_keys", ...command } } }), tools).errors;
   assert.deepEqual(problems({ args: ["project"], shorthands: { n: "limit", all: "include_revoked" }, defaults: { limit: 20 } }), []);
   assert.deepEqual(problems({ shorthands: { n: "count" }, defaults: { count: 1 } }), [
@@ -138,6 +183,16 @@ test("flow check holds shorthands and defaults to the tool's input and away from
   assert.deepEqual(problems({ shorthands: { h: "limit", json: "include_revoked" } }), ['command "keys list": shorthand -h is the CLI\'s own', 'command "keys list": shorthand --json is the CLI\'s own']);
   assert.deepEqual(problems({ shorthands: { project: "limit" } }), ['command "keys list": --project would be both project and limit']);
   assert.deepEqual(problems({ shorthands: { "Max": "limit" } }), ['command "keys list": shorthand "Max" must be one letter or a lowercase word (a-z, 0-9, -)']);
+  assert.deepEqual(problems({ hidden: ["project"], help: { project: "x" } }), [
+    'command "keys list": project is required and hidden, so it needs a default or input code',
+    'command "keys list": help names project, which is not one of its flags or arguments',
+  ]);
+  assert.deepEqual(problems({ args: ["project", "tags"] }), ['command "keys list": tags takes many values, so it must be the only positional argument']);
+  assert.deepEqual(problems({ options: { limit: { help: "x" }, mine: { help: "y", short: "h" } } }), [
+    'command "keys list": option --limit clashes with limit\'s flag',
+    'command "keys list": option --mine\'s -h is already taken',
+    'command "keys list": it has options but no input code to read them',
+  ]);
 });
 
 test("a tool's format is what people see, rendered at a terminal; --json, --fields and the CLI file's view show its data", async () => {

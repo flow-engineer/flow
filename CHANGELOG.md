@@ -12,11 +12,18 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   takes inputs positionally; `short` gives a one-letter flag (`-n 5`); `flag` names an input's flag
   (`--all`), while the input's own flag keeps working; `default` is sent when an input is left out
   (shown in help and the skill); `map` is the team's own code over what is sent, run after
-  arguments, flags and defaults. `columns`, `view`, `alias`, `summary` and `examples` match the
-  object's keys, and the object form takes the same as `shorthands`, `defaults` and `input`.
+  arguments, flags and defaults; an error it throws is shown as wrong arguments (exit 2). `hide`
+  gives an input no flag (set it with `default` or `map`); `help` words one flag's help line;
+  `option` adds a flag that is not a tool input, whose value `map` gets (`map((input, options) =>
+  ...)`); `print` is the team's own output for people (`--json` and `--fields` still print data). A
+  list input as the only `arg` takes every word (`scrape <urls...>`). `columns`, `view`, `alias`,
+  `summary` and `examples` match the object's keys, and the object form takes the same as
+  `shorthands`, `defaults`, `hidden`, `help`, `options`, `input` and `print`.
   Help, completion, the CLI's skill and `flow check` read both forms. `flow check` refuses a
-  shorthand or default naming an input the tool lacks, a shorthand for a positional argument,
-  `-h`/`-H` or one of the CLI's own flags, and two flags of one name.
+  shorthand, default, hidden or help naming an input the tool lacks, a shorthand for a positional
+  argument, `-h`/`-H` or one of the CLI's own flags, two flags of one name, a required hidden input
+  with neither a default nor input code, options with no input code, and a list argument beside
+  other arguments.
 
 ### Migration notes
 

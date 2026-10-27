@@ -24,13 +24,34 @@ export interface ToolCommand {
   shorthands?: Record<string, string>;
   /** Values sent for inputs the person leaves out ({ limit: 20 }); they can still pass their own. */
   defaults?: Record<string, unknown>;
-  /** Your own code over what is sent: gets the input the person typed (defaults filled), returns the tool's input. */
-  input?: (input: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  /** Input fields with no flag: set by defaults or input, so people cannot change them. */
+  hidden?: string[];
+  /** A flag's line in help, by input field (default: the field's description). */
+  help?: Record<string, string>;
+  /** Flags of the command's own that are not tool inputs (`--from-file`); input gets their values. */
+  options?: Record<string, CliOption>;
+  /**
+   * Your own code over what is sent: gets the input the person typed (defaults filled) and the
+   * options' values, returns the tool's input. An error it throws is shown as wrong arguments (exit 2).
+   */
+  input?: (input: Record<string, unknown>, options: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  /** Your own output for people: gets the tool's result, returns the text to print. --json and --fields still print the data. */
+  print?: (result: unknown) => string | Promise<string>;
   /** Another name for the command. */
   alias?: string;
   /** One line under the command in help (default: the tool's title). */
   summary?: string;
   examples?: string[];
+}
+
+/** A flag of a command's own, not one of its tool's inputs. */
+export interface CliOption {
+  /** Its line in help. */
+  help: string;
+  /** What it takes (default "string"); a boolean takes no value. */
+  kind?: "string" | "number" | "boolean";
+  /** A one-letter form (`-f`). */
+  short?: string;
 }
 
 /** What a command of the team's own gets as `this` (Stricli's context): the server's tools and the CLI's output. */
@@ -157,9 +178,29 @@ export class CommandBuilder {
     this.spec.defaults = { ...this.spec.defaults, [field]: value };
     return this;
   }
-  /** Rewrite what is sent, in your own code; runs after arguments, flags and defaults. */
+  /** Give these fields no flag; set them with default() or map(). */
+  hide(...fields: string[]): this {
+    this.spec.hidden = [...(this.spec.hidden ?? []), ...fields];
+    return this;
+  }
+  /** A field's flag line in help. */
+  help(field: string, line: string): this {
+    this.spec.help = { ...this.spec.help, [field]: line };
+    return this;
+  }
+  /** A flag of the command's own, not a tool input; map() gets its value as options[name]. */
+  option(name: string, option: CliOption): this {
+    this.spec.options = { ...this.spec.options, [name]: option };
+    return this;
+  }
+  /** Rewrite what is sent, in your own code; runs after arguments, flags and defaults. Throw to refuse (exit 2). */
   map(fn: NonNullable<ToolCommand["input"]>): this {
     this.spec.input = fn;
+    return this;
+  }
+  /** Print the result your own way for people; --json and --fields still print the data. */
+  print(fn: NonNullable<ToolCommand["print"]>): this {
+    this.spec.print = fn;
     return this;
   }
   /** For a list: the columns of the table people see. */
@@ -227,7 +268,7 @@ export function flagsOf(tool: ToolInfo, settings?: ToolCommand): FlagSpec[] {
   const args = settings?.args ?? [];
   const shorthands = Object.entries(settings?.shorthands ?? {});
   return Object.keys(tool.inputSchema.properties ?? {})
-    .filter((field) => !args.includes(field))
+    .filter((field) => !args.includes(field) && !settings?.hidden?.includes(field))
     .map((field) => {
       const mine = shorthands.filter(([, f]) => f === field).map(([s]) => s);
       const word = mine.find((s) => s.length > 1);
@@ -325,6 +366,22 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
       }
     }
     for (const field of Object.keys(c.defaults ?? {})) if (!input.has(field)) errors.push(`command "${w}": defaults names ${field}, which ${c.tool}'s input does not have`);
+    const required = new Set(tool.inputSchema.required ?? []);
+    for (const field of c.hidden ?? []) {
+      if (!input.has(field)) errors.push(`command "${w}": hidden names ${field}, which ${c.tool}'s input does not have`);
+      else if (c.args?.includes(field)) errors.push(`command "${w}": ${field} is both hidden and a positional argument`);
+      else if (required.has(field) && !(field in (c.defaults ?? {})) && !c.input) errors.push(`command "${w}": ${field} is required and hidden, so it needs a default or input code`);
+    }
+    for (const field of Object.keys(c.help ?? {})) if (!input.has(field) || c.hidden?.includes(field)) errors.push(`command "${w}": help names ${field}, which is not one of its flags or arguments`);
+    const letters = new Set(Object.keys(c.shorthands ?? {}).filter((k) => k.length === 1));
+    for (const [name, option] of Object.entries(c.options ?? {})) {
+      if (flags.has(name) || OWN_FLAGS.includes(name)) errors.push(`command "${w}": option --${name} clashes with ${flags.has(name) ? `${flags.get(name)}'s flag` : "the CLI's own"}`);
+      if (option.short && (letters.has(option.short) || OWN_LETTERS.has(option.short))) errors.push(`command "${w}": option --${name}'s -${option.short} is already taken`);
+      if (option.short) letters.add(option.short);
+    }
+    if (c.options && Object.keys(c.options).length && !c.input) errors.push(`command "${w}": it has options but no input code to read them`);
+    const lists = (c.args ?? []).filter((a) => input.has(a) && flagKind(tool.inputSchema.properties![a]!) === "list");
+    if (lists.length && c.args!.length > 1) errors.push(`command "${w}": ${lists[0]} takes many values, so it must be the only positional argument`);
     const output = outputFields(tool);
     for (const key of ["columns", "view"] as const) {
       for (const f of c[key] ?? []) {
@@ -397,7 +454,7 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
       const settings = c.config && !isCustom(c.config) ? c.config : undefined;
       const args = settings?.args ?? [];
       const flags = flagList(c.tool, settings);
-      if (args.length || flags.length) lines.push("", `Usage: \`${name} ${c.words.join(" ")}${args.map((a) => ` <${a}>`).join("")}${flags.length ? " [flags]" : ""}\``);
+      if (args.length || flags.length) lines.push("", `Usage: \`${name} ${c.words.join(" ")}${args.map((a) => ` <${a}${flagKind(c.tool!.inputSchema.properties?.[a] ?? {}) === "list" ? "..." : ""}>`).join("")}${flags.length ? " [flags]" : ""}\``);
       for (const f of flags) lines.push(`- ${f}`);
       if (c.tool.annotations?.readOnlyHint !== true) lines.push(`- Changes things${c.tool.annotations?.destructiveHint === false ? "" : " and may delete or overwrite: needs --yes"}.`);
       if (c.tool.outputSchema) lines.push("", "JSON output schema:", "", "```json", JSON.stringify(c.tool.outputSchema), "```");
@@ -419,13 +476,15 @@ export function flagName(field: string): string {
 export function flagList(tool: ToolInfo, settings?: ToolCommand): string[] {
   const required = new Set(tool.inputSchema.required ?? []);
   const defaults = settings?.defaults ?? {};
-  return flagsOf(tool, settings).map(({ field, flag, letters, long }) => {
+  const own = Object.entries(settings?.options ?? {}).map(([name, o]) => `\`${o.short ? `-${o.short}, ` : ""}--${name}\` ${o.kind ?? "string"}: ${o.help}`);
+  return [...flagsOf(tool, settings).map(({ field, flag, letters, long }) => {
     const s = tool.inputSchema.properties![field]!;
     const kind = s.enum ? s.enum.join("|") : flagKind(s) === "json" ? `JSON: ${typeHint(s)} (or @file.json)` : flagKind(s);
     const names = [...letters.map((l) => `-${l}`), `--${flag}`].join(", ");
     const given = field in defaults ? `, default ${JSON.stringify(defaults[field])}` : required.has(field) ? ", required" : "";
-    return `\`${names}\`${long ? ` (or \`--${long}\`)` : ""} ${kind}${given}${s.description ? `: ${s.description}` : ""}`;
-  });
+    const about = settings?.help?.[field] ?? s.description;
+    return `\`${names}\`${long ? ` (or \`--${long}\`)` : ""} ${kind}${given}${about ? `: ${about}` : ""}`;
+  }), ...own];
 }
 
 /** A short picture of a JSON value's shape: "list of {item, size, milk?, quantity?}". */
