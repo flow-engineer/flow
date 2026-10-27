@@ -60,8 +60,12 @@ and are `message.in`/`message.out` events marked `answered: true`);
 background (set a tool's own `deadlineMs` for a known-slow one); `partialAfterMs` (default 5,000)
 is how long a finished tool's result waits for the others of its response; `shareUpdates` turns live status lines on web and app UIs off, or replaces their
 guidance with a string; `routes` (`{ "/v1/events": (request) => Response }`) are HTTP routes the
-agent serves beside its chat, such as a business's event push, answered by `agent.fetch(request)`
-(and by the test cloud with a test's events); `onTick(now)` is work of your own on the agent's clock
+agent serves at its own address, such as a business's event push or a provider's webhook or OAuth
+callback, answered by `agent.fetch(request)` (and by the test cloud with a test's events): exact
+paths only (no prefixes or wildcards; the query string is not matched), public, so each checks who
+called (a signature or a token). `npm start`'s playground serves them on its port (local requests
+only); Flow's hosting at `FLOW_AGENT_URL` plus the path ("On Flow's hosting"). `mcpServer`'s
+`auth.routes` are the OAuth bridge's own, not a place for these; `onTick(now)` is work of your own on the agent's clock
 (held sends, reminders timed from your data), run with each check for due scheduled messages.
 `agent.reach({ channel, address })` makes the conversation of someone the business may message
 before they have written; until they write, only a template reaches them on WhatsApp. A template
@@ -297,6 +301,43 @@ reply button, and the agent is told what the template said. An ordinary message 
 button: up to 3 reply buttons OR one link button, never both. A template may mix quick replies and
 URL buttons.
 
+"Message me when my order fills": keep who asked in records, take the business's event on a
+route (or `flowEvents`), then nudge. Never a timer, never a module variable:
+
+```ts
+// The tool, when they ask: context.records.put("watches", `${order}:${context.person}`,
+//   { person: context.person, order, to: { channel: context.channel, address: context.address } })
+const agent = createAgent({ ...,
+  records: { watches: { people: ["person"], fields: ["order"] } },
+  routes: { "/orders/filled": async (request) => {
+    const body = await request.text();
+    if (!signedByBackend(request, body)) return new Response(null, { status: 401 });   // your own check
+    const { order } = JSON.parse(body);
+    for (const w of await agent.records.query<Watch>("watches", { order })) {
+      await agent.nudge({ to: w.value.to, prompt: `Order ${order} filled: tell them.`, idempotencyKey: `filled:${w.id}` });
+      await agent.records.delete("watches", w.id);
+    }
+    return new Response(null, { status: 204 });
+  } },
+});
+```
+
+Within 24 hours of their last message the nudge goes as a message; after that only a template
+reaches them, so declare a `fallbackTemplate` (above): the template goes, the nudge is held, and
+the agent's message follows their reply. On the business's own number that is a utility template
+set up with Meta. On Flow's shared WhatsApp sandbox number (the free trial; it may not be open to
+every account yet) agents create no templates: there is one Flow-owned utility template,
+`flow_update` (listed by `GET /v0/templates` for the sandbox's sender), "Time-sensitive update from
+<app name>: <message> Reply to this message to continue.", where Flow fills in the app's name and
+the agent gives only the message (one line), at most once per person per app in 24 hours:
+
+```ts
+templates: [{ name: "flow_update", language: "en", category: "utility",
+  body: "Time-sensitive update from Acme:\n\n{{1}}\n\nReply to this message to continue.",   // Acme: your app's name, filled in by Flow
+  buttons: [{ type: "quick_reply", text: "Tell me more" }] }],
+fallbackTemplate: { name: "flow_update", body: ["You have an update waiting."] },
+```
+
 ## Ask the owner when you set an agent up
 
 Before the agent sends anything people did not ask for (nudges, follow-ups), ask the owner these
@@ -436,6 +477,38 @@ newer Flow Framework release line than hosting runs is refused before anything i
 separate secrets step (it sends only new or changed `.env` values each time; promote sends them to
 production). Commit first, or the version reads `<sha>+dirty`. Stop the laptop's `npm start` once the deployed one is live: two copies on one key
 both answer every message.
+
+### On Flow's hosting
+
+What the hosted process gets:
+
+- **Environment:** `FLOW_AGENT_URL` (its public https address), `FLOW_ENVIRONMENT` (`staging` or
+  `production`), `PORT`, `AGENT_VERSION`, the owner's secrets by name, and `FLOW_KEY` as that
+  environment's runtime key (messaging, traces and the model). Flow exchanges the `.env`'s
+  developer key for it and never keeps the developer key, so `deploy secret FLOW_KEY` shows another
+  last 4 than `.env`'s: by design. The developer key stays in `.env` for local runs and deploys.
+- **Routes:** every path Flow does not take (`/healthz`, `/playground`, `/nudges`, `/people`,
+  `/webhooks/flow-messaging`, and the MCP paths when `src/mcp.ts` exists) goes to `agent.fetch`, so
+  a route `/orders/filled` answers at `FLOW_AGENT_URL` + `/orders/filled` (body at most 5 MB). The
+  runtime's `routes` log line lists only Flow's paths; the agent's are served all the same.
+- **Storage:** no disk that lasts. Files the agent writes (`.flow/...`, a session file) are in
+  memory and gone at every restart, redeploy and scale to zero (staging stops when idle unless the
+  agent has `FLOW_MESSAGING_KEY`; production keeps one instance). `host: options.host` keeps the
+  conversations in Flow's store; keep the agent's own data in records there:
+
+  ```ts
+  records: { sessions: { people: ["person"] } },   // forgetting the person deletes theirs
+  await agent.records.put("sessions", person, { person, accessToken, expiresAt });          // a route or tool
+  const s = await context.records.get<{ accessToken: string; expiresAt: number }>("sessions", context.person);
+  ```
+
+  Records are the agent's data store, kept as plain JSON, not a secrets manager: keep only what a
+  tool needs (a token and its expiry, never a password) and delete it when it ends; the agent's own
+  keys are secrets. When the business's backend can hold a person's access, keep it there and hand
+  it to tools with `credentials` (`flow-framework-auth`).
+- **Model:** `model: flowModel()`, which sends FLOW_KEY to Flow's model API whatever else is set.
+  `openAICompatible()` with no key takes the first key it finds, and a provider key sent as a secret
+  (`OPENROUTER_API_KEY`, ...) wins over FLOW_KEY.
 
 On the owner's own servers: one instance, kept warm, CPU always on, a durable `database`
 (`postgres(pool)`), `await agent.resume()` at start, the secrets from the platform's secret store

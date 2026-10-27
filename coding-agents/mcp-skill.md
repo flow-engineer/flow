@@ -41,6 +41,13 @@ export const mcp = mcpServer({
 createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamable HTTP at /mcp
 ```
 
+**Deployed, `/mcp` is public.** Flow's hosting serves `src/mcp.ts` at the agent's public address and
+adds no sign-in. Without `auth`, tools' `signIn` is not enforced: every tool, "required" ones
+included, runs for anyone who reaches `/mcp`; with `auth`, `signIn: "none"` tools still run for
+anyone. The starter's `src/mcp.ts` has no `auth`. Before deploying, add `auth` (the
+`flow-framework-auth` skill) when any tool acts or reads a person's data, or delete `src/mcp.ts`
+when MCP is not wanted. Flow's deploy lint warns about both.
+
 - `mcp.fetch(request)` serves a web-standard `Request` instead (Cloudflare Workers, Deno, Bun), so
   it mounts beside the chat agent in one process or runs on its own: it needs no model, channels
   or store.

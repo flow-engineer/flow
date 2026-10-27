@@ -24,6 +24,18 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   argument, `-h`/`-H` or one of the CLI's own flags, two flags of one name, a required hidden input
   with neither a default nor input code, options with no input code, and a list argument beside
   other arguments.
+- **`flow deploy secret FLOW_KEY` says which key Flow keeps.** Flow exchanges the developer key for
+  the environment's runtime key and answers with the runtime key's last 4, which differ from the
+  `.env`'s. The command now says so ("Flow keeps staging's runtime key ••••X for the hosted agent;
+  your key ••••Y stays yours, for running locally and deploying."), and `--json` adds
+  `secret.runtime_key: true` then.
+- **Guides: what an agent gets on Flow's hosting.** The build-agent skill and `docs/agents.md` say
+  what the hosted process gets (environment, the agent's `routes` at `FLOW_AGENT_URL` plus their
+  exact path, no lasting disk: records instead, `flowModel()`), and give a worked "message me when
+  my order fills" (records, a route, a nudge, the WhatsApp window, Flow's one template on the shared
+  sandbox number). The tools, MCP and auth skills, and the starter's `src/mcp.ts`, say plainly that
+  without `mcpServer({ auth })` every tool runs for anyone who reaches `/mcp`, which is public once
+  deployed, and that `signIn: "none"` means anyone.
 
 ### Migration notes
 

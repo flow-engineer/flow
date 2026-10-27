@@ -33,7 +33,10 @@ When the owner has a product (a codebase), the agent is built from it:
 After creating the project and running `npm install`, start the server with `npm run mcp`.
 In another terminal, use `npm run cli -- --help` and `npm run cli -- menu --json`. The starter
 prints the MCP URL and a command to connect Claude Code. These tool calls need no model key or
-Flow account. Replace the café tools and configure account sign-in when needed.
+Flow account. Replace the café tools and configure account sign-in when needed. The starter's
+`src/mcp.ts` has no sign-in: without `mcpServer({ auth })` every tool, `signIn: "required"` ones
+included, runs for anyone who reaches `/mcp`, and once deployed on Flow's hosting `/mcp` is public.
+Add `auth` before deploying tools that act or read a person's data, or delete `src/mcp.ts`.
 
 For remote hosts such as Claude or ChatGPT, expose the server over HTTPS and connect its URL in
 the host. Generating a plugin does not publish it to a directory; follow the host's installation
@@ -407,10 +410,22 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
   `--follow` keeps printing new ones; `--json` is one `{ time, severity, text }` per line. On a Flow
   whose cloud has no logs route yet it says so: `error.code` `not_available`, exit 1.
 - `secret NAME` (one value from stdin) and `secrets --from-env` (every value in a file, now) are for
-  changing a secret by hand; `deploy` already sends the `.env`. `--json` prints
-  `{ ok, environment, saved, skipped, refused, next }`. Before the agent's first deploy the host has
+  changing a secret by hand; `deploy` already sends the `.env`. `secrets --from-env --json` prints
+  `{ ok, environment, saved, skipped, refused, next }`, `secret NAME --json`
+  `{ ok, secret: { name, last4, environment, runtime_key? }, next }`. Before the agent's first deploy the host has
   no agent to keep them for: they are refused, exit 1, and `next` is `deploy`. A secret takes effect
   on the next deploy.
+- `FLOW_KEY` is never kept as sent: Flow exchanges the developer key (`.env`'s, all scopes, for local
+  runs and deploys) for that environment's runtime key (messaging, traces, the model), the only key
+  the hosted agent runs with. So `secret FLOW_KEY` prints the runtime key's last 4, which differ from
+  `.env`'s, and says so (`runtime_key: true`). The developer key stays yours.
+- The hosted agent gets `FLOW_AGENT_URL` (its public address), `FLOW_ENVIRONMENT`, `PORT`,
+  `AGENT_VERSION`, its secrets by name and `FLOW_KEY` (the runtime key). Its `createAgent({ routes })`
+  answer at `FLOW_AGENT_URL` plus their exact path (every path Flow does not take: `/healthz`,
+  `/playground`, `/nudges`, `/people`, `/webhooks/flow-messaging`, the MCP paths); they are public,
+  so each checks who called. Files it writes are lost at every restart, redeploy and scale to zero:
+  keep state in the host's store and the agent's records. Use `model: flowModel()` there; a provider
+  key sent as a secret wins over FLOW_KEY when the model is read from the environment.
 - Exit codes: 0 live or saved, 1 refused, failed or not reachable, 2 a usage problem (no CI key, a
   missing file, a bad name). On an error, `--json` prints `{ ok: false, error: { code, message }, next }`.
 

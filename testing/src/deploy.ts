@@ -444,8 +444,12 @@ async function secret(ctx: Ctx, name: string | undefined, env: string, readStdin
   if (!value) throw new Usage("No value on stdin.");
   const saved = await ctx.api<{ name: string; last4: string }>("PUT", `/v1/hosting/secrets/${name}`, { environment: env, value });
   const next = `${RUN} deploy${env === "production" ? " --env production" : ""}`;
-  if (ctx.json) console.log(JSON.stringify({ ok: true, secret: { name: saved.name, last4: saved.last4, environment: env }, next }));
-  ctx.say(`Saved ${saved.name} (••••${saved.last4}) for ${env}. It takes effect on the next deploy.`);
+  // Flow keeps no developer FLOW_KEY: it answers with the last 4 of the environment's runtime key,
+  // the one the hosted agent runs with, which differs from the key sent (the .env's).
+  const runtimeKey = saved.name === "FLOW_KEY" && saved.last4 !== value.slice(-4);
+  if (ctx.json) console.log(JSON.stringify({ ok: true, secret: { name: saved.name, last4: saved.last4, environment: env, ...(runtimeKey ? { runtime_key: true } : {}) }, next }));
+  if (runtimeKey) ctx.say(`Flow keeps ${env}'s runtime key ••••${saved.last4} for the hosted agent; your key ••••${value.slice(-4)} stays yours, for running locally and deploying. It takes effect on the next deploy.`);
+  else ctx.say(`Saved ${saved.name} (••••${saved.last4}) for ${env}. It takes effect on the next deploy.`);
   ctx.say(`Next: ${next}`);
   return 0;
 }

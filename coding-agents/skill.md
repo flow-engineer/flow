@@ -104,7 +104,8 @@ my-agent/
   src/agent.ts                 buildAgent(): the one place the agent is built
   src/main.ts                  runs it in the playground
   src/name.ts                  the agent's names, read from package.json (see "Names")
-  src/mcp.ts                   optional: the tools as an MCP server (mcp-skill.md)
+  src/mcp.ts                   optional: the tools as an MCP server (mcp-skill.md); no sign-in, so
+                               deployed, anyone can call every tool: add auth or delete it first
   src/cli.ts                   optional: the CLI file (mcp-skill.md)
   context/                     optional: the context pack the tools are written from (context-skill.md)
   mcp.lock.json                optional: the tools of other MCP servers the agent uses (tools-skill.md)

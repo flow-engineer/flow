@@ -13,8 +13,10 @@ export const mcp = mcpServer({
   version: "1.0.0",
   tools,
   dir: fileURLToPath(new URL("../agent", import.meta.url)),
-  // The café has no accounts yet, so every tool answers without sign-in. With accounts, add
-  // auth: { issuer, resource, scopes, verify } (the flow-framework-auth skill).
+  // No auth: anyone who reaches /mcp can call every tool, signIn "required" ones included, and on
+  // Flow's hosting /mcp is a public address. Before deploying tools that act or read a person's
+  // data, add auth: { issuer, resource, scopes, verify } (the flow-framework-auth skill), or
+  // delete this file if MCP is not wanted.
 });
 
 // Run as `npm run mcp`; Flow's hosting imports `mcp` and serves it beside the agent.

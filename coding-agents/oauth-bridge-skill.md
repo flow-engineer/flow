@@ -126,6 +126,9 @@ const mcp = mcpServer({ name, version, tools, auth: bridge.auth });
 // mcp.node / mcp.fetch serve /mcp and the bridge's routes; mcp.paths lists them for Flow's hosting.
 ```
 
+`auth.routes` are the bridge's own. A provider's webhook or another service's OAuth callback (a
+broker's, a payment provider's) is the agent's: `createAgent({ routes })` (`build-agent-skill.md`).
+
 The rules each function keeps:
 
 - `exchange` accepts a code once. `key` is the brand's stable user id: the same id `resolve`
@@ -243,8 +246,8 @@ export async function mcp(agent, host) {
 Passing `agent` serves `<cli> chat` at `/agent/terminal` with the same sign-in as `/mcp`
 (`mcp-skill.md`, "Terminal conversations"); leave it out for MCP and CLI commands only.
 
-The signing key, encryption key and cookie key go in as secrets (`npx @flow-engineer/flow deploy
-secrets`). Self-hosted, deploy with durable storage (`databaseStorage(postgres(pool), issuer)`).
+The signing key, encryption key and cookie key go in as secrets (in `.env`, which `npx
+@flow-engineer/flow deploy` sends, or `deploy secret NAME`). Self-hosted, deploy with durable storage (`databaseStorage(postgres(pool), issuer)`).
 Either way, `issuer` is the agent's public https origin and `resources` its MCP URLs, and the
 brand's code route allows that origin for `return_to`. Repeat steps 2 to 6 against the deployed URL, then add the agent's MCP URL as a
 connector in Claude (Settings → Connectors) and sign in once: Claude registers itself and comes back

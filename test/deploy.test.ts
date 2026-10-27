@@ -185,6 +185,15 @@ test("secret NAME reads its value from stdin and prints only the last 4", async 
   assert.equal((await run(["secret", "EMPTY"], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url }, "")).code, 2);
 });
 
+test("secret FLOW_KEY says Flow keeps the environment's runtime key when its last 4 differ from the key sent", async () => {
+  const fake = await cloud();
+  const { code, stdout, printed } = await run(["secret", "FLOW_KEY", "--json"], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url }, "flow_test_developerkeywxyz\n");
+  assert.equal(code, 0, printed);
+  assert.deepEqual(JSON.parse(stdout).secret, { name: "FLOW_KEY", last4: "abcd", environment: "staging", runtime_key: true });
+  assert.match(printed, /Flow keeps staging's runtime key ••••abcd for the hosted agent; your key ••••wxyz stays yours/);
+  assert.ok(!printed.includes("developerkey"));
+});
+
 test("secrets --from-env sends each value once, never the CI key or a name Flow sets, and prints names only", async () => {
   const fake = await cloud({ refuseSecret: "REFUSED_ONE" });
   const dir = agentFolder(

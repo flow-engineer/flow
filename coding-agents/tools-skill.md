@@ -110,7 +110,11 @@ export const placeOrder = tool({
   so keep every id and URL a next call needs. If it throws, the result goes out as JSON.
 - `signIn`: "none" for what anyone may do signed out (the menu, opening hours), "optional" for what
   works either way and does more signed in, "required" (the default) for everything about a
-  person's own account. It applies only where sign-in is set up (the `flow-framework-auth` skill).
+  person's own account. Over MCP it is enforced only with `mcpServer({ auth })` (the
+  `flow-framework-auth` skill). **Without `auth`, every tool, "required" ones included, runs for
+  anyone who reaches `/mcp`, and deployed on Flow's hosting `/mcp` is a public address. With
+  `auth`, "none" still means anyone on the internet.** Never deploy `src/mcp.ts` without `auth`
+  unless every tool is fine for anyone to call; Flow's deploy lint warns about both.
 - `mcp: { deferred: true }` keeps a less-used tool behind MCP's `search_tools` and `execute_tool`.
   Unmarked tools stay upfront. This changes neither chat access nor generated CLI commands.
   `mcpServer({ deferred: [...] })` replaces the flags for that server; `deferred: []` puts all tools

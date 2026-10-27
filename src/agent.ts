@@ -221,8 +221,10 @@ export interface AgentOptions {
    */
   onTick?: (now: number) => Promise<void> | void;
   /**
-   * HTTP routes the agent serves beside its chat, by path ("/v1/events": a business's event push),
-   * answered by `agent.fetch(request)`. The test cloud calls them in-process with a test's events.
+   * HTTP routes the agent serves at its own address, by exact path ("/v1/events": a business's event
+   * push; no prefixes, the query string not matched), answered by `agent.fetch(request)`: on Flow's
+   * hosting at FLOW_AGENT_URL plus the path, locally by `npm start`'s playground. They are public, so
+   * each checks who called. The test cloud calls them in-process with a test's events.
    */
   routes?: Record<string, (request: Request) => Response | Promise<Response>>;
   /**
