@@ -51,8 +51,11 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   the team: `about` "tooling" (the MCP server or CLI itself) or "product" (the service behind it),
   a `message` and an optional `tool`; the CLI gets `acme feedback`. It needs no sign-in, and with
   traces on its call's span carries the feedback (`flow.feedback.about`, `.message`, `.tool`) even
-  when trace content is off, for the Flow dashboard's Insights. `mcpServer({ feedback: false })`
-  leaves it out; a team's own tool named `feedback` replaces it.
+  when trace content is off, for the Flow dashboard's Insights. Agents are told when to use it: MCP
+  hosts in the server's instructions, and a CLI's top-level help (a FEEDBACK block), its skill (a
+  "Sharing feedback" section) and the error of a failed command (`If this looks wrong, tell the
+  team: acme feedback --about tooling --message "<what happened>"`). `mcpServer({ feedback: false })`
+  leaves all of it out; a team's own tool named `feedback` replaces it.
 
 ### Migration notes
 

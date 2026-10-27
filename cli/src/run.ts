@@ -24,6 +24,7 @@ import { FULL_CATALOG_META } from "../../mcp/src/describe.ts";
 import {
   BUILT_IN,
   commandEntries,
+  feedbackUsage,
   commandTable,
   flagKind,
   flagName,
@@ -552,13 +553,14 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
     children: Map<string, Node>;
   }
   const root: Node = { children: new Map() };
+  const feedback = feedbackUsage(config, tools);
   for (const c of commandTable(config, tools)) {
     let node = root;
     for (const word of c.words) {
       if (!node.children.has(word)) node.children.set(word, { children: new Map() });
       node = node.children.get(word)!;
     }
-    node.command = c.config && isCustom(c.config) ? c.config.command : toolCommand(config, c, prepare, call, io);
+    node.command = c.config && isCustom(c.config) ? c.config.command : toolCommand(config, c, prepare, call, io, feedback);
   }
   const build = (node: Node, path: string[]): Record<string, Target> => {
     const out: Record<string, Target> = {};
@@ -590,7 +592,7 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
   const theirs = Object.keys(top).filter((word) => word !== "chat");
   return buildRouteMap({
     routes: all,
-    docs: { brief: config.description ?? config.name, fullDescription: `${overview(config, all, theirs, Object.keys(own), paint)}\n\n${paint("dim", `${notice}\n--server <url>, --token <token> and --refresh-tools (bypass discovery cache) work on every command.`)}` },
+    docs: { brief: config.description ?? config.name, fullDescription: `${overview(config, all, theirs, Object.keys(own), paint)}${feedback ? `\n\n${paint("bold", "FEEDBACK")}\n  Something failed, missing or confusing? ${paint("cyan", feedback)}` : ""}\n\n${paint("dim", `${notice}\n--server <url>, --token <token> and --refresh-tools (bypass discovery cache) work on every command.`)}` },
   });
 }
 
@@ -673,7 +675,7 @@ function helpCommand(config: CliConfig, tools: ToolInfo[], top: Record<string, T
 }
 
 /** A tool as a Stricli command: its input as flags (and the CLI file's positional arguments). */
-function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) => Promise<void>, call: ToolCall, io: CliIO): StricliCommand<CliContext> {
+function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) => Promise<void>, call: ToolCall, io: CliIO, feedback?: string): StricliCommand<CliContext> {
   const tool = c.tool!;
   const settings = c.config && !isCustom(c.config) ? c.config : undefined;
   const args = settings?.args ?? [];
@@ -747,7 +749,11 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
       const result = await call(tool.name, input, c.words.join(" ")).catch((error: unknown) => {
         throw needsSignIn(error) ? explain(config, "", error) : (badArguments(config, c.words, error, (field) => (args.includes(field) ? `<${field}>` : `--${specs.find((f) => f.field === field)?.flag ?? flagName(field)}`)) ?? error);
       });
-      if (result.isError) throw new CliExit(EXIT.failed, textOf(result.content as Block[]) || `${tool.name} failed.`);
+      if (result.isError) {
+        // Agents read stderr: a failure says where to report it, unless it is feedback's own.
+        const report = tool.name === "feedback" ? undefined : feedback;
+        throw new CliExit(EXIT.failed, `${textOf(result.content as Block[]) || `${tool.name} failed.`}${report ? `\nIf this looks wrong, tell the team: ${report.replace("tooling|product", "tooling")}` : ""}`);
+      }
       // The tool's own text, unless the person asked for data or the CLI file chose what to show.
       if (settings?.print && !parsed.json && !parsed.fields) return void io.write(`${(await settings.print(valueOf(result))).replace(/\n*$/, "")}\n`);
       const formatted = (result._meta as Record<string, unknown> | undefined)?.[FORMATTED] === true && !parsed.json && !parsed.fields && !settings?.columns && !settings?.view;

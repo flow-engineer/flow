@@ -179,7 +179,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   const sessions = new Map<string, { client: { name: string; version: string }; path: string; at: number }>();
   const SESSION_TTL = 24 * 60 * 60 * 1000;
   function endpointHandler(plugin: boolean) {
-    const instructions = options.instructions ?? (plugin ? "" : mcpInstructions(skills));
+    const instructions = options.instructions ?? mcpInstructions(plugin ? [] : skills, Boolean(feedback)) ?? "";
     return createMcpHandler(({ requestInfo }) => {
     const server = new Server({ name: options.name, version: options.version }, { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) });
     server.setRequestHandler("tools/list", async (_request, ctx) => {
@@ -359,6 +359,7 @@ function terminalOf(options: McpServerOptions) {
 function feedbackTool(name: string): Tool {
   return {
     name: "feedback",
+    title: "Tell the team what failed, is missing or could be better",
     description: `Tell the team behind ${name} what went wrong, what is missing or what could be better. about "tooling": this MCP server or CLI itself (a tool that failed or is missing, confusing inputs or results); "product": ${name} itself. Never include keys, passwords or anyone's personal details.`,
     input: z.object({
       about: z.enum(["tooling", "product"]).describe("tooling: this MCP server or CLI; product: the service behind it"),

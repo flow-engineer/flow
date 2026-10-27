@@ -74,7 +74,7 @@ test("only manually deferred tools leave the upfront list, and search returns th
   } finally { await c.close(); }
 });
 
-test("the built-in feedback tool answers anyone on both endpoints, says what was sent, and a team turns it off or replaces it", async () => {
+test("the built-in feedback tool answers anyone on both endpoints, hosts are told when to use it, and a team turns it off or replaces it", async () => {
   const events: Array<Record<string, unknown>> = [];
   const auth = { issuer: "https://login.example.com", verify: () => null };
   const url = await serve({ name: "cafe", version: "1", tools: cafeTools, auth, events: [e => { events.push(e); }] });
@@ -83,6 +83,7 @@ test("the built-in feedback tool answers anyone on both endpoints, says what was
     try {
       const listed = (await c.listTools()).tools.find(t => t.name === "feedback")!;
       assert.deepEqual((listed.inputSchema as { required?: string[] }).required, ["about", "message"]);
+      assert.match(c.getInstructions() ?? "", /^When a tool fails, is missing or is confusing, or the product cannot do what is needed, tell the team with the feedback tool/);
       const answer = await c.callTool({ name: "feedback", arguments: { about: "product", message: "  Oat milk please  " } });
       assert.deepEqual(answer.content, [{ type: "text", text: "Sent to the team behind cafe. Thank you." }]);
     } finally { await c.close(); }
@@ -293,7 +294,7 @@ test("a served tool's context.events is the events side given to mcpServer, and 
 
 test("skills are listed in the instructions and read with read_skill", async () => {
   const files = { "AGENTS.md": "# Pip\nThe chat agent's prompt.", "skills/allergens/SKILL.md": "---\nname: allergens\ndescription: questions about allergies\n---\nNever say an item is safe." };
-  const c = await client(await serve({ name: "cafe", version: "1", tools: [], files }));
+  const c = await client(await serve({ name: "cafe", version: "1", tools: [], files, feedback: false }));
   assert.equal(c.getInstructions(), "This server's skills are rules for one kind of request each. Read a skill with read_skill before doing what it covers.\n- allergens: questions about allergies");
   const descriptor = (await c.listTools()).tools.find(t => t.name === "read_skill")!;
   assert.deepEqual(descriptor._meta?.["flow.engineer/skills"], [{ name: "allergens", description: "questions about allergies" }]);

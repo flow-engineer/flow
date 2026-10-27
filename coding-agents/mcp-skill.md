@@ -100,7 +100,9 @@ enforced per call.
 Every MCP server, and so every CLI, has a built-in `feedback` tool (`acme feedback --about tooling
 --message "..."`): whoever calls it tells the team about the MCP server or CLI itself (`about:
 "tooling"`: a tool that failed or is missing, confusing inputs or results) or the product behind it
-(`"product"`), with an optional `tool`. It needs no sign-in. With traces on (always on Flow's
+(`"product"`), with an optional `tool`. It needs no sign-in. Agents are told when to use it: MCP
+hosts in the server's instructions; a CLI's help, its skill and every failed command's error name
+the exact command. With traces on (always on Flow's
 hosting), the call's span carries what was written even when trace content is off, and the Flow
 dashboard shows it under Insights → Feedback. `mcpServer({ feedback: false })` leaves it out; a
 tool of the team's own named `feedback` replaces it. An agent that imports a Flow MCP server with
