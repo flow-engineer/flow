@@ -202,6 +202,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   or the CLI's skill. Use it when a command of the team's own wraps a tool (one that copies a key
   without printing it), or a tool has no place on the command line. The tools stay on the server,
   so `this.cli.call` still reaches them; `flow check` refuses a name the server has no tool for.
+- Run with no command at a terminal, the CLI shows a welcome: its name in block letters (in
+  `chat.accent` when set), `version`, "Welcome to <name>", `description`, whether the person is signed
+  in, and how to start. `welcome: { banner, title, text, tips }` replaces any part (`banner` is the
+  team's own ASCII art, `false` for none; `tips` are lines as written); `welcome: false` shows the
+  help instead. Coding agents (Claude Code, Codex, Cursor), scripts and pipes always get the help.
+- `signInFirst: true` asks a person who is not signed in to Sign in or Exit before any command, then
+  runs the command they typed; without a person (agents, CI) the command exits 3 with the sign-in
+  command. `auth`, `help` and `--help` never ask; `signInFirst: { except: ["docs"], message }` lets
+  the team's own commands through and words the question. A token in `<NAME>_TOKEN` counts as signed in.
 - Installed, it is the organization's own command: `"bin": { "acme": "src/cli.ts" }` in its package
   (node runs `.ts` files outside `node_modules`; publish a compiled `.js` bin to npm). While building
   it, run it with `npm run cli -- order -h`: npm takes flags before `--` as its own.

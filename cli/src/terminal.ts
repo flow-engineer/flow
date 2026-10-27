@@ -7,6 +7,7 @@ import { parseArgs, styleText, stripVTControlCharacters } from "node:util";
 import { configDir, isSignedIn, storedAccessToken } from "./auth.ts";
 import { tokenEnvOf, type CliConfig } from "./commands.ts";
 import type { CliIO } from "./run.ts";
+import { codingAgent } from "./welcome.ts";
 
 export type ChatUpdate =
   | { type: "reply"; text: string }
@@ -33,7 +34,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   const env = io.env ?? process.env;
   // A coding agent's shell can be a terminal (Cursor's is), yet it cannot drive a full-screen view
   // and pays for every styled line: Claude Code, Cursor and Codex mark their commands' environment.
-  if (flags.values.plain || env.CLAUDECODE || env.CURSOR_AGENT || env.CODEX_CI || env.AI_AGENT) io = { ...io, interactive: false };
+  if (flags.values.plain || codingAgent(env)) io = { ...io, interactive: false };
   const single = flags.positionals.length === 1;
   if (!single && !io.interactive) { io.writeError(`chat needs a terminal; for a single reply use ${config.name} chat "<message>".\n`); return 2; }
   if (!server) { io.writeError("Pass --server <url> or configure the MCP server.\n"); return 5; }
