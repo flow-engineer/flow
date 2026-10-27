@@ -41,6 +41,11 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   a person, the command exits 3 with `<name> auth login`. `auth`, `help` and `--help` never ask;
   `signInFirst: { except: ["docs"], message }` lets the team's own commands through and words the
   question. `CliIO` gains optional `choose` (the menu; omitted asks with `confirm`) and `columns`.
+- **A coding-agent skill for CLI design: `flow-framework-cli-design` (`cli-design-skill.md`).** It
+  says which commands get short forms (rank by use; a group's default for the main verb; the main
+  input positional; short flags and defaults for common ones), ends with a complete CLI file, and
+  `flow new` installs it with the other skills; it also says when to customize the welcome and
+  when to turn on `signInFirst`.
 
 ### Migration notes
 

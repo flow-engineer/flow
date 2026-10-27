@@ -1,4 +1,4 @@
-// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/src/main.ts examples/cafe/src/mcp.ts src/local.ts examples/cafe/src/agent.ts examples/cafe/src/tools.ts examples/cafe/src/channels.ts examples/cafe/src/name.ts examples/cafe/src/cli.ts coding-agents/skill.md coding-agents/build-agent-skill.md coding-agents/mcp-skill.md
+// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/src/main.ts examples/cafe/src/mcp.ts src/local.ts examples/cafe/src/agent.ts examples/cafe/src/tools.ts examples/cafe/src/channels.ts examples/cafe/src/name.ts examples/cafe/src/cli.ts coding-agents/skill.md coding-agents/build-agent-skill.md coding-agents/mcp-skill.md coding-agents/cli-design-skill.md
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer as createHttpServer } from "node:http";
@@ -46,7 +46,7 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   // The key and each test session's results (.flow/last-session.json) stay out of git.
   assert.deepEqual(readFileSync(join(dir, ".gitignore"), "utf8").split("\n").filter(Boolean), ["node_modules/", ".env", ".flow/"]);
   assert.equal(JSON.parse(readFileSync(join(dir, "tsconfig.json"), "utf8")).extends, undefined);
-  for (const skill of ["flow-framework", "flow-framework-build-agent", "flow-framework-mcp", "flow-framework-tools", "flow-framework-tests", "flow-framework-context", "flow-framework-auth"]) assert.ok(existsSync(join(dir, ".claude", "skills", skill, "SKILL.md")), skill);
+  for (const skill of ["flow-framework", "flow-framework-build-agent", "flow-framework-mcp", "flow-framework-cli-design", "flow-framework-tools", "flow-framework-tests", "flow-framework-context", "flow-framework-auth"]) assert.ok(existsSync(join(dir, ".claude", "skills", skill, "SKILL.md")), skill);
   assert.equal(readFileSync(join(dir, "CLAUDE.md"), "utf8"), "@AGENTS.md\n");
   assert.ok(existsSync(join(dir, "tests", "scenarios")));
   const env = readFileSync(join(dir, ".env.example"), "utf8");
