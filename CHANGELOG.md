@@ -30,6 +30,10 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `acme scrape` shows the group's help, which says what the default runs; the CLI's skill names it
   on the default command. A word is still a command or a group, never both. `flow check` refuses a
   default for a name that is not a group, or one that is not a command of that group.
+- **A coding-agent skill for CLI design: `flow-framework-cli-design` (`cli-design-skill.md`).** It
+  says which commands get short forms (rank by use; a group's default for the main verb; the main
+  input positional; short flags and defaults for common ones), ends with a complete CLI file, and
+  `flow new` installs it with the other skills.
 
 ### Migration notes
 

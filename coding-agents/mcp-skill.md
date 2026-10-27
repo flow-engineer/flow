@@ -137,6 +137,9 @@ agent has no `src/cli.ts`.
 
 ## A CLI for the organization
 
+Which commands get short forms (a group's default, positional arguments, short flags) is in
+`flow-framework-cli-design` (`cli-design-skill.md`); this section is how each works.
+
 The same tools as commands, over the organization's MCP server, with the same sign-in and gating.
 It runs on Stricli (`@stricli/core`, the framework Sentry's CLI is built on). Every tool is already a
 command under its own name (`place_order` is `acme place-order`); a CLI file adds what needs

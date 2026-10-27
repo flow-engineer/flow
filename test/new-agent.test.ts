@@ -46,7 +46,7 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   // The key and each test session's results (.flow/last-session.json) stay out of git.
   assert.deepEqual(readFileSync(join(dir, ".gitignore"), "utf8").split("\n").filter(Boolean), ["node_modules/", ".env", ".flow/"]);
   assert.equal(JSON.parse(readFileSync(join(dir, "tsconfig.json"), "utf8")).extends, undefined);
-  for (const skill of ["flow-framework", "flow-framework-build-agent", "flow-framework-mcp", "flow-framework-tools", "flow-framework-tests", "flow-framework-context", "flow-framework-auth"]) assert.ok(existsSync(join(dir, ".claude", "skills", skill, "SKILL.md")), skill);
+  for (const skill of ["flow-framework", "flow-framework-build-agent", "flow-framework-mcp", "flow-framework-cli-design", "flow-framework-tools", "flow-framework-tests", "flow-framework-context", "flow-framework-auth"]) assert.ok(existsSync(join(dir, ".claude", "skills", skill, "SKILL.md")), skill);
   assert.equal(readFileSync(join(dir, "CLAUDE.md"), "utf8"), "@AGENTS.md\n");
   assert.ok(existsSync(join(dir, "tests", "scenarios")));
   const env = readFileSync(join(dir, ".env.example"), "utf8");
