@@ -10,6 +10,8 @@
 // Content (what the person and the agent wrote, tool inputs and results) is sent only with
 // `content: true` (FLOW_FRAMEWORK_TRACES_CONTENT=1); without it the spans hold ids, names, timing and counts,
 // and the endpoint has no messages to show or grade.
+// The one exception is the MCP server's built-in feedback tool: what a caller writes there is meant
+// for the team, so its call's span carries it (`flow.feedback.about`, `.message`, `.tool`) either way.
 //
 // Under `flow test`, which plays the agent in this process, every trace says so: the CLI sets
 // FLOW_FRAMEWORK_RUN_KIND=test before it loads the agent, and FLOW_FRAMEWORK_TEST_SESSION once the session opens.
@@ -277,6 +279,12 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
           if (typeof e[field] === "string") attributes.push(attr(key, e[field] as string));
         }
         if (e.ok === false) attributes.push(attr("error", typeof e.error === "string" ? clip(e.error) : "Tool failed"));
+        // Feedback is written to be read by the team, so its text goes even when content is off.
+        const feedback = e.ok !== false ? (e.feedback as { about?: unknown; message?: unknown; tool?: unknown } | undefined) : undefined;
+        if (feedback && typeof feedback.about === "string" && typeof feedback.message === "string") {
+          attributes.push(attr("flow.feedback.about", feedback.about), attr("flow.feedback.message", clip(feedback.message)));
+          if (typeof feedback.tool === "string") attributes.push(attr("flow.feedback.tool", feedback.tool));
+        }
         enqueue([span(hex(16), `mcp.call ${e.tool}`, started?.at ?? e.at - Number(e.ms ?? 0), e.at, attributes, undefined, e.ok === false)]);
       }
       return;

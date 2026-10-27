@@ -230,7 +230,7 @@ test("a tool kept to the CLI is listed and called only for the CLI's own sign-in
   const whoami = tool({ name: "whoami", description: "Who is signed in.", input: z.object({}), hints: { readOnly: true }, run: (_i, ctx) => ({ key: ctx.key }) });
   const lookup = tool({ name: "invoice_lookup", description: "Look up an invoice.", input: z.object({ id: z.string() }), mcp: { deferred: true }, hints: { readOnly: true }, run: ({ id }) => ({ id }) });
   const reveal = tool({ name: "api_keys_reveal", description: "Show one API key's value.", input: z.object({ key_id: z.string() }), output: z.object({ key: z.string() }), mcp: { clients: ["cli"], deferred: true }, hints: { readOnly: true }, run: ({ key_id }) => ({ key: `secret-${key_id}` }) });
-  const mcp = mcpServer({ name: "acme", version: "1", tools: [whoami, lookup, reveal], auth: bridge.auth });
+  const mcp = mcpServer({ name: "acme", version: "1", tools: [whoami, lookup, reveal], feedback: false, auth: bridge.auth });
   handle = (req, res) => void mcp.node(req, res);
   assert.deepEqual(mcp.descriptors.map((d) => d.name), ["whoami", "search_tools", "execute_tool"]);
   assert.throws(() => mcpServer({ name: "acme", version: "1", tools: [reveal] }), /api_keys_reveal is kept to some clients \(mcp.clients\), which needs auth/);

@@ -75,11 +75,18 @@ export function loadInstructions(files: AgentFiles, skills: Skill[], inline = fa
 }
 
 /** What an MCP server tells a host about its skills when it connects (chinwag/mcp). */
-export function mcpInstructions(skills: Skill[]): string | undefined {
-  if (!skills.length) return undefined;
+export function mcpInstructions(skills: Skill[], feedback = false): string | undefined {
   const list = skills.map((s) => `- ${s.name}: ${s.description}`).join("\n");
-  return `This server's skills are rules for one kind of request each. Read a skill with read_skill before doing what it covers.\n${list}`;
+  const parts = [
+    skills.length ? `This server's skills are rules for one kind of request each. Read a skill with read_skill before doing what it covers.\n${list}` : "",
+    feedback ? FEEDBACK_NUDGE("the feedback tool") : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join("\n\n") : undefined;
 }
+
+/** When to use the built-in feedback tool, told to MCP hosts and in a CLI's help and skill (`how`: the tool or command). */
+export const FEEDBACK_NUDGE = (how: string): string =>
+  `When a tool fails, is missing or is confusing, or the product cannot do what is needed, tell the team with ${how}: about "tooling" for this MCP server or CLI, "product" for the service behind it. Never include keys, passwords or personal details.`;
 
 /** The MCP server's way to read a skill: a tool, since every host calls tools. */
 export function readSkillTool(skills: Skill[]): Tool {

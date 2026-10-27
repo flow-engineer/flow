@@ -42,7 +42,7 @@ test("the café's tools are served as spec-valid MCP tools, every annotation sen
   const c = await client(url);
   const listed = await c.listTools();
   assert.ok(isSpecType.ListToolsResult(listed));
-  assert.deepEqual(listed.tools.map((t) => t.name), ["get_menu", "place_order", "order_status"]);
+  assert.deepEqual(listed.tools.map((t) => t.name), ["get_menu", "place_order", "order_status", "feedback"]);
   for (const t of listed.tools) assert.ok(isSpecType.Tool(t), `${t.name} is a spec Tool`);
   const place = listed.tools.find((t) => t.name === "place_order")!;
   assert.deepEqual(place.annotations, { title: "Place an order", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
@@ -58,7 +58,7 @@ test("the café's tools are served as spec-valid MCP tools, every annotation sen
 test("only manually deferred tools leave the upfront list, and search returns their executable descriptors", async () => {
   const lookup = tool({ name: "invoice_lookup", description: "Look up an invoice.", input: z.object({ id: z.string() }), output: z.object({ id: z.string() }), mcp: { deferred: true }, signIn: "none", hints: { readOnly: true }, run: ({ id }) => ({ id }) });
   const archive = tool({ name: "invoice_archive", description: "Archive an invoice.", input: z.object({ id: z.string() }), mcp: { deferred: true }, run: () => "done" });
-  const c = await client(await serve({ name: "test", version: "1", tools: [cafeTools[0]!, lookup, archive] }));
+  const c = await client(await serve({ name: "test", version: "1", tools: [cafeTools[0]!, lookup, archive], feedback: false }));
   try {
     assert.deepEqual((await c.listTools()).tools.map(t => t.name), ["get_menu", "search_tools", "execute_tool"]);
     const found = await c.callTool({ name: "search_tools", arguments: { query: "invoice_lookup", limit: 1 } });
@@ -74,9 +74,33 @@ test("only manually deferred tools leave the upfront list, and search returns th
   } finally { await c.close(); }
 });
 
+test("the built-in feedback tool answers anyone on both endpoints, hosts are told when to use it, and a team turns it off or replaces it", async () => {
+  const events: Array<Record<string, unknown>> = [];
+  const auth = { issuer: "https://login.example.com", verify: () => null };
+  const url = await serve({ name: "cafe", version: "1", tools: cafeTools, auth, events: [e => { events.push(e); }] });
+  for (const endpoint of [url, `${url}/plugin`]) {
+    const c = await client(endpoint);
+    try {
+      const listed = (await c.listTools()).tools.find(t => t.name === "feedback")!;
+      assert.deepEqual((listed.inputSchema as { required?: string[] }).required, ["about", "message"]);
+      assert.match(c.getInstructions() ?? "", /^When a tool fails, is missing or is confusing, or the product cannot do what is needed, tell the team with the feedback tool/);
+      const answer = await c.callTool({ name: "feedback", arguments: { about: "product", message: "  Oat milk please  " } });
+      assert.deepEqual(answer.content, [{ type: "text", text: "Sent to the team behind cafe. Thank you." }]);
+    } finally { await c.close(); }
+  }
+  const sent = events.filter(e => e.type === "tool.end" && e.tool === "feedback");
+  assert.deepEqual(sent.map(e => [e.surface, e.feedback]), [["mcp", { about: "product", message: "Oat milk please" }], ["mcp-plugin", { about: "product", message: "Oat milk please" }]]);
+  assert.equal((await rpc(url, call("feedback", { about: "other", message: "x" }))).status, 200, "a bad category is the tool's error, not a sign-in");
+
+  assert.ok(!mcpServer({ name: "cafe", version: "1", tools: cafeTools, feedback: false }).descriptors.some(d => d.name === "feedback"));
+  const own = tool({ name: "feedback", description: "Our own form.", input: z.object({ text: z.string() }), signIn: "none", run: () => "ours" });
+  const replaced = mcpServer({ name: "cafe", version: "1", tools: [own] });
+  assert.deepEqual(replaced.descriptors.map(d => d.description), ["Our own form."]);
+});
+
 test("the server can replace manual deferral, including promoting every tool with an empty list", () => {
   const marked = { ...cafeTools[0]!, mcp: { deferred: true } };
-  const options = { name: "test", version: "1", tools: [marked, cafeTools[1]!] };
+  const options = { name: "test", version: "1", tools: [marked, cafeTools[1]!], feedback: false };
   assert.deepEqual(mcpServer({ ...options, deferred: [] }).descriptors.map(t => t.name), ["get_menu", "place_order"]);
   assert.deepEqual(mcpServer({ ...options, deferred: ["place_order"] }).descriptors.map(t => t.name), ["get_menu", "search_tools", "execute_tool"]);
   assert.throws(() => mcpServer({ ...options, deferred: ["missing"] }), /deferred tool missing does not exist/);
@@ -122,7 +146,7 @@ test("deferred execution challenges for the target's sign-in and read or write s
 
 test("generated discovery and execution descriptors can be renamed, or replaced with a team's tools", async () => {
   const deferred = { ...cafeTools[0]!, mcp: { deferred: true } };
-  const c = await client(await serve({ name: "test", version: "1", tools: [deferred], descriptor: (t, d) => ({ ...d, name: t.name === "search_tools" ? "find_operations" : t.name === "execute_tool" ? "run_operation" : d.name }) }));
+  const c = await client(await serve({ name: "test", version: "1", tools: [deferred], feedback: false, descriptor: (t, d) => ({ ...d, name: t.name === "search_tools" ? "find_operations" : t.name === "execute_tool" ? "run_operation" : d.name }) }));
   try {
     assert.deepEqual((await c.listTools()).tools.map(t => t.name), ["find_operations", "run_operation"]);
     assert.ok((await c.callTool({ name: "find_operations", arguments: { query: "menu" } })).structuredContent);
@@ -270,7 +294,7 @@ test("a served tool's context.events is the events side given to mcpServer, and 
 
 test("skills are listed in the instructions and read with read_skill", async () => {
   const files = { "AGENTS.md": "# Pip\nThe chat agent's prompt.", "skills/allergens/SKILL.md": "---\nname: allergens\ndescription: questions about allergies\n---\nNever say an item is safe." };
-  const c = await client(await serve({ name: "cafe", version: "1", tools: [], files }));
+  const c = await client(await serve({ name: "cafe", version: "1", tools: [], files, feedback: false }));
   assert.equal(c.getInstructions(), "This server's skills are rules for one kind of request each. Read a skill with read_skill before doing what it covers.\n- allergens: questions about allergies");
   const descriptor = (await c.listTools()).tools.find(t => t.name === "read_skill")!;
   assert.deepEqual(descriptor._meta?.["flow.engineer/skills"], [{ name: "allergens", description: "questions about allergies" }]);
@@ -291,7 +315,7 @@ test("a tool that cannot be described exactly is refused when the server is made
 test("plugin paths deliver tools once, share sign-in, and advertise their own resource", async () => {
   const events: unknown[] = [];
   const status = tool({ name: "status", description: "Status.", input: z.object({}), mcp: { deferred: true }, run: () => "ready" });
-  const url = await serve({ name: "cafe", version: "1", tools: [status], files: { "skills/allergens/SKILL.md": "Allergy rules" }, events: [e => { events.push(e); }], auth: { issuer: "https://login.example.com", verify: token => token === "test" ? { key: "person" } : null } });
+  const url = await serve({ name: "cafe", version: "1", tools: [status], feedback: false, files: { "skills/allergens/SKILL.md": "Allergy rules" }, events: [e => { events.push(e); }], auth: { issuer: "https://login.example.com", verify: token => token === "test" ? { key: "person" } : null } });
   const c = await client(`${url}/plugin`, "test");
   assert.deepEqual((await c.listTools()).tools.map(t => t.name), ["search_tools", "execute_tool"]);
   assert.equal(c.getInstructions(), undefined);

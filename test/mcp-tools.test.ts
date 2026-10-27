@@ -16,12 +16,12 @@ after(() => servers.forEach((s) => s.close()));
 
 /** An upstream MCP server whose tools the test can swap while it runs. */
 async function upstream(tools: Tool[]) {
-  let handle: McpServerHandle = mcpServer({ name: "shop", version: "1", tools });
+  let handle: McpServerHandle = mcpServer({ name: "shop", version: "1", tools, feedback: false });
   const http = createServer((req, res) => void handle.node(req, res));
   servers.push(http);
   await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
   const { port } = http.address() as { port: number };
-  return { url: `http://127.0.0.1:${port}/mcp`, swap: (next: Tool[]) => void (handle = mcpServer({ name: "shop", version: "1", tools: next })) };
+  return { url: `http://127.0.0.1:${port}/mcp`, swap: (next: Tool[]) => void (handle = mcpServer({ name: "shop", version: "1", tools: next, feedback: false })) };
 }
 
 const context = (): ToolContext => ({ conversationId: "c", person: "phone:+15550100", key: null, channel: "whatsapp", callId: "1", idempotencyKey: "k1", signal: new AbortController().signal, records: unavailableRecords("a test") });

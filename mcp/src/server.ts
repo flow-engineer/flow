@@ -105,6 +105,12 @@ export interface McpServerOptions {
   terminal?: false | { path?: string; channel?: string; guests?: boolean };
   /** Traces from FLOW_FRAMEWORK_TRACES_* (or legacy CHINWAG_TRACES_*) by default; false disables them. */
   traces?: TracesOptions | false;
+  /**
+   * The built-in `feedback` tool (the CLI's `feedback` command): whoever calls the server tells the
+   * team about the server itself ("tooling") or the product, and traces carry it to the dashboard.
+   * Default on; false leaves it out. A tool of the team's own named `feedback` replaces it.
+   */
+  feedback?: boolean;
 }
 
 export interface McpServerHandle {
@@ -129,7 +135,8 @@ const NO_RECORDS = unavailableRecords("give mcpServer({ records: agent.records }
 export function mcpServer(options: McpServerOptions): McpServerHandle {
   if (options.dir !== undefined && options.files !== undefined) throw new Error("@flow-engineer/flow/mcp: give dir or files, not both");
   const skills = options.dir !== undefined || options.files !== undefined ? loadSkills(options.files ?? readAgentFolder(options.dir!)) : [];
-  const tools = [...options.tools, ...(skills.length ? [readSkillTool(skills)] : [])];
+  const feedback = options.feedback === false || options.tools.some(t => t.name === "feedback") ? undefined : feedbackTool(options.name);
+  const tools = [...options.tools, ...(skills.length ? [readSkillTool(skills)] : []), ...(feedback ? [feedback] : [])];
   const problems = toolsProblems(tools);
   if (problems.length) throw new Error(`@flow-engineer/flow/mcp: these tools cannot be served as declared:\n- ${problems.join("\n- ")}`);
   // Only a verified token says which client is calling: without auth, such a tool reaches no one.
@@ -154,7 +161,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   const surfacesFor = (kind?: McpClientKind) => {
     const visible = (list: Tool[]) => list.flatMap((t, i) => !t.mcp?.clients || (kind !== undefined && t.mcp.clients.includes(kind)) ? [{ tool: t, descriptor: sourceDescriptors[i]! }] : []);
     const surface = (list: Tool[]) => { const shown = visible(list); return toolSurface(shown.map(s => s.tool), shown.map(s => s.descriptor), deferred, options.descriptor); };
-    return { standalone: surface(tools), plugin: surface(options.tools) };
+    return { standalone: surface(tools), plugin: surface([...options.tools, ...(feedback ? [feedback] : [])]) };
   };
   const audiences = new Map([[undefined as McpClientKind | undefined, surfacesFor()]]);
   for (const kind of MCP_CLIENT_KINDS) if (kept.some(t => t.mcp!.clients!.includes(kind))) audiences.set(kind, surfacesFor(kind));
@@ -172,7 +179,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   const sessions = new Map<string, { client: { name: string; version: string }; path: string; at: number }>();
   const SESSION_TTL = 24 * 60 * 60 * 1000;
   function endpointHandler(plugin: boolean) {
-    const instructions = options.instructions ?? (plugin ? "" : mcpInstructions(skills));
+    const instructions = options.instructions ?? mcpInstructions(plugin ? [] : skills, Boolean(feedback)) ?? "";
     return createMcpHandler(({ requestInfo }) => {
     const server = new Server({ name: options.name, version: options.version }, { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) });
     server.setRequestHandler("tools/list", async (_request, ctx) => {
@@ -210,7 +217,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
       const started = Date.now();
       emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input, ...detail });
       const { result, formatError } = await callTool(t, input, context);
-      emit(context.conversationId, "tool.end", { callId: context.callId, tool: t.name, ms: Date.now() - started, ok: !result.isError, output: result.structuredContent ?? result.content, error: result.isError ? result.content.filter(c => c.type === "text").map(c => c.text).join("\n") : undefined, formatError, ...detail });
+      emit(context.conversationId, "tool.end", { callId: context.callId, tool: t.name, ms: Date.now() - started, ok: !result.isError, output: result.structuredContent ?? result.content, error: result.isError ? result.content.filter(c => c.type === "text").map(c => c.text).join("\n") : undefined, formatError, ...(t === feedback ? { feedback: input } : {}), ...detail });
       return result;
     });
     options.extend?.(server);
@@ -346,6 +353,23 @@ function terminalOf(options: McpServerOptions) {
   const terminal = terminalServer({ agent, ...(verify ? { auth: { verify } } : {}), ...settings });
   if (typeof given !== "function") given.addChannel(terminal.channel);
   return terminal;
+}
+
+/** The built-in feedback tool. Its run only thanks: the call's tool.end event carries what was said. */
+function feedbackTool(name: string): Tool {
+  return {
+    name: "feedback",
+    title: "Tell the team what failed, is missing or could be better",
+    description: `Tell the team behind ${name} what went wrong, what is missing or what could be better. about "tooling": this MCP server or CLI itself (a tool that failed or is missing, confusing inputs or results); "product": ${name} itself. Never include keys, passwords or anyone's personal details.`,
+    input: z.object({
+      about: z.enum(["tooling", "product"]).describe("tooling: this MCP server or CLI; product: the service behind it"),
+      message: z.string().trim().min(1).max(2000).describe("What happened and what you expected"),
+      tool: z.string().trim().min(1).max(100).optional().describe("The tool the feedback is about, if any"),
+    }),
+    signIn: "none",
+    hints: { readOnly: false, destructive: false, idempotent: false, openWorld: false },
+    run: () => `Sent to the team behind ${name}. Thank you.`,
+  };
 }
 
 /** One endpoint's catalog. Plugin discovery never includes the standalone read_skill tool. */

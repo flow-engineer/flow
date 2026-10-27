@@ -63,6 +63,16 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `flow new` installs it with the other skills; it also says when to customize the welcome and
   when to turn on `signInFirst`.
 
+- **A built-in `feedback` tool on every MCP server and CLI.** Agents and people leave feedback for
+  the team: `about` "tooling" (the MCP server or CLI itself) or "product" (the service behind it),
+  a `message` and an optional `tool`; the CLI gets `acme feedback`. It needs no sign-in, and with
+  traces on its call's span carries the feedback (`flow.feedback.about`, `.message`, `.tool`) even
+  when trace content is off, for the Flow dashboard's Insights. Agents are told when to use it: MCP
+  hosts in the server's instructions, and a CLI's top-level help (a FEEDBACK block), its skill (a
+  "Sharing feedback" section) and the error of a failed command (`If this looks wrong, tell the
+  team: acme feedback --about tooling --message "<what happened>"`). `mcpServer({ feedback: false })`
+  leaves all of it out; a team's own tool named `feedback` replaces it.
+
 ### Migration notes
 
 - A bare run at a terminal now shows the welcome instead of the help. To keep the help, set
@@ -70,6 +80,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - `chat.accent` still works; move it to `brand.accent` so the welcome and the sign-in page use it
   too. Where both are set, `brand.accent` wins. A custom `openUrl` that waited for the page it opened
   must not: the CLI no longer awaits it.
+- MCP servers list one more tool, `feedback`, and CLIs one more command. To keep the list as it was,
+  pass `mcpServer({ feedback: false })`. A tool already named `feedback` keeps working and replaces
+  the built-in one.
 
 ## 0.10.3 (2026-10-27)
 
