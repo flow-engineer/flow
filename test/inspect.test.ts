@@ -47,7 +47,7 @@ test("inspect lists tools raw, signs in as a host does without printing the toke
     res.writeHead(404).end();
   });
   const mine = tool({ name: "my_orders", description: "Their orders.", input: z.object({ limit: z.number().optional() }), hints: { readOnly: true }, run: ({ limit }, ctx) => ({ for: ctx.key, limit }) });
-  const handle = mcpServer({ name: "acme", version: "1", tools: [mine], auth: { issuer, verify: (t) => (t === "tok-1" ? { key: "user-7" } : null) } });
+  const handle = mcpServer({ name: "acme", version: "1", tools: [mine], feedback: false, auth: { issuer, verify: (t) => (t === "tok-1" ? { key: "user-7" } : null) } });
   const server = `${await listen((req, res) => void handle.node(req, res))}/mcp`;
 
   const run = async (...argv: string[]) => {

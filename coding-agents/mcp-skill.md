@@ -95,6 +95,17 @@ control: known tools remain directly callable with the same authorization requir
 host-visible hints are conservative (it may write or delete); its target's permissions are still
 enforced per call.
 
+### The feedback tool
+
+Every MCP server, and so every CLI, has a built-in `feedback` tool (`acme feedback --about tooling
+--message "..."`): whoever calls it tells the team about the MCP server or CLI itself (`about:
+"tooling"`: a tool that failed or is missing, confusing inputs or results) or the product behind it
+(`"product"`), with an optional `tool`. It needs no sign-in. With traces on (always on Flow's
+hosting), the call's span carries what was written even when trace content is off, and the Flow
+dashboard shows it under Insights → Feedback. `mcpServer({ feedback: false })` leaves it out; a
+tool of the team's own named `feedback` replaces it. An agent that imports a Flow MCP server with
+`mcpTools` gets that server's `feedback` too unless it is left out of the lock.
+
 ### Keep a tool to the brand's own CLI
 
 `mcp: { clients: ["cli"] }` keeps a tool to the CLI built with this agent's `defineCli`, for what
