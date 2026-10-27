@@ -60,14 +60,53 @@ function painter(io: CliIO): Paint {
   return io.interactive && !env.NO_COLOR && env.TERM !== "dumb" ? (format, text) => styleText(format, text, { validateStream: false }) : (_f, text) => text;
 }
 
-/** The accent for the banner: the brand's when it has one, else cyan. */
-function accent(config: CliConfig, io: CliIO, paint: Paint): (text: string) => string {
-  const env = io.env ?? process.env;
-  const hex = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(brandOf(config).accent ?? "");
-  if (hex && io.interactive && !env.NO_COLOR && env.TERM !== "dumb") {
-    const [r, g, b] = hex.slice(1).map((h) => parseInt(h, 16));
-    return (text) => text.split("\n").map((line) => `\u001b[38;2;${r};${g};${b}m${line}\u001b[39m`).join("\n");
+/**
+ * How many colors the terminal shows: none (NO_COLOR, TERM=dumb), 16, 256, or RGB only when
+ * COLORTERM says so. An RGB escape a terminal cannot read is taken apart into other codes: macOS
+ * Terminal read #645bff's `38;2;100;91;255` as a grey background and red text.
+ */
+export function colorDepth(env: Record<string, string | undefined>): 0 | 16 | 256 | "rgb" {
+  if (env.NO_COLOR || env.TERM === "dumb") return 0;
+  if (/^(truecolor|24bit)$/i.test(env.COLORTERM ?? "")) return "rgb";
+  return /256/.test(env.TERM ?? "") ? 256 : 16;
+}
+
+/** The nearest of the 256-color palette's cube and greys. */
+export function nearest256(rgb: number[]): number {
+  const cube = [0, 95, 135, 175, 215, 255];
+  let closest = 16, distance = Infinity;
+  for (let index = 16; index < 256; index++) {
+    const n = index - 16;
+    const candidate = index >= 232 ? Array(3).fill(8 + (index - 232) * 10)
+      : [cube[Math.floor(n / 36)]!, cube[Math.floor(n / 6) % 6]!, cube[n % 6]!];
+    const delta = candidate.reduce((sum, value, channel) => sum + (value - rgb[channel]!) ** 2, 0);
+    if (delta < distance) { closest = index; distance = delta; }
   }
+  return closest;
+}
+
+// The 16 basic colors as xterm draws them, by their codes; black and bright white are left out,
+// since one of them is the background.
+const BASIC: Array<[number, number[]]> = [
+  [31, [205, 0, 0]], [32, [0, 205, 0]], [33, [205, 205, 0]], [34, [0, 0, 238]], [35, [205, 0, 205]], [36, [0, 205, 205]], [37, [229, 229, 229]],
+  [90, [127, 127, 127]], [91, [255, 0, 0]], [92, [0, 255, 0]], [93, [255, 255, 0]], [94, [92, 92, 255]], [95, [255, 0, 255]], [96, [0, 255, 255]],
+];
+
+/** The SGR parameters for a hex color at this depth; undefined without color. */
+export function colorCode(hex: string, depth: ReturnType<typeof colorDepth>): string | undefined {
+  if (depth === 0) return undefined;
+  const rgb = [1, 3, 5].map((offset) => parseInt(hex.slice(offset, offset + 2), 16));
+  if (depth === "rgb") return `38;2;${rgb.join(";")}`;
+  if (depth === 256) return `38;5;${nearest256(rgb)}`;
+  const distance = (c: number[]) => c.reduce((sum, value, channel) => sum + (value - rgb[channel]!) ** 2, 0);
+  return String(BASIC.reduce((best, next) => (distance(next[1]) < distance(best[1]) ? next : best))[0]);
+}
+
+/** The accent for the banner: the brand's, in as many colors as the terminal shows, else cyan. */
+function accent(config: CliConfig, io: CliIO, paint: Paint): (text: string) => string {
+  const hex = brandOf(config).accent;
+  const code = hex && /^#[0-9a-f]{6}$/i.test(hex) && io.interactive ? colorCode(hex, colorDepth(io.env ?? process.env)) : undefined;
+  if (code) return (text) => text.split("\n").map((line) => `\u001b[${code}m${line}\u001b[0m`).join("\n");
   return (text) => text.split("\n").map((line) => paint("cyan", line)).join("\n");
 }
 
