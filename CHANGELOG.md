@@ -6,14 +6,17 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
-- **CLI shorthands and defaults.** A `{ tool }` command in the CLI file takes `shorthands`, each
-  naming an input field: a letter is a short flag (`{ n: "limit" }` → `-n 5`), a word is the flag's
-  name (`{ all: "include_revoked" }` → `--all` in help, completion and the CLI's skill). The field's
-  own flag keeps working. `defaults` gives values sent when the person leaves an input out
-  (`{ limit: 20 }`), shown in help and the skill; a required input with a default may be left out.
-  Positional inputs stay `args`. `flow check` refuses a shorthand or default naming an input the
-  tool lacks, a shorthand for a positional argument, `-h`/`-H` or one of the CLI's own flags, and
-  two flags of one name.
+- **CLI commands written as code: `command(tool)`.** A CLI file can write a tool's command as a
+  chain instead of an object: `command("list_keys").arg("project").short("n", "limit")
+  .flag("all", "include_revoked").default("limit", 20).map((input) => ({ ...input }))`. `arg`
+  takes inputs positionally; `short` gives a one-letter flag (`-n 5`); `flag` names an input's flag
+  (`--all`), while the input's own flag keeps working; `default` is sent when an input is left out
+  (shown in help and the skill); `map` is the team's own code over what is sent, run after
+  arguments, flags and defaults. `columns`, `view`, `alias`, `summary` and `examples` match the
+  object's keys, and the object form takes the same as `shorthands`, `defaults` and `input`.
+  Help, completion, the CLI's skill and `flow check` read both forms. `flow check` refuses a
+  shorthand or default naming an input the tool lacks, a shorthand for a positional argument,
+  `-h`/`-H` or one of the CLI's own flags, and two flags of one name.
 
 ### Migration notes
 

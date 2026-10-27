@@ -24,6 +24,8 @@ export interface ToolCommand {
   shorthands?: Record<string, string>;
   /** Values sent for inputs the person leaves out ({ limit: 20 }); they can still pass their own. */
   defaults?: Record<string, unknown>;
+  /** Your own code over what is sent: gets the input the person typed (defaults filled), returns the tool's input. */
+  input?: (input: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>;
   /** Another name for the command. */
   alias?: string;
   /** One line under the command in help (default: the tool's title). */
@@ -46,7 +48,7 @@ export interface CustomCommand {
   command: StricliCommand<CliContext>;
 }
 
-export type CommandConfig = ToolCommand | CustomCommand;
+export type CommandConfig = ToolCommand | CustomCommand | CommandBuilder;
 
 export interface CliConfig {
   /** The command's name ("acme"): its help, its config folder (~/.config/<name>) and token variable. */
@@ -114,14 +116,84 @@ export interface Command {
   words: string[];
   summary: string;
   tool?: ToolInfo;
-  config?: CommandConfig;
+  config?: ToolCommand | CustomCommand;
 }
 
 export function defineCli(config: CliConfig): CliConfig {
   return config;
 }
 
-export function isCustom(config: CommandConfig): config is CustomCommand {
+/**
+ * A tool's command, written as code: `command("list_keys").arg("project").short("n", "limit")`.
+ * Each step sets one of ToolCommand's fields, so help, completion, the CLI's skill and flow check
+ * read it as they read the plain object.
+ */
+export function command(tool: string): CommandBuilder {
+  return new CommandBuilder(tool);
+}
+
+export class CommandBuilder {
+  readonly spec: ToolCommand;
+  constructor(tool: string) {
+    this.spec = { tool };
+  }
+  /** Take these input fields from positional arguments, in order. */
+  arg(...fields: string[]): this {
+    this.spec.args = [...(this.spec.args ?? []), ...fields];
+    return this;
+  }
+  /** A one-letter flag for a field: short("n", "limit") → `-n 5`. */
+  short(letter: string, field: string): this {
+    this.spec.shorthands = { ...this.spec.shorthands, [letter]: field };
+    return this;
+  }
+  /** The flag's name for a field: flag("all", "include_revoked") → `--all`; `--include-revoked` still works. */
+  flag(name: string, field: string): this {
+    this.spec.shorthands = { ...this.spec.shorthands, [name]: field };
+    return this;
+  }
+  /** The value sent when the person leaves the field out. */
+  default(field: string, value: unknown): this {
+    this.spec.defaults = { ...this.spec.defaults, [field]: value };
+    return this;
+  }
+  /** Rewrite what is sent, in your own code; runs after arguments, flags and defaults. */
+  map(fn: NonNullable<ToolCommand["input"]>): this {
+    this.spec.input = fn;
+    return this;
+  }
+  /** For a list: the columns of the table people see. */
+  columns(...fields: string[]): this {
+    this.spec.columns = fields;
+    return this;
+  }
+  /** For one record: the fields people see, in order. */
+  view(...fields: string[]): this {
+    this.spec.view = fields;
+    return this;
+  }
+  /** Another name for the command. */
+  alias(words: string): this {
+    this.spec.alias = words;
+    return this;
+  }
+  /** One line under the command in help (default: the tool's title). */
+  summary(line: string): this {
+    this.spec.summary = line;
+    return this;
+  }
+  examples(...lines: string[]): this {
+    this.spec.examples = [...(this.spec.examples ?? []), ...lines];
+    return this;
+  }
+}
+
+/** The CLI file's commands, each a plain ToolCommand or CustomCommand (a builder gives its spec). */
+export function commandEntries(config: CliConfig): [string, ToolCommand | CustomCommand][] {
+  return Object.entries(config.commands ?? {}).map(([w, c]) => [w, c instanceof CommandBuilder ? c.spec : c]);
+}
+
+export function isCustom(config: ToolCommand | CustomCommand): config is CustomCommand {
   return (config as CustomCommand).command !== undefined;
 }
 
@@ -168,7 +240,7 @@ export function commandTable(config: CliConfig, tools: ToolInfo[]): Command[] {
   const byName = new Map(tools.map((t) => [t.name, t]));
   const commands: Command[] = [];
   const named = new Set<string>(config.exclude);
-  for (const [words, c] of Object.entries(config.commands ?? {})) {
+  for (const [words, c] of commandEntries(config)) {
     const split = words.trim().split(/\s+/);
     if (isCustom(c)) {
       commands.push({ words: split, summary: "", config: c });
@@ -224,7 +296,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
     if (!byName.has(t)) errors.push(`exclude names ${t}, but there is no tool named ${t} on the server`);
     named.add(t);
   }
-  for (const [w, c] of Object.entries(config.commands ?? {})) {
+  for (const [w, c] of commandEntries(config)) {
     claim(w, `"${w}"`);
     if (isCustom(c)) continue;
     if (c.alias) claim(c.alias, `the alias of "${w}"`);
@@ -263,7 +335,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
   }
   for (const t of tools) {
     if (named.has(t.name) || HOST_ONLY.has(t.name)) continue;
-    if (Object.entries(config.commands ?? {}).some(([w, c]) => w.trim() === derivedName(t.name) && isCustom(c))) continue;
+    if (commandEntries(config).some(([w, c]) => w.trim() === derivedName(t.name) && isCustom(c))) continue;
     claim(derivedName(t.name), `tool ${t.name}`);
     if (config.commands) warnings.push(`tool ${t.name} has no command in the CLI file; it is reachable as "${derivedName(t.name)}"`);
   }

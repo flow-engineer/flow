@@ -14,7 +14,7 @@ import { CURSOR_MARKER, TUI, visibleWidth, type Terminal } from "@mariozechner/p
 import { after, test } from "node:test";
 import { z } from "zod";
 import { buildCommand } from "@stricli/core";
-import { cliProblems, commandTable, defineCli, runCli, skillFile, type CliConfig, type CliIO } from "../cli/src/index.ts";
+import { cliProblems, command, commandTable, defineCli, runCli, skillFile, type CliConfig, type CliIO } from "../cli/src/index.ts";
 import { signOut, storedProvider } from "../cli/src/auth.ts";
 import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
 import { scriptedModel, respond, call } from "./helpers.ts";
@@ -93,10 +93,13 @@ test("commands include MCP-deferred tools: positionals, flags, --json and --fiel
   assert.equal(table.out, "ORDER_ID  STATUS  TOTAL\nBL-1043   making  9.6\n");
 });
 
-test("shorthands give inputs short and renamed flags, the long name still works, and defaults fill what is left out", async () => {
+test("a command written as code: short and renamed flags, the long name still works, defaults and its own input code", async () => {
   const cli = defineCli({
     ...acme(await serve({ tools: [listOrders, getOrder, cancelOrder] })),
-    commands: { "order list": { tool: "list_orders", shorthands: { n: "limit", state: "status", s: "status" }, defaults: { limit: 1 } } },
+    commands: {
+      "order list": command("list_orders").short("n", "limit").flag("state", "status").short("s", "status").default("limit", 1),
+      "order last": command("list_orders").arg("status").map((input) => ({ ...input, limit: 1 })),
+    },
   });
   const sent = async (argv: string[]) => {
     const out = io();
@@ -108,6 +111,9 @@ test("shorthands give inputs short and renamed flags, the long name still works,
   assert.deepEqual(await sent(["--state", "making", "-n", "5"]), ["BL-1043"]);
   assert.deepEqual(await sent(["-s", "making"]), ["BL-1043"]);
   assert.deepEqual(await sent(["--status", "making", "--limit", "5"]), ["BL-1043"], "the input's own flags still work");
+  const last = io();
+  assert.equal(await runCli(cli, ["order", "last", "--limit", "9", "--json"], last.channel), 0, last.err);
+  assert.equal(JSON.parse(last.out).orders.length, 1, "the command's own code has the last word on what is sent");
 
   const help = io();
   await runCli(cli, ["order", "list", "--help"], help.channel);

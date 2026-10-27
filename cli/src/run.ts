@@ -22,6 +22,7 @@ import { FORMATTED } from "../../src/tools.ts";
 import { FULL_CATALOG_META } from "../../mcp/src/describe.ts";
 import {
   BUILT_IN,
+  commandEntries,
   commandTable,
   flagKind,
   flagName,
@@ -145,7 +146,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
   const local = findCommand(commandTable(config, []), rest);
   const custom = Boolean(local?.command.config && isCustom(local.command.config));
   const prefix = rest.filter(w => w !== "--help" && w !== "-h").join(" ");
-  const children = Object.entries(config.commands ?? {}).filter(([words]) => words.startsWith(`${prefix} `));
+  const children = commandEntries(config).filter(([words]) => words.startsWith(`${prefix} `));
   const localOnly = custom || Boolean(prefix && children.length && children.every(([, command]) => isCustom(command)));
   const asksHelp = rest.length === 0 || rest[0] === "-h" || rest[0] === "--help";
 
@@ -663,11 +664,12 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
       positional: { kind: "tuple", parameters: args.map((field) => ({ brief: withDefault(props[field]?.description ?? field.replace(/_/g, " "), defaults[field]), placeholder: field, parse: parserFor(field, props[field] ?? {}), optional: !required.has(field) || field in defaults })) } as never,
     },
     async func(this: CliContext, parsed: Record<string, unknown>, ...positional: unknown[]) {
-      const input: Record<string, unknown> = { ...defaults };
+      let input: Record<string, unknown> = { ...defaults };
       args.forEach((field, i) => {
         if (positional[i] !== undefined) input[field] = positional[i];
       });
       for (const [key, field] of byFlag) if (parsed[key] !== undefined) input[field] = parsed[key];
+      if (settings?.input) input = await settings.input(input);
       if (writes && parsed["dry-run"]) return void io.write(`${JSON.stringify({ dryRun: true, tool: tool.name, arguments: input }, null, parsed.json ? undefined : 2)}\n`);
       await prepare(tool);
       if (destructive && !parsed.yes) {
