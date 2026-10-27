@@ -5,7 +5,7 @@
 
 import { emitKeypressEvents } from "node:readline";
 import { styleText } from "node:util";
-import type { CliConfig } from "./commands.ts";
+import { brandOf, type CliConfig } from "./commands.ts";
 import type { CliIO } from "./run.ts";
 
 /** Claude Code, Cursor and Codex mark their commands' environment; their terminal is not a person's. */
@@ -60,10 +60,10 @@ function painter(io: CliIO): Paint {
   return io.interactive && !env.NO_COLOR && env.TERM !== "dumb" ? (format, text) => styleText(format, text, { validateStream: false }) : (_f, text) => text;
 }
 
-/** The accent for the banner: the CLI's chat accent when it has one, else cyan. */
+/** The accent for the banner: the brand's when it has one, else cyan. */
 function accent(config: CliConfig, io: CliIO, paint: Paint): (text: string) => string {
   const env = io.env ?? process.env;
-  const hex = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(config.chat?.accent ?? "");
+  const hex = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(brandOf(config).accent ?? "");
   if (hex && io.interactive && !env.NO_COLOR && env.TERM !== "dumb") {
     const [r, g, b] = hex.slice(1).map((h) => parseInt(h, 16));
     return (text) => text.split("\n").map((line) => `\u001b[38;2;${r};${g};${b}m${line}\u001b[39m`).join("\n");

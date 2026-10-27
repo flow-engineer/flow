@@ -31,7 +31,7 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   on the default command. A word is still a command or a group, never both. `flow check` refuses a
   default for a name that is not a group, or one that is not a command of that group.
 - **A welcome screen for a bare run.** A person who runs the CLI with no command at a terminal sees
-  its name in block letters (in `chat.accent` when set), its version, "Welcome to <name>", its
+  its name in block letters (in the brand's accent when set), its version, "Welcome to <name>", its
   description, whether they are signed in, and how to start. `defineCli({ welcome: { banner, title,
   text, tips } })` replaces any part (`banner` takes the team's own ASCII art, or `false`);
   `welcome: false` shows the help as before. Coding agents (Claude Code, Codex, Cursor), scripts and
@@ -41,6 +41,22 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   a person, the command exits 3 with `<name> auth login`. `auth`, `help` and `--help` never ask;
   `signInFirst: { except: ["docs"], message }` lets the team's own commands through and words the
   question. `CliIO` gains optional `choose` (the menu; omitted asks with `confirm`) and `columns`.
+- **One brand for the whole CLI: `defineCli({ brand: { name, logo, accent } })`.** Set once, read
+  by the chat, the welcome banner and the sign-in page. `name` is how people see it written
+  (default the command's name), `logo` an https or `data:image` URL, `accent` a six-digit hex color.
+  `chat.accent` keeps working as the older name for `brand.accent`. `flow check` refuses an accent
+  that is not a six-digit hex color and a logo that is not https or `data:image`.
+- **A branded page at the end of `auth login`.** The browser no longer gets the plain text "Signed
+  in. You can close this tab": it gets a page with the brand's logo (else its initial) and accent,
+  in light and dark, that says "You're signed in to <name>" and tries to close the tab, staying up
+  where the browser refuses. A failure says what went wrong and shows `<name> auth login` to try
+  again. `defineCli({ signInPage: ({ status, brand, cli, message }) => html })` replaces it with the
+  team's own; it gets only what the page shows, never the code, token or state. Pages are sent with
+  `cache-control: no-store` and `referrer-policy: no-referrer`.
+- **Fix: the sign-in page said "Signed in" before the sign-in had worked.** The browser now waits
+  until the code is exchanged and the tokens are saved, and shows the failure page when either
+  fails. `openUrl` is no longer awaited, since the page it opens is answered only when the sign-in
+  ends.
 - **A coding-agent skill for CLI design: `flow-framework-cli-design` (`cli-design-skill.md`).** It
   says which commands get short forms (rank by use; a group's default for the main verb; the main
   input positional; short flags and defaults for common ones), ends with a complete CLI file, and
@@ -51,6 +67,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 - A bare run at a terminal now shows the welcome instead of the help. To keep the help, set
   `welcome: false`. Agents, scripts and pipes are unchanged.
+- `chat.accent` still works; move it to `brand.accent` so the welcome and the sign-in page use it
+  too. Where both are set, `brand.accent` wins. A custom `openUrl` that waited for the page it opened
+  must not: the CLI no longer awaits it.
 
 ## 0.10.3 (2026-10-27)
 

@@ -738,9 +738,10 @@ test("wrong arguments exit 2 with what is wrong and the help to read, also when 
 });
 
 /** An authorization server whose login page approves at once, and an MCP server it signs in to. */
-async function signInServers() {
+async function signInServers(token: () => Promise<number> | number = () => 200) {
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "chinwag-cli-"));
   let issuer = "", registrations = 0;
+  const pages: Response[] = [];
   issuer = await listen(async (req, res) => {
     const url = new URL(req.url!, issuer);
     const body = await new Promise<string>((resolve) => {
@@ -760,16 +761,22 @@ async function signInServers() {
       back.searchParams.set("iss", issuer);
       return res.writeHead(302, { location: back.toString() }).end();
     }
-    if (url.pathname === "/token") return json(200, { access_token: "tok-1", token_type: "Bearer", expires_in: 3600, refresh_token: "ref-1" });
+    if (url.pathname === "/token") {
+      const status = await token();
+      return status === 200 ? json(200, { access_token: "tok-1", token_type: "Bearer", expires_in: 3600, refresh_token: "ref-1" }) : json(status, { error: "invalid_grant" });
+    }
     res.writeHead(404).end();
   });
   const mine = tool({ name: "my_orders", description: "Their orders.", input: z.object({}), hints: { readOnly: true }, run: (_i, ctx) => ({ for: ctx.key }) });
   const server = await serve({ tools: [mine], auth: { issuer, verify: (t) => (t === "tok-1" ? { key: "user-7" } : null) } });
-  const openUrl = async (link: string) => {
+  const opened: Promise<void>[] = [];
+  const openUrl = (link: string) => void opened.push((async () => {
     const page = await fetch(link, { redirect: "manual" });
-    await fetch(page.headers.get("location")!);
-  };
-  return { server, openUrl, registrations: () => registrations };
+    pages.push(await fetch(page.headers.get("location")!));
+  })());
+  // The browser's pages, once the CLI has answered them.
+  const answered = async () => (await Promise.all(opened), pages);
+  return { server, openUrl, registrations: () => registrations, pages, answered };
 }
 
 test("auth login signs in on the organization's own login, and the token is kept at mode 600", async () => {
@@ -789,6 +796,53 @@ test("auth login signs in on the organization's own login, and the token is kept
   const registered = { ...cli, name: "registered-client", clientId: "known-client" };
   assert.equal(await runCli(registered, ["auth", "login"], io().channel), 0);
   assert.equal(registrations(), 1, "an existing provider's registered client never requires DCR");
+});
+
+test("the sign-in page shows the brand, and says signed in only once the code is exchanged", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let exchanging!: () => void;
+  const exchange = new Promise<void>((r) => (exchanging = r));
+  const { server, openUrl, pages, answered } = await signInServers(async () => { exchanging(); await gate; return 200; });
+  const brand = { name: "Acme <Coffee>", accent: "#645bff", logo: "https://acme.test/logo.svg" };
+  const login = runCli({ ...defineCli({ name: "acme", server, brand }), openUrl }, ["auth", "login"], io().channel);
+  await exchange;
+  assert.equal(pages.length, 0, "the browser waits while the code is exchanged");
+  release();
+  assert.equal(await login, 0);
+  const page = (await answered())[0]!;
+  assert.equal(page.headers.get("cache-control"), "no-store");
+  assert.equal(page.headers.get("referrer-policy"), "no-referrer");
+  const html = await page.text();
+  assert.match(html, /You're signed in to Acme &#60;Coffee&#62;/, "the brand's name, escaped");
+  assert.match(html, /--accent: #645bff/);
+  assert.match(html, /src="https:\/\/acme\.test\/logo\.svg"/);
+  assert.match(html, /window\.close\(\)/, "it tries to close the tab; the page stays if the browser refuses");
+
+});
+
+test("a failed code exchange shows the failure page; a team's own page gets only what it shows", async () => {
+  const { server, openUrl, answered } = await signInServers(() => 400);
+  const seen: unknown[] = [];
+  const cli: CliConfig = { ...defineCli({ name: "acme", server, chat: { accent: "#b85c00" }, signInPage: (page) => (seen.push(page), `<h1>${page.status}</h1>`) }), openUrl };
+  const failed = io();
+  assert.notEqual(await runCli(cli, ["auth", "login"], failed.channel), 0);
+  const pages = await answered();
+  assert.equal(await pages[0]!.text(), "<h1>failed</h1>");
+  assert.deepEqual(seen, [{ status: "failed", brand: { name: "acme", accent: "#b85c00" }, cli: "acme", message: "The sign-in came back but could not be completed. Your terminal says why." }], "chat.accent is the brand's accent; no code, token or state");
+  assert.equal(pages[0]!.headers.get("cache-control"), "no-store");
+
+  const plain: CliConfig = { ...cli, signInPage: undefined };
+  assert.notEqual(await runCli(plain, ["auth", "login"], io().channel), 0);
+  assert.match(await (await answered())[1]!.text(), /Sign-in didn't finish[\s\S]*acme auth login/);
+});
+
+test("flow check refuses a brand color or logo a browser cannot use", () => {
+  const problems = (brand: object) => cliProblems(defineCli({ name: "acme", brand }), []).errors;
+  assert.deepEqual(problems({ accent: "#645bff", logo: "https://acme.test/logo.svg" }), []);
+  assert.deepEqual(problems({ logo: "data:image/png;base64,iVBORw0KGgo=" }), []);
+  assert.deepEqual(problems({ accent: "purple", logo: "http://acme.test/logo.svg" }), ["brand.accent must be a six-digit hex color, for example #b85c00", "brand.logo must be an https URL or a data:image URL"]);
+  assert.deepEqual(cliProblems(defineCli({ name: "acme", chat: { accent: "red" } }), []).errors, ["brand.accent must be a six-digit hex color, for example #b85c00"]);
 });
 
 // The help tests cover --help; a bare run is the one place a person and an agent see different things.

@@ -8,7 +8,7 @@
 // knows the caller is this CLI and lists the tools kept to it (Tool.mcp.clients).
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +22,7 @@ import {
   type StoredOAuthTokens,
   type OAuthDiscoveryState,
 } from "@modelcontextprotocol/client";
-import type { CliConfig } from "./commands.ts";
+import { brandOf, HEX, logoProblem, type CliConfig, type SignInPage } from "./commands.ts";
 
 interface Saved {
   client?: StoredOAuthClientInformation;
@@ -102,7 +102,8 @@ export function storedProvider(config: CliConfig, server: string, redirectUrl?: 
     // works pasted anywhere on this computer (the state is in the auth file, not the tab).
     redirectToAuthorization: async (url) => {
       say(config.openUrl ? `Opening the sign-in page. If it opens in the wrong browser, paste this link into the one you want:\n  ${url}\n` : `Open this link to sign in:\n  ${url}\n`);
-      if (config.openUrl) await Promise.resolve(config.openUrl(url.toString())).catch(() => {});
+      // Not awaited: the page the opener loads is answered only once this sign-in finishes.
+      if (config.openUrl) void Promise.resolve().then(() => config.openUrl!(url.toString())).catch(() => {});
     },
     saveCodeVerifier: (verifier) => write({ verifier }),
     codeVerifier: () => {
@@ -169,6 +170,87 @@ export async function signedInAsOtherClient(config: CliConfig, server: string): 
   } catch { return false; }
 }
 
+const escape = (text: string) => text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
+/** Black or white, whichever reads better on the accent. */
+function onAccent(hex: string): string {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r! + 0.7152 * g! + 0.0722 * b! > 0.18 ? "#111111" : "#ffffff";
+}
+
+/** Flow's sign-in page: the brand's logo (else its initial) and accent, the outcome, and the way back to the terminal. */
+export function signInPageHtml(page: SignInPage, nonce: string): string {
+  const { brand, status } = page;
+  const accent = brand.accent && HEX.test(brand.accent) ? brand.accent : "#4f5bd5";
+  const ok = status === "signed-in";
+  const name = escape(brand.name);
+  const logo = brand.logo && !logoProblem(brand.logo)
+    ? `<img class="logo" src="${escape(brand.logo)}" alt="${name}">`
+    : `<div class="logo initial" aria-hidden="true">${escape([...brand.name.trim()][0]?.toUpperCase() ?? "")}</div>`;
+  const icon = ok
+    ? `<path d="M7 12.5l3.2 3.2L17 9" />`
+    : `<path d="M8.5 8.5l7 7M15.5 8.5l-7 7" />`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>${ok ? `Signed in to ${name}` : "Sign-in didn't finish"}</title>
+<style nonce="${nonce}">
+:root { --accent: ${accent}; --on-accent: ${onAccent(accent)}; --bg: #f6f6f8; --card: #ffffff; --text: #16161a; --muted: #5d5d68; --line: #e6e6ec; --bad: #d4382c; color-scheme: light dark; }
+@media (prefers-color-scheme: dark) { :root { --bg: #0f0f12; --card: #18181d; --text: #f2f2f5; --muted: #a3a3ae; --line: #2a2a31; --bad: #ff6b5e; } }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: var(--bg); color: var(--text); font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: 4px; background: var(--accent); }
+main { width: 100%; max-width: 420px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 36px 32px 28px; text-align: center; box-shadow: 0 1px 2px rgb(0 0 0 / 4%), 0 12px 32px rgb(0 0 0 / 6%); }
+.logo { display: block; margin: 0 auto 24px; max-height: 44px; max-width: 180px; }
+.initial { width: 44px; height: 44px; border-radius: 12px; background: var(--accent); color: var(--on-accent); font-weight: 700; font-size: 22px; line-height: 44px; }
+.status { width: 64px; height: 64px; margin: 0 auto 18px; border-radius: 50%; display: grid; place-items: center; background: color-mix(in srgb, var(--mark) 14%, transparent); }
+.status svg { width: 44px; height: 44px; fill: none; stroke: var(--mark); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ok { --mark: var(--accent); } .bad { --mark: var(--bad); }
+h1 { margin: 0 0 8px; font-size: 22px; line-height: 1.3; letter-spacing: -0.01em; }
+p { margin: 0; color: var(--muted); }
+.terminal { margin: 22px 0 0; padding: 12px 14px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line); font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--text); text-align: left; overflow-wrap: anywhere; }
+.terminal span { color: var(--accent); }
+.close { margin-top: 20px; font-size: 14px; }
+.terminal + .close, .close + .terminal { margin-top: 10px; }
+</style>
+</head>
+<body>
+<main>
+${logo}
+<div class="status ${ok ? "ok" : "bad"}"><svg viewBox="0 0 24 24" aria-hidden="true">${icon}</svg></div>
+<h1>${ok ? `You're signed in to ${name}` : "Sign-in didn't finish"}</h1>
+<p>${escape(page.message)}</p>
+${ok ? `<p class="close">You can close this tab.</p>` : `<p class="close">To try again, run this in your terminal:</p>
+<div class="terminal"><span>$</span> ${escape(page.cli)} auth login</div>`}
+</main>
+<script nonce="${nonce}">
+history.replaceState(null, "", location.pathname);
+${ok ? "setTimeout(function () { window.close(); }, 1500);" : ""}
+</script>
+</body>
+</html>
+`;
+}
+
+/** The page a sign-in ends on: the team's own when it has one (else, or if it throws, Flow's), never cached. */
+function sendPage(config: CliConfig, res: ServerResponse, code: number, status: SignInPage["status"], message: string): void {
+  const page: SignInPage = { status, brand: brandOf(config), cli: config.name, message };
+  const nonce = randomBytes(16).toString("base64");
+  let html: string | undefined;
+  try { html = config.signInPage?.(page); } catch {}
+  const own = typeof html === "string";
+  res.writeHead(code, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    ...(own ? {} : { "content-security-policy": `default-src 'none'; img-src https: data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'` }),
+  }).end(own ? html : signInPageHtml(page, nonce));
+}
+
 /** Sign in: the browser goes to the organization's own login, and comes back to a loopback port. */
 export async function signIn(config: CliConfig, server: string, signal?: AbortSignal, say?: (text: string) => void): Promise<void> {
   signal?.throwIfAborted();
@@ -187,6 +269,10 @@ export async function signIn(config: CliConfig, server: string, signal?: AbortSi
   await new Promise<void>((resolve, reject) => { callback.once("error", reject); callback.listen(config.redirectPort ?? 0, "127.0.0.1", resolve); });
   const { port } = callback.address() as { port: number };
   const redirectUrl = `http://127.0.0.1:${port}/callback`;
+  // The browser waits on the code's page until the code is exchanged and the tokens are saved.
+  let finish!: (outcome: { ok: boolean; message: string }) => void;
+  const outcome = new Promise<{ ok: boolean; message: string }>((resolve) => (finish = resolve));
+  const answered: Promise<void>[] = [];
   let cancel: (() => void) | undefined;
   try {
     const provider = storedProvider(config, server, redirectUrl, signal, say);
@@ -199,13 +285,17 @@ export async function signIn(config: CliConfig, server: string, signal?: AbortSi
         if (url.pathname !== "/callback") return void res.writeHead(404).end();
         const error = url.searchParams.get("error");
         const got = url.searchParams.get("code");
+        // A stray or stale request is answered and never ends the sign-in in progress.
         if (req.method !== "GET" || req.headers.host !== `127.0.0.1:${port}` || !readAll(config)[server]?.state || url.searchParams.get("state") !== readAll(config)[server]?.state) {
-          res.writeHead(400, { "content-type": "text/plain" }).end("Invalid sign-in response.");
-          return;
+          return sendPage(config, res, 400, "failed", "This sign-in link has expired or was already used.");
         }
-        res.writeHead(200, { "content-type": "text/plain; charset=utf-8" }).end(got ? `Signed in. You can close this tab and go back to ${config.name}.` : `Sign-in failed: ${error ?? "no code"}.`);
-        if (got) resolve({ code: got, iss: url.searchParams.get("iss") ?? undefined });
-        else reject(new Error(`Sign-in failed: ${error ?? "no code came back"}.`));
+        answered.push(new Promise((done) => res.once("close", done)));
+        if (!got) {
+          reject(new Error(`Sign-in failed: ${error ?? "no code came back"}.`));
+          return sendPage(config, res, 200, "failed", error === "access_denied" ? "The sign-in was cancelled." : "The sign-in page did not approve it.");
+        }
+        resolve({ code: got, iss: url.searchParams.get("iss") ?? undefined });
+        void outcome.then(({ ok, message }) => sendPage(config, res, 200, ok ? "signed-in" : "failed", message));
       });
     });
     // Cancellation may arrive while discovery or the authorization request is still in flight.
@@ -213,8 +303,17 @@ export async function signIn(config: CliConfig, server: string, signal?: AbortSi
     const first = await auth(provider, { serverUrl: server });
     if (first === "AUTHORIZED") return;
     const answer = await code;
-    await auth(provider, { serverUrl: server, authorizationCode: answer.code, iss: answer.iss });
+    try {
+      await auth(provider, { serverUrl: server, authorizationCode: answer.code, iss: answer.iss });
+    } catch (error) {
+      finish({ ok: false, message: "The sign-in came back but could not be completed. Your terminal says why." });
+      throw error;
+    }
+    finish({ ok: true, message: `Return to your terminal to keep using ${config.name}.` });
   } finally {
+    finish({ ok: false, message: "The sign-in was stopped in the terminal." });
+    // The page reaches the browser before the CLI exits.
+    await Promise.all(answered);
     if (cancel) signal?.removeEventListener("abort", cancel);
     callback.close();
   }

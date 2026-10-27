@@ -80,7 +80,13 @@ export interface CliConfig {
   server?: string;
   /** The agent terminal URL; default the server origin plus /agent/terminal. */
   agent?: string;
-  /** Human chat inherits the terminal's colors. Optional six-digit hex accent brands its title and borders. */
+  /**
+   * The brand, set once: the chat, the welcome banner and the sign-in page read it. `name` is how
+   * people see it written (default the command's name), `logo` an https or data:image URL, and
+   * `accent` a six-digit hex color.
+   */
+  brand?: Brand;
+  /** Human chat inherits the terminal's colors. `accent` is the older name for brand.accent. */
   chat?: { accent?: string };
   /** The variable a token is read from for CI and agents (default <NAME>_TOKEN). */
   tokenEnv?: string;
@@ -130,6 +136,32 @@ export interface CliConfig {
    * the team's own commands by their first words (["docs"]); `message` replaces the question.
    */
   signInFirst?: boolean | { message?: string; except?: string[] };
+  /**
+   * The browser page a sign-in ends on, as HTML, replacing Flow's branded page. It gets only what
+   * the page shows, never the code, token or state; Flow sends it with no caching.
+   */
+  signInPage?: (page: SignInPage) => string;
+}
+
+export interface Brand {
+  name?: string;
+  logo?: string;
+  accent?: string;
+}
+
+/** What the sign-in page shows: whether the sign-in worked, the brand, and one sentence. */
+export interface SignInPage {
+  status: "signed-in" | "failed";
+  brand: Brand & { name: string };
+  /** The command's name ("olostep"), to say where to go back to. */
+  cli: string;
+  message: string;
+}
+
+/** The brand with its defaults: the command's name, and chat.accent when brand.accent is unset. */
+export function brandOf(config: CliConfig): Brand & { name: string } {
+  const accent = config.brand?.accent ?? config.chat?.accent;
+  return { ...config.brand, name: config.brand?.name ?? config.name, ...(accent ? { accent } : {}) };
 }
 
 /** The welcome screen's parts; any left out keep their default. */
@@ -370,10 +402,22 @@ function outputFields(tool: ToolInfo): Set<string> | null {
   return fields;
 }
 
+/** A brand accent: a six-digit hex color. */
+export const HEX = /^#[0-9a-f]{6}$/i;
+
+/** A logo a browser shows from the sign-in page: https, or an image written into the URL. */
+export function logoProblem(logo: string): string | undefined {
+  return /^https:\/\/[^\s"'<>]+$|^data:image\/[a-z0-9.+-]+(;[^,\s"'<>]*)?,[^\s"'<>]+$/i.test(logo) && URL.canParse(logo) ? undefined : "brand.logo must be an https URL or a data:image URL";
+}
+
 /** What is wrong in a CLI file against the server's tools, one sentence each; warnings apart. */
 export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
   const warnings: string[] = [];
+  const { accent, logo } = brandOf(config);
+  if (accent !== undefined && !HEX.test(accent)) errors.push(`brand.accent must be a six-digit hex color, for example #b85c00`);
+  const logoError = logo === undefined ? undefined : logoProblem(logo);
+  if (logoError) errors.push(logoError);
   const byName = new Map(tools.map((t) => [t.name, t]));
   const words = new Map<string, string>();
   const claim = (w: string, owner: string) => {
