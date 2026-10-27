@@ -30,14 +30,27 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `acme scrape` shows the group's help, which says what the default runs; the CLI's skill names it
   on the default command. A word is still a command or a group, never both. `flow check` refuses a
   default for a name that is not a group, or one that is not a command of that group.
+- **A welcome screen for a bare run.** A person who runs the CLI with no command at a terminal sees
+  its name in block letters (in `chat.accent` when set), its version, "Welcome to <name>", its
+  description, whether they are signed in, and how to start. `defineCli({ welcome: { banner, title,
+  text, tips } })` replaces any part (`banner` takes the team's own ASCII art, or `false`);
+  `welcome: false` shows the help as before. Coding agents (Claude Code, Codex, Cursor), scripts and
+  pipes get the help, unchanged.
+- **Sign-in first: `defineCli({ signInFirst: true })`.** A person who is not signed in is asked to
+  Sign in or Exit (arrow keys, Enter) before any command, then the command they typed runs. Without
+  a person, the command exits 3 with `<name> auth login`. `auth`, `help` and `--help` never ask;
+  `signInFirst: { except: ["docs"], message }` lets the team's own commands through and words the
+  question. `CliIO` gains optional `choose` (the menu; omitted asks with `confirm`) and `columns`.
 - **A coding-agent skill for CLI design: `flow-framework-cli-design` (`cli-design-skill.md`).** It
   says which commands get short forms (rank by use; a group's default for the main verb; the main
   input positional; short flags and defaults for common ones), ends with a complete CLI file, and
-  `flow new` installs it with the other skills.
+  `flow new` installs it with the other skills; it also says when to customize the welcome and
+  when to turn on `signInFirst`.
 
 ### Migration notes
 
-None.
+- A bare run at a terminal now shows the welcome instead of the help. To keep the help, set
+  `welcome: false`. Agents, scripts and pipes are unchanged.
 
 ## 0.10.3 (2026-10-27)
 

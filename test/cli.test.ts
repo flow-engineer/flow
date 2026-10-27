@@ -737,7 +737,8 @@ test("wrong arguments exit 2 with what is wrong and the help to read, also when 
   assert.match(typo.err, /did you mean `order`/);
 });
 
-test("auth login signs in on the organization's own login, and the token is kept at mode 600", async () => {
+/** An authorization server whose login page approves at once, and an MCP server it signs in to. */
+async function signInServers() {
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "chinwag-cli-"));
   let issuer = "", registrations = 0;
   issuer = await listen(async (req, res) => {
@@ -764,27 +765,93 @@ test("auth login signs in on the organization's own login, and the token is kept
   });
   const mine = tool({ name: "my_orders", description: "Their orders.", input: z.object({}), hints: { readOnly: true }, run: (_i, ctx) => ({ for: ctx.key }) });
   const server = await serve({ tools: [mine], auth: { issuer, verify: (t) => (t === "tok-1" ? { key: "user-7" } : null) } });
-  const cli: CliConfig = {
-    ...defineCli({ name: "acme", server }),
-    openUrl: async (link) => {
-      const page = await fetch(link, { redirect: "manual" });
-      await fetch(page.headers.get("location")!);
-    },
+  const openUrl = async (link: string) => {
+    const page = await fetch(link, { redirect: "manual" });
+    await fetch(page.headers.get("location")!);
   };
+  return { server, openUrl, registrations: () => registrations };
+}
+
+test("auth login signs in on the organization's own login, and the token is kept at mode 600", async () => {
+  const { server, openUrl, registrations } = await signInServers();
+  const cli: CliConfig = { ...defineCli({ name: "acme", server }), openUrl };
 
   const before = io();
   assert.equal(await runCli(cli, ["my-orders"], before.channel), 3, "signed out, a signed-in tool asks for sign-in");
   assert.match(before.err, /acme auth login/);
 
   assert.equal(await runCli(cli, ["auth", "login"], io().channel), 0);
-  assert.equal(statSync(join(process.env.XDG_CONFIG_HOME, "acme", "auth.json")).mode & 0o777, 0o600);
+  assert.equal(statSync(join(process.env.XDG_CONFIG_HOME!, "acme", "auth.json")).mode & 0o777, 0o600);
   const after = io();
   assert.equal(await runCli(cli, ["my-orders", "--json"], after.channel), 0);
   assert.deepEqual(JSON.parse(after.out), { for: "user-7" });
-  assert.equal(registrations, 1);
+  assert.equal(registrations(), 1);
   const registered = { ...cli, name: "registered-client", clientId: "known-client" };
   assert.equal(await runCli(registered, ["auth", "login"], io().channel), 0);
-  assert.equal(registrations, 1, "an existing provider's registered client never requires DCR");
+  assert.equal(registrations(), 1, "an existing provider's registered client never requires DCR");
+});
+
+// The help tests cover --help; a bare run is the one place a person and an agent see different things.
+test("a bare run at a terminal welcomes a person; agents and pipes get the help, and every part can be replaced", async () => {
+  const cli = { ...acme(await serve({ tools: [listOrders] })), version: "1.2.0", description: "Order coffee." };
+  const person = io(true); person.channel.env = { NO_COLOR: "1" }; person.channel.columns = 100;
+  assert.equal(await runCli(cli, [], person.channel), 0);
+  assert.match(person.out, /██/, "the name in block letters");
+  assert.match(person.out, /acme v1\.2\.0\n\n {2}Welcome to acme\n {2}Order coffee\.\n\n {2}○ Not signed in\. Run acme auth login/);
+  assert.match(person.out, /acme chat "<request>" +Ask for anything/);
+  assert.doesNotMatch(person.out, /THIS CLI/, "the welcome replaces the help");
+
+  for (const env of [{ CLAUDECODE: "1" }, { NO_COLOR: "1" }]) {
+    const agent = io(env.CLAUDECODE ? true : false); agent.channel.env = env;
+    assert.equal(await runCli(cli, [], agent.channel), 0);
+    assert.match(agent.out, /THIS CLI/, "a coding agent or a pipe gets the help");
+    assert.doesNotMatch(agent.out, /██|Welcome/);
+  }
+  const off = io(true); off.channel.env = { NO_COLOR: "1" };
+  assert.equal(await runCli({ ...cli, welcome: false }, [], off.channel), 0);
+  assert.match(off.out, /THIS CLI/);
+
+  const own = io(true); own.channel.env = { NO_COLOR: "1" };
+  assert.equal(await runCli({ ...cli, welcome: { banner: "<ACME ART>", title: "Hi there", text: "Coffee, fast.", tips: ["acme order list   Your orders"] } }, [], own.channel), 0);
+  assert.match(own.out, /^\n {2}<ACME ART>\n\n {2}acme v1\.2\.0\n\n {2}Hi there\n {2}Coffee, fast\.\n\n.*\n\n {2}acme order list {3}Your orders\n\n$/);
+  const narrow = io(true); narrow.channel.env = { NO_COLOR: "1" }; narrow.channel.columns = 20;
+  assert.equal(await runCli(cli, [], narrow.channel), 0);
+  assert.doesNotMatch(narrow.out, /██/, "a banner wider than the terminal is left out");
+});
+
+test("signInFirst offers sign-in before any command, then runs it; without a person it exits 3 with the command", async () => {
+  const { server, openUrl } = await signInServers();
+  const asked: string[] = [];
+  const cli: CliConfig = { ...defineCli({ name: "acme", server, signInFirst: true }), openUrl };
+  const person = (answer: number | undefined) => {
+    const out = io(true); out.channel.env = { NO_COLOR: "1" };
+    out.channel.choose = async (question, options) => (asked.push(`${question} ${options.join("/")}`), answer);
+    return out;
+  };
+
+  const agent = io(true); agent.channel.env = { CODEX_CI: "1" };
+  assert.equal(await runCli(cli, ["my-orders"], agent.channel), 3);
+  assert.match(agent.err, /Please sign in to acme to continue\. Run `acme auth login` \(or set ACME_TOKEN\)/);
+  const help = io();
+  assert.equal(await runCli(cli, [], help.channel), 0, "a bare run without a person is the help");
+  assert.equal(await runCli(cli, ["my-orders", "--help"], io().channel), 0);
+
+  const left = person(1);
+  assert.equal(await runCli(cli, ["my-orders"], left.channel), 3, "Exit leaves without running the command");
+  assert.deepEqual(asked, ["Please sign in to acme to continue. Sign in/Exit"]);
+  assert.match(left.err, /Welcome to acme/, "the question comes under the welcome's top, on stderr before a command");
+
+  const signing = person(0);
+  assert.equal(await runCli(cli, ["my-orders", "--json"], signing.channel), 0);
+  assert.deepEqual(JSON.parse(signing.out), { for: "user-7" }, "after signing in, the command typed runs, its output its own");
+  assert.match(signing.err, /Signed in to /);
+  assert.equal(asked.length, 2);
+  assert.equal(await runCli(cli, ["my-orders", "--json"], person(1).channel), 0);
+  assert.equal(asked.length, 2, "signed in, nothing is asked");
+  assert.equal(await runCli(cli, ["auth", "logout"], io().channel), 0);
+  const except = person(1);
+  assert.equal(await runCli({ ...cli, signInFirst: { except: ["my-orders"] } }, ["my-orders"], except.channel), 3, "an excepted command runs, and its tool asks for sign-in itself");
+  assert.equal(asked.length, 2);
 });
 
 // Tool argument tests cannot prove that the server receives CLI metadata outside arguments.

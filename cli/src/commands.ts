@@ -117,6 +117,31 @@ export interface CliConfig {
   redirectPort?: number;
   /** How a sign-in link is opened (default: printed for the person to open). */
   openUrl?: (url: string) => void | Promise<void>;
+  /**
+   * What a person sees who runs the CLI with no command at a terminal: the name in block letters,
+   * the version, a greeting, whether they are signed in, and how to start. Each part can be
+   * replaced; false prints the help instead. Coding agents, scripts and pipes always get the help.
+   */
+  welcome?: false | Welcome;
+  /**
+   * Sign-in comes first: a person who is not signed in is offered Sign in or Exit before any
+   * command, then the command they typed runs. Without a terminal (coding agents, CI) the command
+   * exits 3 with the sign-in command instead. `auth`, `help` and `--help` never ask; `except` adds
+   * the team's own commands by their first words (["docs"]); `message` replaces the question.
+   */
+  signInFirst?: boolean | { message?: string; except?: string[] };
+}
+
+/** The welcome screen's parts; any left out keep their default. */
+export interface Welcome {
+  /** Art above the rest, as written (its own ASCII art); default the CLI's name in block letters; false for none. */
+  banner?: string | false;
+  /** Default "Welcome to <name>". */
+  title?: string;
+  /** Default the CLI's description. */
+  text?: string;
+  /** Lines under it, as written; default how to start (chat and --help). */
+  tips?: string[];
 }
 
 /** What the CLI knows of a tool, from the server's tools/list. */

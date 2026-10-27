@@ -17,6 +17,7 @@ import { styleText } from "node:util";
 import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider, type Tool as McpTool } from "@modelcontextprotocol/client";
 import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
 import { configDir, isSignedIn, signedInAsOtherClient, signIn, signOut, storedProvider } from "./auth.ts";
+import { chooseAtTerminal, person, signInQuestion, tips, waitsForSignIn, welcomeScreen } from "./welcome.ts";
 import { SKILLS_META } from "../../src/skills.ts";
 import { FORMATTED } from "../../src/tools.ts";
 import { FULL_CATALOG_META } from "../../mcp/src/describe.ts";
@@ -62,6 +63,10 @@ export interface CliIO {
   chat?: (session: ChatSession) => Promise<number>;
   /** Ask a yes-or-no question (only when interactive). */
   confirm(question: string): Promise<boolean>;
+  /** Pick one of a few options (only when interactive): the chosen index, or undefined to leave. Omitted asks with confirm. */
+  choose?(question: string, options: string[]): Promise<number | undefined>;
+  /** The terminal's width, which decides whether the welcome banner fits; default 80. */
+  columns?: number;
 }
 
 export function processIO(): CliIO {
@@ -83,6 +88,8 @@ export function processIO(): CliIO {
         }
       } finally { rl.close(); }
     },
+    get columns() { return process.stdout.columns; },
+    choose: (question, options) => chooseAtTerminal(question, options, !process.env.NO_COLOR && process.env.TERM !== "dumb"),
     async confirm(question) {
       const rl = createInterface({ input: process.stdin, output: process.stderr });
       try {
@@ -146,6 +153,31 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
   if (rest.length && config.defaultCommands?.[rest.join(" ")] !== undefined) rest.push("--help");
   const server = given ?? config.server ?? env[envName(config, "SERVER")];
   const token = givenToken ?? env[tokenEnvOf(config)];
+  const signedIn = token ? "env" as const : server && isSignedIn(config, server) ? "login" as const : null;
+  const bare = rest.length === 0;
+  const welcome = bare && config.welcome !== false && person(io);
+  // A bare run without a person is a request for the help, which needs no sign-in.
+  if (server && !signedIn && waitsForSignIn(config, rest) && (!bare || person(io))) {
+    const login = `${config.name} auth login`;
+    if (!person(io)) {
+      io.writeError(`${signInQuestion(config)} Run \`${login}\` (or set ${tokenEnvOf(config)}), then run this again.\n`);
+      return EXIT.signIn;
+    }
+    // Before a command its output stays the command's own (--json), so the screen goes to stderr.
+    if (config.welcome !== false) (bare ? io.write : io.writeError)(welcomeScreen(config, { server, signedIn, tokenEnv: tokenEnvOf(config) }, io, true));
+    const chosen = io.choose ? await io.choose(signInQuestion(config), ["Sign in", "Exit"]) : (await io.confirm(`${signInQuestion(config)} Sign in now?`) ? 0 : undefined);
+    if (chosen !== 0) { io.writeError(`Not signed in. Run \`${login}\` when you are ready.\n`); return EXIT.signIn; }
+    try { await signIn(config, server, io.signal, (text) => io.writeError(text)); }
+    catch (error) { const problem = error instanceof CliExit ? error : explain(config, server, error); io.writeError(`${problem.message}\n`); return problem.code; }
+    forgetChat(config, server);
+    io.writeError(`Signed in to ${server}.\n`);
+    if (bare) { if (config.welcome !== false) io.write(`\n${tips(config, painter(io))}\n\n`); else rest.push("--help"); }
+    else io.writeError("\n");
+    if (welcome) return EXIT.ok;
+  } else if (welcome) {
+    io.write(welcomeScreen(config, { server, signedIn, tokenEnv: tokenEnvOf(config) }, io));
+    return EXIT.ok;
+  }
   if (rest[0] === "chat" && !config.commands?.[rest[0]]) return runTerminal(config, server, token, rest, io);
   const table = commandTable(config, []);
   const local = findCommand(table, withDefaults(config, table, rest));
