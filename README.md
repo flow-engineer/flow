@@ -13,16 +13,16 @@ own assistant, the same product capabilities should be available to them.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE) ![Node 22.18+](https://img.shields.io/badge/node-%3E%3D22.18-brightgreen.svg) ![TypeScript](https://img.shields.io/badge/TypeScript-yes-3178c6.svg)
 
-[Documentation](https://docs.flow.engineer/framework) · [Quickstart](https://docs.flow.engineer/framework/quickstart) · [For coding agents](https://docs.flow.engineer/agents) · [Website](https://flow.engineer)
+[Documentation](https://flow.engineer/docs/framework) · [Quickstart](https://flow.engineer/docs/framework/quickstart) · [For coding agents](https://flow.engineer/docs/agents) · [Website](https://flow.engineer)
 
 ## One codebase, every interface
 
 | Build | Reach |
 | --- | --- |
-| [MCP server](https://docs.flow.engineer/framework/mcp) | Claude, ChatGPT and other MCP clients |
-| [Plugin](https://docs.flow.engineer/plugins) | Hosts that load native skills and an MCP connection |
-| [CLI](https://docs.flow.engineer/cli) | People, scripts, Claude Code, Codex and other coding agents |
-| [Messaging agent](https://docs.flow.engineer/conversations) | WhatsApp, iMessage, Telegram, SMS and your own web or app chat |
+| [MCP server](https://flow.engineer/docs/framework/mcp) | Claude, ChatGPT and other MCP clients |
+| [Plugin](https://flow.engineer/docs/plugins) | Hosts that load native skills and an MCP connection |
+| [CLI](https://flow.engineer/docs/cli) | People, scripts, Claude Code, Codex and other coding agents |
+| [Messaging agent](https://flow.engineer/docs/conversations) | WhatsApp, iMessage, Telegram, SMS and your own web or app chat |
 
 Tools are typed TypeScript functions that call your APIs. Skills teach the workflows around them.
 Flow exposes the same capabilities through each interface, with authentication hooks for your
@@ -65,7 +65,7 @@ with the URL the server prints. `call`, `auth`, `resources` and `prompts` exerci
 sign-in and other capabilities as a host does, without requiring a CLI configuration.
 
 These tool calls need no model key. To reach Claude or ChatGPT remotely, host the MCP server over
-HTTPS and connect it in the host. [MCP and sign-in](https://docs.flow.engineer/framework/mcp) · [Plugin packages](https://docs.flow.engineer/plugins)
+HTTPS and connect it in the host. [MCP and sign-in](https://flow.engineer/docs/framework/mcp) · [Plugin packages](https://flow.engineer/docs/plugins)
 
 ### Messaging and the playground
 
@@ -77,7 +77,7 @@ npm start
 `link` signs in, sets up the trial keys and prints a phone link. Use `--channel whatsapp` or
 `--channel imessage` for those platforms when available. Open the playground URL from `npm start`
 to try the agent locally, then text it from your phone while it runs. You can also use your own
-model key and messaging provider. [Full setup and trial details](https://docs.flow.engineer/framework/quickstart)
+model key and messaging provider. [Full setup and trial details](https://flow.engineer/docs/framework/quickstart)
 
 ## Build with your coding agent
 
@@ -85,7 +85,7 @@ model key and messaging provider. [Full setup and trial details](https://docs.fl
 Codex or another coding agent your product's codebase and tell it which interfaces to build.
 Replace the café tools with calls to your APIs and teach your workflows through skills.
 
-Read the [coding-agent guide](https://docs.flow.engineer/agents), or explore the [café example](examples/cafe).
+Read the [coding-agent guide](https://flow.engineer/docs/agents), or explore the [café example](examples/cafe).
 
 ## Test, host and observe
 
@@ -95,16 +95,16 @@ Flow Cloud. The playground simulators follow each app’s behavior, including ch
 controls, media and voice notes; Debug mode shows the underlying platform payloads. Flow Messaging
 provides channels through one API; you can also bring your own providers.
 
-[Deployment](https://docs.flow.engineer/hosting) · [Self-hosting](https://docs.flow.engineer/self-hosting) · [Testing](https://docs.flow.engineer/testing) · [Traces](https://docs.flow.engineer/traces)
+[Deployment](https://flow.engineer/docs/hosting) · [Self-hosting](https://flow.engineer/docs/self-hosting) · [Testing](https://flow.engineer/docs/testing) · [Traces](https://flow.engineer/docs/traces)
 
 ## Documentation
 
-The [documentation site](https://docs.flow.engineer) covers the Framework and the
-[Unified Messaging API](https://docs.flow.engineer/unified-messaging-api). Its source lives in the
+The [documentation site](https://flow.engineer/docs) covers the Framework and the
+[Unified Messaging API](https://flow.engineer/docs/unified-messaging-api). Its source lives in the
 private `flow-engineer/docs` repository. Public behavior changes update the relevant guide there
 for people and coding agents; see [AGENTS.md](AGENTS.md).
 
-[Tools](https://docs.flow.engineer/build-agent) · [Skills](https://docs.flow.engineer/skills) · [Models and options](https://docs.flow.engineer/reference)
+[Tools](https://flow.engineer/docs/build-agent) · [Skills](https://flow.engineer/docs/skills) · [Models and options](https://flow.engineer/docs/reference)
 
 In this repository: [channel options](docs/channels.md) · [patterns that worked](docs/patterns.md) (enforce what matters in `beforeSend`, keep prompts for judgement, render in code, refuse with a reason the model can act on, test a long chat).
 

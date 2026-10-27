@@ -1,6 +1,6 @@
 # Flow Framework for coding agents
 
-The published guide is at https://docs.flow.engineer/agents: that is the link to give.
+The published guide is at https://flow.engineer/docs/agents: that is the link to give.
 
 You are building or changing a Flow project for a person (the owner): tools and skills exposed
 through an MCP server (Claude, ChatGPT, Cursor, Codex), plugins, a CLI or a messaging agent on
@@ -37,8 +37,8 @@ Flow account. Replace the café tools and configure account sign-in when needed.
 
 For remote hosts such as Claude or ChatGPT, expose the server over HTTPS and connect its URL in
 the host. Generating a plugin does not publish it to a directory; follow the host's installation
-or review flow. See [MCP servers](https://docs.flow.engineer/framework/mcp),
-[plugins](https://docs.flow.engineer/plugins) and [CLIs](https://docs.flow.engineer/cli).
+or review flow. See [MCP servers](https://flow.engineer/docs/framework/mcp),
+[plugins](https://flow.engineer/docs/plugins) and [CLIs](https://flow.engineer/docs/cli).
 
 ## Messaging setup
 

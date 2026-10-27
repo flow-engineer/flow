@@ -250,7 +250,7 @@ opt-in link. Text takes up to 9999 characters; there are no buttons, lists or te
 
 - Flow Messaging: https://api.flow.engineer
 - API reference: https://api.flow.engineer/openapi.yaml
-- Flow Framework: https://www.npmjs.com/package/flow
+- Flow Framework: https://www.npmjs.com/package/@flow-engineer/flow
 
 ## License
 

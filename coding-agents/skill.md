@@ -60,7 +60,7 @@ curl -sS https://api.flow.engineer/v1/feedback -H 'content-type: application/jso
 `kind` is `bug`, `docs`, `feature` or `other`; only `feedback` is required (up to 4,000 characters).
 Describe Flow's behaviour, never the owner's keys, `.env` values, customers' data or private code,
 and tell the owner in one line what you sent. The sender's IP address is kept with it. Fields and
-answers: https://docs.flow.engineer/agents#send-flow-feedback.
+answers: https://flow.engineer/docs/agents#send-flow-feedback.
 
 ## Names
 
