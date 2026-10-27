@@ -2,7 +2,7 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## 0.10.3 (unreleased)
+## 0.10.3 (2026-10-27)
 
 ### Changes
 
@@ -23,17 +23,26 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   keeps it as `agentVersion` in the `--json` report and `.flow/last-session.json`.
 - **`flow test --agent-version`** defaults to that version (it was `GITHUB_SHA` only), and a version
   given with it is also the one the agent's traces carry for that run.
-- **`flow deploy`'s default version** is that version too: the full commit (it was the short one),
-  `FLOW_AGENT_VERSION` or the CI's commit when set, `package.json`'s `version` outside git.
+- **`flow deploy`'s default label is now the full commit, not the short one.** It is that version
+  too: `FLOW_AGENT_VERSION` or the CI's commit when set, else the folder's full git commit (it was
+  `git rev-parse --short HEAD`), else `package.json`'s `version` outside git. Deploys, `flow test`
+  sessions and traces of the same folder now carry the same label.
 - **The coding-agent skills keep one version per build.** `build-agent-skill.md` ("Deploy it") says the
   git commit is the version, to pass it as `FLOW_AGENT_VERSION` to a process with no `.git` (a
   container image), how CI records a deploy on the owner's own servers (`POST /v1/deployments` with
   `FLOW_KEY` on stdin), and how to compare two versions offline; `test-skill.md` points there.
+- **The simulators' iMessage sample uses Flow Messaging's `/v0` basic message**: an inbound
+  event's `content` is `{ kind: "basic", text, media }` (a voice note `{ kind: "voice", file_id,
+  url }`) and a send is `POST /v0/conversations/{id}/basic`. The README, `docs/` and the
+  coding-agent skill link the documentation at `https://flow.engineer/docs`, and
+  `flow-messaging/README.md` links the npm package `@flow-engineer/flow`.
 
 ### Migration notes
 
-None: nothing to change. Deploy records made from here on name the full commit where earlier ones
-named the short one. An agent whose environment uses `FLOW_AGENT_VERSION` or `AGENT_VERSION` for
+None: nothing to change. **`flow deploy` without `--version` now labels a deploy with the full
+commit** where earlier ones named the short one (`a1b2c3d` became `a1b2c3d4e5...`, 40 characters);
+a script or dashboard filter that matched the short label should match the full one, or pass
+`--version` to choose it. An agent whose environment uses `FLOW_AGENT_VERSION` or `AGENT_VERSION` for
 something else now sends that value as its version; pass `traces: { version }` to choose it.
 
 ## 0.10.2 (2026-10-26)
