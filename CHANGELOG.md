@@ -72,6 +72,10 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   "Sharing feedback" section) and the error of a failed command (`If this looks wrong, tell the
   team: acme feedback --about tooling --message "<what happened>"`). `mcpServer({ feedback: false })`
   leaves all of it out; a team's own tool named `feedback` replaces it.
+- **A team's own `auth status`.** A CLI file's `"auth status": { command: buildCommand({ ... }) }`
+  replaces the built-in one (help, output, `--json`, all of it); `auth login` and `auth logout`
+  stay the CLI's. `flow check` refuses a tool command there, since only the team's own code replaces
+  it, and still refuses any other command under `auth`, `tools` or `skill`.
 
 ### Migration notes
 

@@ -214,6 +214,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
 - A command of the team's own is any Stricli command: `"report daily": { command: buildCommand({ ... }) }`
   with `buildCommand` from `@stricli/core`; inside it, `this.cli.call(tool, input)` calls the server's
   tools and `this.cli.print(value, { json })` prints like the rest.
+  One of the CLI's own may be replaced this way: `"auth status": { command: buildCommand({ ... }) }`
+  shows the team's own account details (call a tool such as `whoami`); `auth login`, `auth logout`,
+  `tools` and `skill` stay the CLI's.
 - `exclude: ["api_keys_reveal"]` gives those tools no command of their own: not in help, completion
   or the CLI's skill. Use it when a command of the team's own wraps a tool (one that copies a key
   without printing it), or a tool has no place on the command line. The tools stay on the server,
