@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import { CURSOR_MARKER, Editor, Markdown, ProcessTerminal, Text, TUI, matchesKey, truncateToWidth, visibleWidth, type Component, type Focusable, type Terminal, type MarkdownTheme } from "@mariozechner/pi-tui";
 
 import type { ChatSession, ChatUpdate } from "./terminal.ts";
+import { nearest256 } from "./welcome.ts";
 
 type Entry =
   | { kind: "user" | "reply" | "notice"; text: string; body: Component }
@@ -19,24 +20,11 @@ const clean = (text: string) => stripVTControlCharacters(text).replace(/[\x00-\x
 const describe = (value: unknown) => clean(typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "");
 
 // Approximate brand colors with the portable 256-color palette; never require RGB support.
-function nearest(rgb: number[]): number {
-  const cube = [0, 95, 135, 175, 215, 255];
-  let closest = 16, distance = Infinity;
-  for (let index = 16; index < 256; index++) {
-    const n = index - 16;
-    const candidate = index >= 232 ? Array(3).fill(8 + (index - 232) * 10)
-      : [cube[Math.floor(n / 36)]!, cube[Math.floor(n / 6) % 6]!, cube[n % 6]!];
-    const delta = candidate.reduce((sum, value, channel) => sum + (value - rgb[channel]!) ** 2, 0);
-    if (delta < distance) { closest = index; distance = delta; }
-  }
-  return closest;
-}
-
 function brandColor(hex?: string): { code: string; rgb?: number[] } {
   if (hex === undefined) return { code: "36" }; // The terminal profile's own cyan.
   if (!/^#[0-9a-f]{6}$/i.test(hex)) throw new Error("chat.accent must be a six-digit hex color.");
   const rgb = [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16));
-  return { code: `38;5;${nearest(rgb)}`, rgb };
+  return { code: `38;5;${nearest256(rgb)}`, rgb };
 }
 
 /** Session state and layout; the terminal is injected so layout/input tests never need a real TTY. */

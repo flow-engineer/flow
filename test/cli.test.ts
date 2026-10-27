@@ -915,6 +915,29 @@ test("a bare run at a terminal welcomes a person; agents and pipes get the help,
   assert.doesNotMatch(narrow.out, /██/, "a banner wider than the terminal is left out");
 });
 
+// An RGB escape a terminal cannot read is taken apart into other codes (macOS Terminal: grey background, red text).
+test("the banner's accent is in as many colors as the terminal shows, and every line resets", async () => {
+  const cli = { ...acme(await serve({ tools: [listOrders] })), brand: { accent: "#645bff" } };
+  const cases: Array<[Record<string, string>, RegExp | null]> = [
+    [{ TERM: "xterm-256color", COLORTERM: "truecolor" }, /\u001b\[38;2;100;91;255m/],
+    [{ TERM: "xterm-256color" }, /\u001b\[38;5;63m/],
+    [{ TERM: "xterm" }, /\u001b\[94m/],
+    [{ TERM: "xterm-256color", NO_COLOR: "1" }, null],
+  ];
+  for (const [env, code] of cases) {
+    const out = io(true); out.channel.env = env; out.channel.columns = 100;
+    assert.equal(await runCli(cli, [], out.channel), 0);
+    const art = out.out.split("\n").filter((line) => line.includes("█"));
+    assert.equal(art.length, 5, JSON.stringify(env));
+    if (!code) { assert.doesNotMatch(out.out, /\u001b\[/, "NO_COLOR prints no escapes"); continue; }
+    for (const line of art) {
+      assert.match(line, code, JSON.stringify(env));
+      assert.match(line, /\u001b\[0m$/, "each banner line resets every style");
+    }
+    if (!env.COLORTERM) assert.doesNotMatch(out.out, /38;2;/, "no RGB unless the terminal says it reads it");
+  }
+});
+
 test("signInFirst offers sign-in before any command, then runs it; without a person it exits 3 with the command", async () => {
   const { server, openUrl } = await signInServers();
   const asked: string[] = [];

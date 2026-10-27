@@ -2,6 +2,21 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.10.5 (2026-10-27)
+
+### Changes
+
+- **The welcome banner's brand color works in every terminal.** It was always sent as an RGB
+  escape, which terminals without RGB, such as macOS Terminal, took apart into other codes: a
+  `brand.accent` of `#645bff` showed a red banner with a grey background running into the text and
+  the sign-in menu below it. The banner now uses RGB only when `COLORTERM` is `truecolor` or
+  `24bit`, the nearest of 256 colors when `TERM` names 256 colors, else the nearest of the 16 basic
+  ones, and none with `NO_COLOR` or `TERM=dumb`. Each banner line ends by resetting every style.
+
+### Migration notes
+
+None.
+
 ## 0.10.4 (2026-10-27)
 
 ### Changes
