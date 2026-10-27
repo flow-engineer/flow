@@ -60,7 +60,7 @@ curl -sS https://api.flow.engineer/v1/feedback -H 'content-type: application/jso
 `kind` is `bug`, `docs`, `feature` or `other`; only `feedback` is required (up to 4,000 characters).
 Describe Flow's behaviour, never the owner's keys, `.env` values, customers' data or private code,
 and tell the owner in one line what you sent. The sender's IP address is kept with it. Fields and
-answers: https://docs.flow.engineer/agents#send-flow-feedback.
+answers: https://flow.engineer/docs/agents#send-flow-feedback.
 
 ## Names
 
@@ -149,3 +149,10 @@ says so instead: `chinwag.via` is "playground", and a real turn has no `chinwag.
 `chinwag.channel` is the platform (`whatsapp`, `sms`, `telegram`, `imessage`, `web` for a custom UI,
 `cli` for the terminal), the same on the root span and its send spans; a custom channel of your own
 can name its platform with `traceChannel` (one of these; any other name traces as `other`).
+Every trace carries the agent's version as `service.version`, with no setting: `FLOW_AGENT_VERSION`,
+else `AGENT_VERSION` (set by Flow's hosting to the deploy's version), else the CI's commit
+(`GITHUB_SHA`, `CI_COMMIT_SHA`, `BUILDKITE_COMMIT`, `CIRCLE_SHA1`, `GIT_COMMIT`), else the folder's full
+git commit (`<sha>+dirty` with uncommitted changes), else `package.json`'s `version`; `traces.version`
+in code wins. `flow test` and `flow deploy` use the same label, `agent.status().version` returns it,
+and the agent logs it once when it starts (`flow: agent version <v> (from <where>)`). A value outside
+1 to 100 letters, digits and `. _ : / + -` is not sent.

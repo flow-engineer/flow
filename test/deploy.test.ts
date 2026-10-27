@@ -1,4 +1,4 @@
-// covers: testing/src/deploy.ts
+// covers: testing/src/deploy.ts src/traces.ts
 // `flow deploy` (testing/src/deploy.ts) against a fake cloud: the CI key from the environment or
 // the agent's .env, the folder packed without its secrets or dependencies, a deploy followed until
 // live or refused, an agent on a newer Flow Framework than hosting's refused before the upload,
@@ -325,14 +325,14 @@ test("secrets --from-env before any deploy says why on stderr, points at flow de
   assert.ok(!json.printed.includes("sk-1"));
 });
 
-test("the version is the commit, with +dirty and a warning when the folder has uncommitted changes", async () => {
+test("the version is the agent's version, the full commit, with +dirty and a warning when the folder has uncommitted changes", async () => {
   const dir = agentFolder();
   writeFileSync(join(dir, ".gitignore"), "node_modules\n.flow\n.env*\n");
   const git = (...a: string[]) => execFileSync("git", ["-C", dir, ...a], { stdio: "pipe" }).toString().trim();
   git("init", "-q");
   git("add", ".");
   git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init");
-  const sha = git("rev-parse", "--short", "HEAD");
+  const sha = git("rev-parse", "HEAD");
   const clean = await cloud();
   assert.equal((await run(["--dir", dir], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: clean.url })).code, 0);
   assert.equal(clean.calls[0]!.body!.version, sha);

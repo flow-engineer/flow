@@ -237,13 +237,14 @@ export function wirePayload(p: Platform, m: WireMessage, person: { name: string;
     const conversation = `conv_${hex(phone, 24)}`;
     if (m.kind === "in") {
       const a = m.attachments?.[0];
-      const content = !a ? { type: "text", text: m.text }
-        : a.kind === "audio" ? { type: "voice", file_id: `file_${hex(`${m.at}`, 24)}`, mime_type: a.mime }
-          : { type: "media", kind: a.kind, file_id: `file_${hex(`${m.at}`, 24)}`, mime_type: a.mime, ...(a.name ? { filename: a.name } : {}), ...(m.text ? { caption: m.text } : {}) };
+      const file = `file_${hex(`${m.at}`, 24)}`;
+      const content = !a ? { kind: "basic", text: m.text }
+        : a.kind === "audio" ? { kind: "voice", file_id: file, url: `https://api.flow.engineer/v0/files/${file}` }
+          : { kind: "basic", media: { type: a.kind, file_id: file, url: `https://api.flow.engineer/v0/files/${file}`, mime_type: a.mime, ...(a.name ? { filename: a.name } : {}) }, ...(m.text ? { text: m.text } : {}) };
       return { api: "POST your webhook · Flow Messaging event (iMessage has no public API)", body: { id: `evt_${hex(`${m.at}`, 24)}`, type: "message.received", conversation: { id: conversation, channel: "imessage", sender: "snd_…", contact: `ct_${hex(phone, 24)}` }, data: { message: { id: `msg_${hex(`${m.id}`, 24)}`, conversation, direction: "in", content, ...(quoted ? { reply_to: `msg_${hex(`${quoted.id}`, 24)}` } : {}) } } } };
     }
-    const content = m.image ? { type: "media", kind: "image", ...("url" in m.image ? { url: m.image.url } : { file_id: m.image.fileId }), ...(m.text ? { caption: m.text } : {}) } : { type: "text", text: m.text, format: "plain" };
-    return { api: `POST https://api.flow.engineer/v1/conversations/${conversation}/messages · Flow Messaging`, body: { content, ...(m.replyTo ? { reply_to: `msg_${hex(m.replyTo, 24)}` } : {}) } };
+    const body = m.image ? { media: { type: "image", ...("url" in m.image ? { url: m.image.url } : { file_id: m.image.fileId }) }, ...(m.text ? { text: m.text } : {}) } : { text: m.text };
+    return { api: `POST https://api.flow.engineer/v0/conversations/${conversation}/basic · Flow Messaging`, body: { ...body, ...(m.replyTo ? { reply_to: `msg_${hex(m.replyTo, 24)}` } : {}) } };
   }
   return null;
 }

@@ -21,6 +21,8 @@ export function lastSessionIn(dir: string): string {
 /** .flow/last-session.json: what each run ended as, for `--failed`, `flow show` and coding agents. */
 export interface LastSession {
   sessionId: string;
+  /** The agent's version the session kept (--agent-version, else the one its traces carry); absent when none is known. */
+  agentVersion?: string;
   /** The cloud's id for the agent, from the open (an older cloud names none). */
   agent?: string;
   dashboard: string;

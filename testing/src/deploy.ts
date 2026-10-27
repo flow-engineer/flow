@@ -25,6 +25,7 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { RUN } from "../../src/names.ts";
+import { agentVersion } from "../../src/traces.ts";
 const DEFAULT_CLOUD = "https://flow.engineer/observe";
 
 export const DEPLOY_LINE = `  flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--json]
@@ -58,8 +59,9 @@ export const DEPLOY_USAGE = `Usage:
   --env        Where (default: staging). Production takes only an agent whose buildAgent passes
                options.host on to createAgent, with no database of its own.
   --dir        The agent's folder (default: .): package.json, package-lock.json, src/agent.ts.
-  --version    A label for this version (default: the folder's git commit, if any, with +dirty
-               when the folder has uncommitted changes).
+  --version    A label for this version (default: the agent's version, as its traces and flow test
+               send it: FLOW_AGENT_VERSION, else the CI's commit, else the folder's git commit with
+               +dirty when it has uncommitted changes, else package.json's version).
   --no-secrets Deploy without sending the .env's values as secrets.
   --cloud      The cloud's address (default: FLOW_FRAMEWORK_CLOUD, else ${DEFAULT_CLOUD}).
   --from-env   With secrets: send each non-empty value in the file as a secret (never the CI key,
@@ -270,7 +272,7 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
     return answer as T;
   };
 
-  const ctx: Ctx = { api, say, json, dir, pollMs: options.pollMs ?? 3000, maxPolls: options.maxPolls, now: options.now ?? Date.now, keyId: createHash("sha256").update(key).digest("hex").slice(0, 16) };
+  const ctx: Ctx = { api, say, json, dir, pollMs: options.pollMs ?? 3000, maxPolls: options.maxPolls, now: options.now ?? Date.now, keyId: createHash("sha256").update(key).digest("hex").slice(0, 16), env: { ...Object.fromEntries(dotEnv), ...env } };
   try {
     const [name, extra] = args;
     if (values["no-secrets"] && command !== undefined && command !== "promote") throw new Usage(`--no-secrets goes with flow deploy and deploy promote\n\n${usage}`);
@@ -307,6 +309,8 @@ interface Ctx {
   now: () => number;
   /** Which agent (a hash of its CI key), for .flow/secrets.json. */
   keyId: string;
+  /** The environment, over the agent's .env: where the version's settings (FLOW_AGENT_VERSION, a CI's commit) are read. */
+  env: NodeJS.ProcessEnv;
 }
 
 async function deploy(ctx: Ctx, dir: string, env: string, version: string | undefined, withSecrets: boolean): Promise<number> {
@@ -315,7 +319,7 @@ async function deploy(ctx: Ctx, dir: string, env: string, version: string | unde
   }
   await frameworkFits(ctx, dir, env);
   if (version === undefined) {
-    version = gitVersion(dir);
+    version = agentVersion({ dir, env: ctx.env })?.version;
     if (version?.endsWith("+dirty")) console.error("Warning: deploying uncommitted changes; commit first so the version names what runs.");
   }
   const tmp = mkdtempSync(join(tmpdir(), "flow-deploy-"));
@@ -733,23 +737,6 @@ async function logs(ctx: Ctx, environment: string, since: string, followLines: b
     polls++;
     if (!followLines || (ctx.maxPolls !== undefined && polls >= ctx.maxPolls)) return 0;
     await new Promise((r) => setTimeout(r, ctx.pollMs));
-  }
-}
-
-/** The folder's git commit, with +dirty when the folder has changes not committed (what is packed is the folder as it is). */
-export function gitVersion(dir: string): string | undefined {
-  let sha: string;
-  try {
-    sha = execFileSync("git", ["-C", dir, "rev-parse", "--short", "HEAD"], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
-  } catch {
-    return undefined;
-  }
-  if (!sha) return undefined;
-  try {
-    const changes = execFileSync("git", ["-C", dir, "status", "--porcelain", "--", "."], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
-    return changes ? `${sha}+dirty` : sha;
-  } catch {
-    return sha;
   }
 }
 

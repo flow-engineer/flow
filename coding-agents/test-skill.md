@@ -303,8 +303,10 @@ the CLI refuses a hosted cloud without it and the key. `--environment staging` o
 kept with the session.
 
 The open goes to the front door with the key; the session then plays at the tunnel the cloud
-answers, with the session's own token. `--agent-version` (else `GITHUB_SHA`) and `--ref` (else
-GitHub's branch) are kept with the session. A CI step (GitHub Actions shown):
+answers, with the session's own token. `--agent-version` (else the version the agent's traces
+carry: `FLOW_AGENT_VERSION`, the CI's commit, the folder's git commit or `package.json`'s `version`) and
+`--ref` (else GitHub's branch) are kept with the session; `flow test` prints the version, and keeps it
+in `--json` and `.flow/last-session.json` as `agentVersion`. A CI step (GitHub Actions shown):
 
 ```yaml
 - run: npx @flow-engineer/flow test --cloud https://flow.engineer/observe --synthetic --environment staging
@@ -314,7 +316,9 @@ GitHub's branch) are kept with the session. A CI step (GitHub Actions shown):
 ```
 
 Only the files in your `tests/` folder run; the cloud keeps each file by its hash and compares
-runs only while the tests are the same. Every run calls real models, so it costs a little.
+runs only while the tests are the same. The session's version is the commit the CI checked out, the
+same label the agent's traces carry; leave `--agent-version` unset unless the commit is not what
+runs, and record deploys on the owner's own servers as `build-agent-skill.md` ("Deploy it") says. Every run calls real models, so it costs a little.
 
 ## An agent on another framework, in any language
 
