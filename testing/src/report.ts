@@ -66,6 +66,8 @@ export interface JsonReport {
   outcome: Outcome;
   exitCode: number;
   sessionId: string | null;
+  /** The agent's version the session kept (--agent-version, else the one its traces carry); null when none is known. */
+  agentVersion: string | null;
   /** The cloud's id for the agent, which `flow show` reads runs under. */
   agent: string | null;
   dashboard: string | null;

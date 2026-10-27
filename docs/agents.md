@@ -391,8 +391,11 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
   `{ ok, deploy: { id, environment, status, version, findings, error }, url, next }` on stdout
   (`url` is null when the cloud does not say it yet; the human output then says "URL: not available
   on this Flow yet"); progress goes to stderr. The deploy's id is kept in `.flow/deploys.json`. The
-  version is the folder's git commit, `<sha>+dirty` (with a warning) when the folder has
-  uncommitted changes, since what is packed is the folder as it is; `--version` names it yourself.
+  version is the agent's version, the label its traces and `flow test` send: `FLOW_AGENT_VERSION`,
+  else the CI's commit (`GITHUB_SHA`, ...), else the folder's full git commit, `<sha>+dirty` (with a
+  warning) when the folder has uncommitted changes, since what is packed is the folder as it is, else
+  `package.json`'s `version`; `--version` names it yourself. Hosting gives it to the agent as
+  `AGENT_VERSION`, so its traces carry it.
 - `promote` moves staging's live version to production, with no new build. Production keeps its
   own secrets: promote sends the `.env`'s new or changed values there first (`--no-secrets` sends none).
 - `status` shows, per environment (both unless `--env`), the deploy serving it (`status`, `version`,

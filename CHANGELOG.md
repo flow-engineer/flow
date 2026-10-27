@@ -2,6 +2,36 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.10.3 (unreleased)
+
+### Changes
+
+- **Every agent stamps its version, with no setting.** One label, the agent's version, is now what
+  traces send as `service.version`, what `flow test` keeps with its session and what `flow deploy`
+  keeps with the deploy, for the same folder. It is the first of: `traces.version` in code (or
+  `--agent-version` / `--version`), `FLOW_AGENT_VERSION`, `AGENT_VERSION` (Flow's hosting sets it to
+  the deploy's version), the CI's commit (`GITHUB_SHA`, `CI_COMMIT_SHA`, `BUILDKITE_COMMIT`,
+  `CIRCLE_SHA1`, `GIT_COMMIT`), the folder's full git commit (`<sha>+dirty` when it has uncommitted
+  changes), `package.json`'s `version`. A value outside 1 to 100 letters, digits and `. _ : / + -`
+  (or shaped like a phone number) is never sent; a warning names where it was set, never the value.
+  No git, or a folder without `.git` (as hosting packs it), is no version from git, never an error.
+  So a dashboard can tell which version wrote a reply, and list the versions tests and traces have
+  seen, without a deploy step in CI.
+- **Compare versions offline.** `agent.status().version` returns it (and so the playground's
+  `GET /api/status`), the agent logs it once when it starts (`flow: agent version <v> (from <where>)`,
+  on stderr; not under `node --test` or `flow test`), and `flow test` prints `Agent version: <v>` and
+  keeps it as `agentVersion` in the `--json` report and `.flow/last-session.json`.
+- **`flow test --agent-version`** defaults to that version (it was `GITHUB_SHA` only), and a version
+  given with it is also the one the agent's traces carry for that run.
+- **`flow deploy`'s default version** is that version too: the full commit (it was the short one),
+  `FLOW_AGENT_VERSION` or the CI's commit when set, `package.json`'s `version` outside git.
+
+### Migration notes
+
+None: nothing to change. Deploy records made from here on name the full commit where earlier ones
+named the short one. An agent whose environment uses `FLOW_AGENT_VERSION` or `AGENT_VERSION` for
+something else now sends that value as its version; pass `traces: { version }` to choose it.
+
 ## 0.10.2 (2026-10-26)
 
 ### Changes

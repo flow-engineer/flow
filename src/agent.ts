@@ -26,7 +26,7 @@ import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFil
 import { Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
 import { clock, quietUntil, validZone } from "./time.ts";
 import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } from "./tools.ts";
-import { traces, tracesFromEnv, type Traces, type TracesOptions } from "./traces.ts";
+import { agentVersion, setting, traces, tracesFromEnv, type Traces, type TracesOptions } from "./traces.ts";
 import type { BeforeSend, ChannelInfo, Deliver, Incoming, Model, Outbound, SendReceipt, Template, TemplateDefinition, Transcribe } from "./types.ts";
 
 /** What a host supplies to an agent: `createAgent({ ..., host })`. */
@@ -267,7 +267,12 @@ export interface AgentStatus {
   idleForMs: number;
   conversations: number;
   backgroundTasks: number;
+  /** This agent's version, the `service.version` its traces carry (from git, FLOW_AGENT_VERSION, ...: src/traces.ts agentVersion); absent when none is known. */
+  version?: string;
 }
+
+/** Whether this process has logged the agent's version (once, at the first agent made). */
+let versionLogged = false;
 
 export interface ReceiveOptions {
   /** What the channel can show. Default: plain text only (no reactions, no status). */
@@ -408,6 +413,7 @@ export class Agent {
   /** `defaultCountryCode`'s digits. */
   private readonly countryCode: string | undefined;
   private readonly traces: Traces | null;
+  private readonly version: string | undefined;
 
   constructor(options: AgentOptions) {
     options = withHost(options);
@@ -428,7 +434,14 @@ export class Agent {
     if (options.defaultCountryCode !== undefined && !/^\+?[1-9]\d{0,2}$/.test(options.defaultCountryCode.trim())) throw new Error(`flow: defaultCountryCode is a calling code such as "+91", not "${options.defaultCountryCode}"`);
     this.countryCode = options.defaultCountryCode?.trim().replace(/^\+/, "");
     const tracing = options.traces ?? tracesFromEnv();
-    this.traces = tracing ? traces(tracing, { service: options.id ?? "flow", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind, viaOf: (id, channel) => this.viaOf(id, channel) }) : null;
+    const version = agentVersion({ given: tracing?.version });
+    this.version = version?.version;
+    // One line per process, so two runs can be told apart from their logs; `flow test` prints it itself, and an agent's own tests stay quiet.
+    if (version && !versionLogged && !process.env.NODE_TEST_CONTEXT && setting("RUN_KIND") !== "test") {
+      versionLogged = true;
+      console.warn(`flow: agent version ${version.version} (from ${version.from})`);
+    }
+    this.traces = tracing ? traces({ ...tracing, version: this.version }, { service: options.id ?? "flow", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind, viaOf: (id, channel) => this.viaOf(id, channel) }) : null;
     const sinks = [...(options.events ?? []), ...(this.traces ? [this.traces.sink] : [])];
     this.runner = `${options.runner ?? process.env.FLOW_RUNNER ?? hostname()}:${randomUUID().slice(0, 8)}`;
     // Per-request activity never includes model context or hidden model text.
@@ -1445,6 +1458,7 @@ export class Agent {
       idleForMs: busy ? 0 : idle,
       conversations: all.length,
       backgroundTasks: all.reduce((n, c) => n + c.backgroundTasks.length, 0),
+      ...(this.version ? { version: this.version } : {}),
     };
   }
 

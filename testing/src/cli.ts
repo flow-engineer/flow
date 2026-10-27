@@ -7,8 +7,9 @@
 //   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--strict] [--fresh] [--json]
 // A hosted cloud (any --cloud off this machine, the default included) needs the
 // agent's CI key in FLOW_FRAMEWORK_CLOUD_KEY and --synthetic, the attestation that the test files hold no real
-// customer or member data. --agent-version (else GITHUB_SHA), --ref (else GitHub's branch) and
-// --environment (staging or production) are kept with the session.
+// customer or member data. --agent-version (else the agent's version, as its traces carry it:
+// src/traces.ts agentVersion), --ref (else GitHub's branch) and --environment (staging or
+// production) are kept with the session; the version also in --json and .flow/last-session.json.
 // The agent's src/agent.ts exports buildAgent({ model, events, tools }) and its tools; its tests are
 // in tests/scenarios and tests/tools. An agent built on anything else is tested through its HTTP
 // endpoint instead, with --agent-url (testing/src/http-agent.ts): its own tools run for real.
@@ -29,7 +30,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 import { hasModelKey } from "../../src/model.ts";
 import { PLUGIN_LINE, pluginCli } from "./plugin.ts";
-import { OBSERVE_URL, setting } from "../../src/traces.ts";
+import { agentVersion, OBSERVE_URL, setting, validVersion } from "../../src/traces.ts";
 import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions, type SendPathProblem } from "./client.ts";
 import type { SessionLimits } from "./protocol.ts";
 import { runPrinter } from "./print-run.ts";
@@ -87,7 +88,9 @@ const TEST_OPTIONS = `Options for test:
                            other line goes to stderr
   --dotenv <path>          Read the environment from this file instead of the folder's .env
   --verbose                Also print slow event uploads
-  --agent-version <v>      Kept with the session (default: GITHUB_SHA)
+  --agent-version <v>      Kept with the session and put on the agent's traces (default: the version
+                           its traces carry: FLOW_AGENT_VERSION, the CI's commit, the folder's git
+                           commit, or package.json's version)
   --ref <ref>              Kept with the session (default: GitHub's branch)
   --environment <name>     staging or production, kept with the session
   --agent-url <url>        Test an agent you already have, on any framework, through its HTTP
@@ -133,8 +136,8 @@ Exit status:
        playing until it is stopped from the dashboard
 
 Results: once the session has opened, every exit writes .flow/last-session.json in the agent's
-folder: the session id, the cloud's agent id, dashboard link, suite hash and time, and per run its
-scenario, channel, number, run id, verdict (passed, failed, flaky, errored or not_played) and failed checks
+folder: the session id, the agent's version, the cloud's agent id, dashboard link, suite hash and
+time, and per run its scenario, channel, number, run id, verdict (passed, failed, flaky, errored or not_played) and failed checks
 with the judge's reasons (and, for a scenario the cloud could not play, its file and what is wrong). Never the messages. The folder is git-ignored and the suite synthetic.
 
 Environment (also read from the agent folder's .env, or --dotenv; variables already set win;
@@ -301,6 +304,8 @@ let dashboard = "";
 /** The cloud's limits for this workspace, from the open (none from an older cloud). */
 let limits: SessionLimits | null = null;
 let agentId = "";
+/** The agent's version the session keeps. */
+let version: string | undefined;
 const seen: RunSummary[] = [];
 /** Set when the cloud ended the whole session scenario_invalid. */
 let endedInvalid: SessionInvalid | null = null;
@@ -316,13 +321,17 @@ const runs = checkRuns(values.runs);
 const cloud = values.cloud || setting("CLOUD") || OBSERVE_URL;
 const ciKey = setting("CLOUD_KEY") || undefined;
 
+// The version the session keeps is the one the agent's traces carry: an explicit one is handed to them.
+version = values["agent-version"] || agentVersion()?.version;
+if (values["agent-version"] && validVersion(values["agent-version"])) process.env.FLOW_AGENT_VERSION = values["agent-version"];
+
 let openHeaders: Record<string, string> = {};
 try {
   openHeaders = cloudHeaders({
     cloud,
     ciKey,
     synthetic: values.synthetic!,
-    agentVersion: values["agent-version"] || process.env.GITHUB_SHA || undefined,
+    agentVersion: version,
     ref: values.ref || process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME || undefined,
     environment: values.environment,
   });
@@ -407,6 +416,7 @@ process.on("SIGINT", () => {
   end("interrupted", { received: seen, error: reportError(undefined, "interrupted") });
 });
 
+if (version) say(`Agent version: ${version}`);
 let summary: Awaited<ReturnType<typeof runInCloud>>;
 try {
   summary = await runInCloud({
@@ -574,6 +584,7 @@ function saveSession(ended: Ended, received: RunSummary[], link: string, print: 
   if (!sessionId) return;
   const last: LastSession = {
     sessionId,
+    ...(version ? { agentVersion: version } : {}),
     ...(agentId ? { agent: agentId } : {}),
     dashboard: link,
     suiteHash: suiteHash(files),
@@ -633,6 +644,7 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       outcome,
       exitCode,
       sessionId: sessionId || null,
+      agentVersion: version ?? null,
       agent: agentId || null,
       dashboard: dashboard || null,
       suiteHash: files.length ? suiteHash(files) : null,
