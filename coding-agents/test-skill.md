@@ -316,7 +316,9 @@ in `--json` and `.flow/last-session.json` as `agentVersion`. A CI step (GitHub A
 ```
 
 Only the files in your `tests/` folder run; the cloud keeps each file by its hash and compares
-runs only while the tests are the same. Every run calls real models, so it costs a little.
+runs only while the tests are the same. The session's version is the commit the CI checked out, the
+same label the agent's traces carry; leave `--agent-version` unset unless the commit is not what
+runs, and record deploys on the owner's own servers as `build-agent-skill.md` ("Deploy it") says. Every run calls real models, so it costs a little.
 
 ## An agent on another framework, in any language
 

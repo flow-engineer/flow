@@ -441,3 +441,27 @@ On the owner's own servers: one instance, kept warm, CPU always on, a durable `d
 (`postgres(pool)`), `await agent.resume()` at start, the secrets from the platform's secret store
 (never the `.env`), and Flow Messaging's stream (`fm.start`) with its cursor file on a disk that
 survives a restart, or its webhook (`FLOW_MESSAGING_WEBHOOK_SECRET`) on a public https address.
+
+**One version per build: the git commit.** Traces carry it as `service.version` with no setting
+(from `FLOW_AGENT_VERSION`, else the CI's commit, else the folder's git commit; on Flow's cloud, the
+deploy's version), and `flow test` keeps the same one with its session (`--agent-version`, default the
+CI's commit), so a test run, a deploy and a reply all name one commit. Do not set a version that
+differs from the code that runs. On the owner's own servers, a process with no `.git` and no CI
+variables (a container image) has only `package.json`'s version: give it the commit as
+`FLOW_AGENT_VERSION` in its environment (a build argument set from `$GITHUB_SHA`, say). Record each
+deploy there after it succeeds, in the same CI job (GitHub Actions shown; `flow deploy` on Flow's cloud
+records itself, and this framework's CLI has no `deploy record` command). The key goes on stdin, never
+in the arguments:
+
+```sh
+printf 'Authorization: Bearer %s\n' "$FLOW_KEY" | curl --fail-with-body -sS --retry 3 --retry-all-errors \
+  -X POST "https://flow.engineer/observe/v1/deployments" -H @- \
+  -H "Idempotency-Key: flow-deploy-production-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+  -H "Content-Type: application/json" -d '{"environment": "production", "version": "'"$GITHUB_SHA"'"}'
+```
+
+`staging` in both places for a staging deploy. `FLOW_KEY` is the project's Flow key, from the CI's
+secrets. To compare two versions offline, check out each commit and run `flow test --synthetic --json > <commit>.json`
+(the session keeps that commit as `agentVersion`; `.flow/last-session.json` is overwritten by the next run, so
+copy it aside), then compare the runs; a running agent says its version in `agent.status().version` and in
+its start log line, `flow: agent version <v> (from <where>)`.
