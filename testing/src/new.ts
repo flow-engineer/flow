@@ -218,6 +218,8 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
   }
 
   const own = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  // esbuild only packs the CLI (flow cli pack), on the developer's computer: a dev dependency.
+  const { esbuild, ...peers } = own.peerDependencies;
   const pkg = {
     name,
     // What people call it: the message a phone sends to reach it is "Join <displayName> (ref <code>)".
@@ -231,15 +233,15 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
     engines: own.engines,
     scripts: { start: "node --env-file-if-exists=.env src/main.ts", mcp: "node --env-file-if-exists=.env src/mcp.ts", cli: "node --env-file-if-exists=.env src/cli.ts", test: "flow test", typecheck: "tsc --noEmit" },
     // The café serves its tools over MCP (src/mcp.ts) and as a CLI (src/cli.ts): their SDKs, pinned as Flow Framework pins them.
-    dependencies: { "@flow-engineer/flow": `^${own.version}`, ...own.peerDependencies },
-    devDependencies: { "@types/node": own.devDependencies["@types/node"], typescript: own.devDependencies.typescript },
+    dependencies: { "@flow-engineer/flow": `^${own.version}`, ...peers },
+    devDependencies: { "@types/node": own.devDependencies["@types/node"], typescript: own.devDependencies.typescript, esbuild },
   };
   writeFileSync(join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
   writeFileSync(join(dir, "tsconfig.json"), `${JSON.stringify(TSCONFIG, null, 2)}\n`);
   // An existing .gitignore (flow init in a fresh repository) keeps its lines and gets the missing ones.
   const ignore = join(dir, ".gitignore");
   const ignored = existsSync(ignore) ? readFileSync(ignore, "utf8") : "";
-  const missing = ["node_modules/", ".env", ".flow/"].filter((line) => !ignored.split("\n").includes(line));
+  const missing = ["node_modules/", ".env", ".flow/", "release/"].filter((line) => !ignored.split("\n").includes(line));
   if (missing.length) writeFileSync(ignore, `${ignored}${ignored && !ignored.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`);
   // npm install then refuses a Node older than the engines field says, before .ts files fail to load.
   writeFileSync(join(dir, ".npmrc"), "engine-strict=true\n");

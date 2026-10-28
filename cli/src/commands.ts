@@ -5,6 +5,8 @@
 // commands of its own. cliProblems is the rule-based check that keeps that file true to the tools;
 // it never judges taste.
 
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Command as StricliCommand, CommandContext } from "@stricli/core";
 import { FEEDBACK_NUDGE } from "../../src/skills.ts";
 
@@ -151,6 +153,11 @@ export interface CliConfig {
    * replaces Flow's.
    */
   update?: { command: string; latest?: string };
+  /**
+   * Files the CLI reads at run time, by their paths in the agent's folder (["context/icon.svg"]):
+   * `flow cli pack` ships them beside the bundle at the same paths. Read one with cliFile(path).
+   */
+  files?: string[];
 }
 
 export interface Brand {
@@ -213,8 +220,25 @@ export interface Command {
   config?: ToolCommand | CustomCommand;
 }
 
+/** What `flow cli pack` writes into a packed CLI (esbuild's define); never set in the source. */
+declare const __FLOW_CLI_RELEASE__: { version: string; update: { command: string; latest: string } } | undefined;
+
+/**
+ * The CLI file's configuration. Packed by `flow cli pack`, its version is the release's, and
+ * update's command and latest, where the file leaves them out, are the address it is served from.
+ */
 export function defineCli(config: CliConfig): CliConfig {
-  return config;
+  if (typeof __FLOW_CLI_RELEASE__ === "undefined") return config;
+  const release = __FLOW_CLI_RELEASE__;
+  return { ...config, version: release.version, update: { command: config.update?.command ?? release.update.command, latest: config.update?.latest ?? release.update.latest } };
+}
+
+/**
+ * Where a file of defineCli's files is: packed, beside the bundle (the package's own folder); from
+ * the source, in the folder the CLI runs from, the agent's folder as `npm run cli` runs it.
+ */
+export function cliFile(path: string): string {
+  return typeof __FLOW_CLI_RELEASE__ === "undefined" ? resolve(path) : fileURLToPath(new URL(`../${path}`, import.meta.url));
 }
 
 /**

@@ -63,7 +63,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && node -e \"for (const f of ['page.html', 'person.html']) fs.copyFileSync('simulators/src/' + f, 'dist/simulators/src/' + f)\"",
+    "build": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && node -e \"for (const f of ['page.html', 'person.html']) fs.copyFileSync('simulators/src/' + f, 'dist/simulators/src/' + f); fs.copyFileSync('testing/src/install.sh', 'dist/testing/src/install.sh')\"",
     "prepack": "npm run build",
     "test": "node --test --test-timeout=30000 \"test/**/*.test.ts\"",
     "test:changed": "node scripts/test-changed.ts",
@@ -84,7 +84,8 @@
     "marked": "12.0.2",
     "marked-terminal": "7.3.0",
     "oidc-provider": "9.12.2",
-    "@mariozechner/pi-tui": "0.73.1"
+    "@mariozechner/pi-tui": "0.73.1",
+    "esbuild": "0.28.2"
   },
   "peerDependenciesMeta": {
     "@modelcontextprotocol/client": {
@@ -107,6 +108,9 @@
     },
     "@mariozechner/pi-tui": {
       "optional": true
+    },
+    "esbuild": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -120,6 +124,7 @@
     "marked-terminal": "7.3.0",
     "oidc-provider": "9.12.2",
     "typescript": "^7.0.2",
-    "@mariozechner/pi-tui": "0.73.1"
+    "@mariozechner/pi-tui": "0.73.1",
+    "esbuild": "0.28.2"
   }
 }

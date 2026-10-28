@@ -2,6 +2,59 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **`flow cli pack`: the CLI as one package anyone with Node.js installs.** `flow cli pack --server
+  <staging|production|https url> [--base-url <url>] [--out release/] [--dir .] [--json]` bundles
+  `src/cli.ts` with every dependency (esbuild: ESM, lazy imports kept in chunks of their own,
+  Node 20.19 and newer) and writes `<out>/<name>.tgz`, `<out>/install.sh` and `<out>/release.json`
+  (`{ name, display_name, version, sha256, size, server }`; `--json` prints `{ ok, release, files,
+  next }`). `staging` and `production` are the hosted agent's address (`GET /v1/hosting/address`
+  with the CI key) plus `/mcp`. The server takes the place of the default written in the CLI file
+  (`process.env.ACME_SERVER ?? "http://127.0.0.1:8790/mcp"`), which must be there exactly once,
+  else pack refuses (exit 2). The version is package.json's, the server's name and the git commit:
+  `0.1.3-production.ab12cd3` (`custom` for a URL, `.dirty` with uncommitted tracked changes); a
+  packed CLI's `version` is always the release's. Unless the CLI file sets them, `update.latest` is
+  `<base>/cli/version` and `update.command` is `curl -fsSL <base> | sh`, where `<base>` is
+  `--base-url`, else the hosted address, else the server's origin. Before `npm pack`, the bundle's
+  `--help` must print `USAGE` when started through a link (as npm installs a command) from an
+  empty folder with a fresh config (exit 1 otherwise). esbuild is a new optional peer dependency,
+  `esbuild@0.28.2`, loaded only by `flow cli pack`; without it pack exits 2 with
+  `npm i -D esbuild@0.28.2`. The starter has it as a dev dependency and ignores `release/`.
+- **An installer for every packed CLI.** `install.sh` (POSIX sh) needs Node.js 20.19 or newer and
+  npm, downloads `<base>/cli/<name>-<version>.tgz` with curl or wget, checks its sha256 (with
+  `shasum -a 256` or `sha256sum`) before installing it with `npm install --global --prefix
+  ~/.<name>` (`<NAME>_HOME`), without sudo. It refuses another `<name>` already on PATH and says
+  where, links the command into the first writable PATH folder (else `~/.local/bin` and one marked
+  line in the shell's rc file; fish too), and says what to run next. `<NAME>_CLI_URL` installs
+  another package, unchecked. `--base-url` writes the address into the installer for a team that
+  serves it itself; otherwise it keeps the placeholder `__FLOW_CLI_BASE_URL__` for Flow's hosting to
+  fill in with the address it is served from.
+- **Files a CLI reads at run time: `defineCli({ files })` and `cliFile(path)`.** `files:
+  ["context/icon.svg"]` are shipped beside the bundle at the same paths; `cliFile("context/icon.svg")`
+  (from `@flow-engineer/flow/cli`) is the file's path: beside the bundle when packed, in the folder
+  the CLI runs from (the agent's, as `npm run cli` runs it) from the source.
+- **Tables are headed in the brand's accent.** A tool's Markdown table at a terminal had its headers
+  in red (cli-table3's default). They are in `brand.accent`, at the terminal's color depth (RGB,
+  256 or 16 colors, as the welcome banner), else cyan.
+- **A packed CLI's background tool refresh runs no command.** Bundled into one file with the CLI
+  file, the process that refreshes the cached tools in the background also ran the CLI with its
+  internal flag after it, and could exit before writing; `runCli` now returns at once there.
+- **The starter's CLI runs when installed.** npm installs a command as a link, and the starter's
+  `src/cli.ts` compared `process.argv[1]` (the link) with its own path, so an installed `acme` did
+  nothing. It compares `realpathSync(process.argv[1])`.
+
+### Migration notes
+
+- **A CLI file made by `flow new` before this release does nothing once installed.** Change its
+  last line from `if (process.argv[1] === fileURLToPath(import.meta.url)) ...` to
+  `if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) ...`,
+  with `import { realpathSync } from "node:fs";`. `flow cli pack` refuses the old line.
+- **`flow cli pack` is Flow's own.** A tool named `pack` on a server reached with `flow cli` is
+  `flow cli --server <url> pack` (the server first).
+
 ## 0.10.6 (2026-10-28)
 
 ### Changes

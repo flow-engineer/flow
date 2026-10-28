@@ -284,6 +284,23 @@ test("a tool's format is what people see, rendered at a terminal; --json, --fiel
   assert.equal(await run(cli(["key.id", "manage_url"]), []), "key.id      key_1\nmanage_url  https://acme.test/keys\n");
 });
 
+// cli-table3 paints headers red, and only in named colors: Flow paints them itself.
+test("a rendered table's headers are in the brand's accent, in as many colors as the terminal shows, else cyan", async () => {
+  const report = tool({ name: "report", description: "A report.", input: z.object({}), output: z.object({ rows: z.number() }), signIn: "none", hints: { readOnly: true }, run: () => ({ rows: 1 }), format: () => "| Name | Size |\n|---|---|\n| a | 1 |\n" });
+  const server = await serve({ tools: [report] });
+  const run = async (brand: CliConfig["brand"], env: Record<string, string>) => {
+    const out = io(true); out.channel.env = env;
+    assert.equal(await runCli(defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-")), server, brand }), ["report"], out.channel), 0);
+    return out.out.split("\n").find((line) => line.includes("Name"))!;
+  };
+  const purple = { accent: "#645bff" };
+  assert.match(await run(purple, { TERM: "xterm-256color", COLORTERM: "truecolor" }), /\u001b\[38;2;100;91;255mName\u001b\[39m.*\u001b\[38;2;100;91;255mSize\u001b\[39m/);
+  assert.match(await run(purple, { TERM: "xterm-256color" }), /\u001b\[38;5;63mName/);
+  assert.match(await run(purple, { TERM: "xterm" }), /\u001b\[94mName/);
+  assert.match(await run(undefined, { TERM: "xterm" }), /\u001b\[36mName/, "cyan without a brand accent");
+  assert.doesNotMatch(await run(purple, { TERM: "xterm" }), /\u001b\[31m/, "never cli-table3's red");
+});
+
 test("a group's help lists its subcommands, and the top level lists groups and commands, styled at a terminal", async () => {
   const cli = acme(await serve({ tools: [listOrders, getOrder, cancelOrder] }));
   for (const argv of [["order"], ["order", "-h"]]) {
