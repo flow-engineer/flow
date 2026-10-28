@@ -23,6 +23,7 @@
 
 import { createHmac, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { gzipSync } from "node:zlib";
 import { replyButton, type Channel, type ChannelAgent } from "./channels.ts";
 import { sameSecret, withoutTrailingSlashes, wrongTries } from "./http.ts";
 import type { CarouselCard, ChannelInfo, Outbound, PageContext, Photo, SendReceipt } from "./types.ts";
@@ -566,7 +567,7 @@ export function webChat(options: WebChatOptions = {}): WebChat {
           const handler = routes[path];
           if (handler) return handler(request);
           const file = path === "/widget.js" ? "loader" : /^\/widget\/([a-z0-9-]+)\.js$/.exec(path)?.[1];
-          if (file && (request.method === "GET" || request.method === "HEAD")) return widgetFile(file);
+          if (file && (request.method === "GET" || request.method === "HEAD")) return widgetFile(file, /\bgzip\b/.test(request.headers.get("accept-encoding") ?? ""));
           return problem(404, "not_found", "no such web chat route");
         },
       };
@@ -701,25 +702,29 @@ function turnSlots(most: number): () => Promise<() => void> {
     });
 }
 
-/** The chat box's files: built (dist/widget/src/<name>.js), or from source with their types stripped. */
-const widgetFiles = new Map<string, Promise<string | null>>();
-async function widgetFile(name: string): Promise<Response> {
+/** The chat box's files: built (dist/widget/src/<name>.js), or from source with their types stripped; gzipped once for browsers that take it. */
+const widgetFiles = new Map<string, Promise<{ text: string; gzip: Uint8Array<ArrayBuffer> } | null>>();
+async function widgetFile(name: string, gzip: boolean): Promise<Response> {
   let file = widgetFiles.get(name);
   if (!file) {
     file = (async () => {
       const at = new URL(`../widget/src/${name}`, import.meta.url);
-      const built = await readFile(new URL(`${at.href}.js`), "utf8").catch(() => null);
-      if (built !== null) return built;
-      const source = await readFile(new URL(`${at.href}.ts`), "utf8").catch(() => null);
-      if (source === null) return null;
-      const { stripTypeScriptTypes } = (await import("node:module")) as { stripTypeScriptTypes?: (code: string) => string };
-      return stripTypeScriptTypes ? stripTypeScriptTypes(source) : null;
+      let text = await readFile(new URL(`${at.href}.js`), "utf8").catch(() => null);
+      if (text === null) {
+        const source = await readFile(new URL(`${at.href}.ts`), "utf8").catch(() => null);
+        const { stripTypeScriptTypes } = (await import("node:module")) as { stripTypeScriptTypes?: (code: string) => string };
+        text = source !== null && stripTypeScriptTypes ? stripTypeScriptTypes(source) : null;
+      }
+      return text === null ? null : { text, gzip: new Uint8Array(gzipSync(text)) };
     })();
     widgetFiles.set(name, file);
   }
-  const text = await file;
-  if (text === null) return problem(404, "not_found", "no such widget file");
-  return new Response(text, { status: 200, headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=300", "access-control-allow-origin": "*" } });
+  const found = await file;
+  if (!found) return problem(404, "not_found", "no such widget file");
+  const headers = { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=300", "access-control-allow-origin": "*", vary: "accept-encoding" };
+  return gzip
+    ? new Response(found.gzip, { status: 200, headers: { ...headers, "content-encoding": "gzip" } })
+    : new Response(found.text, { status: 200, headers });
 }
 
 function randomKey(): string {

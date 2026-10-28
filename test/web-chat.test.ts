@@ -235,6 +235,21 @@ test("the page a visitor writes from reaches the agent as one line of data, and 
   assert.equal((await box.send({ id: "p2", text: "x", page: { url: "https://evil.example/" } })).status, 400);
 });
 
+test("the agent serves the chat box: the loader and the panel's modules as JavaScript any site may load, gzipped when the browser takes it", async () => {
+  const web = await webAgent();
+  const loader = await web.http("/widget.js", { origin: null });
+  assert.equal(loader.status, 200);
+  assert.equal(loader.headers.get("content-type"), "text/javascript; charset=utf-8");
+  assert.equal(loader.headers.get("access-control-allow-origin"), "*");
+  assert.match(await loader.text(), /FlowChat/);
+  const panel = await web.http("/widget/panel.js", { origin: "https://elsewhere.example", headers: { "accept-encoding": "gzip, br" } });
+  assert.equal(panel.headers.get("content-encoding"), "gzip");
+  const { gunzipSync } = process.getBuiltinModule("node:zlib");
+  assert.match(gunzipSync(Buffer.from(await panel.arrayBuffer())).toString(), /import/);
+  assert.equal((await web.http("/widget/nope.js")).status, 404);
+  assert.equal((await web.http("/widget/../src/agent.js")).status, 404);
+});
+
 function signToken(claims: Record<string, unknown>): string {
   const { createHmac } = process.getBuiltinModule("node:crypto");
   const head = `${Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}`;
