@@ -11,10 +11,21 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   flow-messaging README no longer put iMessage under WhatsApp's 24-hour rule. On iMessage the only
   timing rule is for typing indicators and read receipts: 5 minutes after the line's last message
   to that person.
+- **The agent is told how messages read, on every channel.** Three lines in its prompt, after the
+  channel's formatting line: one idea per message or short paragraph, a long answer split into a
+  few short messages; items from a catalogue or tool named in plain words, the exact title kept
+  for an order summary or a list row; and, on channels with buttons or lists, buttons only when
+  the person's next step is to pick one of a few options, never one that just repeats the text.
+  The last replaces the line that offered buttons whenever they chose between options. A
+  channel's `instructions` add to it; `createAgent({ writing: "..." })` replaces it and
+  `writing: false` leaves it out ([docs/channels.md](docs/channels.md#how-messages-read)).
 
 ### Migration notes
 
-None.
+No API changes: `writing` is a new option, and nothing is renamed or removed. The prompt's default
+changes how agents write: fewer buttons, shorter messages. To keep the earlier wording, pass
+`writing: "When they choose between a few options, offer them as buttons so they can tap."` (or
+`writing: false` for no guidance at all).
 
 ## 0.10.5 (2026-10-27)
 

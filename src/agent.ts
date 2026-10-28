@@ -103,6 +103,12 @@ export interface AgentOptions {
    */
   shareUpdates?: boolean | string;
   /**
+   * Flow Framework's guidance on how messages read, on every channel: buttons or a list only when
+   * the next step is a pick, catalogue titles in plain words, one idea per message. Default on;
+   * false leaves it out, a string replaces it. A channel's own `instructions` come after it.
+   */
+  writing?: boolean | string;
+  /**
    * The longest a reply waits for a tool that sets no `deadlineMs` of its own; past it the tool
    * moves to the background. Default 60,000 ms. Before that, the reply waits for all of a
    * response's tools unless the person writes again or `partialAfterMs` passes.
@@ -484,6 +490,7 @@ export class Agent {
       talk: {
         shareUpdates: options.shareUpdates !== false,
         shareUpdatesInstructions: typeof options.shareUpdates === "string" ? options.shareUpdates : undefined,
+        writing: options.writing === false ? false : typeof options.writing === "string" ? options.writing : undefined,
       },
       emit,
       runner: this.runner,

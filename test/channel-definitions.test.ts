@@ -211,6 +211,26 @@ test("a channel's own instructions are in the prompt only while the person uses 
   await h.agent.conversation(b!.conversationId)!.whenIdle();
 });
 
+test("`writing` replaces Flow Framework's guidance on how messages read, or leaves it out; a channel's instructions still follow", async () => {
+  const ours = "Keep every reply to one short message. Offer our three plans as buttons whenever pricing comes up.";
+  const app = () => customUI("app", { info: { buttons: { max: 3, labelMax: 20 } }, instructions: "Fill app_link only from a tool result.", sendMessage: async () => {} });
+  const system = async (writing: AgentOptions["writing"]) => {
+    const h = agentWith([app()], { writing });
+    const started = await h.agent.message({ channel: "app", from: "session-1", message: "how much is it?" });
+    const first = await h.nextCall(0);
+    first.answer(respond(call("send_app", { text: "Here." })));
+    await h.agent.conversation(started!.conversationId)!.whenIdle();
+    return first.request.system;
+  };
+  const replaced = await system(ours);
+  assert.ok(replaced.includes(`- ${ours}\n- Fill app_link only from a tool result.`), replaced);
+  assert.doesNotMatch(replaced, /one idea per message|in plain words|only when their next step/);
+  const off = await system(false);
+  assert.doesNotMatch(off, /one idea per message|in plain words|only when their next step/);
+  assert.match(off, /- Markdown works here\.\n- Fill app_link only from a tool result\./);
+  assert.match(await system(undefined), /one idea per message[\s\S]*only when their next step[\s\S]*- Fill app_link only from a tool result\./, "the default, with the channel's own line after it");
+});
+
 test("contentRefusal refuses what Flow Messaging refuses, with its error type, field and message, and takes the rest (a WebP header too)", () => {
   const wa = whatsapp({ sendMessage: async () => {}, sendCarousel: async () => {} }).info;
   const photo = (name: string) => ({ url: `https://example.com/${name}` });
