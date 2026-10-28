@@ -17,7 +17,15 @@ export type Config = {
   context?: unknown;
   signedOut: boolean;
 };
-type Mount = { shadow: ShadowRoot; host: HTMLElement; launcher: HTMLButtonElement; config: Config; emit(name: string, detail?: unknown): void };
+type Mount = {
+  shadow: ShadowRoot;
+  host: HTMLElement;
+  launcher: HTMLButtonElement;
+  config: Config;
+  emit(name: string, detail?: unknown): void;
+  /** Adds styles to the shadow root in a way a page's CSP allows (constructable stylesheets). */
+  style(css: string): void;
+};
 
 const IDLE_MS = 120_000;
 const ICONS = {
@@ -42,10 +50,9 @@ function iconButton(cls: string, label: string, icon: keyof typeof ICONS, type: 
   return button;
 }
 
-export function mount({ shadow, launcher, config, emit }: Mount) {
+export function mount({ shadow, launcher, config, emit, style }: Mount) {
   const w = WORDS[config.lang];
-  const style = el("style");
-  style.textContent = CSS;
+  style(CSS);
 
   const panel = el("div", "panel");
   panel.hidden = true;
@@ -93,7 +100,7 @@ export function mount({ shadow, launcher, config, emit }: Mount) {
   sheet.setAttribute("aria-labelledby", "flow-chat-sheet");
 
   panel.append(header, thread, typing, announcer, form, sheet);
-  shadow.append(style, panel);
+  shadow.append(panel);
 
   const rows = new Map<string, HTMLElement>();
   const unechoed = new Map<string, HTMLElement>(); // the visitor's messages drawn at once, until their echo comes
