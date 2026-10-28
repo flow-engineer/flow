@@ -40,6 +40,14 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   not the person. A stream Flow stops for good resolves `stopped` with `channelCode`, `hint` and
   `docUrl` when Flow gave them, and logs the hint. The starter prints the hint when its stream stops,
   and for `plan_ended` points to https://flow.engineer/dashboard/plans instead of `setup`.
+- **The join message on Flow's shared lines says Join.** What a phone sends to reach an agent on
+  Flow's shared Telegram bot, WhatsApp number and iMessage line is now `Join <name> (ref <code>)`,
+  such as `Join FlatX agent (ref brave-otter-40718263)`, or `Join my agent (ref <code>)` with no
+  name (was `Hi <name> (ref <code>)`, `Hi there` with none). Flow's service writes it; `setup` and
+  `link` print what it returns, and their help, `flow new`'s and `flow init`'s text and the guides
+  say Join. The agent's first message from that person is the text before `(ref`: `Join FlatX
+  agent`. Links shared already keep working: any message of up to 160 characters ending in
+  `(ref <code>)` joins, and Telegram's Start link is unchanged.
 
 ### Migration notes
 

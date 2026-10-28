@@ -5,7 +5,7 @@
 // `flow init` makes the same agent in the current folder, named by `--name`, else after
 // `--display-name`, else after the folder. Inside a clone, `npm run new -- <name>` makes
 // agents/<name>/ instead. `--display-name` is what people call the agent ("FlatX agent"), kept as
-// package.json's displayName: the message a phone sends to reach it is "Hi <it> (ref <code>)".
+// package.json's displayName: the message a phone sends to reach it is "Join <it> (ref <code>)".
 // The café's agent is Pip; the display name takes Pip's place in its prompt (agent/AGENTS.md). Every
 // other name in the agent's code comes from package.json through src/name.ts (its CLI command, the
 // CLI's variables, its MCP server), so nothing here rewrites them. `flow link --display-name` (and
@@ -220,7 +220,7 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
   const own = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const pkg = {
     name,
-    // What people call it: the message a phone sends to reach it is "Hi <displayName> (ref <code>)".
+    // What people call it: the message a phone sends to reach it is "Join <displayName> (ref <code>)".
     displayName,
     version: "0.1.0",
     private: true,
