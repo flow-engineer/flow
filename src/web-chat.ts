@@ -170,6 +170,8 @@ interface Box {
   /** The newest number this process knows was given them; the recheck wakes them past it. */
   head: number;
   open: number;
+  /** Goes up with each piece of news, so a reader that read the store just before it still sees it. */
+  version: number;
 }
 
 export function webChat(options: WebChatOptions = {}): WebChat {
@@ -202,7 +204,7 @@ export function webChat(options: WebChatOptions = {}): WebChat {
 
   function boxOf(address: string): Box {
     let box = boxes.get(address);
-    if (!box) boxes.set(address, (box = { waiters: new Set(), live: { typing: false, status: null }, head: 0, open: 0 }));
+    if (!box) boxes.set(address, (box = { waiters: new Set(), live: { typing: false, status: null }, head: 0, open: 0, version: 0 }));
     return box;
   }
   /** Forgets a box nothing waits on and that shows nothing live. */
@@ -211,11 +213,15 @@ export function webChat(options: WebChatOptions = {}): WebChat {
     if (box && !box.waiters.size && !box.open && !box.live.typing && box.live.status === null) boxes.delete(address);
   }
   function wake(address: string): void {
-    for (const waiter of boxes.get(address)?.waiters ?? []) waiter();
+    const box = boxes.get(address);
+    if (!box) return;
+    box.version++;
+    for (const waiter of box.waiters) waiter();
   }
-  /** Resolves on news for the visitor, after `ms`, or when `signal` aborts. */
-  function news(address: string, ms: number, signal: AbortSignal): Promise<void> {
+  /** Resolves on news for the visitor since `seen` (their box's version when the reader last read), after `ms`, or when `signal` aborts. */
+  function news(address: string, seen: number, ms: number, signal: AbortSignal): Promise<void> {
     const box = boxOf(address);
+    if (box.version !== seen) return Promise.resolve();
     return new Promise<void>((resolve) => {
       const done = () => {
         clearTimeout(timer);
@@ -381,13 +387,14 @@ export function webChat(options: WebChatOptions = {}): WebChat {
   }
 
   async function history(visitor: Visitor, headers: Record<string, string>): Promise<Response> {
+    if (!perMinute.take(`history:${visitor.address}`, 30)) return problem(429, "rate_limited", "too many history reads; try again in a minute", headers, 60);
     const { last } = await agent!.store.webEvents(name, visitor.address, 0, 0);
     const kept = await agent!.store.webEvents(name, visitor.address, Math.max(0, last - HISTORY), HISTORY);
     // Older than the outbox holds: the transcript, on this channel, before its oldest event.
     const since = kept.events[0]?.at ?? Infinity;
     const conversationId = await agent!.conversationOf({ channel: name, address: visitor.address });
     const entries = conversationId ? await agent!.transcript(conversationId) : [];
-    const older = entries.filter((e) => e.at < since && "channel" in e && e.channel === name).flatMap(fromTranscript).slice(-HISTORY);
+    const older = entries.filter((e) => e.at < since && "channel" in e && e.channel === name).flatMap((e, i) => fromTranscript(e, i)).slice(-HISTORY);
     return json(200, { messages: [...older, ...kept.events.map(served)], cursor: last }, headers);
   }
 
@@ -408,11 +415,12 @@ export function webChat(options: WebChatOptions = {}): WebChat {
       const until = now() + wait;
       const live = JSON.stringify(box.live);
       for (;;) {
+        const seen = box.version;
         const got = await eventsAfter(visitor.address, after);
         if ("reset" in got || got.events.length || JSON.stringify(box.live) !== live || now() >= until || request.signal.aborted) {
           return json(200, "reset" in got ? got : { ...got, live: box.live }, headers);
         }
-        await news(visitor.address, until - now(), request.signal);
+        await news(visitor.address, seen, until - now(), request.signal);
       }
     } finally {
       close();
@@ -436,6 +444,7 @@ export function webChat(options: WebChatOptions = {}): WebChat {
           let live = "";
           let pinged = now();
           while (!stop.signal.aborted) {
+            const seen = boxOf(visitor.address).version;
             const got = await eventsAfter(visitor.address, cursor);
             if ("reset" in got) {
               frame("reset", {});
@@ -450,7 +459,7 @@ export function webChat(options: WebChatOptions = {}): WebChat {
               break;
             }
             if (now() - pinged >= PING_MS) write(": ping\n\n"), (pinged = now());
-            await news(visitor.address, Math.min(PING_MS - (now() - pinged), ends - now()), stop.signal);
+            await news(visitor.address, seen, Math.min(PING_MS - (now() - pinged), ends - now()), stop.signal);
           }
         } catch (error) {
           if (!stop.signal.aborted) console.warn("flow web chat: a stream ended:", error instanceof Error ? error.name : "unknown");
@@ -587,15 +596,15 @@ function served(row: WebEventRow): WebChatEvent {
 }
 
 /** A transcript line as the box shows it (seq 0: from before what the outbox holds). */
-function fromTranscript(e: TranscriptEntry): WebChatEvent[] {
+function fromTranscript(e: TranscriptEntry, n: number): WebChatEvent[] {
   if (e.kind === "in") return [{ type: "message", from: "person", id: e.id, text: e.text, ...(e.choice ? { choice: { ...(e.choiceId ? { id: e.choiceId } : {}), title: e.text } } : {}), seq: 0, at: e.at }];
   if (e.kind !== "out" || e.template) return [];
-  if (e.carousel) return [{ type: "carousel", id: `t${e.at}`, text: e.text, cards: e.carousel.flatMap(webCard), seq: 0, at: e.at }];
+  if (e.carousel) return [{ type: "carousel", id: `t${n}`, text: e.text, cards: e.carousel.flatMap(webCard), seq: 0, at: e.at }];
   const image = httpsPhoto(e.image);
   return [{
     type: "message",
     from: "agent",
-    id: `t${e.at}`,
+    id: `t${n}`,
     text: e.text,
     ...(e.buttons?.length ? { buttons: e.buttons.map(replyButton) } : {}),
     ...(e.list ? { list: e.list } : {}),
