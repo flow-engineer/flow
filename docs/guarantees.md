@@ -59,7 +59,8 @@ What follows from it:
 - **A person's other conversations** (under another key, sharing a verified phone number: a
   WhatsApp chat and a web chat signed in with that number) are shown to each turn as their recent
   messages, read from the store when the turn starts: a message the other conversation is taking at
-  that moment may show only from the next turn. Replies go only on the channel of the conversation
+  that moment may show only from the next turn, and a turn whose read fails goes on without them
+  (a warning is logged). Replies go only on the channel of the conversation
   whose turn it is. Only one agent's conversations are ever linked, and `forgetPerson` deletes all
   of them ([channels.md](channels.md#one-person-on-several-channels)).
 - What a platform does after accepting a message is the platform's: Flow Messaging sends one

@@ -511,7 +511,8 @@ export class Agent {
       windowClosed: (nudge, to) => this.windowClosed(nudge, to),
       get tagChannels() { return channels.size > 1; },
       links: (id) => this.links(id),
-      elsewhere: (id) => this.elsewhere(id),
+      // What the person said on their other channels is extra context: a store that fails it leaves the turn without it.
+      elsewhere: (id) => this.elsewhere(id).catch((error) => (console.warn("flow: the person's other conversations could not be read:", error instanceof Error ? error.message : error), [])),
       settle: (target, status, reason, messageId) => this.settle(target, status, reason, messageId),
     };
     for (const channel of this.channelsByName.values()) {
