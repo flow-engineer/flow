@@ -47,8 +47,9 @@ their defaults, and what `buildAgent` is passed by `flow test` and Flow's hostin
 - The HTTP agent contract `flow check-endpoint` checks, and the business events envelope and answers
   ([events.md](events.md)).
 - The web chat's HTTP contract under `/v1/web-chat` (sessions, history, events over SSE or
-  long-polling, messages, the identity token's claims, error codes) and the chat box's script tag
-  and its `data-` attributes and `FlowChat` API ([channels.md](channels.md#webchatoptions)).
+  long-polling, messages, the identity token's claims, error codes) and the chat box's script tag:
+  its `data-` attributes, the `FlowChat` API, the `flowchat:open` and `flowchat:message` events and
+  the `--flow-chat-*` CSS properties ([channels.md](channels.md#webchatoptions)).
 
 ### The `flow` command
 

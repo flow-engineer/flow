@@ -91,7 +91,17 @@ element, which needs `'unsafe-inline'`). Sites that enforce Trusted Types are no
 ```
 
 The agent's send tool is `send_web`; `beforeSend`, content rules, traces (channel `web`) and tests
-behave as on every channel, and the playground plays it as its web simulator.
+behave as on every channel, and the playground plays it as its web simulator. Two channels cannot
+share a name: the starter `flow new` writes has a placeholder `customUI("web", provider)`; replace it
+with `webChat()` (or give one of them another `name`).
+
+The box's script tag takes `data-title`, `data-greeting`, `data-avatar` (an https URL),
+`data-context` (JSON), `data-identity-url`, `data-theme` (`auto`, `light`, `dark`), `data-position`
+(`right`, `left`) and `data-lang` (`en`, `hi`; default the page's language). Theme it with CSS
+properties on the `flow-chat` element (`--flow-chat-accent`, `--flow-chat-accent-text`,
+`--flow-chat-font`, `--flow-chat-radius`). The page can call `FlowChat.open()`, `.close()`,
+`.setContext({...})`, `.signIn()` (asks `data-identity-url` again) and `.signOut()`, and listen for
+the `flowchat:open` and `flowchat:message` events.
 
 | Option | What it does |
 |---|---|
@@ -108,7 +118,7 @@ behave as on every channel, and the playground plays it as its web simulator.
 they come back), kept in the browser, and the agent knows them as `web:visitor:<id>`. Safari deletes
 what a script stored after 7 days without a visit; they then start afresh. To make a signed-in
 visitor the same person as on WhatsApp, your backend signs them a short identity token, an HS256
-JWT `{ sub, aud: "flow-web-chat", iat, exp }` valid at most 10 minutes, `sub` being the key your
+JWT `{ sub, aud: "flow-web-chat", exp }` (`iat` optional) valid at most 10 minutes, `sub` being the key your
 `resolve` gives for them; any JWT library makes it, or in Node:
 
 ```ts
@@ -123,8 +133,8 @@ conversation and every tool. An anonymous visitor's chat stays apart from their 
 sign in.
 
 **The page they wrote from.** Each message carries the page (`url`, `title`) and the site's own
-details (`data-context`, or `FlowChat.setContext({...})`), at most 1 KB, the URL on one of the
-allowed sites. The agent reads it as one line of data in its turn, never as instructions, and tools
+details (`data-context`, or `FlowChat.setContext({...})`), at most 1 KB (the box drops the title,
+then the details, then the URL's query to fit), the URL on one of the allowed sites. The agent reads it as one line of data in its turn, never as instructions, and tools
 get it as `context.page` (`{ url, title?, context? }`).
 
 **Protection.** The allowed sites stop other websites embedding the agent; they do not stop a
@@ -153,7 +163,7 @@ CORS for the allowed sites):
 |---|---|
 | `POST /session { visitor?, identity? }` | `200 { session, expires_at, signed_in, visitor?, limits }`: a session for 1 hour. Give the stored `visitor` credential to stay the same visitor (the answer has it renewed: store it), or an `identity` token. `401 identity_invalid`, `429 rate_limited` |
 | `GET /history` | `200 { messages, cursor }`: the conversation on this channel, oldest first (entries older than the outbox have `seq: 0`), and the newest number |
-| `GET /events?after=<seq>` | With `Accept: text/event-stream`: server-sent events `hello { cursor }`, `message` (each event, its number as the SSE `id`), `live { typing, status }`, `reset` (read the history again), `reconnect { cursor }` after 14 minutes, a ping every 15 s. Otherwise a long-poll of up to 25 s: `200 { events, cursor, live }` or `{ reset: true }`. Show each number once |
+| `GET /events?after=<seq>` | With `Accept: text/event-stream`: server-sent events `hello { cursor }`, `message` (each event, its number as the SSE `id`), `live { typing, status }`, `reset` (read the history again), `reconnect { cursor }` after 14 minutes, a ping every 15 s. Otherwise a long-poll of up to 25 s (`wait=<seconds>` for less): `200 { events, cursor, live }` or `{ reset: true }`. Show each number once |
 | `POST /messages { id, text, choice?, page?, context? }` | `202 { id }` once the store has it; the same `id` again is taken once. `202 { id, busy: true }` past the daily cap. `400`, `413`, `429` with `retry_after`, `503` (send it again) |
 | `GET /widget.js`, `GET /widget/<name>.js` | The chat box |
 

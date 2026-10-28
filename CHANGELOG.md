@@ -50,6 +50,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   until Flow updates it. Agents that keep their own database migrate it themselves as they start.
 - **A store of your own that forwards Store calls** (a `StoreApi` other than `Store`) must serve
   the six new methods above, and run migration 12, before the agent uses `webChat()`.
+- **Adding `webChat()` to the starter:** its placeholder `customUI("web", provider)` has the same
+  name, and two channels cannot share one (`flow: two channels have the same name`). Replace the
+  placeholder with `webChat({ origins: [...] })`.
 - Nothing else changes for an agent that does not add `webChat()`.
 
 ## 0.10.5 (2026-10-27)
