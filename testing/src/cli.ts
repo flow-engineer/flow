@@ -20,7 +20,7 @@
 // and `flow show <run>` prints one run's record from the cloud (testing/src/show.ts).
 // `flow login`, `logout`, `whoami`, `setup` and `link` sign in to flow.engineer and get the agent's
 // keys and its phone link (testing/src/account.ts). `flow deploy` puts the agent on Flow's hosting
-// (testing/src/deploy.ts).
+// (testing/src/deploy.ts), and `flow cli pack|publish|rollback|status` ships its CLI (testing/src/cli-pack.ts).
 
 import { mkdirSync, existsSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -39,7 +39,7 @@ import { CHECK_LINE as TOOLS_CHECK_LINE, checkCli, mcpUpdateCli } from "./check.
 import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
 import { RECORDS_LINE, recordsCli } from "./records.ts";
-import { DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
+import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
@@ -151,7 +151,7 @@ the CHINWAG_ names from before the rename still work):
                            GEMINI_API_KEY: the first with a value is used, else FLOW_KEY
                            (the agent's Flow key, on its trial credit; flow setup writes it)`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
-const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${RECORDS_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${INSPECT_LINE}
+const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${RECORDS_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${CLI_RELEASE_LINE}\n${INSPECT_LINE}
 ${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${DEPLOY_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
 
 /** What to do after new or init, from step 2; a model key comes first when none is set here. */
@@ -186,6 +186,8 @@ if (process.argv[2] === "mcp") {
   await withPeers("mcp update", () => import("../../mcp/src/client.ts"));
   process.exit(await mcpUpdateCli());
 }
+// The agent's own CLI, shipped: pack, publish, rollback, status (testing/src/deploy.ts, cli-pack.ts).
+if (process.argv[2] === "cli" && ["pack", "publish", "rollback", "status"].includes(process.argv[3] ?? "")) process.exit(await cliReleaseCli(process.argv.slice(3)));
 if (process.argv[2] === "cli") {
   // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client and @stricli/core, optional peers.
   const { defineCli, runCli } = await withPeers("cli", () => import("../../cli/src/index.ts"));

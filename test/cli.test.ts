@@ -284,6 +284,24 @@ test("a tool's format is what people see, rendered at a terminal; --json, --fiel
   assert.equal(await run(cli(["key.id", "manage_url"]), []), "key.id      key_1\nmanage_url  https://acme.test/keys\n");
 });
 
+test("a formatted table's headers are the brand's accent at the terminal's depth, cyan without one, never cli-table3's red", async () => {
+  const table = tool({ name: "plans", description: "Plans.", input: z.object({}), output: z.object({}), signIn: "none", hints: { readOnly: true }, run: () => ({}), format: () => "| Plan | Price |\n| --- | --- |\n| Pro | $20 |\n" });
+  const server = await serve({ tools: [table] });
+  const run = async (brand: CliConfig["brand"], env: Record<string, string>) => {
+    const out = io(true);
+    out.channel.env = env;
+    assert.equal(await runCli(defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-")), server, brand }), ["plans"], out.channel), 0);
+    return out.out;
+  };
+  const rgb = await run({ accent: "#645bff" }, { COLORTERM: "truecolor" });
+  assert.match(rgb, /\u001b\[38;2;100;91;255m Plan/);
+  assert.doesNotMatch(rgb, /\u001b\[3[16]m/);
+  assert.match(await run({ accent: "#645bff" }, { TERM: "xterm-256color" }), /\u001b\[38;5;\d+m Plan/);
+  const plain = await run(undefined, {});
+  assert.match(plain, /\u001b\[36m Plan/);
+  assert.doesNotMatch(plain, /\u001b\[31m/);
+});
+
 test("a group's help lists its subcommands, and the top level lists groups and commands, styled at a terminal", async () => {
   const cli = acme(await serve({ tools: [listOrders, getOrder, cancelOrder] }));
   for (const argv of [["order"], ["order", "-h"]]) {
@@ -914,7 +932,7 @@ test("update says when this is the newest version, else runs the CLI file's upda
   assert.deepEqual(cliProblems(defineCli({ name: "acme", update: { command: installs }, commands: { update: { tool: "update" } } }), updateTool).errors, [], "the CLI file's own update replaces Flow's");
 });
 
-test("a person at a terminal hears of a newer version after a command, asked at most once a day; scripts and --json never", async () => {
+test("a person at a terminal hears of a newer version after a command, or that theirs was withdrawn, asked at most once a day; scripts and --json never", async () => {
   let asked = 0;
   const latest = `${await listen((_req, res) => { asked++; res.end(JSON.stringify({ version: "1.3.0" })); })}/latest.json`;
   const cli = defineCli({ name: "acme", version: "1.2.0", directory: mkdtempSync(join(testDirectory, "flow-cli-notice-")), welcome: false, update: { command: "true", latest } });
@@ -933,6 +951,13 @@ test("a person at a terminal hears of a newer version after a command, asked at 
   writeFileSync(join(cli.directory!, "update.json"), JSON.stringify({ checkedAt: Date.now() - 25 * 60 * 60_000, latest: "1.3.0" }));
   await run(true);
   assert.equal(asked, 2, "a day later it asks again");
+  // A rolled-back build: the published version is older, but this one is withdrawn.
+  const withdrawn = `${await listen((_req, res) => res.end(JSON.stringify({ version: "1.1.0", withdrawn: ["1.2.0"] })))}/version.json`;
+  const rolledBack = defineCli({ ...cli, directory: mkdtempSync(join(testDirectory, "flow-cli-notice-")), update: { command: "true", latest: withdrawn } });
+  const ran = io(true);
+  ran.channel.env = {};
+  assert.equal(await runCli(rolledBack, ["--help"], ran.channel), 0);
+  assert.match(stripVTControlCharacters(ran.err), /This version of acme \(1\.2\.0\) was withdrawn; 1\.1\.0 replaces it\. Run acme update to get it\./);
 });
 
 // The help tests cover --help; a bare run is the one place a person and an agent see different things.

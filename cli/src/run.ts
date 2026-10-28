@@ -778,7 +778,7 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
       // The tool's own text, unless the person asked for data or the CLI file chose what to show.
       if (settings?.print && !parsed.json && !parsed.fields) return void io.write(`${(await settings.print(valueOf(result))).replace(/\n*$/, "")}\n`);
       const formatted = (result._meta as Record<string, unknown> | undefined)?.[FORMATTED] === true && !parsed.json && !parsed.fields && !settings?.columns && !settings?.view;
-      if (formatted) return void io.write(`${(await forTerminal(textOf(result.content as Block[]), io)).replace(/\n*$/, "")}\n`);
+      if (formatted) return void io.write(`${(await forTerminal(textOf(result.content as Block[]), io, config)).replace(/\n*$/, "")}\n`);
       io.write(`${render(valueOf(result), { json: Boolean(parsed.json), fields: parsed.fields as string[] | undefined, columns: settings?.columns, view: settings?.view })}\n`);
     },
   });
@@ -830,8 +830,9 @@ function updateCommand(config: CliConfig, io: CliIO): StricliCommand<CliContext>
     docs: { brief: `Update ${config.name} to its newest version`, fullDescription: `Update ${config.name} to its newest version. Runs: ${command}` },
     parameters: {},
     async func() {
-      const newest = latest && config.version ? await newestVersion(config, io.signal ?? AbortSignal.timeout(10_000)) : undefined;
-      if (newest !== undefined && !isNewer(newest, config.version!)) return void io.write(`${config.name} ${config.version} is the newest version.\n`);
+      const answer = latest && config.version ? await newestVersion(config, io.signal ?? AbortSignal.timeout(10_000)) : undefined;
+      if (answer !== undefined && !offered(answer, config.version!)) return void io.write(`${config.name} ${config.version} is the newest version.\n`);
+      const newest = answer?.version;
       io.writeError(`Updating ${config.name}${newest ? ` to ${newest}` : ""}...\n`);
       const code = await new Promise<number | string>((done) => {
         const child = spawn(command, { shell: true, stdio: ["inherit", "pipe", "pipe"], env: io.env ?? process.env, signal: io.signal });
@@ -854,29 +855,44 @@ async function updateNotice(config: CliConfig, argv: string[], io: CliIO, signal
   const env = io.env ?? process.env;
   if (!config.update?.latest || !config.version || !person(io) || env.CI || argv.includes("--json") || (argv[0] === "update" && updatesItself(config))) return undefined;
   const file = join(configDir(config), "update.json");
-  let saved: { checkedAt?: number; latest?: string } = {};
+  let saved: { checkedAt?: number; latest?: string; withdrawn?: boolean } = {};
   try { saved = JSON.parse(readFileSync(file, "utf8")); } catch {}
-  let newest = typeof saved.latest === "string" ? saved.latest : undefined;
+  let newest: Newest | undefined = typeof saved.latest === "string" ? { version: saved.latest, withdrawn: saved.withdrawn === true } : undefined;
   const checkedAt = Number(saved.checkedAt);
   if (!(Date.now() - checkedAt < UPDATE_EVERY_MS && checkedAt <= Date.now())) {
     // Saved before asking: a check that fails or is cut short waits a day like one that answered.
     const save = (value: object) => { try { mkdirSync(dirname(file), { recursive: true, mode: 0o700 }); writeFileSync(file, JSON.stringify(value), { mode: 0o600 }); } catch {} };
-    save({ checkedAt: Date.now(), ...(newest ? { latest: newest } : {}) });
+    save({ checkedAt: Date.now(), ...(newest ? { latest: newest.version, withdrawn: newest.withdrawn } : {}) });
     const answer = await newestVersion(config, signal);
-    if (answer !== undefined) save({ checkedAt: Date.now(), latest: newest = answer });
+    if (answer !== undefined) save({ checkedAt: Date.now(), latest: (newest = answer).version, withdrawn: answer.withdrawn });
   }
-  if (!newest || !isNewer(newest, config.version)) return undefined;
+  if (!newest || !offered(newest, config.version)) return undefined;
   const paint = painter(io);
-  return `\n${paint("dim", `A new version of ${config.name} is out: ${newest} (you have ${config.version}).`)} Run ${paint("cyan", `${config.name} update`)} to get it.\n`;
+  const line = newest.withdrawn ? `This version of ${config.name} (${config.version}) was withdrawn; ${newest.version} replaces it.` : `A new version of ${config.name} is out: ${newest.version} (you have ${config.version}).`;
+  return `\n${paint("dim", line)} Run ${paint("cyan", `${config.name} update`)} to get it.\n`;
 }
 
-/** The version update.latest names, or undefined when it cannot be read. */
-async function newestVersion(config: CliConfig, signal: AbortSignal): Promise<string | undefined> {
+/** What update.latest answered: its version, and whether it names this CLI's version as withdrawn (a rolled-back build). */
+interface Newest {
+  version: string;
+  withdrawn: boolean;
+}
+
+/** Whether to offer the version update.latest answered: a newer build, or any other build when this one was withdrawn. */
+const offered = (newest: Newest, current: string) => isNewer(newest.version, current) || (newest.withdrawn && newest.version !== current);
+
+/**
+ * The version update.latest names, or undefined when it cannot be read. Its `withdrawn`, a list of
+ * versions taken back (Flow's hosting lists the ones a rollback replaced), marks this CLI's own.
+ */
+async function newestVersion(config: CliConfig, signal: AbortSignal): Promise<Newest | undefined> {
   try {
     const response = await fetch(config.update!.latest!, { signal, headers: { accept: "application/json" } });
     if (!response.ok) return undefined;
-    const version = ((await response.json()) as { version?: unknown })?.version;
-    return typeof version === "string" && /^v?\d+\.\d+\.\d+/.test(version) ? version : undefined;
+    const answer = (await response.json()) as { version?: unknown; withdrawn?: unknown };
+    const version = answer?.version;
+    if (typeof version !== "string" || !/^v?\d+\.\d+\.\d+/.test(version)) return undefined;
+    return { version, withdrawn: Array.isArray(answer.withdrawn) && answer.withdrawn.includes(config.version) };
   } catch { return undefined; }
 }
 

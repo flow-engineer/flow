@@ -151,6 +151,12 @@ export interface CliConfig {
    * replaces Flow's.
    */
   update?: { command: string; latest?: string };
+  /**
+   * Files the CLI reads at run time (a catalog, a logo), relative to the package's folder.
+   * `flow cli pack` ships them at the same paths beside the bundle (dist/cli.js), so code in
+   * src/cli.ts that reads `new URL("../context/x.json", import.meta.url)` finds them installed too.
+   */
+  files?: string[];
 }
 
 export interface Brand {
@@ -213,8 +219,15 @@ export interface Command {
   config?: ToolCommand | CustomCommand;
 }
 
+/** What `flow cli pack` bakes into a packed CLI (esbuild's define); absent when run from source. */
+declare const __FLOW_CLI_PACK__: { server: string; version: string; update: { command: string; latest: string } } | undefined;
+
 export function defineCli(config: CliConfig): CliConfig {
-  return config;
+  if (typeof __FLOW_CLI_PACK__ === "undefined") return config;
+  // A packed CLI talks to the server it was packed for, unless <NAME>_SERVER says otherwise, and
+  // updates itself from where it was published unless the CLI file says how.
+  const env = process.env[`${config.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_SERVER`];
+  return { ...config, server: env || __FLOW_CLI_PACK__.server, version: __FLOW_CLI_PACK__.version, update: config.update ?? __FLOW_CLI_PACK__.update };
 }
 
 /**

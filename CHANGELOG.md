@@ -2,6 +2,59 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased (0.11.0)
+
+### Changes
+
+- **`flow cli pack`: ship the agent's CLI without a pack script.** `npx @flow-engineer/flow cli pack
+  --server staging|production|<url> [--base-url <url>] [--out release]` bundles `src/cli.ts` with
+  esbuild (ES modules with code splitting, a `require` for bundled CommonJS packages), bakes in the
+  server, the version (`<package version>-<env>.<commit>`, `.dirty.<time>` with uncommitted changes, so each such pack is its own version) and
+  `update`, installs the package into a scratch prefix and runs `--help` and `auth status --help`
+  through its bin link with a fresh config folder, then writes `release/<name>-<version>.tgz`,
+  `release/<name>.tgz`, `release/install.sh` and `release/version.json`. Serve the four together at
+  `--base-url` (default: the server's origin plus `/cli`). `staging` and `production` use the
+  agent's address on Flow's hosting plus `/mcp`.
+- **The installer.** `install.sh` installs into `~/.<name>` with npm (no sudo), checks Node and the
+  download's sha256 first, refuses to replace another `<name>` on PATH, links the command into the
+  first writable PATH folder, else adds one marked line to the shell's rc file (zsh, bash and its
+  login file, fish, `.profile`) once, and words everything with the brand's name. `<NAME>_HOME` and
+  `<NAME>_CLI_URL` override where it installs and what it downloads.
+- **`flow deploy` publishes the CLI.** With a CLI file, `flow deploy` (and `deploy promote`) pack it
+  for the environment once the agent is live and publish it to Flow's hosting, which serves it from
+  the agent's address: `curl -fsSL https://<address> | sh`. `--no-cli` skips it; a failure leaves the
+  agent live and says to run `flow cli publish`; a cloud that hosts no CLIs yet says so and the
+  deploy succeeds. `flow cli publish`, `flow cli rollback <version>` and `flow cli status` publish,
+  restore and list versions without redeploying the agent.
+- **`defineCli({ files })`.** Files the CLI reads at run time ship beside the bundle at the same
+  paths, so `new URL("../context/x.json", import.meta.url)` from `src/cli.ts` finds them installed.
+- **A packed CLI's server, version and update.** A CLI packed by `flow cli pack` talks to the server
+  it was packed for unless `<NAME>_SERVER` says otherwise, reports its packed version, and gets
+  `update` (rerun the installer; `latest` is `version.json`) unless the CLI file sets its own.
+- **A withdrawn version is offered an update.** `update.latest` may answer `withdrawn`, the versions
+  taken back; a CLI whose own version is listed sees "This version of acme (…) was withdrawn; … replaces
+  it" and `acme update` installs the replacement, even when it is older. Flow's hosting lists the
+  versions a rollback replaced.
+- **Table headers follow `brand.accent`.** Tables in a tool's formatted output and in chat were
+  printed with cli-table3's red headers. They are now the brand's accent at the terminal's color
+  depth (RGB, 256 or 16 colors, as the welcome banner), and cyan without an accent.
+- **The starter's CLI file runs when installed.** It compared `process.argv[1]` with its own path,
+  which npm's bin link (a symlink) never matches, so an installed command printed nothing. It now
+  compares real paths. `release/` is in the starter's `.gitignore` and left out of `flow deploy`'s upload.
+- **New dependency: esbuild** (exact pin), for `flow cli pack`.
+
+### Migration notes
+
+- A CLI file written from the starter or the skills before 0.11 runs nothing when installed through
+  npm's bin link. Change its last line to compare real paths:
+  `if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) process.exit(await runCli(cli, process.argv.slice(2)));`
+  (`import { realpathSync } from "node:fs"`). `flow cli pack` refuses a CLI that prints nothing.
+- `flow cli pack`, `publish`, `rollback` and `status` are now Flow's own commands: `flow cli
+  --server <url> pack` against a server with a tool named `pack` (or the others) needs the tool's
+  full command name.
+- A team with its own pack script can delete it and its upload step: `flow deploy` (or `flow cli
+  pack` for another host) replaces both. A `marked-terminal` patch for table colors can go too.
+
 ## 0.10.6 (2026-10-28)
 
 ### Changes

@@ -7,7 +7,7 @@ import { parseArgs, styleText, stripVTControlCharacters } from "node:util";
 import { configDir, isSignedIn, storedAccessToken } from "./auth.ts";
 import { brandOf, HEX, tokenEnvOf, type CliConfig } from "./commands.ts";
 import type { CliIO } from "./run.ts";
-import { codingAgent } from "./welcome.ts";
+import { codingAgent, colorCode, colorDepth } from "./welcome.ts";
 
 export type ChatUpdate =
   | { type: "reply"; text: string }
@@ -140,7 +140,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
     if (flags.values.json) io.write(`${JSON.stringify(result)}\n`);
     else {
       const text = messages.join(humanChat ? "\n\n" : "\n");
-      const rendered = await forTerminal(io.interactive ? safe(text) : text, io);
+      const rendered = await forTerminal(io.interactive ? safe(text) : text, io, config);
       const body = io.interactive ? rendered.trimEnd() : rendered;
       if (humanChat && body) io.write(`\n${paint(["bold", "green"], config.name)}\n${body.split("\n").map(line => `  ${line}`).join("\n")}\n\n`);
       else io.write(`${body}\n`);
@@ -200,12 +200,26 @@ export function forgetChat(config: CliConfig, server: string): void {
   writeFileSync(file, `${JSON.stringify(saved)}\n`, { mode: 0o600 });
 }
 
+/** A rendered table with its header row's cells (the line after the top border) in `code`. */
+function paintHeader(rendered: string, code: string): string {
+  const lines = rendered.split("\n");
+  if (lines.length > 2) lines[1] = lines[1].replace(/(?<=│)((?:\u001b\[[0-9;]*m)*)([^│\u001b]+)((?:\u001b\[[0-9;]*m)*)(?=│)/g, (_, lead: string, text: string, trail: string) => `${lead}\u001b[${code}m${text}\u001b[39m${trail}`);
+  return lines.join("\n");
+}
+
 /** The same optional Markdown renderer for chat and tool output. Pipes retain the source. */
-export async function forTerminal(markdown: string, io: CliIO): Promise<string> {
+export async function forTerminal(markdown: string, io: CliIO, config: CliConfig): Promise<string> {
   const env = io.env ?? process.env;
   if (!io.interactive || env.NO_COLOR || env.TERM === "dumb") return markdown;
   try {
     const [{ Marked }, { markedTerminal }] = await Promise.all([import("marked"), import("marked-terminal")]);
-    return await new Marked(markedTerminal({ showSectionPrefix: false, width: Math.max(20, (process.stdout.columns ?? 80) - 4), reflowText: true }) as never).parse(markdown);
+    // Headers are painted here, after cli-table3 lays the table out: its own colors come from an optional
+    // package that also decides by itself whether the stream takes color. The brand's accent, else cyan.
+    const extension = markedTerminal({ showSectionPrefix: false, width: Math.max(20, (process.stdout.columns ?? 80) - 4), reflowText: true, tableOptions: { style: { head: [] } } } as never) as unknown as { renderer: Record<string, (...args: unknown[]) => string> };
+    const hex = brandOf(config).accent;
+    const code = (hex && HEX.test(hex) ? colorCode(hex, colorDepth(env)) : undefined) ?? "36";
+    const table = extension.renderer.table;
+    if (table) extension.renderer.table = function (this: unknown, ...args: unknown[]) { return paintHeader(table.apply(this, args), code); };
+    return await new Marked(extension as never).parse(markdown);
   } catch { return markdown; }
 }

@@ -239,7 +239,7 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
   // An existing .gitignore (flow init in a fresh repository) keeps its lines and gets the missing ones.
   const ignore = join(dir, ".gitignore");
   const ignored = existsSync(ignore) ? readFileSync(ignore, "utf8") : "";
-  const missing = ["node_modules/", ".env", ".flow/"].filter((line) => !ignored.split("\n").includes(line));
+  const missing = ["node_modules/", ".env", ".flow/", "release/"].filter((line) => !ignored.split("\n").includes(line));
   if (missing.length) writeFileSync(ignore, `${ignored}${ignored && !ignored.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`);
   // npm install then refuses a Node older than the engines field says, before .ts files fail to load.
   writeFileSync(join(dir, ".npmrc"), "engine-strict=true\n");
