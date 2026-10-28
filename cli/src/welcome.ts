@@ -5,7 +5,7 @@
 
 import { emitKeypressEvents } from "node:readline";
 import { styleText } from "node:util";
-import { brandOf, type CliConfig } from "./commands.ts";
+import { brandOf, updatesItself, type CliConfig } from "./commands.ts";
 import type { CliIO } from "./run.ts";
 
 /** Claude Code, Cursor and Codex mark their commands' environment; their terminal is not a person's. */
@@ -153,7 +153,7 @@ export function waitsForSignIn(config: CliConfig, words: string[]): boolean {
   if (words.includes("--help") || words.includes("-h")) return false;
   const first = words.filter((w) => !w.startsWith("-"));
   const except = typeof config.signInFirst === "object" ? (config.signInFirst.except ?? []) : [];
-  return !["auth", "help", ...except].some((e) => {
+  return !["auth", "help", ...(updatesItself(config) ? ["update"] : []), ...except].some((e) => {
     const parts = e.trim().split(/\s+/);
     return parts.every((p, i) => first[i] === p);
   });

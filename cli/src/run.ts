@@ -13,6 +13,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } 
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
+import { setTimeout as delay } from "node:timers/promises";
 import { styleText } from "node:util";
 import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider, type Tool as McpTool } from "@modelcontextprotocol/client";
 import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
@@ -37,6 +38,7 @@ import {
   skillFile,
   tokenEnvOf,
   typeHint,
+  updatesItself,
   type CliConfig,
   type CliContext,
   type Command,
@@ -149,6 +151,17 @@ function noServer(config: CliConfig): string {
 /** Run the CLI once; resolves with its exit code. */
 export async function runCli(config: CliConfig, argv: string[], io: CliIO = processIO()): Promise<number> {
   io.signal?.throwIfAborted();
+  const checking = new AbortController();
+  const notice = updateNotice(config, argv, io, checking.signal);
+  const code = await runOnce(config, argv, io);
+  // A slow check gets a moment after the command, never longer; it is asked again the next day.
+  const line = await Promise.race([notice, delay(UPDATE_WAIT_MS, undefined, { signal: checking.signal }).catch(() => undefined)]);
+  checking.abort();
+  if (line) io.writeError(line);
+  return code;
+}
+
+async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<number> {
   const env = io.env ?? process.env;
   const { rest, server: given, token: givenToken, refresh } = connectionFlags(config, argv);
   // A group with a default subcommand, alone, shows its help rather than running the default.
@@ -186,7 +199,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
   const custom = Boolean(local?.command.config && isCustom(local.command.config));
   const prefix = rest.filter(w => w !== "--help" && w !== "-h").join(" ");
   const children = commandEntries(config).filter(([words]) => words.startsWith(`${prefix} `));
-  const localOnly = custom || Boolean(prefix && children.length && children.every(([, command]) => isCustom(command)));
+  const localOnly = custom || (rest[0] === "update" && updatesItself(config)) || Boolean(prefix && children.length && children.every(([, command]) => isCustom(command)));
   const asksHelp = rest.length === 0 || rest[0] === "-h" || rest[0] === "--help";
 
   let client: Client | undefined;
@@ -594,6 +607,7 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
   const own: Record<string, Target> = {
     tools: toolsCommand(tools, io), skill: skillCommand(config, tools, call, io, server ? refresh : undefined), auth: authRoutes(config, server, io, replaced.get("auth status")),
   };
+  if (updatesItself(config)) own.update = updateCommand(config, io);
   if (!top.help) own.help = helpCommand(config, tools, top, own, io);
   const all = { chat: top.chat ?? buildCommand({ docs: { brief: CHAT_BRIEF }, parameters: {}, func() {} }), ...top, ...own };
   const theirs = Object.keys(top).filter((word) => word !== "chat");
@@ -804,6 +818,78 @@ function parserFor(field: string, schema: JsonSchema): (input: string) => unknow
   if (kind === "boolean") return parseBoolean;
   if (kind === "json") return (v) => JSON.parse(v.startsWith("@") ? readFileSync(v.slice(1), "utf8") : v);
   return String;
+}
+
+const UPDATE_EVERY_MS = 24 * 60 * 60_000;
+const UPDATE_WAIT_MS = 1_000;
+
+/** `acme update`: says so when this is already the newest version, else runs the CLI file's update command. */
+function updateCommand(config: CliConfig, io: CliIO): StricliCommand<CliContext> {
+  const { command, latest } = config.update!;
+  return buildCommand<{}, [], CliContext>({
+    docs: { brief: `Update ${config.name} to its newest version`, fullDescription: `Update ${config.name} to its newest version. Runs: ${command}` },
+    parameters: {},
+    async func() {
+      const newest = latest && config.version ? await newestVersion(config, io.signal ?? AbortSignal.timeout(10_000)) : undefined;
+      if (newest !== undefined && !isNewer(newest, config.version!)) return void io.write(`${config.name} ${config.version} is the newest version.\n`);
+      io.writeError(`Updating ${config.name}${newest ? ` to ${newest}` : ""}...\n`);
+      const code = await new Promise<number | string>((done) => {
+        const child = spawn(command, { shell: true, stdio: ["inherit", "pipe", "pipe"], env: io.env ?? process.env, signal: io.signal });
+        child.stdout.on("data", (chunk) => io.write(String(chunk)));
+        child.stderr.on("data", (chunk) => io.writeError(String(chunk)));
+        child.on("error", (error) => done(error.message));
+        child.on("close", (exit, signal) => done(exit ?? signal ?? 1));
+      });
+      if (code !== 0) throw new CliExit(EXIT.failed, `The update did not finish (${typeof code === "number" ? `exit ${code}` : code}). Run it again, or run it yourself: ${command}`);
+    },
+  });
+}
+
+/**
+ * The line a person at a terminal sees after a command when a newer version is out: from the saved
+ * answer (update.json in the CLI's config folder), asked of update.latest again once a day. Never
+ * for scripts, coding agents, CI or --json, and never during `update`.
+ */
+async function updateNotice(config: CliConfig, argv: string[], io: CliIO, signal: AbortSignal): Promise<string | undefined> {
+  const env = io.env ?? process.env;
+  if (!config.update?.latest || !config.version || !person(io) || env.CI || argv.includes("--json") || (argv[0] === "update" && updatesItself(config))) return undefined;
+  const file = join(configDir(config), "update.json");
+  let saved: { checkedAt?: number; latest?: string } = {};
+  try { saved = JSON.parse(readFileSync(file, "utf8")); } catch {}
+  let newest = typeof saved.latest === "string" ? saved.latest : undefined;
+  const checkedAt = Number(saved.checkedAt);
+  if (!(Date.now() - checkedAt < UPDATE_EVERY_MS && checkedAt <= Date.now())) {
+    // Saved before asking: a check that fails or is cut short waits a day like one that answered.
+    const save = (value: object) => { try { mkdirSync(dirname(file), { recursive: true, mode: 0o700 }); writeFileSync(file, JSON.stringify(value), { mode: 0o600 }); } catch {} };
+    save({ checkedAt: Date.now(), ...(newest ? { latest: newest } : {}) });
+    const answer = await newestVersion(config, signal);
+    if (answer !== undefined) save({ checkedAt: Date.now(), latest: newest = answer });
+  }
+  if (!newest || !isNewer(newest, config.version)) return undefined;
+  const paint = painter(io);
+  return `\n${paint("dim", `A new version of ${config.name} is out: ${newest} (you have ${config.version}).`)} Run ${paint("cyan", `${config.name} update`)} to get it.\n`;
+}
+
+/** The version update.latest names, or undefined when it cannot be read. */
+async function newestVersion(config: CliConfig, signal: AbortSignal): Promise<string | undefined> {
+  try {
+    const response = await fetch(config.update!.latest!, { signal, headers: { accept: "application/json" } });
+    if (!response.ok) return undefined;
+    const version = ((await response.json()) as { version?: unknown })?.version;
+    return typeof version === "string" && /^v?\d+\.\d+\.\d+/.test(version) ? version : undefined;
+  } catch { return undefined; }
+}
+
+/**
+ * Whether `latest` is a newer build than `current`: a higher major.minor.patch, or the same with
+ * another suffix (a rebuild such as 0.1.2-production.ece030e), since latest is what was published.
+ */
+function isNewer(latest: string, current: string): boolean {
+  const core = (v: string) => /^v?(\d+)\.(\d+)\.(\d+)/.exec(v)?.slice(1).map(Number);
+  const a = core(latest), b = core(current);
+  if (!a || !b) return false;
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i]! > b[i]!;
+  return latest.replace(/^v/, "") !== current.replace(/^v/, "");
 }
 
 function toolsCommand(tools: ToolInfo[], io: CliIO): StricliCommand<CliContext> {

@@ -6,6 +6,20 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **`acme update`, and a notice when a newer CLI is out.** A CLI file can set
+  `update: { command, latest }`. `acme update` runs `command` in a shell (an install script such as
+  `curl -fsSL https://acme.example/install.sh | sh`, or `npm install -g acme@latest`) and shows its
+  output; a failure exits 1 with the command to run by hand. `latest` is a URL answering JSON with a
+  `version` (npm's `https://registry.npmjs.org/<package>/latest` already does), compared with the
+  CLI's `version`: `acme update` says when this is already the newest, and a person at a terminal
+  sees one line after a command when a newer version is out, such as "A new version of acme is out:
+  1.3.0 (you have 1.2.0). Run acme update to get it." It is asked at most once a day (the answer is
+  kept in `update.json` in the CLI's config folder) and given a second after the command at most;
+  scripts, coding agents, `CI` and `--json` never see it or ask. A version with the same
+  major.minor.patch and another suffix (a rebuild) counts as newer. `update` never asks for sign-in.
+  A command of the team's own named `update` replaces Flow's; with `update` set, a tool whose
+  command would be `update` needs another name in `commands` (`flow check` says so).
+
 - **iMessage has no 24-hour window, and the text now says so.** `flow link --channel imessage`
   says the agent can reply after you write first, any time later; `docs/agents.md` and the
   flow-messaging README no longer put iMessage under WhatsApp's 24-hour rule. On iMessage the only
