@@ -150,6 +150,9 @@ function noServer(config: CliConfig): string {
 
 /** Run the CLI once; resolves with its exit code. */
 export async function runCli(config: CliConfig, argv: string[], io: CliIO = processIO()): Promise<number> {
+  // Packed into one file with the CLI file (flow cli pack), the worker's process runs the CLI file
+  // too, once the worker is done: there is nothing left to run.
+  if (refreshWorker && argv[0] === REFRESH_ARG) return 0;
   io.signal?.throwIfAborted();
   const checking = new AbortController();
   const notice = updateNotice(config, argv, io, checking.signal);
@@ -492,7 +495,8 @@ function backgroundDiscovery(config: CliConfig, server: string, token: string | 
 }
 
 // Internal worker entry point; importing the CLI never launches it.
-if (process.argv[2] === REFRESH_ARG && process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
+const refreshWorker = process.argv[2] === REFRESH_ARG && Boolean(process.argv[1]) && pathToFileURL(resolve(process.argv[1]!)).href === import.meta.url;
+if (refreshWorker) {
   let file: string | undefined;
   const release = () => { if (file) { try { rmSync(`${file}.refresh`, { recursive: true, force: true }); } catch {} } };
   process.once("exit", release);
@@ -778,7 +782,7 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
       // The tool's own text, unless the person asked for data or the CLI file chose what to show.
       if (settings?.print && !parsed.json && !parsed.fields) return void io.write(`${(await settings.print(valueOf(result))).replace(/\n*$/, "")}\n`);
       const formatted = (result._meta as Record<string, unknown> | undefined)?.[FORMATTED] === true && !parsed.json && !parsed.fields && !settings?.columns && !settings?.view;
-      if (formatted) return void io.write(`${(await forTerminal(textOf(result.content as Block[]), io)).replace(/\n*$/, "")}\n`);
+      if (formatted) return void io.write(`${(await forTerminal(textOf(result.content as Block[]), io, config)).replace(/\n*$/, "")}\n`);
       io.write(`${render(valueOf(result), { json: Boolean(parsed.json), fields: parsed.fields as string[] | undefined, columns: settings?.columns, view: settings?.view })}\n`);
     },
   });

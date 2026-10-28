@@ -228,11 +228,7 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
   }
   const json = Boolean(values.json);
   const say = json ? (line: string) => console.error(line) : (line: string) => console.log(line);
-  const fail = (code: string, message: string, exit: number, next?: string): number => {
-    if (json) console.log(JSON.stringify({ ok: false, error: { code, message }, next: next ?? null }));
-    console.error(next ? `${message}\nNext: ${next}` : message);
-    return exit;
-  };
+  const fail = failer(json);
 
   const command = top === "logs" ? "logs" : positionals[0];
   const args = top === "logs" ? positionals : positionals.slice(1);
@@ -241,36 +237,8 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
   if (command !== "logs" && (values.since !== undefined || values.follow)) return fail("usage", `--since and --follow go with flow logs\n\n${usage}`, 2);
   const environment: "staging" | "production" = given ?? "staging";
   const dir = resolve(values.dir!);
-  const dotEnv = readEnvFile(join(dir, ".env"));
-  const setting = (...names: string[]) => {
-    for (const name of names) if (env[name]) return env[name];
-    for (const name of names) if (dotEnv.get(name)) return dotEnv.get(name);
-    return undefined;
-  };
-  const key = setting("FLOW_FRAMEWORK_CLOUD_KEY", "CHINWAG_CLOUD_KEY");
-  if (!key) return fail("no_ci_key", "Set FLOW_FRAMEWORK_CLOUD_KEY to your agent's CI key (oci_...), in the environment or the agent's .env.", 2, `${RUN} setup`);
-  const cloud = (values.cloud || setting("FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD") || DEFAULT_CLOUD).replace(/\/$/, "");
-
-  const api: Api = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
-    const res = await fetch(cloud + path, {
-      method,
-      headers: { authorization: `Bearer ${key}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const text = await res.text();
-    let answer: { error?: { code?: string; message?: string; hint?: string } } & Record<string, unknown> = {};
-    try {
-      answer = JSON.parse(text);
-    } catch {
-      // not JSON: the status says it
-    }
-    if (!res.ok) {
-      const why = answer.error?.message ?? `${res.status} ${res.statusText}`;
-      const missing = (res.status === 404 || res.status === 405) && typeof answer.error?.code !== "string";
-      throw new Refused(answer.error?.hint ? `${why} (${answer.error.hint})` : why, answer.error?.code ?? "refused", missing);
-    }
-    return answer as T;
-  };
+  const { key, cloud, api, dotEnv } = cloudOf(dir, env, values.cloud);
+  if (!key) return fail("no_ci_key", NO_KEY, 2, `${RUN} setup`);
 
   const ctx: Ctx = { api, say, json, dir, pollMs: options.pollMs ?? 3000, maxPolls: options.maxPolls, now: options.now ?? Date.now, keyId: createHash("sha256").update(key).digest("hex").slice(0, 16), env: { ...Object.fromEntries(dotEnv), ...env } };
   try {
@@ -297,6 +265,50 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
     if (error instanceof Refused) return fail(error.code, `Refused: ${error.message}`, 1);
     return fail("network", `Could not reach ${cloud}: ${(error as Error).message}`, 1);
   }
+}
+
+/** Prints a failure, also as JSON with --json; returns the exit code. */
+function failer(json: boolean): (code: string, message: string, exit: number, next?: string) => number {
+  return (code, message, exit, next) => {
+    if (json) console.log(JSON.stringify({ ok: false, error: { code, message }, next: next ?? null }));
+    console.error(next ? `${message}\nNext: ${next}` : message);
+    return exit;
+  };
+}
+
+const NO_KEY = "Set FLOW_FRAMEWORK_CLOUD_KEY to your agent's CI key (oci_...), in the environment or the agent's .env.";
+
+/** The cloud's address and the agent's CI key (the environment's, else the agent's .env's), and a caller of the cloud's routes. */
+function cloudOf(dir: string, env: NodeJS.ProcessEnv, given: string | undefined): { key: string | undefined; cloud: string; api: Api; dotEnv: Map<string, string> } {
+  const dotEnv = readEnvFile(join(dir, ".env"));
+  const setting = (...names: string[]) => {
+    for (const name of names) if (env[name]) return env[name];
+    for (const name of names) if (dotEnv.get(name)) return dotEnv.get(name);
+    return undefined;
+  };
+  const key = setting("FLOW_FRAMEWORK_CLOUD_KEY", "CHINWAG_CLOUD_KEY");
+  const cloud = (given || setting("FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD") || DEFAULT_CLOUD).replace(/\/$/, "");
+  const api: Api = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
+    const res = await fetch(cloud + path, {
+      method,
+      headers: { authorization: `Bearer ${key}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    let answer: { error?: { code?: string; message?: string; hint?: string } } & Record<string, unknown> = {};
+    try {
+      answer = JSON.parse(text);
+    } catch {
+      // not JSON: the status says it
+    }
+    if (!res.ok) {
+      const why = answer.error?.message ?? `${res.status} ${res.statusText}`;
+      const missing = (res.status === 404 || res.status === 405) && typeof answer.error?.code !== "string";
+      throw new Refused(answer.error?.hint ? `${why} (${answer.error.hint})` : why, answer.error?.code ?? "refused", missing);
+    }
+    return answer as T;
+  };
+  return { key, cloud, api, dotEnv };
 }
 
 interface Ctx {
@@ -591,7 +603,7 @@ async function follow(ctx: Ctx, id: string): Promise<number> {
 const NO_URL = "not available on this Flow yet (the dashboard's Playground opens it)";
 
 /** The service's address, when the cloud tells it (GET /v1/hosting/address); null when it does not. */
-async function address(ctx: Ctx, environment: string): Promise<string | null> {
+async function address(ctx: Pick<Ctx, "api">, environment: string): Promise<string | null> {
   try {
     const { url } = await ctx.api<{ url?: string | null }>("GET", `/v1/hosting/address?environment=${encodeURIComponent(environment)}`);
     return typeof url === "string" && url ? url : null;
@@ -737,6 +749,106 @@ async function logs(ctx: Ctx, environment: string, since: string, followLines: b
     polls++;
     if (!followLines || (ctx.maxPolls !== undefined && polls >= ctx.maxPolls)) return 0;
     await new Promise((r) => setTimeout(r, ctx.pollMs));
+  }
+}
+
+export const CLI_RELEASE_LINE = `  flow cli pack --server <staging|production|url> [--base-url <url>] [--out <folder>] [--json]
+                            The agent's CLI (src/cli.ts) as one package anyone with Node.js
+                            installs, with its installer (flow cli pack --help)`;
+
+export const CLI_RELEASE_USAGE = `Usage:
+  flow cli pack --server <staging|production|url> [--base-url <url>] [--out <folder>] [--dir <folder>] [--json]
+      Bundles the agent's CLI (src/cli.ts) with everything it needs, so Node.js 20.19 or newer is
+      all a computer needs to run it, and writes into <out>:
+        <name>.tgz     the package: npm install --global <name>.tgz installs it
+        install.sh     its installer: curl -fsSL <base-url> | sh
+        release.json   { name, display_name, version, sha256, size, server }
+
+  --server     The MCP server the packed CLI uses: staging or production (the CLI file's
+               servers.<env> when set, else the hosted agent's address, asked of the cloud with the
+               CI key, plus /mcp), or an https URL. It takes the place of the default server
+               written in src/cli.ts, which must be there once.
+               The CLI keeps sign-ins by server: never change it for a CLI people already use.
+  --base-url   Where you serve install.sh and <name>-<version>.tgz yourself: install.sh downloads
+               <base-url>/cli/<name>-<version>.tgz. Without it install.sh is for Flow's hosting,
+               which fills in the address it serves it from.
+  --out        Where the files go (default: release/ in the agent's folder).
+  --dir        The agent's folder (default: .).
+  --json       Print one JSON answer on stdout (progress goes to stderr).
+  --cloud, FLOW_FRAMEWORK_CLOUD_KEY: as for flow deploy (flow deploy --help).
+
+The version is package.json's, the server's name and the git commit: 0.1.3-production.ab12cd3
+(custom for an https server; .dirty at the end with uncommitted changes). Unless src/cli.ts sets
+update itself, the packed CLI asks <base>/cli/version for a newer version and <name> update runs
+curl -fsSL <base> | sh, where <base> is --base-url, else the hosted agent's address, else the
+server's origin. The files in defineCli({ files }) go beside the bundle (cliFile(path) finds them).
+The packed CLI's --help must run from a fresh folder before it is packed. esbuild bundles it, an
+optional peer of Flow Framework: npm i -D esbuild.`;
+
+/** `flow cli pack ...`, the words after `cli`. */
+export async function cliReleaseCli(argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        server: { type: "string" },
+        "base-url": { type: "string" },
+        out: { type: "string" },
+        dir: { type: "string", default: "." },
+        cloud: { type: "string" },
+        json: { type: "boolean" },
+        help: { type: "boolean", short: "h" },
+      },
+    });
+  } catch (error) {
+    console.error(`${(error as Error).message}\n\n${CLI_RELEASE_USAGE}`);
+    return 2;
+  }
+  const { values, positionals } = parsed;
+  if (values.help) {
+    console.log(CLI_RELEASE_USAGE);
+    return 0;
+  }
+  const json = Boolean(values.json);
+  const say = json ? (line: string) => console.error(line) : (line: string) => console.log(line);
+  const fail = failer(json);
+  if (positionals[0] !== "pack" || positionals.length > 1) return fail("usage", `Unknown command: cli ${positionals.join(" ")}\n\n${CLI_RELEASE_USAGE}`, 2);
+  const https = (url: string | undefined) => url !== undefined && /^https:\/\/[^/\s]/.test(url) && URL.canParse(url);
+  const server = values.server;
+  const hosted = server === "staging" || server === "production";
+  if (!hosted && !https(server)) return fail("usage", `--server is staging, production or an https URL\n\n${CLI_RELEASE_USAGE}`, 2);
+  if (values["base-url"] !== undefined && !https(values["base-url"])) return fail("usage", `--base-url is an https URL\n\n${CLI_RELEASE_USAGE}`, 2);
+  const dir = resolve(values.dir!);
+  const { key, cloud, api } = cloudOf(dir, env, values.cloud);
+  const { fixedServer, packCli, PackError } = await import("./cli-pack.ts");
+  try {
+    let target = server!;
+    let base = values["base-url"];
+    // The CLI file's own server for the environment (defineCli({ servers })), else the hosted address.
+    const fixed = hosted && existsSync(join(dir, "src", "cli.ts")) ? await fixedServer(dir, server) : undefined;
+    if (fixed) {
+      target = fixed;
+      base ??= new URL(fixed).origin;
+    } else if (hosted) {
+      if (!key) return fail("no_ci_key", NO_KEY, 2, `${RUN} setup`);
+      const { url } = await api<{ url?: string | null }>("GET", `/v1/hosting/address?environment=${server}`);
+      if (!url) throw new Refused(`${server} has no address yet: deploy the agent there first`, "no_address");
+      target = `${url.replace(/\/$/, "")}/mcp`;
+      base ??= url;
+    }
+    const out = values.out ? resolve(values.out) : join(dir, "release");
+    const release = await packCli({ dir, server: target, label: hosted ? server : "custom", base: (base ?? new URL(target).origin).replace(/\/+$/, ""), baseUrl: values["base-url"], out, say });
+    const files = { tgz: join(out, `${release.name}.tgz`), installer: join(out, "install.sh"), release: join(out, "release.json") };
+    const next = `npm install --global ${files.tgz} (tries it on this computer)`;
+    if (json) console.log(JSON.stringify({ ok: true, release, files, next }));
+    say(`Next: ${next}`);
+    return 0;
+  } catch (error) {
+    if (error instanceof PackError) return fail("pack_failed", error.message, error.exit);
+    if (error instanceof Refused) return fail(error.code, `Refused: ${error.message}`, 1);
+    return fail("network", `Could not reach ${cloud}: ${(error as Error).message}`, 1);
   }
 }
 

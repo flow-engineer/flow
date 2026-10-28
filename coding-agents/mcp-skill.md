@@ -162,6 +162,7 @@ Flow Framework pins), and write `src/cli.ts`:
 
 ```ts
 #!/usr/bin/env node
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { command, defineCli, runCli } from "@flow-engineer/flow/cli";
 
@@ -180,7 +181,8 @@ export const cli = defineCli({
   },
 });
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCli(cli, process.argv.slice(2)));
+// Installed, the command is a link to this file: compare where it leads.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) process.exit(await runCli(cli, process.argv.slice(2)));
 ```
 
 - Words are groups then a verb: `order` is a **command group**, `list`, `view` and `place` its
@@ -241,8 +243,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   command. `auth`, `help`, `update` and `--help` never ask; `signInFirst: { except: ["docs"], message }` lets
   the team's own commands through and words the question. A token in `<NAME>_TOKEN` counts as signed in.
 - Installed, it is the organization's own command: `"bin": { "acme": "src/cli.ts" }` in its package
-  (node runs `.ts` files outside `node_modules`; publish a compiled `.js` bin to npm). While building
-  it, run it with `npm run cli -- order -h`: npm takes flags before `--` as its own.
+  (node runs `.ts` files outside `node_modules`). While building it, run it with
+  `npm run cli -- order -h`: npm takes flags before `--` as its own. To put it on people's
+  computers, pack it (Ship the CLI, below).
 - `update: { command, latest }` gives the CLI `acme update`, which runs `command` in a shell (the
   team's install script, such as `curl -fsSL https://acme.example/install.sh | sh`, or
   `npm install -g acme@latest`). `latest` is a URL answering JSON with a `version` (npm's
@@ -283,6 +286,54 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   credentials are never stored in the discovery cache. A custom command declaring its own
   `--refresh-tools` flag keeps that flag; use `tools --refresh-tools` to force framework discovery.
 
+
+### Ship the CLI
+
+`npx flow cli pack --server production` (or `staging`, or an https MCP URL) bundles `src/cli.ts`
+with every dependency into one package that needs only Node.js 20.19 or newer, and writes
+`release/acme.tgz`, `release/install.sh` and `release/release.json` (`{ name, display_name,
+version, sha256, size, server }`). `staging` and `production` are the hosted agent's address
+(asked of the cloud with `FLOW_FRAMEWORK_CLOUD_KEY`) plus `/mcp`. The version is package.json's,
+the server's name and the git commit: `0.1.3-production.ab12cd3` (`custom` for a URL, `.dirty`
+with uncommitted changes), so commit first. It needs esbuild: `npm i -D esbuild@0.28.2` (the
+starter has it). Add `release/` to `.gitignore`.
+
+- `servers: { production: "https://cli.acme.com/mcp" }` fixes the server a pack for that
+  environment uses, in place of the hosted address (`flow cli pack --server production` and every
+  `flow deploy` read it). Set it before the first release when the CLI lives on a domain of its
+  own, and never change it.
+- Write the default server once, as a string: `server: process.env.ACME_SERVER ?? "http://127.0.0.1:8790/mcp"`.
+  Pack puts the release's server in its place (the variable still overrides it) and refuses a
+  file where that string is missing or written twice.
+- Start `runCli` through `realpathSync(process.argv[1])`, as above: npm installs the command as a
+  link, and a CLI that compares `process.argv[1]` itself does nothing when installed. Before it
+  packs, pack runs the bundle's `--help` through a link from an empty folder and refuses it
+  without `USAGE`.
+- Files the CLI reads at run time (an icon, a JSON catalogue) go in `files: ["context/icon.svg"]`
+  and are read with `readFileSync(cliFile("context/icon.svg"))` (`cliFile` from
+  `@flow-engineer/flow/cli`): beside the bundle when packed, in the agent's folder from the source.
+- A packed CLI's `version` is the release's. Without `update` in the CLI file, `acme update` runs
+  `curl -fsSL <base> | sh` and people hear of a newer version from `<base>/cli/version`; `<base>`
+  is the hosted agent's address, else `--base-url`, else the server's origin.
+- `install.sh` installs into `~/.acme` (`ACME_HOME`) without sudo, checks Node and the package's
+  sha256, refuses another `acme` already on PATH, and links the command into a writable PATH
+  folder (else `~/.local/bin` and one line in the shell's rc file). `ACME_CLI_URL` installs another
+  package, unchecked. Serving it yourself: `--base-url https://get.acme.example` writes the
+  address into install.sh; serve it at `/`, the package at `/cli/acme-<version>.tgz` and
+  `{ "version": "<version>" }` at `/cli/version`.
+
+Domains, and what never changes once people have the CLI:
+- The server URL packed into a shipped CLI never changes. The CLI keeps each person's sign-in by
+  server URL, so a build with another one signs everyone out. Choose it before the first release.
+- A team whose MCP server people already use can launch only the CLI on a domain of its own,
+  such as `cli.acme.com`: add it to the agent as an extra domain (dashboard, Settings → Domains)
+  and set `servers: { production: "https://cli.acme.com/mcp" }` in the CLI file once; packs for
+  production then use it, whatever the agent's own address. The existing MCP server stays where
+  it is.
+- Later, `mcp.acme.com` can be added as another extra domain of the same agent; shipped CLIs keep
+  `cli.acme.com`. When the MCP server moves there, add its `https://mcp.acme.com/mcp` to the
+  OAuth bridge's `resources` (`oauth-bridge-skill.md`), beside the ones already there.
+- Changing the sign-in issuer (the OAuth server's origin) signs everyone out, on every surface.
 
 ### Native plugins and standalone MCP
 

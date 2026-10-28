@@ -15,7 +15,7 @@ Read only the relevant guides; do not load every skill upfront.
 | Task | Skill | Package file |
 | --- | --- | --- |
 | Build or operate a messaging agent, its playground, phone connection or deployment | `flow-framework-build-agent` | `build-agent-skill.md` |
-| Serve MCP tools, configure deferral, build a CLI or package plugins | `flow-framework-mcp` | `mcp-skill.md` |
+| Serve MCP tools, configure deferral, build or ship a CLI, or package plugins | `flow-framework-mcp` | `mcp-skill.md` |
 | Choose a CLI's short forms: default commands, positional arguments, short flags | `flow-framework-cli-design` | `cli-design-skill.md` |
 | Write or change tools and their test files | `flow-framework-tools` | `tools-skill.md` |
 | Write or change test scenarios | `flow-framework-tests` | `test-skill.md` |
