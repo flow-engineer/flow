@@ -79,8 +79,11 @@ export function buildAgent({ events, tools, host } = {}) {
 }
 ```
 
-and the site adds one script tag, served by the agent, so it always matches the agent's version
-(the site's CSP needs the agent's address in `script-src` and `connect-src`):
+and the site adds one script tag, served by the agent, so it always matches the agent's version.
+A site with a CSP adds the agent's address to `script-src` and `connect-src` (and `'self'` to
+`connect-src` for `data-identity-url`), and `https:` (or the photos' hosts) to `img-src`; `style-src`
+needs nothing (the box uses constructable stylesheets; Safari before 16.4 falls back to a `<style>`
+element, which needs `'unsafe-inline'`). Sites that enforce Trusted Types are not supported yet:
 
 ```html
 <script async src="https://<agent address>/v1/web-chat/widget.js"
