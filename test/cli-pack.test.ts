@@ -229,3 +229,10 @@ test("defineCli({ servers }) is what a pack for that environment uses, with no a
   assert.equal(release.display_name, "Acme Coffee");
   assert.equal(calls.length, before, "no CI key needed, no address asked");
 });
+
+test("from the source, cliFile finds the file in the agent's folder when the CLI runs from another folder", async () => {
+  const dir = cliAgentFolder(scratch);
+  const elsewhere = mkdtempSync(join(scratch, "elsewhere-"));
+  const help = await promisify(execFile)(process.execPath, [join(dir, "src", "cli.ts"), "--help"], { cwd: elsewhere, env: { ...fresh(), ACME_SERVER: "http://127.0.0.1:9/mcp" }, encoding: "utf8" });
+  assert.match(help.stdout, /Coffee, ordered from a terminal\./);
+});
