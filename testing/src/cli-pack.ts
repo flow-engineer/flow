@@ -62,13 +62,16 @@ const BUNDLE = "dist";
 /** The URL a release's file is served at. */
 export const fileUrl = (baseUrl: string, file: string) => `${baseUrl.replace(/\/+$/, "")}/${file}`;
 
-/** `<package version>-<label>.<commit>`, `.dirty` when the folder has changes not committed; no commit outside git. */
+/**
+ * `<package version>-<label>.<commit>`; with changes not committed `.dirty.<time>` after it (seconds,
+ * base 36), so two packs of different uncommitted work never share a version. No commit outside git.
+ */
 export function releaseVersion(dir: string, packageVersion: string, label: string): string {
   const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { stdio: ["ignore", "pipe", "ignore"], timeout: 5_000 }).toString().trim();
   let commit = "";
   try {
     commit = git("rev-parse", "--short", "HEAD");
-    if (git("status", "--porcelain", "--untracked-files=no", "--", ".")) commit += ".dirty";
+    if (git("status", "--porcelain", "--untracked-files=no", "--", ".")) commit += `.dirty.${Math.floor(Date.now() / 1000).toString(36)}`;
   } catch {
     // not a repository, or no git
   }

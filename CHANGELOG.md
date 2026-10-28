@@ -9,7 +9,7 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - **`flow cli pack`: ship the agent's CLI without a pack script.** `npx @flow-engineer/flow cli pack
   --server staging|production|<url> [--base-url <url>] [--out release]` bundles `src/cli.ts` with
   esbuild (ES modules with code splitting, a `require` for bundled CommonJS packages), bakes in the
-  server, the version (`<package version>-<env>.<commit>`, `.dirty` with uncommitted changes) and
+  server, the version (`<package version>-<env>.<commit>`, `.dirty.<time>` with uncommitted changes, so each such pack is its own version) and
   `update`, installs the package into a scratch prefix and runs `--help` and `auth status --help`
   through its bin link with a fresh config folder, then writes `release/<name>-<version>.tgz`,
   `release/<name>.tgz`, `release/install.sh` and `release/version.json`. Serve the four together at

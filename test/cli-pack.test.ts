@@ -37,7 +37,7 @@ test("a packed CLI installs with its install.sh from a clean prefix, with no env
     createReadStream(file).pipe(res);
   });
   const release = await packCli({ dir: cafe, server, baseUrl: `${files}/cli`, label: "staging", out });
-  assert.match(release.version, /^0\.1\.0-staging(\.[0-9a-f]+(\.dirty)?)?$/);
+  assert.match(release.version, /^0\.1\.0-staging(\.[0-9a-f]+(\.dirty\.[0-9a-z]+)?)?$/);
   assert.deepEqual(JSON.parse(readFileSync(release.files.versionJson, "utf8")), { version: release.version, sha256: release.sha256, url: `${files}/cli/cafe-${release.version}.tgz` });
 
   const home = join(work, "home");

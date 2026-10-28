@@ -920,7 +920,7 @@ async function cliApi<T>(ctx: Ctx, method: string, path: string, body?: unknown)
   try {
     return await ctx.api<T>(method, path, body);
   } catch (error) {
-    if (error instanceof Refused && error.missing) throw new NotAvailable("Publishing a CLI is not available on this Flow yet: its cloud has no CLI routes. flow cli pack --server <url> makes the files for any static host.");
+    if (error instanceof Refused && (error.missing || error.code === "cli_unavailable")) throw new NotAvailable("Publishing a CLI is not available on this Flow yet: its cloud has no CLI routes. flow cli pack --server <url> makes the files for any static host.");
     throw error;
   }
 }
@@ -930,7 +930,7 @@ async function publish(ctx: Ctx, env: string, origin: string): Promise<CliOutcom
   const out = mkdtempSync(join(tmpdir(), "flow-cli-release-"));
   try {
     const r = await packCli({ dir: ctx.dir, server: `${origin}/mcp`, baseUrl: `${origin}/cli`, label: env, out, say: ctx.say });
-    const made = await cliApi<{ release: HostedRelease; upload_urls: { tgz: string; installer: string } }>(ctx, "POST", "/v1/hosting/cli/releases", {
+    const made = await cliApi<{ release: HostedRelease; upload_urls: { tgz: string; installer: string } | null }>(ctx, "POST", "/v1/hosting/cli/releases", {
       environment: env,
       name: r.name,
       display_name: r.displayName,
@@ -938,7 +938,9 @@ async function publish(ctx: Ctx, env: string, origin: string): Promise<CliOutcom
       sha256: r.sha256,
       size: r.size,
     });
-    for (const [file, url, type] of [[r.files.tgz, made.upload_urls.tgz, "application/gzip"], [r.files.installer, made.upload_urls.installer, "text/x-shellscript"]] as const) {
+    // No upload URLs: the cloud already holds this exact build (same version and sha256), so publishing makes it current.
+    const uploads = made.upload_urls ? ([[r.files.tgz, made.upload_urls.tgz, "application/gzip"], [r.files.installer, made.upload_urls.installer, "text/x-shellscript"]] as const) : [];
+    for (const [file, url, type] of uploads) {
       const put = await fetch(url, { method: "PUT", headers: { "content-type": type }, body: readFileSync(file) });
       if (!put.ok) throw new Refused(`the upload failed (${put.status})`, "upload_failed");
     }

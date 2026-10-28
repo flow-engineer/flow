@@ -23,7 +23,7 @@ interface Call {
 }
 
 /** A fake cloud: the routes `flow deploy` calls, a deploy that builds once then ends as `ending`. */
-async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean; neverDeployed?: boolean; framework?: string; cli?: boolean } = {}) {
+async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean; neverDeployed?: boolean; framework?: string; cli?: boolean | "held" } = {}) {
   const calls: Call[] = [];
   let looks = 0;
   const server = createServer(async (req, res) => {
@@ -54,7 +54,7 @@ async function cloud(options: { ending?: "live" | "refused"; address?: boolean; 
     }
     if (path.startsWith("/v1/hosting/cli/") && !options.cli) return res.writeHead(404, { "content-type": "text/plain" }).end("404 page not found");
     const release = (status: string) => ({ name: "acme", version: (calls.find((c) => c.path === "/v1/hosting/cli/releases")?.body?.version as string) ?? "1.0.0-staging", sha256: "0".repeat(64), size: 10, status });
-    if (req.method === "POST" && path === "/v1/hosting/cli/releases") return send(201, { release: release("uploading"), upload_urls: { tgz: `${url}/upload/cli-tgz`, installer: `${url}/upload/cli-installer` } });
+    if (req.method === "POST" && path === "/v1/hosting/cli/releases") return send(201, { release: release("uploading"), upload_urls: options.cli === "held" ? null : { tgz: `${url}/upload/cli-tgz`, installer: `${url}/upload/cli-installer` } });
     if (req.method === "PUT" && path.startsWith("/upload/cli-")) return send(200, {});
     if (req.method === "POST" && /^\/v1\/hosting\/cli\/releases\/[^/]+\/publish$/.test(path)) return send(200, { release: release("live") });
     if (req.method === "POST" && path === "/v1/hosting/cli/rollback") return send(200, { release: { ...release("live"), version: "1.0.0-staging.old" } });
@@ -403,7 +403,7 @@ function agentWithCli(): string {
   return dir;
 }
 
-test("deploy publishes the CLI once the agent is live, for its address; cli rollback serves an earlier one; a cloud with no CLI routes deploys as before", async () => {
+test("deploy publishes the CLI once the agent is live, for its address; a build the cloud holds is not uploaded again; cli rollback serves an earlier one; a cloud with no CLI routes deploys as before", async () => {
   const fake = await cloud({ address: true, cli: true });
   const dir = agentWithCli();
   const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url };
@@ -418,6 +418,12 @@ test("deploy publishes the CLI once the agent is live, for its address; cli roll
   assert.match(made.sha256 as string, /^[0-9a-f]{64}$/);
   assert.ok(fake.calls.find((c) => c.path === "/upload/cli-installer")!.bytes > 0);
   assert.match(printed, /Install the CLI: curl -fsSL https:\/\/agent-staging\.example\.com \| sh/);
+
+  const held = await cloud({ address: true, cli: "held" });
+  const again = await run(["cli", "publish", "--dir", dir], { ...env, FLOW_FRAMEWORK_CLOUD: held.url });
+  assert.equal(again.code, 0, again.printed);
+  assert.deepEqual(held.calls.map((c) => c.method).filter((m) => m === "PUT"), [], "nothing uploaded");
+  assert.match(held.calls.at(-1)!.path, /^\/v1\/hosting\/cli\/releases\/[^/]+\/publish$/);
 
   const back = await run(["cli", "rollback", "1.0.0-staging.old", "--dir", dir, "--json"], env);
   assert.equal(back.code, 0, back.printed);
