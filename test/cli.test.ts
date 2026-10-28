@@ -284,6 +284,24 @@ test("a tool's format is what people see, rendered at a terminal; --json, --fiel
   assert.equal(await run(cli(["key.id", "manage_url"]), []), "key.id      key_1\nmanage_url  https://acme.test/keys\n");
 });
 
+test("a formatted table's headers are the brand's accent at the terminal's depth, cyan without one, never cli-table3's red", async () => {
+  const table = tool({ name: "plans", description: "Plans.", input: z.object({}), output: z.object({}), signIn: "none", hints: { readOnly: true }, run: () => ({}), format: () => "| Plan | Price |\n| --- | --- |\n| Pro | $20 |\n" });
+  const server = await serve({ tools: [table] });
+  const run = async (brand: CliConfig["brand"], env: Record<string, string>) => {
+    const out = io(true);
+    out.channel.env = env;
+    assert.equal(await runCli(defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-")), server, brand }), ["plans"], out.channel), 0);
+    return out.out;
+  };
+  const rgb = await run({ accent: "#645bff" }, { COLORTERM: "truecolor" });
+  assert.match(rgb, /\u001b\[38;2;100;91;255m Plan/);
+  assert.doesNotMatch(rgb, /\u001b\[3[16]m/);
+  assert.match(await run({ accent: "#645bff" }, { TERM: "xterm-256color" }), /\u001b\[38;5;\d+m Plan/);
+  const plain = await run(undefined, {});
+  assert.match(plain, /\u001b\[36m Plan/);
+  assert.doesNotMatch(plain, /\u001b\[31m/);
+});
+
 test("a group's help lists its subcommands, and the top level lists groups and commands, styled at a terminal", async () => {
   const cli = acme(await serve({ tools: [listOrders, getOrder, cancelOrder] }));
   for (const argv of [["order"], ["order", "-h"]]) {

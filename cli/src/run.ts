@@ -778,7 +778,7 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
       // The tool's own text, unless the person asked for data or the CLI file chose what to show.
       if (settings?.print && !parsed.json && !parsed.fields) return void io.write(`${(await settings.print(valueOf(result))).replace(/\n*$/, "")}\n`);
       const formatted = (result._meta as Record<string, unknown> | undefined)?.[FORMATTED] === true && !parsed.json && !parsed.fields && !settings?.columns && !settings?.view;
-      if (formatted) return void io.write(`${(await forTerminal(textOf(result.content as Block[]), io)).replace(/\n*$/, "")}\n`);
+      if (formatted) return void io.write(`${(await forTerminal(textOf(result.content as Block[]), io, config)).replace(/\n*$/, "")}\n`);
       io.write(`${render(valueOf(result), { json: Boolean(parsed.json), fields: parsed.fields as string[] | undefined, columns: settings?.columns, view: settings?.view })}\n`);
     },
   });

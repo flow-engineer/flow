@@ -7,7 +7,7 @@ import { parseArgs, styleText, stripVTControlCharacters } from "node:util";
 import { configDir, isSignedIn, storedAccessToken } from "./auth.ts";
 import { brandOf, HEX, tokenEnvOf, type CliConfig } from "./commands.ts";
 import type { CliIO } from "./run.ts";
-import { codingAgent } from "./welcome.ts";
+import { codingAgent, colorCode, colorDepth } from "./welcome.ts";
 
 export type ChatUpdate =
   | { type: "reply"; text: string }
@@ -140,7 +140,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
     if (flags.values.json) io.write(`${JSON.stringify(result)}\n`);
     else {
       const text = messages.join(humanChat ? "\n\n" : "\n");
-      const rendered = await forTerminal(io.interactive ? safe(text) : text, io);
+      const rendered = await forTerminal(io.interactive ? safe(text) : text, io, config);
       const body = io.interactive ? rendered.trimEnd() : rendered;
       if (humanChat && body) io.write(`\n${paint(["bold", "green"], config.name)}\n${body.split("\n").map(line => `  ${line}`).join("\n")}\n\n`);
       else io.write(`${body}\n`);
@@ -201,11 +201,17 @@ export function forgetChat(config: CliConfig, server: string): void {
 }
 
 /** The same optional Markdown renderer for chat and tool output. Pipes retain the source. */
-export async function forTerminal(markdown: string, io: CliIO): Promise<string> {
+export async function forTerminal(markdown: string, io: CliIO, config: CliConfig): Promise<string> {
   const env = io.env ?? process.env;
   if (!io.interactive || env.NO_COLOR || env.TERM === "dumb") return markdown;
   try {
     const [{ Marked }, { markedTerminal }] = await Promise.all([import("marked"), import("marked-terminal")]);
-    return await new Marked(markedTerminal({ showSectionPrefix: false, width: Math.max(20, (process.stdout.columns ?? 80) - 4), reflowText: true }) as never).parse(markdown);
+    // cli-table3 paints headers only in named colors (its default is red): cyan, then the brand's accent in its place.
+    const extension = markedTerminal({ showSectionPrefix: false, width: Math.max(20, (process.stdout.columns ?? 80) - 4), reflowText: true, tableOptions: { style: { head: ["cyan"] } } } as never) as unknown as { renderer: Record<string, (...args: unknown[]) => string> };
+    const hex = brandOf(config).accent;
+    const code = hex && HEX.test(hex) ? colorCode(hex, colorDepth(env)) : undefined;
+    const table = extension.renderer.table;
+    if (code && table) extension.renderer.table = function (this: unknown, ...args: unknown[]) { return table.apply(this, args).replaceAll("\u001b[36m", `\u001b[${code}m`); };
+    return await new Marked(extension as never).parse(markdown);
   } catch { return markdown; }
 }
