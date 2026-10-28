@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src", "mcp/src", "cli/src", "oauth/src", "test", "conformance", "scripts", "bench"]
+  "include": ["src", "mcp/src", "cli/src", "oauth/src", "test", "widget/test", "conformance", "scripts", "bench"]
 }
