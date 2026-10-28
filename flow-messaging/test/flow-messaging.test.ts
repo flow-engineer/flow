@@ -225,20 +225,28 @@ test("failures reach the agent as Not delivered: a permanent refusal once, untri
   t.after(() => (flow.close(), live.close()));
   flow.contacts.ct_sam = { address: { phone: "+15550100111" } };
   const path = "/v0/conversations/conv_sms/basic";
-  flow.queued.push({ match: post(path), status: 403, body: { error: { type: "permission", channel_code: "contact_opted_out", message: "The contact opted out.", hint: "", doc_url: "" } } });
+  const hint = "Wait for them to text START.";
+  flow.queued.push({ match: post(path), status: 403, body: { error: { type: "permission", channel_code: "contact_opted_out", message: "The contact opted out.", hint, doc_url: "https://api.flow.engineer/docs/errors/permission" } } });
+  const warnings: string[] = [];
+  t.mock.method(console, "warn", (line: string) => void warnings.push(line));
 
   await live.deliver(received(SMS, "msg_1", { kind: "basic", text: "hi" }));
   (await live.nextCall(0)).answer(respond(call("send_sms", { text: "Hello" })));
   const second = await live.nextCall(1);
   assert.equal(lastUser(second.request.messages), "[Not delivered] \"Hello\": permission (contact_opted_out): The contact opted out. It will fail again: don't resend it.");
   assert.equal(flow.sends(path).length, 1, "a permanent refusal is not tried again");
+  // The hint is for the developer, on the console; the agent's note leaves it out.
+  assert.ok(warnings.includes(`@flow-engineer/flow/flow-messaging: a send on sms was refused, permission (contact_opted_out). ${hint} (https://api.flow.engineer/docs/errors/permission)`), warnings.join("\n"));
+  assert.ok(!JSON.stringify(second.request).includes(hint), "no text the model reads carries the hint");
 
   second.answer(respond(call("send_sms", { text: "Are you there?" })));
   await flow.request((r) => post(path)(r) && r.body.text === "Are you there?");
-  const failed = { id: "msg_out1", conversation: "conv_sms", direction: "out", status: "failed", content: { kind: "basic", text: "Are you there?" }, error: { type: "channel_error", channel_code: "carrier_filtered", message: "A carrier filtered it." } };
+  const failed = { id: "msg_out1", conversation: "conv_sms", direction: "out", status: "failed", content: { kind: "basic", text: "Are you there?" }, error: { type: "channel_error", channel_code: "carrier_filtered", message: "A carrier filtered it.", hint: "Ask them to text the line first.", doc_url: "https://api.flow.engineer/docs/errors/channel_error" } };
   assert.equal((await live.deliver(event("message.failed", SMS, { message: failed }))).status, 200);
   const third = await live.nextCall(2);
   assert.equal(lastUser(third.request.messages), "[Not delivered] \"Are you there?\": channel_error (carrier_filtered): A carrier filtered it. It will fail again: don't resend it.");
+  assert.ok(!JSON.stringify(third.request).includes("Ask them to text the line first."), "a late failure's hint stays out of the model's text too");
+  assert.ok(warnings.some((w) => w.includes("Ask them to text the line first. (https://api.flow.engineer/docs/errors/channel_error)")), warnings.join("\n"));
   third.answer(respond(call("send_sms", { text: "Sorry about that" })));
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });

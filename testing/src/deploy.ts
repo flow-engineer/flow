@@ -1,9 +1,9 @@
 // `flow deploy`: puts the agent in this folder on Flow's hosting, through the cloud (observe's
 // /v1/hosting routes) with the agent's CI key. Node's own modules only.
 //
-//   flow deploy [--env staging|production] [--dir .] [--version <v>] [--no-secrets] [--json]
+//   flow deploy [--env staging|production] [--dir .] [--version <v>] [--no-secrets] [--no-cli] [--json]
 //                                                                                pack, send .env's new or changed values as secrets, upload, build, go live
-//   flow deploy promote [--no-secrets] [--json]                                  staging's live version to production
+//   flow deploy promote [--no-secrets] [--no-cli] [--json]                       staging's live version to production
 //   flow deploy status [--env staging|production] [--json]                       what is live, its version, when, its URL
 //   flow logs [--env staging|production] [--since 1h] [--follow] [--json]        the hosted agent's log lines
 //   flow deploy secret <NAME> [--env staging|production] [--json]                a secret, its value read from stdin
@@ -15,6 +15,9 @@
 // cloud which Flow Framework hosting runs (GET /v1/hosting/framework → { framework: { version } })
 // and refuses an agent locked to a newer release line (major.minor), as hosting's lint would after
 // the upload; a cloud without that route, or any failure to ask, leaves the build to decide.
+// With a CLI file (src/cli.ts), the CLI is packed for the environment's address before anything is
+// sent and published once live (flow cli publish); promote publishes a production build of it.
+// `flow cli pack|publish|rollback|status` are here too, on the /v1/hosting/cli routes.
 // Nothing here prints a key or a secret's value.
 
 import { execFileSync } from "node:child_process";
@@ -25,10 +28,11 @@ import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
 import { RUN } from "../../src/names.ts";
+import { fixedServer, packCli, PackError, type PackedCli } from "./cli-pack.ts";
 import { agentVersion } from "../../src/traces.ts";
 const DEFAULT_CLOUD = "https://flow.engineer/observe";
 
-export const DEPLOY_LINE = `  flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--json]
+export const DEPLOY_LINE = `  flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--no-cli] [--json]
                             Put this agent on Flow's hosting, so it answers while this machine
                             sleeps (flow deploy --help: status, promote, secret, secrets)
   flow logs [--env staging|production] [--since 1h] [--follow] [--json]
@@ -44,11 +48,11 @@ export const LOGS_USAGE = `Usage:
   --dir, --cloud, FLOW_FRAMEWORK_CLOUD_KEY: as for flow deploy (flow deploy --help).`;
 
 export const DEPLOY_USAGE = `Usage:
-  flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--json]
+  flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--no-cli] [--json]
                                                            one command, first deploy included: sends the
                                                            .env's new or changed values as secrets, then
                                                            packs, builds and follows it to live
-  flow deploy promote [--no-secrets] [--json]              staging's live version to production (the
+  flow deploy promote [--no-secrets] [--no-cli] [--json]   staging's live version to production (the
                                                            .env's new or changed values sent there first)
   flow deploy status [--env staging|production] [--json]   what is live, its version, when, and its URL
   flow deploy secret <NAME> [--env staging|production]     one secret, the value on stdin
@@ -63,6 +67,7 @@ export const DEPLOY_USAGE = `Usage:
                send it: FLOW_AGENT_VERSION, else the CI's commit, else the folder's git commit with
                +dirty when it has uncommitted changes, else package.json's version).
   --no-secrets Deploy without sending the .env's values as secrets.
+  --no-cli     Deploy without packing and publishing the CLI (src/cli.ts).
   --cloud      The cloud's address (default: FLOW_FRAMEWORK_CLOUD, else ${DEFAULT_CLOUD}).
   --from-env   With secrets: send each non-empty value in the file as a secret (never the CI key,
                the cloud's address, or a name Flow sets itself, such as the
@@ -77,6 +82,13 @@ flow deploy first checks that hosting runs the agent's Flow Framework release li
 in package-lock.json, 0.4 for 0.4.11): a newer one is refused before anything is sent. A Flow whose
 cloud does not say which it runs deploys as before, and the build refuses it.
 
+With a CLI file (src/cli.ts), flow deploy packs the CLI for the environment's address before
+anything is sent (one that does not pack stops the deploy), and publishes it once the deploy is
+live, as flow cli publish does: curl -fsSL <the agent's URL> | sh installs it. Before an
+environment's first deploy it is packed once live. promote publishes a production build of it from
+this folder. Without esbuild, or on a Flow whose hosting serves no CLIs, the deploy goes on without
+it and says so; --json's answer has cli: what publishing it came to (null without one).
+
 status shows both environments unless --env names one. The last deploy this folder made is kept
 in .flow/deploys.json (never packed).
 
@@ -87,7 +99,7 @@ Environment (or the agent folder's .env):
 /** The CLI's own settings in a .env: never sent as secrets. */
 const CLI_NAMES = new Set(["FLOW_FRAMEWORK_CLOUD_KEY", "CHINWAG_CLOUD_KEY", "FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD"]);
 /** Names the host sets on the agent's service itself, which it refuses as secrets. */
-export const HOST_NAMES = /^(FLOW_AGENT_ID|FLOW_AGENT_NAME|FLOW_ENVIRONMENT|FLOW_STORE_URL|FLOW_STORE_TOKEN|FLOW_STORE_FRAMEWORK|FLOW_STORE_CHINWAG|FLOW_API_TOKEN|FLOW_PLAYGROUND_TOKEN|AGENT_VERSION|AGENT_DIR|PORT)$|^(FLOW_STORE_|CHINWAG_TRACES_|FLOW_FRAMEWORK_TRACES_|K_)/;
+export const HOST_NAMES = /^(FLOW_AGENT_ID|FLOW_AGENT_NAME|FLOW_ENVIRONMENT|FLOW_STORE_URL|FLOW_STORE_TOKEN|FLOW_STORE_FRAMEWORK|FLOW_STORE_CHINWAG|FLOW_API_TOKEN|FLOW_PLAYGROUND_TOKEN|FLOW_CLI_BUCKET|AGENT_VERSION|AGENT_DIR|PORT)$|^(FLOW_STORE_|CHINWAG_TRACES_|FLOW_FRAMEWORK_TRACES_|K_)/;
 const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 /** A name `secrets --from-env` sends: two characters at least, as the host takes them. */
 const ENV_SECRET_NAME = /^[A-Z][A-Z0-9_]{1,63}$/;
@@ -211,6 +223,7 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
         cloud: { type: "string" },
         "from-env": { type: "boolean" },
         "no-secrets": { type: "boolean" },
+        "no-cli": { type: "boolean" },
         since: { type: "string" },
         follow: { type: "boolean", short: "f" },
         json: { type: "boolean" },
@@ -228,11 +241,7 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
   }
   const json = Boolean(values.json);
   const say = json ? (line: string) => console.error(line) : (line: string) => console.log(line);
-  const fail = (code: string, message: string, exit: number, next?: string): number => {
-    if (json) console.log(JSON.stringify({ ok: false, error: { code, message }, next: next ?? null }));
-    console.error(next ? `${message}\nNext: ${next}` : message);
-    return exit;
-  };
+  const fail = failer(json);
 
   const command = top === "logs" ? "logs" : positionals[0];
   const args = top === "logs" ? positionals : positionals.slice(1);
@@ -241,6 +250,50 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
   if (command !== "logs" && (values.since !== undefined || values.follow)) return fail("usage", `--since and --follow go with flow logs\n\n${usage}`, 2);
   const environment: "staging" | "production" = given ?? "staging";
   const dir = resolve(values.dir!);
+  const { key, cloud, api, dotEnv } = cloudOf(dir, env, values.cloud);
+  if (!key) return fail("no_ci_key", NO_KEY, 2, `${RUN} setup`);
+
+  const ctx: Ctx = { api, say, json, dir, pollMs: options.pollMs ?? 3000, maxPolls: options.maxPolls, now: options.now ?? Date.now, keyId: createHash("sha256").update(key).digest("hex").slice(0, 16), env: { ...Object.fromEntries(dotEnv), ...env } };
+  try {
+    const [name, extra] = args;
+    for (const flag of ["no-secrets", "no-cli"] as const) if (values[flag] && command !== undefined && command !== "promote") throw new Usage(`--${flag} goes with flow deploy and deploy promote\n\n${usage}`);
+    if (command === "logs") {
+      if (name !== undefined) throw new Usage(`flow logs takes no arguments.\n\n${usage}`);
+      return await logs(ctx, environment, values.since ?? "1h", Boolean(values.follow));
+    }
+    if (extra !== undefined || (name !== undefined && command !== "secret" && command !== "secrets")) throw new Usage(`Too many arguments.\n\n${usage}`);
+    if (command === "promote") return await promote(ctx, !values["no-secrets"], !values["no-cli"]);
+    if (command === "status") return await status(ctx, given ? [given] : ["staging", "production"]);
+    if (command === "secret") return await secret(ctx, name, environment, options.readStdin ?? (() => readFileSync(0, "utf8")));
+    if (command === "secrets") {
+      if (!values["from-env"]) throw new Usage(`secrets takes --from-env [<file>]\n\n${usage}`);
+      return await secretsFromEnv(ctx, resolve(name ? name : join(dir, ".env")), environment);
+    }
+    if (command !== undefined) throw new Usage(`Unknown command: deploy ${command}\n\n${usage}`);
+    return await deploy(ctx, dir, environment, values.version, !values["no-secrets"], !values["no-cli"]);
+  } catch (error) {
+    if (error instanceof Usage) return fail("usage", error.message, 2);
+    if (error instanceof TooNew) return fail("chinwag_too_new", `Refused: ${error.message}`, 1, error.next);
+    if (error instanceof NotAvailable) return fail("not_available", error.message, 1);
+    if (error instanceof PackError) return fail(error.code, `The CLI did not pack, so nothing was sent: ${error.message}`, error.exit, "fix it, or add --no-cli");
+    if (error instanceof Refused) return fail(error.code, `Refused: ${error.message}`, 1);
+    return fail("network", `Could not reach ${cloud}: ${(error as Error).message}`, 1);
+  }
+}
+
+/** Prints a failure, also as JSON with --json; returns the exit code. */
+function failer(json: boolean): (code: string, message: string, exit: number, next?: string) => number {
+  return (code, message, exit, next) => {
+    if (json) console.log(JSON.stringify({ ok: false, error: { code, message }, next: next ?? null }));
+    console.error(next ? `${message}\nNext: ${next}` : message);
+    return exit;
+  };
+}
+
+const NO_KEY = "Set FLOW_FRAMEWORK_CLOUD_KEY to your agent's CI key (oci_...), in the environment or the agent's .env.";
+
+/** The cloud's address and the agent's CI key (the environment's, else the agent's .env's), and a caller of the cloud's routes. */
+function cloudOf(dir: string, env: NodeJS.ProcessEnv, given: string | undefined): { key: string | undefined; cloud: string; api: Api; dotEnv: Map<string, string> } {
   const dotEnv = readEnvFile(join(dir, ".env"));
   const setting = (...names: string[]) => {
     for (const name of names) if (env[name]) return env[name];
@@ -248,9 +301,7 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
     return undefined;
   };
   const key = setting("FLOW_FRAMEWORK_CLOUD_KEY", "CHINWAG_CLOUD_KEY");
-  if (!key) return fail("no_ci_key", "Set FLOW_FRAMEWORK_CLOUD_KEY to your agent's CI key (oci_...), in the environment or the agent's .env.", 2, `${RUN} setup`);
-  const cloud = (values.cloud || setting("FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD") || DEFAULT_CLOUD).replace(/\/$/, "");
-
+  const cloud = (given || setting("FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD") || DEFAULT_CLOUD).replace(/\/$/, "");
   const api: Api = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
     const res = await fetch(cloud + path, {
       method,
@@ -271,32 +322,7 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
     }
     return answer as T;
   };
-
-  const ctx: Ctx = { api, say, json, dir, pollMs: options.pollMs ?? 3000, maxPolls: options.maxPolls, now: options.now ?? Date.now, keyId: createHash("sha256").update(key).digest("hex").slice(0, 16), env: { ...Object.fromEntries(dotEnv), ...env } };
-  try {
-    const [name, extra] = args;
-    if (values["no-secrets"] && command !== undefined && command !== "promote") throw new Usage(`--no-secrets goes with flow deploy and deploy promote\n\n${usage}`);
-    if (command === "logs") {
-      if (name !== undefined) throw new Usage(`flow logs takes no arguments.\n\n${usage}`);
-      return await logs(ctx, environment, values.since ?? "1h", Boolean(values.follow));
-    }
-    if (extra !== undefined || (name !== undefined && command !== "secret" && command !== "secrets")) throw new Usage(`Too many arguments.\n\n${usage}`);
-    if (command === "promote") return await promote(ctx, !values["no-secrets"]);
-    if (command === "status") return await status(ctx, given ? [given] : ["staging", "production"]);
-    if (command === "secret") return await secret(ctx, name, environment, options.readStdin ?? (() => readFileSync(0, "utf8")));
-    if (command === "secrets") {
-      if (!values["from-env"]) throw new Usage(`secrets takes --from-env [<file>]\n\n${usage}`);
-      return await secretsFromEnv(ctx, resolve(name ? name : join(dir, ".env")), environment);
-    }
-    if (command !== undefined) throw new Usage(`Unknown command: deploy ${command}\n\n${usage}`);
-    return await deploy(ctx, dir, environment, values.version, !values["no-secrets"]);
-  } catch (error) {
-    if (error instanceof Usage) return fail("usage", error.message, 2);
-    if (error instanceof TooNew) return fail("chinwag_too_new", `Refused: ${error.message}`, 1, error.next);
-    if (error instanceof NotAvailable) return fail("not_available", error.message, 1);
-    if (error instanceof Refused) return fail(error.code, `Refused: ${error.message}`, 1);
-    return fail("network", `Could not reach ${cloud}: ${(error as Error).message}`, 1);
-  }
+  return { key, cloud, api, dotEnv };
 }
 
 interface Ctx {
@@ -313,7 +339,7 @@ interface Ctx {
   env: NodeJS.ProcessEnv;
 }
 
-async function deploy(ctx: Ctx, dir: string, env: string, version: string | undefined, withSecrets: boolean): Promise<number> {
+async function deploy(ctx: Ctx, dir: string, env: "staging" | "production", version: string | undefined, withSecrets: boolean, withCli: boolean): Promise<number> {
   for (const file of ["package.json", "package-lock.json", "src/agent.ts"]) {
     if (!existsSync(join(dir, file))) throw new Usage(`${join(dir, file)} is missing: deploy the agent's folder (npm install makes package-lock.json).`);
   }
@@ -324,6 +350,7 @@ async function deploy(ctx: Ctx, dir: string, env: string, version: string | unde
   }
   const tmp = mkdtempSync(join(tmpdir(), "flow-deploy-"));
   try {
+    const cli = withCli ? await cliStep(ctx, env, tmp) : undefined;
     const bundle = join(tmp, "agent.tgz");
     pack(dir, bundle);
     const size = statSync(bundle).size;
@@ -338,7 +365,7 @@ async function deploy(ctx: Ctx, dir: string, env: string, version: string | unde
     await ctx.api("POST", `/v1/hosting/deploys/${made.deploy.id}/start`);
     remember(ctx.dir, env, made.deploy.id);
     ctx.say(`Deploy ${made.deploy.id} to ${env}: building.`);
-    return await follow(ctx, made.deploy.id);
+    return await follow(ctx, made.deploy.id, cli);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -428,13 +455,66 @@ async function secretsFirst(ctx: Ctx, env: string, what: "deploy" | "promote"): 
   if (sent.saved.length) ctx.say(`Sent ${sent.saved.length} secret${sent.saved.length === 1 ? "" : "s"} from .env to ${env}: ${sent.saved.join(", ")}.`);
 }
 
-async function promote(ctx: Ctx, withSecrets: boolean): Promise<number> {
-  // Production keeps secrets of its own: the .env's go there first, so the promoted version has them.
-  if (withSecrets) await secretsFirst(ctx, "production", "promote");
-  const { deploy } = await ctx.api<{ deploy: Deploy }>("POST", "/v1/hosting/promote");
-  remember(ctx.dir, "production", deploy.id);
-  ctx.say(`Promoting staging's ${deploy.version ?? "live version"} to production (${deploy.id}).`);
-  return await follow(ctx, deploy.id);
+async function promote(ctx: Ctx, withSecrets: boolean, withCli: boolean): Promise<number> {
+  const tmp = mkdtempSync(join(tmpdir(), "flow-promote-"));
+  try {
+    // A production build of the CLI, from this folder.
+    const cli = withCli ? await cliStep(ctx, "production", tmp) : undefined;
+    // Production keeps secrets of its own: the .env's go there first, so the promoted version has them.
+    if (withSecrets) await secretsFirst(ctx, "production", "promote");
+    const { deploy } = await ctx.api<{ deploy: Deploy }>("POST", "/v1/hosting/promote");
+    remember(ctx.dir, "production", deploy.id);
+    ctx.say(`Promoting staging's ${deploy.version ?? "live version"} to production (${deploy.id}).`);
+    return await follow(ctx, deploy.id, cli);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+/** What publishing the CLI after a deploy came to, for the deploy's answer; failed makes the deploy exit 1. */
+interface CliOutcome {
+  cli: ({ published: true } & Published) | { published: false; code: string; message: string };
+  failed: boolean;
+}
+
+/**
+ * The CLI's part of a deploy, when the folder has src/cli.ts: packed into `out` before anything is
+ * sent, for the address it will be served from, so a CLI that does not pack stops the deploy there;
+ * published once the deploy is live (the step returned). Before an environment's first deploy it
+ * has no address yet, so it is packed once live. Without esbuild, or on a Flow whose hosting serves
+ * no CLIs, the deploy goes on without it and says so.
+ */
+async function cliStep(ctx: Ctx, environment: "staging" | "production", out: string): Promise<(() => Promise<CliOutcome>) | undefined> {
+  if (!existsSync(join(ctx.dir, "src", "cli.ts"))) return undefined;
+  const skipped = (code: string, message: string): CliOutcome => {
+    ctx.say(message);
+    return { cli: { published: false, code, message }, failed: false };
+  };
+  const noEsbuild = (error: unknown) => error instanceof PackError && error.code === "no_esbuild";
+  const leftOut = (error: PackError) => skipped("no_esbuild", `The CLI (src/cli.ts) is left out: ${error.message} (or add --no-cli).`);
+  let packed: PackedCli | undefined;
+  try {
+    const url = (await fixedServer(ctx.dir, environment)) ? undefined : await hostedAddress(ctx, environment).catch(() => null);
+    if (url) packed = await packFor(ctx, environment, url, out);
+    else if (url === undefined) packed = await packHosted(ctx, environment, undefined, out);
+  } catch (error) {
+    if (!noEsbuild(error)) throw error;
+    return async () => leftOut(error as PackError);
+  }
+  return async () => {
+    try {
+      packed ??= await packHosted(ctx, environment, undefined, out);
+      return { cli: { published: true, ...(await publish(ctx, environment, packed, out)) }, failed: false };
+    } catch (error) {
+      if (noEsbuild(error)) return leftOut(error as PackError);
+      if (error instanceof Refused && error.code === "cli_off") return skipped("cli_off", "This Flow's hosting serves no CLIs yet: the CLI was not published.");
+      if (error instanceof Refused && error.code === "server_changed") return skipped("server_changed", `Warning: the CLI was not published. ${error.message}.`);
+      const code = error instanceof Refused || error instanceof PackError ? error.code : "network";
+      const message = (error as Error).message;
+      console.error(`The CLI was not published: ${message}\nNext: ${RUN} cli publish --env ${environment}`);
+      return { cli: { published: false, code, message }, failed: true };
+    }
+  };
 }
 
 async function secret(ctx: Ctx, name: string | undefined, env: string, readStdin: () => string): Promise<number> {
@@ -546,7 +626,7 @@ async function secretsFromEnv(ctx: Ctx, file: string, env: string): Promise<numb
 }
 
 /** Follows a deploy until it is live, refused or failed, printing each change. */
-async function follow(ctx: Ctx, id: string): Promise<number> {
+async function follow(ctx: Ctx, id: string, cli?: () => Promise<CliOutcome>): Promise<number> {
   const until = Date.now() + GIVE_UP_MS;
   let last = "";
   for (;;) {
@@ -566,15 +646,19 @@ async function follow(ctx: Ctx, id: string): Promise<number> {
         : deploy.environment === "staging"
           ? `try it in your agent's Playground (Staging) in the dashboard, then ${RUN} deploy promote`
           : "open your agent's Playground (Production) in the dashboard";
-      if (ctx.json) {
-        const { id: deployId, environment, status, version, findings, error } = deploy;
-        console.log(JSON.stringify({ ok: live, deploy: { id: deployId, environment, status, version, findings: findings ?? [], error }, url, next }));
-      }
       if (live) {
         ctx.say(`Live in ${deploy.environment}.`);
         ctx.say(`URL: ${url ?? NO_URL}`);
+      }
+      // Once live, the CLI is published for it.
+      const after = live && cli ? await cli() : undefined;
+      if (ctx.json) {
+        const { id: deployId, environment, status, version, findings, error } = deploy;
+        console.log(JSON.stringify({ ok: live && !after?.failed, deploy: { id: deployId, environment, status, version, findings: findings ?? [], error }, url, cli: after?.cli ?? null, next }));
+      }
+      if (live) {
         ctx.say(`Next: ${next}`);
-        return 0;
+        return after?.failed ? 1 : 0;
       }
       if (!ctx.json) console.error(deploy.status === "refused" ? "Refused: fix the errors above and deploy again." : `Failed: ${deploy.error ?? "the build or the service did not start"}.`);
       else ctx.say(deploy.status === "refused" ? "Refused." : `Failed: ${deploy.error ?? "the build or the service did not start"}.`);
@@ -591,7 +675,7 @@ async function follow(ctx: Ctx, id: string): Promise<number> {
 const NO_URL = "not available on this Flow yet (the dashboard's Playground opens it)";
 
 /** The service's address, when the cloud tells it (GET /v1/hosting/address); null when it does not. */
-async function address(ctx: Ctx, environment: string): Promise<string | null> {
+async function address(ctx: Pick<Ctx, "api">, environment: string): Promise<string | null> {
   try {
     const { url } = await ctx.api<{ url?: string | null }>("GET", `/v1/hosting/address?environment=${encodeURIComponent(environment)}`);
     return typeof url === "string" && url ? url : null;
@@ -738,6 +822,282 @@ async function logs(ctx: Ctx, environment: string, since: string, followLines: b
     if (!followLines || (ctx.maxPolls !== undefined && polls >= ctx.maxPolls)) return 0;
     await new Promise((r) => setTimeout(r, ctx.pollMs));
   }
+}
+
+export const CLI_RELEASE_LINE = `  flow cli pack --server <staging|production|url> [--base-url <url>] [--out <folder>] [--json]
+                            The agent's CLI (src/cli.ts) as one package anyone with Node.js
+                            installs, with its installer (flow cli pack --help)
+  flow cli publish|rollback|status --env staging|production
+                            Its releases on Flow's hosting: curl -fsSL <agent's address> | sh`;
+
+export const CLI_RELEASE_USAGE = `Usage:
+  flow cli pack --server <staging|production|url> [--base-url <url>] [--out <folder>] [--dir <folder>] [--json]
+      Bundles the agent's CLI (src/cli.ts) with everything it needs, so Node.js 20.19 or newer is
+      all a computer needs to run it, and writes into <out>:
+        <name>.tgz     the package: npm install --global <name>.tgz installs it
+        install.sh     its installer: curl -fsSL <base-url> | sh
+        release.json   { name, display_name, version, sha256, size, server }
+  flow cli publish --env staging|production [--server <url>] [--change-server] [--dir <folder>] [--json]
+      Packs it for that environment's hosted agent and makes it the version the agent serves:
+      curl -fsSL <the agent's address> | sh installs it, and the CLIs out there are offered it.
+      flow deploy does this itself after a deploy (--no-cli leaves the CLI out). It refuses a
+      build whose server differs from the one served (everyone would sign in again), unless
+      --change-server.
+  flow cli rollback --env staging|production <version> [--json]
+      Serves an earlier published version again; people on the one it replaces are offered it.
+  flow cli status [--env staging|production] [--json]
+      The version served and the last releases, per environment.
+
+  --server     The MCP server the packed CLI uses: staging or production (the CLI file's
+               servers.<env> when set, else the hosted agent's address, asked of the cloud with the
+               CI key, plus /mcp), or an https URL. It takes the place of the default server
+               written in src/cli.ts, which must be there once.
+               The CLI keeps sign-ins by server: never change it for a CLI people already use.
+               publish takes an https URL to pack for a domain of the agent other than its address.
+  --base-url   Where you serve install.sh and <name>-<version>.tgz yourself: install.sh downloads
+               <base-url>/cli/<name>-<version>.tgz. Without it install.sh is for Flow's hosting,
+               which fills in the address it serves it from.
+  --out        Where pack writes (default: release/ in the agent's folder).
+  --dir        The agent's folder (default: .).
+  --json       Print one JSON answer on stdout (progress goes to stderr).
+  --cloud, FLOW_FRAMEWORK_CLOUD_KEY: as for flow deploy (flow deploy --help).
+
+The version is package.json's, the server's name and the git commit: 0.1.3-production.ab12cd3
+(custom for an https server; .dirty at the end with uncommitted changes). Unless src/cli.ts sets
+update itself, the packed CLI asks <base>/cli/version for a newer version and <name> update runs
+curl -fsSL <base> | sh, where <base> is --base-url, else the hosted agent's address, else the
+server's origin. The files in defineCli({ files }) go beside the bundle (cliFile(path) finds them).
+The packed CLI's --help must run from a fresh folder before it is packed. esbuild bundles it, an
+optional peer of Flow Framework: npm i -D esbuild.`;
+
+/** `flow cli pack|publish|rollback|status ...`, the words after `cli`. */
+export async function cliReleaseCli(argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        env: { type: "string" },
+        server: { type: "string" },
+        "base-url": { type: "string" },
+        out: { type: "string" },
+        dir: { type: "string", default: "." },
+        cloud: { type: "string" },
+        "change-server": { type: "boolean" },
+        json: { type: "boolean" },
+        help: { type: "boolean", short: "h" },
+      },
+    });
+  } catch (error) {
+    console.error(`${(error as Error).message}\n\n${CLI_RELEASE_USAGE}`);
+    return 2;
+  }
+  const { values, positionals } = parsed;
+  if (values.help) {
+    console.log(CLI_RELEASE_USAGE);
+    return 0;
+  }
+  const json = Boolean(values.json);
+  const say = json ? (line: string) => console.error(line) : (line: string) => console.log(line);
+  const fail = failer(json);
+  const usage = (message: string) => fail("usage", `${message}\n\n${CLI_RELEASE_USAGE}`, 2);
+  const [command, ...args] = positionals;
+  const https = (url: string | undefined) => url !== undefined && /^https:\/\/[^/\s]/.test(url) && URL.canParse(url);
+  const environment = values.env;
+  if (!["pack", "publish", "rollback", "status"].includes(command ?? "")) return usage(`Unknown command: cli ${positionals.join(" ")}`);
+  if (environment !== undefined && environment !== "staging" && environment !== "production") return usage("--env is staging or production");
+  if (command !== "pack" && command !== "status" && !environment) return usage(`cli ${command} needs --env staging or --env production`);
+  if (command === "pack" ? environment !== undefined : values["base-url"] !== undefined || values.out !== undefined) return usage(`--env goes with publish, rollback and status; --base-url and --out with pack`);
+  if (command === "pack" && values.server !== "staging" && values.server !== "production" && !https(values.server)) return usage("--server is staging, production or an https URL");
+  if (command === "publish" && values.server !== undefined && !https(values.server)) return usage("publish's --server is an https URL (else the environment's address)");
+  if (command !== "pack" && command !== "publish" && values.server !== undefined) return usage("--server goes with pack and publish");
+  if (values["base-url"] !== undefined && !https(values["base-url"])) return usage("--base-url is an https URL");
+  if (values["change-server"] && command !== "publish") return usage("--change-server goes with publish");
+  if (args.length !== (command === "rollback" ? 1 : 0)) return usage(command === "rollback" ? "cli rollback takes the version to serve again" : `cli ${command} takes no arguments`);
+
+  const dir = resolve(values.dir!);
+  const { key, cloud, api } = cloudOf(dir, env, values.cloud);
+  // A pack may need no cloud (an https server, or the CLI file's servers): it says when it does.
+  if (!key && command !== "pack") return fail("no_ci_key", NO_KEY, 2, `${RUN} setup`);
+  const ctx: CliCtx = { api, say, json, dir, noKey: !key };
+  try {
+    if (command === "pack") {
+      const hosted = https(values.server) ? undefined : (values.server as "staging" | "production");
+      const out = values.out ? resolve(values.out) : join(dir, "release");
+      const release = hosted ? await packHosted(ctx, hosted, undefined, out, values["base-url"]) : await packCli({ dir, server: values.server!, label: "custom", base: (values["base-url"] ?? new URL(values.server!).origin).replace(/\/+$/, ""), baseUrl: values["base-url"], out, say });
+      const files = { tgz: join(out, `${release.name}.tgz`), installer: join(out, "install.sh"), release: join(out, "release.json") };
+      const next = hosted ? `${RUN} cli publish --env ${hosted} (or npm install --global ${files.tgz} to try it here)` : `npm install --global ${files.tgz} (tries it on this computer)`;
+      if (json) console.log(JSON.stringify({ ok: true, release, files, next }));
+      say(`Next: ${next}`);
+      return 0;
+    }
+    if (command === "publish") {
+      const published = await packAndPublish(ctx, environment!, values.server, Boolean(values["change-server"]));
+      const next = `${published.install}  (installs it; ${RUN} cli status --env ${environment} shows the releases)`;
+      if (json) console.log(JSON.stringify({ ok: true, ...published, next }));
+      say(`Next: ${next}`);
+      return 0;
+    }
+    if (command === "rollback") return await rollback(ctx, environment!, args[0]!);
+    return await cliStatus(ctx, environment ? [environment] : ["staging", "production"]);
+  } catch (error) {
+    if (error instanceof PackError) return fail(error.code, error.message, error.exit);
+    if (error instanceof Refused && error.code === "cli_off") return fail("cli_off", CLI_OFF, 1);
+    if (error instanceof Refused && error.code === "no_ci_key") return fail("no_ci_key", NO_KEY, 2, `${RUN} setup`);
+    if (error instanceof Refused && error.code === "server_changed") return fail("server_changed", `Refused: ${error.message}`, 1);
+    if (error instanceof Refused) return fail(error.code, `Refused: ${error.message}`, 1, NEXT_AFTER[error.code]?.(environment ?? "staging"));
+    return fail("network", `Could not reach ${cloud}: ${(error as Error).message}`, 1);
+  }
+}
+
+const CLI_OFF = `This Flow's hosting serves no CLIs (cli_off). ${RUN} cli pack --server <url> --base-url <url> packs one to serve yourself.`;
+
+/** What to do next after a refusal the CLI routes give. */
+const NEXT_AFTER: Record<string, (env: string) => string> = {
+  version_exists: () => "commit the changes and publish again: a new commit is a new version",
+  already_published: (env) => `${RUN} cli rollback --env ${env} <version> serves an earlier version again`,
+  not_published: (env) => `${RUN} cli status --env ${env} lists the published versions`,
+  already_current: (env) => `${RUN} cli status --env ${env}`,
+};
+
+interface CliCtx {
+  api: Api;
+  say: (line: string) => void;
+  json: boolean;
+  dir: string;
+  /** No CI key: only a pack that asks the cloud nothing can go on. */
+  noKey?: boolean;
+}
+
+/** A CLI release, as the host keeps it. */
+interface CliRelease {
+  version: string;
+  name: string;
+  display_name: string;
+  environment: string;
+  sha256: string;
+  size: number;
+  status: "uploading" | "published";
+  created_at: string;
+  published_at: string | null;
+  published_by: string | null;
+}
+
+/** The version an environment serves (the host's current.json). */
+interface CliCurrent {
+  name: string;
+  display_name: string;
+  version: string;
+  sha256: string;
+  size: number;
+  tgz: string;
+  installer: string;
+  published_at: string;
+  published_by: string;
+  rolled_back_from: string | null;
+  /** The server packed into it; older clouds do not say. */
+  server?: string;
+}
+
+/** The hosted agent's address in an environment; null before its first deploy. */
+async function hostedAddress(ctx: Pick<CliCtx, "api">, environment: string): Promise<string | null> {
+  const { url } = await ctx.api<{ url?: string | null }>("GET", `/v1/hosting/address?environment=${environment}`);
+  return typeof url === "string" && url ? url.replace(/\/+$/, "") : null;
+}
+
+/** Packs the CLI for an environment: its hosted address plus /mcp, or the https server given (a domain of the agent's own). */
+async function packHosted(ctx: CliCtx, environment: "staging" | "production", server: string | undefined, out: string, baseUrl?: string): Promise<PackedCli> {
+  if (server) return packCli({ dir: ctx.dir, server, label: "custom", base: new URL(server).origin, out, say: ctx.say });
+  // The CLI file's own server for the environment (defineCli({ servers })), else the hosted address.
+  const fixed = await fixedServer(ctx.dir, environment);
+  if (fixed) return packCli({ dir: ctx.dir, server: fixed, label: environment, base: (baseUrl ?? new URL(fixed).origin).replace(/\/+$/, ""), baseUrl, out, say: ctx.say });
+  if (ctx.noKey) throw new Refused(NO_KEY, "no_ci_key");
+  const url = await hostedAddress(ctx, environment);
+  if (!url) throw new Refused(`${environment} has no address yet: deploy the agent there first (${RUN} deploy${environment === "production" ? " promote" : ""})`, "no_address");
+  return packFor(ctx, environment, url, out, baseUrl);
+}
+
+/** Packs the CLI for a hosted address: its /mcp the server, the address where it is served from. */
+function packFor(ctx: CliCtx, environment: "staging" | "production", url: string, out: string, baseUrl?: string): Promise<PackedCli> {
+  return packCli({ dir: ctx.dir, server: `${url}/mcp`, label: environment, base: (baseUrl ?? url).replace(/\/+$/, ""), baseUrl, out, say: ctx.say });
+}
+
+interface Published {
+  release: CliRelease;
+  current: CliCurrent;
+  /** How people install it: curl -fsSL <base> | sh. */
+  install: string;
+}
+
+/** Packs the CLI for an environment into a folder of its own, then publishes it. */
+async function packAndPublish(ctx: CliCtx, environment: "staging" | "production", server: string | undefined, changeServer: boolean): Promise<Published> {
+  const out = mkdtempSync(join(tmpdir(), "flow-cli-release-"));
+  try {
+    const packed = await packHosted(ctx, environment, server, out);
+    return await publish(ctx, environment, packed, out, changeServer);
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Publishes a packed release: the host makes it (or finds it, the same sha256) and signs an upload
+ * URL for the package and one for the installer, both PUT with no key; then makes it current.
+ */
+async function publish(ctx: CliCtx, environment: string, packed: PackedCli, out: string, changeServer = false): Promise<Published> {
+  const { name, display_name, version, sha256, size, server } = packed;
+  // People's sign-ins are kept by server: a release with another one would sign everyone out.
+  const { current } = await ctx.api<{ current: CliCurrent | null }>("GET", `/v1/hosting/cli/releases?environment=${environment}`);
+  if (current?.server && current.server !== server && !changeServer) {
+    throw new Refused(
+      `${environment}'s CLI uses ${current.server}, and this build ${server}: everyone who installed it would have to sign in again. To keep ${current.server}, set defineCli({ servers: { ${environment}: "${current.server}" } }) in src/cli.ts; to change it on purpose, ${RUN} cli publish --env ${environment} --change-server`,
+      "server_changed",
+    );
+  }
+  const made = await ctx.api<{ release: CliRelease; uploads?: { tgz: string; installer: string } }>("POST", "/v1/hosting/cli/releases", { environment, name, display_name, version, sha256, size, server });
+  // A version already published needs no upload: publishing the current one again changes nothing.
+  if (made.release.status !== "published" && made.uploads) {
+    for (const [url, file, type] of [[made.uploads.tgz, `${name}.tgz`, "application/gzip"], [made.uploads.installer, "install.sh", "text/x-shellscript; charset=utf-8"]] as const) {
+      const put = await fetch(url, { method: "PUT", headers: { "content-type": type }, body: readFileSync(join(out, file)) });
+      if (!put.ok) throw new Refused(`the upload of ${file} failed (${put.status})`, "upload_failed");
+    }
+  }
+  const done = await ctx.api<{ release: CliRelease; current: CliCurrent }>("POST", `/v1/hosting/cli/releases/${encodeURIComponent(version)}/publish`, { environment });
+  const install = `curl -fsSL ${new URL(packed.server).origin} | sh`;
+  ctx.say(`Published ${name} ${version} to ${environment} (${(size / 1024).toFixed(0)} KB). ${install}`);
+  return { release: done.release, current: done.current, install };
+}
+
+/** `flow cli rollback`: serves an earlier published version again. */
+async function rollback(ctx: CliCtx, environment: string, version: string): Promise<number> {
+  const { current } = await ctx.api<{ current: CliCurrent }>("POST", "/v1/hosting/cli/rollback", { environment, version });
+  const next = `${RUN} cli status --env ${environment}`;
+  if (ctx.json) console.log(JSON.stringify({ ok: true, current, next }));
+  ctx.say(`${environment} serves ${current.name} ${current.version} again${current.rolled_back_from ? `, in place of ${current.rolled_back_from}: people on ${current.rolled_back_from} are offered ${current.version} by ${current.name} update` : ""}.`);
+  ctx.say(`Next: ${next}`);
+  return 0;
+}
+
+/** `flow cli status`: per environment, the version served and the releases, newest first. */
+async function cliStatus(ctx: CliCtx, environments: string[]): Promise<number> {
+  const found: Array<{ environment: string; current: CliCurrent | null; releases: CliRelease[] }> = [];
+  for (const environment of environments) {
+    const { current, releases } = await ctx.api<{ current: CliCurrent | null; releases: CliRelease[] }>("GET", `/v1/hosting/cli/releases?environment=${environment}`);
+    found.push({ environment, current: current ?? null, releases: releases ?? [] });
+  }
+  const next = `${RUN} cli publish --env ${environments.length === 1 ? environments[0] : "staging"}`;
+  if (ctx.json) {
+    console.log(JSON.stringify({ ok: true, environments: Object.fromEntries(found.map(({ environment, ...rest }) => [environment, rest])), next }));
+    return 0;
+  }
+  for (const { environment, current, releases } of found) {
+    if (!current) ctx.say(`${environment}: no CLI published.`);
+    else ctx.say(`${environment}: ${current.name} ${current.version}, published ${current.published_at} by ${current.published_by}${current.rolled_back_from ? ` (rolled back from ${current.rolled_back_from})` : ""}`);
+    for (const r of releases.slice(0, 10)) ctx.say(`  ${r.version}  ${(r.size / 1024).toFixed(0)} KB  ${r.published_at ? `published ${r.published_at}` : r.status}${r.version === current?.version ? "  (current)" : ""}`);
+  }
+  ctx.say(`Next: ${next}`);
+  return 0;
 }
 
 const mb = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`;

@@ -284,6 +284,23 @@ test("a tool's format is what people see, rendered at a terminal; --json, --fiel
   assert.equal(await run(cli(["key.id", "manage_url"]), []), "key.id      key_1\nmanage_url  https://acme.test/keys\n");
 });
 
+// cli-table3 paints headers red, and only in named colors: Flow paints them itself.
+test("a rendered table's headers are in the brand's accent, in as many colors as the terminal shows, else cyan", async () => {
+  const report = tool({ name: "report", description: "A report.", input: z.object({}), output: z.object({ rows: z.number() }), signIn: "none", hints: { readOnly: true }, run: () => ({ rows: 1 }), format: () => "| Name | Size |\n|---|---|\n| a | 1 |\n" });
+  const server = await serve({ tools: [report] });
+  const run = async (brand: CliConfig["brand"], env: Record<string, string>) => {
+    const out = io(true); out.channel.env = env;
+    assert.equal(await runCli(defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-")), server, brand }), ["report"], out.channel), 0);
+    return out.out.split("\n").find((line) => line.includes("Name"))!;
+  };
+  const purple = { accent: "#645bff" };
+  assert.match(await run(purple, { TERM: "xterm-256color", COLORTERM: "truecolor" }), /\u001b\[38;2;100;91;255mName\u001b\[39m.*\u001b\[38;2;100;91;255mSize\u001b\[39m/);
+  assert.match(await run(purple, { TERM: "xterm-256color" }), /\u001b\[38;5;63mName/);
+  assert.match(await run(purple, { TERM: "xterm" }), /\u001b\[94mName/);
+  assert.match(await run(undefined, { TERM: "xterm" }), /\u001b\[36mName/, "cyan without a brand accent");
+  assert.doesNotMatch(await run(purple, { TERM: "xterm" }), /\u001b\[31m/, "never cli-table3's red");
+});
+
 test("a group's help lists its subcommands, and the top level lists groups and commands, styled at a terminal", async () => {
   const cli = acme(await serve({ tools: [listOrders, getOrder, cancelOrder] }));
   for (const argv of [["order"], ["order", "-h"]]) {
@@ -865,6 +882,7 @@ test("flow check refuses a brand color or logo a browser cannot use", () => {
   assert.deepEqual(problems({ logo: "data:image/png;base64,iVBORw0KGgo=" }), []);
   assert.deepEqual(problems({ accent: "purple", logo: "http://acme.test/logo.svg" }), ["brand.accent must be a six-digit hex color, for example #b85c00", "brand.logo must be an https URL or a data:image URL"]);
   assert.deepEqual(cliProblems(defineCli({ name: "acme", chat: { accent: "red" } }), []).errors, ["brand.accent must be a six-digit hex color, for example #b85c00"]);
+  assert.deepEqual(cliProblems(defineCli({ name: "acme", servers: { production: "http://cli.acme.test/mcp" } }), []).errors, ["servers.production must be an https URL, such as https://cli.acme.com/mcp"]);
 });
 
 // No test replaces one of the CLI's own commands; this is the one that may be.
@@ -933,6 +951,21 @@ test("a person at a terminal hears of a newer version after a command, asked at 
   writeFileSync(join(cli.directory!, "update.json"), JSON.stringify({ checkedAt: Date.now() - 25 * 60 * 60_000, latest: "1.3.0" }));
   await run(true);
   assert.equal(asked, 2, "a day later it asks again");
+});
+
+test("after a rollback, a CLI on the version rolled back from is offered the current one, though it is older; others are not", async () => {
+  const latest = `${await listen((_req, res) => res.end(JSON.stringify({ version: "1.2.0-production.aaa1111", rolled_back_from: "1.3.0-production.bbb2222" })))}/cli/version`;
+  const cli = (version: string) => defineCli({ name: "acme", version, directory: mkdtempSync(join(testDirectory, "flow-cli-rollback-")), welcome: false, update: { command: "echo updated", latest } });
+  const run = async (version: string, argv: string[]) => {
+    const ran = io(true);
+    ran.channel.env = {};
+    assert.equal(await runCli(cli(version), argv, ran.channel), 0);
+    return { out: ran.out, err: stripVTControlCharacters(ran.err) };
+  };
+  assert.equal((await run("1.3.0-production.bbb2222", ["--help"])).err, "\nacme 1.3.0-production.bbb2222 was rolled back; the version to use is 1.2.0-production.aaa1111. Run acme update to get it.\n");
+  assert.match((await run("1.3.0-production.bbb2222", ["update"])).err, /^Updating acme to 1\.2\.0-production\.aaa1111\.\.\.\n/);
+  assert.equal((await run("1.3.1-production.ccc3333", ["--help"])).err, "", "a version the rollback did not replace is not offered an older one");
+  assert.equal((await run("1.3.1-production.ccc3333", ["update"])).out, "acme 1.3.1-production.ccc3333 is the newest version.\n");
 });
 
 // The help tests cover --help; a bare run is the one place a person and an agent see different things.

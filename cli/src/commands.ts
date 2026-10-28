@@ -5,6 +5,8 @@
 // commands of its own. cliProblems is the rule-based check that keeps that file true to the tools;
 // it never judges taste.
 
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Command as StricliCommand, CommandContext } from "@stricli/core";
 import { FEEDBACK_NUDGE } from "../../src/skills.ts";
 
@@ -79,6 +81,13 @@ export interface CliConfig {
   version?: string;
   /** The organization's MCP endpoint. Else `--server` or <NAME>_SERVER. */
   server?: string;
+  /**
+   * The MCP server a CLI packed for an environment uses (`flow cli pack --server production`, and
+   * flow deploy), in place of the hosted agent's address: an https URL such as
+   * https://cli.acme.com/mcp, a domain of the agent's own. People's sign-ins are kept by server, so
+   * once a CLI is out, this never changes.
+   */
+  servers?: { production?: string; staging?: string };
   /** The agent terminal URL; default the server origin plus /agent/terminal. */
   agent?: string;
   /**
@@ -147,10 +156,16 @@ export interface CliConfig {
    * `npm install -g acme@latest`) and shows its output. With `latest`, a URL answering JSON with a
    * `version` (npm's https://registry.npmjs.org/acme/latest answers so), `acme update` first says
    * when `version` is already the newest, and a person at a terminal sees one line after a command
-   * when a newer one is out, checked at most once a day. A command of your own named `update`
-   * replaces Flow's.
+   * when a newer one is out, checked at most once a day. When the answer's `rolled_back_from` is
+   * this version (`flow cli rollback`), its `version` is offered too, though older. A command of
+   * your own named `update` replaces Flow's.
    */
   update?: { command: string; latest?: string };
+  /**
+   * Files the CLI reads at run time, by their paths in the agent's folder (["context/icon.svg"]):
+   * `flow cli pack` ships them beside the bundle at the same paths. Read one with cliFile(path).
+   */
+  files?: string[];
 }
 
 export interface Brand {
@@ -213,8 +228,25 @@ export interface Command {
   config?: ToolCommand | CustomCommand;
 }
 
+/** What `flow cli pack` writes into a packed CLI (esbuild's define); never set in the source. */
+declare const __FLOW_CLI_RELEASE__: { version: string; update: { command: string; latest: string } } | undefined;
+
+/**
+ * The CLI file's configuration. Packed by `flow cli pack`, its version is the release's, and
+ * update's command and latest, where the file leaves them out, are the address it is served from.
+ */
 export function defineCli(config: CliConfig): CliConfig {
-  return config;
+  if (typeof __FLOW_CLI_RELEASE__ === "undefined") return config;
+  const release = __FLOW_CLI_RELEASE__;
+  return { ...config, version: release.version, update: { command: config.update?.command ?? release.update.command, latest: config.update?.latest ?? release.update.latest } };
+}
+
+/**
+ * Where a file of defineCli's files is: packed, beside the bundle (the package's own folder); from
+ * the source, in the folder the CLI runs from, the agent's folder as `npm run cli` runs it.
+ */
+export function cliFile(path: string): string {
+  return typeof __FLOW_CLI_RELEASE__ === "undefined" ? resolve(path) : fileURLToPath(new URL(`../${path}`, import.meta.url));
 }
 
 /**
@@ -433,6 +465,11 @@ function outputFields(tool: ToolInfo): Set<string> | null {
   return fields;
 }
 
+/** An https URL with a host. */
+export function httpsUrl(url: string): boolean {
+  return /^https:\/\/[^/\s]/.test(url) && URL.canParse(url);
+}
+
 /** A brand accent: a six-digit hex color. */
 export const HEX = /^#[0-9a-f]{6}$/i;
 
@@ -449,6 +486,9 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
   if (accent !== undefined && !HEX.test(accent)) errors.push(`brand.accent must be a six-digit hex color, for example #b85c00`);
   const logoError = logo === undefined ? undefined : logoProblem(logo);
   if (logoError) errors.push(logoError);
+  for (const [environment, url] of Object.entries(config.servers ?? {})) {
+    if (url !== undefined && !httpsUrl(url)) errors.push(`servers.${environment} must be an https URL, such as https://cli.acme.com/mcp`);
+  }
   if (config.update) {
     if (!config.update.command?.trim()) errors.push("update.command must be the shell command that updates the CLI");
     if (config.update.latest !== undefined && !/^https?:$/.test(URL.canParse(config.update.latest) ? new URL(config.update.latest).protocol : "")) errors.push("update.latest must be an http or https URL");

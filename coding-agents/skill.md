@@ -15,7 +15,7 @@ Read only the relevant guides; do not load every skill upfront.
 | Task | Skill | Package file |
 | --- | --- | --- |
 | Build or operate a messaging agent, its playground, phone connection or deployment | `flow-framework-build-agent` | `build-agent-skill.md` |
-| Serve MCP tools, configure deferral, build a CLI or package plugins | `flow-framework-mcp` | `mcp-skill.md` |
+| Serve MCP tools, configure deferral, build or ship a CLI, or package plugins | `flow-framework-mcp` | `mcp-skill.md` |
 | Choose a CLI's short forms: default commands, positional arguments, short flags | `flow-framework-cli-design` | `cli-design-skill.md` |
 | Write or change tools and their test files | `flow-framework-tools` | `tools-skill.md` |
 | Write or change test scenarios | `flow-framework-tests` | `test-skill.md` |
@@ -83,7 +83,7 @@ from it unless they want another), and tell them where people see each name:
   - the plugins `flow plugin` makes: the plugin's name and its MCP server's (`--name` overrides),
     with package.json's `description` as the plugin's description.
 - **`displayName`**, what people call the agent (`Skycast`): `--display-name`. People see it as:
-  - the message their phone sends to reach it, `Hi Skycast (ref <code>)`, filled in by the link
+  - the message their phone sends to reach it, `Join Skycast (ref <code>)`, filled in by the link
     `link` prints and by its /try page;
   - the name the agent gives itself in chats, from its prompt `agent/AGENTS.md`.
   The owner also sees it on the playground and in what `npm start` and `npm run mcp` print.

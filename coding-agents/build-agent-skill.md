@@ -364,7 +364,7 @@ To chat with the agent from the owner's phone, with no tunnel and no key made by
 from the agent's folder (`npx @flow-engineer/flow init --display-name "<name>"` makes a starter in
 an empty one, named `flatx-agent` after it unless `--name` says otherwise: first ask the owner what
 people should call their agent, such as "FlatX agent" (see "Names"); the
-phone's first message is `Hi FlatX agent (ref <code>)`, and `package.json`'s `displayName` keeps it;
+phone's first message is `Join FlatX agent (ref <code>)` (the agent reads `Join FlatX agent`), and `package.json`'s `displayName` keeps it;
 `link --display-name "<name>"` renames it later, in `package.json` and `agent/AGENTS.md`).
 Only `chat` reads stdin; `init` asks for the name only in a terminal, and nothing else asks for input.
 
@@ -405,6 +405,17 @@ starter does this when `.env` has `FLOW_MESSAGING_KEY`. Each error is
 2 network, 3 refused, 4 sign-in waiting. Never ask the owner to paste a key into the chat. Always
 name the package (`npx @flow-engineer/flow ...`): `npx flow` on its own fetches another npm package.
 CI never logs in: `setup --ci` says how to give it the cloud key.
+
+The free trial takes 25 people per channel in all; past that, new people are held: their messages
+are kept, not delivered, until a place frees. More is a paid Flow Messaging plan, which only the
+workspace owner buys, self-serve, at https://flow.engineer/dashboard/plans: **Shared** (more people
+on Flow's shared lines, with live keys), **Dedicated** (the owner's own iMessage number, with SMS/RCS
+fallback; Flow reviews it first, usually within a day) and the **Outbound** add-on (the agent
+messages people first). Once a channel's trial has 80% of its people, `setup`, `link` and `status`
+print a `Next:` line naming the plans and the link (`plans` in `--json`). Show the owner that line,
+a trial-limit error's `next`, and the `hint` of a paused plan's refusal (`channel_code` `plan_ended`:
+the adapter logs it and the stream's `stopped` carries it), with the link: retrying, or running
+`setup` again, does not make room. Prices and limits: `docs/agents.md`, "Paid plans".
 
 ## Deploy it
 

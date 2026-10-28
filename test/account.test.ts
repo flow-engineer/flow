@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { currentToken, deleteCredentials, retryAfterSeconds, saveCredentials } from "../testing/src/flow-login.ts";
+import { plansNext } from "../testing/src/account.ts";
 
 const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
 const TOKEN = "fcli_secret_token_1234";
@@ -43,7 +44,7 @@ async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => 
       const c = asked.searchParams.get("c")!;
       if ((options.tryOpen ?? ["telegram"]).includes(c)) {
         const code = asked.pathname.split("/")[2]!;
-        const message = `Hi ${asked.searchParams.get("n") || "there"} (ref ${code})`;
+        const message = `Join ${asked.searchParams.get("n") || "my agent"} (ref ${code})`;
         const encoded = encodeURIComponent(message).replace(/\(/g, "%28").replace(/\)/g, "%29");
         const link = c === "telegram" ? `https://t.me/FlowSandboxBot?start=${code}` : c === "whatsapp" ? `https://wa.me/15550100001?text=${encoded}` : `sms:+15550100002?&body=${encoded}`;
         return send(200, { channel: c, message, link, page: asked.toString() });
@@ -326,10 +327,10 @@ test("link in a folder not set up signs in, resuming a code already waiting, run
   assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_FRAMEWORK_JOIN_CODE=brave-otter-1$/m);
   const page = `${flow.url}/try/brave-otter-1?c=telegram&n=cafe`;
   assert.deepEqual(result.lines.at(-1), {
-    url: "https://t.me/FlowSandboxBot?start=brave-otter-1", page, join_message: "Hi cafe (ref brave-otter-1)", channel: "telegram", join_code: "brave-otter-1", reply_only: false,
+    url: "https://t.me/FlowSandboxBot?start=brave-otter-1", page, join_message: "Join cafe (ref brave-otter-1)", channel: "telegram", join_code: "brave-otter-1", reply_only: false,
     say_to_person: `Your Telegram link: https://t.me/FlowSandboxBot?start=brave-otter-1 Open it and press Start. On a computer without Telegram, open ${page} instead.`,
     model_key: { set: false, env: null, flow_credit: null, message: NO_KEY }, running: false,
-    next: "add your own model key to .env (flow.engineer gave no trial credit), then npm start, then send the link above",
+    next: "add your own model key to .env (flow.engineer gave no trial credit), then npm start, then send the link above", plans: null,
   });
   assert.ok(!("next" in result.lines[2]!), "setup's next list is not given as well: one next per run");
   assert.match(result.err, /answers only once \.env has a model key/, "with no model key it does not say the phone chats with it");
@@ -573,8 +574,8 @@ test("setup and link refuse a folder with no package.json before signing in or m
 
 test("setup saves each open channel's sender and prints its link; link --channel imessage says the agent replies only after you write", async (t) => {
   const channels = {
-    whatsapp_sender: "snd_wa", whatsapp_link: "https://wa.me/15550100001?text=Hi%20there%20%28ref%20brave-otter-1%29",
-    imessage_sender: "snd_im", imessage_link: "sms:+15550100002?&body=Hi%20there%20%28ref%20brave-otter-1%29",
+    whatsapp_sender: "snd_wa", whatsapp_link: "https://wa.me/15550100001?text=Join%20my%20agent%20%28ref%20brave-otter-1%29",
+    imessage_sender: "snd_im", imessage_link: "sms:+15550100002?&body=Join%20my%20agent%20%28ref%20brave-otter-1%29",
     trial: { telegram: { limit: null, used: 0 }, whatsapp: { limit: 300, used: 12 }, imessage: { limit: 100, used: 0 } },
   };
   const flow = await flowServer([], 200, { setup: { ...channels, try_urls: undefined }, tryOpen: ["telegram", "whatsapp", "imessage"] });
@@ -588,16 +589,17 @@ test("setup saves each open channel's sender and prints its link; link --channel
   assert.match(dotenv, /^FLOW_MESSAGING_IMESSAGE_SENDER=snd_im$/m);
   assert.equal(set.lines[0]!.imessage_link, channels.imessage_link);
   assert.equal(set.lines[0]!.try_urls.imessage, `${flow.url}/try/brave-otter-1?c=imessage&n=cafe`);
-  assert.equal(set.lines[0]!.direct_links.imessage, "sms:+15550100002?&body=Hi%20cafe%20%28ref%20brave-otter-1%29", "the iMessage link itself, named");
-  assert.equal(set.lines[0]!.join_message, "Hi cafe (ref brave-otter-1)");
+  assert.equal(set.lines[0]!.direct_links.imessage, "sms:+15550100002?&body=Join%20cafe%20%28ref%20brave-otter-1%29", "the iMessage link itself, named");
+  assert.equal(set.lines[0]!.join_message, "Join cafe (ref brave-otter-1)");
   assert.deepEqual(set.lines[0]!.trial, channels.trial);
-  assert.match(set.err, /^On WhatsApp: https:\/\/wa\.me\/15550100001\?text=Hi%20cafe%20%28ref%20brave-otter-1%29 \(on a computer: .*\?c=whatsapp&n=cafe\) \(free trial: 12 of 300 messages used\)$/m);
+  assert.match(set.err, /^On WhatsApp: https:\/\/wa\.me\/15550100001\?text=Join%20cafe%20%28ref%20brave-otter-1%29 \(on a computer: .*\?c=whatsapp&n=cafe\) \(free trial: 12 of 300 messages used\)$/m);
+  assert.match(set.err, /^On iMessage: sms:\+15550100002\?&body=Join%20cafe%20%28ref%20brave-otter-1%29 \(on a computer: .*\?c=imessage&n=cafe\) \(free trial: 0 of 100 messages used\)$/m);
 
   const imessage = await run(["link", "--channel", "imessage", "--json"], { url: flow.url, config: temp(), cwd });
   assert.equal(imessage.code, 0, imessage.err);
   assert.equal(imessage.lines[0]!.reply_only, true);
   assert.match(imessage.lines[0]!.say_to_person, /can reply after you write to it first, any time later/);
-  assert.equal(imessage.lines[0]!.url, "sms:+15550100002?&body=Hi%20cafe%20%28ref%20brave-otter-1%29");
+  assert.equal(imessage.lines[0]!.url, "sms:+15550100002?&body=Join%20cafe%20%28ref%20brave-otter-1%29");
   assert.match(imessage.lines[0]!.say_to_person, /^Your iMessage link: sms:\+15550100002\?&body=\S+ Open it on an iPhone or a Mac/);
   assert.match(imessage.err, /cannot message you first/);
 });
@@ -611,7 +613,7 @@ test("link --channel whatsapp in a folder set up before it had a WhatsApp sender
   assert.equal(result.code, 0, result.err);
   assert.deepEqual(result.lines.at(-2)!.minted, [], "every key was had");
   assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_MESSAGING_WHATSAPP_SENDER=snd_wa$/m);
-  assert.equal(result.lines.at(-1)!.url, "https://wa.me/15550100001?text=Hi%20cafe%20%28ref%20brave-otter-1%29");
+  assert.equal(result.lines.at(-1)!.url, "https://wa.me/15550100001?text=Join%20cafe%20%28ref%20brave-otter-1%29");
   assert.equal(result.lines.at(-1)!.page, `${flow.url}/try/brave-otter-1?c=whatsapp&n=cafe`);
   assert.match(result.err, /within 24 hours of your last message/);
   assert.match(result.err, /^Next: add your own model key to \.env \(flow\.engineer gave no trial credit\), then npm start, then send the link above\.$/m, "npm start is not running here: one Next line, to start it");
@@ -939,7 +941,7 @@ test("status with FLOW_KEY the model's key asks Flow's GET /credit for what is l
   assert.match(offline.out, /^Model: Flow trial credit \(credit left unknown: Flow could not be reached\)$/m);
 });
 
-test("link fills in the name people call the agent (package.json displayName): Hi FlatX agent (ref <code>)", async (t) => {
+test("link fills in the name people call the agent (package.json displayName): Join FlatX agent (ref <code>)", async (t) => {
   const flow = await flowServer([], 200, { tryOpen: ["telegram", "whatsapp", "imessage"] });
   t.after(flow.close);
   const cwd = temp();
@@ -947,10 +949,11 @@ test("link fills in the name people call the agent (package.json displayName): H
   writeFileSync(join(cwd, ".env"), `FLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_MESSAGING_IMESSAGE_SENDER=snd_im\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\n`);
   const result = await run(["link", "--channel", "imessage", "--json"], { url: flow.url, config: temp(), cwd });
   assert.equal(result.code, 0, result.err);
-  assert.equal(result.lines[0]!.join_message, "Hi FlatX agent (ref brave-otter-1)");
-  assert.equal(result.lines[0]!.url, "sms:+15550100002?&body=Hi%20FlatX%20agent%20%28ref%20brave-otter-1%29");
+  assert.equal(result.lines[0]!.join_message, "Join FlatX agent (ref brave-otter-1)");
+  assert.equal(result.lines[0]!.url, "sms:+15550100002?&body=Join%20FlatX%20agent%20%28ref%20brave-otter-1%29");
   assert.equal(result.lines[0]!.page, `${flow.url}/try/brave-otter-1?c=imessage&n=FlatX+agent`);
-  assert.match(result.err, /^Open it on a phone and send the message it fills in, "Hi FlatX agent \(ref brave-otter-1\)"\. From then on$/m);
+  assert.match(result.err, /^sms:\+15550100002\?&body=Join%20FlatX%20agent%20%28ref%20brave-otter-1%29\nOn a computer without iMessage: \S+\/try\/brave-otter-1\?c=imessage&n=FlatX\+agent\n/m, "the link lines");
+  assert.match(result.err, /^Open it on a phone and send the message it fills in, "Join FlatX agent \(ref brave-otter-1\)"\. From then on$/m);
 });
 
 test("link --channel whatsapp writes WhatsApp's page as FLOW_FRAMEWORK_TRY_URL and prints only WhatsApp's trial line, though setup opened every channel", async (t) => {
@@ -997,9 +1000,26 @@ test("a trial answer with held counts people (Flow Messaging since Oct 2026): se
   const status = await run(["status"], { url: flow.url, config: temp(), cwd, env });
   assert.equal(status.code, 0, status.err);
   assert.match(status.out, /^iMessage: sender in \.env; open now \(free trial: 1 of 25 people\)$/m);
+  // A full trial names the plans and where the owner buys one, on each.
+  for (const said of [set, link, status]) assert.ok(said.out.split("\n").includes(PLANS_FULL), said.out);
 });
 
-test("link and setup --display-name rename the agent: package.json's displayName and its prompt, then the phone link says Hi <name>", async (t) => {
+const PLANS_FULL = "Next: the free trial is full on Telegram, so new people wait for a place (2 waiting now). More people: Shared $25/month, or Dedicated $100/month with your own iMessage number, at https://flow.engineer/dashboard/plans?plan=shared (the workspace owner buys it).";
+
+test("the paid plans are named by rule: at 80% of a trial's people, the plans page; full or holding anyone, the Shared plan's link", () => {
+  const at = (used: number, held = 0) => plansNext({ telegram: { limit: 25, used, held } });
+  assert.equal(at(19), undefined, "under 80%");
+  assert.deepEqual(at(20), { url: "https://flow.engineer/dashboard/plans", message: "the free trial is nearly full on Telegram. More people or your own iMessage number: Shared $25/month or Dedicated $100/month, at https://flow.engineer/dashboard/plans (the workspace owner buys it)." });
+  assert.equal(at(25)?.url, "https://flow.engineer/dashboard/plans?plan=shared");
+  assert.match(at(25)!.message, /^the free trial is full on Telegram, so new people wait for a place\. More people/);
+  assert.equal(`Next: ${plansNext({ telegram: { limit: 25, used: 25, held: 2 }, whatsapp: { limit: 25, used: 3, held: 0 } })!.message}`, PLANS_FULL);
+  assert.match(plansNext({ telegram: { limit: 25, used: 25, held: 1 }, imessage: { limit: 25, used: 24, held: 2 } })!.message, /full on Telegram and iMessage, so new people wait for a place \(3 waiting now\)/);
+  assert.equal(plansNext({ whatsapp: { limit: 300, used: 299 } }), undefined, "an older answer counting messages");
+  assert.equal(plansNext({ telegram: { limit: null, used: 900, held: 0 } }), undefined, "an unlimited trial");
+  assert.equal(plansNext(null), undefined);
+});
+
+test("link and setup --display-name rename the agent: package.json's displayName and its prompt, then the phone link says Join <name>", async (t) => {
   const flow = await flowServer([], 200, { tryOpen: ["telegram"] });
   t.after(flow.close);
   const cwd = temp();
@@ -1010,7 +1030,7 @@ test("link and setup --display-name rename the agent: package.json's displayName
   const result = await run(["link", "--display-name", "Rowan", "--json"], { url: flow.url, config: temp(), cwd });
   assert.equal(result.code, 0, result.err);
   assert.deepEqual(result.lines[0], { display_name: "Rowan", prompt_renamed: true });
-  assert.equal(result.lines.at(-1)!.join_message, "Hi Rowan (ref brave-otter-1)");
+  assert.equal(result.lines.at(-1)!.join_message, "Join Rowan (ref brave-otter-1)");
   assert.deepEqual(JSON.parse(readFileSync(join(cwd, "package.json"), "utf8")), { name: "flatx", displayName: "Rowan", version: "0.1.0" });
   assert.equal(readFileSync(join(cwd, "agent", "AGENTS.md"), "utf8"), "# Rowan\n\nYou are Rowan, the ordering assistant. Junipers grow here.\n", "whole words only");
 

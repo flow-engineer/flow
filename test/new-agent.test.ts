@@ -44,7 +44,7 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   assert.equal(pkg.engines.node, own.engines.node);
   assert.equal(readFileSync(join(dir, ".npmrc"), "utf8"), "engine-strict=true\n");
   // The key and each test session's results (.flow/last-session.json) stay out of git.
-  assert.deepEqual(readFileSync(join(dir, ".gitignore"), "utf8").split("\n").filter(Boolean), ["node_modules/", ".env", ".flow/"]);
+  assert.deepEqual(readFileSync(join(dir, ".gitignore"), "utf8").split("\n").filter(Boolean), ["node_modules/", ".env", ".flow/", "release/"]);
   assert.equal(JSON.parse(readFileSync(join(dir, "tsconfig.json"), "utf8")).extends, undefined);
   for (const skill of ["flow-framework", "flow-framework-build-agent", "flow-framework-mcp", "flow-framework-cli-design", "flow-framework-tools", "flow-framework-tests", "flow-framework-context", "flow-framework-auth"]) assert.ok(existsSync(join(dir, ".claude", "skills", skill, "SKILL.md")), skill);
   assert.equal(readFileSync(join(dir, "CLAUDE.md"), "utf8"), "@AGENTS.md\n");
@@ -74,7 +74,7 @@ test("flow init makes the same agent in the folder it runs in, named by --name, 
   const main = readFileSync(join(dir, "src", "main.ts"), "utf8");
   assert.match(main, /from "@flow-engineer\/flow\/flow-messaging"/);
   assert.match(main, /process\.env\.FLOW_MESSAGING_KEY \? flowMessaging\(\)/);
-  assert.equal(readFileSync(join(dir, ".gitignore"), "utf8"), "dist/\nnode_modules/\n.env\n.flow/\n");
+  assert.equal(readFileSync(join(dir, ".gitignore"), "utf8"), "dist/\nnode_modules/\n.env\n.flow/\nrelease/\n");
   assert.throws(() => initHere(dir), /has package\.json, tsconfig\.json, src, agent, tests/);
 });
 
@@ -108,7 +108,7 @@ test("the name people call the agent (--display-name) is package.json's displayN
   const result = spawnSync(process.execPath, [cli, "init", "--display-name", "FlatX agent"], { cwd: here, env: { PATH: process.env.PATH }, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(readFileSync(join(here, "package.json"), "utf8")).displayName, "FlatX agent");
-  assert.match(result.stdout, /a phone reaches it with "Hi FlatX agent \(ref <code>\)"/);
+  assert.match(result.stdout, /a phone reaches it with "Join FlatX agent \(ref <code>\)"/);
 });
 
 test("every name in a new agent's code comes from its package.json: the CLI, its variables and examples, and the MCP server", async (t) => {

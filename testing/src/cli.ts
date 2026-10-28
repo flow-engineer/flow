@@ -39,7 +39,7 @@ import { CHECK_LINE as TOOLS_CHECK_LINE, checkCli, mcpUpdateCli } from "./check.
 import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
 import { RECORDS_LINE, recordsCli } from "./records.ts";
-import { DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
+import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
@@ -53,7 +53,7 @@ const NEW_LINE = `  flow new <name> [--display-name <name>]
   flow init [--name <name>] [--display-name <name>]
                             Make that agent in the current folder.
                             --display-name is what people call it, such as "FlatX agent": a
-                            phone reaches it with "Hi FlatX agent (ref <code>)" (asked for when
+                            phone reaches it with "Join FlatX agent (ref <code>)" (asked for when
                             run in a terminal; else the name in words).
                             --name is its package, CLI command and MCP server name, such as
                             flatx-agent (else the display name in lowercase and dashes, else
@@ -151,7 +151,7 @@ the CHINWAG_ names from before the rename still work):
                            GEMINI_API_KEY: the first with a value is used, else FLOW_KEY
                            (the agent's Flow key, on its trial credit; flow setup writes it)`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
-const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${RECORDS_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${INSPECT_LINE}
+const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${RECORDS_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${CLI_RELEASE_LINE}\n${INSPECT_LINE}
 ${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${DEPLOY_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
 
 /** What to do after new or init, from step 2; a model key comes first when none is set here. */
@@ -186,6 +186,7 @@ if (process.argv[2] === "mcp") {
   await withPeers("mcp update", () => import("../../mcp/src/client.ts"));
   process.exit(await mcpUpdateCli());
 }
+if (process.argv[2] === "cli" && ["pack", "publish", "rollback", "status"].includes(process.argv[3] ?? "")) process.exit(await cliReleaseCli(process.argv.slice(3)));
 if (process.argv[2] === "cli") {
   // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client and @stricli/core, optional peers.
   const { defineCli, runCli } = await withPeers("cli", () => import("../../cli/src/index.ts"));
@@ -245,7 +246,7 @@ async function askDisplayName(given: string | undefined, packageName: string): P
   const fallback = displayNameOf(undefined, packageName);
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    return (await rl.question(`What should people call your agent? Their phone says "Hi <it>" (Enter for "${fallback}"): `)).trim() || undefined;
+    return (await rl.question(`What should people call your agent? Their phone says "Join <it>" (Enter for "${fallback}"): `)).trim() || undefined;
   } finally {
     rl.close();
   }
@@ -253,7 +254,7 @@ async function askDisplayName(given: string | undefined, packageName: string): P
 
 const namedLine = (dir: string) => {
   const displayName = (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { displayName?: string }).displayName;
-  return `People call it "${displayName}" (package.json displayName, and its prompt agent/AGENTS.md): a phone reaches it with "Hi ${displayName} (ref <code>)".`;
+  return `People call it "${displayName}" (package.json displayName, and its prompt agent/AGENTS.md): a phone reaches it with "Join ${displayName} (ref <code>)".`;
 };
 
 const displayNameFlag = (values as { "display-name"?: string })["display-name"];
