@@ -627,7 +627,7 @@ function originPattern(origin: string): RegExp | null {
   const m = /^(https):\/\/(\*\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*)(:\d{1,5})?\/?$/i.exec(origin) ?? /^(http):\/\/()(localhost|127\.0\.0\.1)(:\d{1,5})?\/?$/i.exec(origin);
   if (!m) return null;
   const [, scheme, wildcard, host, port = ""] = m;
-  const escaped = host.replace(/[.]/g, "\\.");
+  const escaped = host.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
   return new RegExp(`^${scheme}://${wildcard ? "[a-z0-9-]+(?:\\.[a-z0-9-]+)*\\." : ""}${escaped}${port}$`, "i");
 }
 
