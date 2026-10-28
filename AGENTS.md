@@ -39,7 +39,10 @@ across these surfaces. A project can start with any one of them.
 - Every test file starts with `// covers: <src files>`, the source files whose behaviour it
   protects; `test:changed` reads it, so keep it accurate when tests move or code is split. Paths
   are relative to the repository root, also in the simulators and flow-messaging packages (`simulators/src/server.ts`).
-- The full suite (`npm test`, at the root, in `simulators/` and in `flow-messaging/`) runs before a change is merged.
+- The full suite (`npm run test:all`: `npm test` at the root, in `simulators/` and in `flow-messaging/`,
+  at once) runs before a change is merged, and fails when it takes more than two minutes. Never raise
+  the limit: make the slow tests faster (a file whose tests are independent runs them at once,
+  `describe(..., { concurrency: true })`) or cut the ones that protect nothing.
 - Tests that call real models (a simulated person, a judge) run only when someone starts them,
   never in CI, and print what they cost.
 

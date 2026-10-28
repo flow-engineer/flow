@@ -41,7 +41,9 @@ async function cloud(options: { firstDeploy?: boolean; cli?: "off" | "version_ex
     const path = req.url!;
     const type = String(req.headers["content-type"] ?? "");
     calls.push({ method: req.method!, path, auth: String(req.headers.authorization), type, headers: Object.keys(req.headers), body: type.includes("json") && bytes.length ? JSON.parse(bytes.toString()) : null, bytes });
-    const send = (status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+    // No kept-alive connections: the CLI packs synchronously between calls, and under load the server
+    // closed an idle one just as the next call reused it ("fetch failed").
+    const send = (status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json", connection: "close" }).end(JSON.stringify(body));
     const route = `${req.method} ${path.split("?")[0]}`;
     const environment = new URL(path, url).searchParams.get("environment") ?? (calls.at(-1)!.body?.environment as string | undefined) ?? "staging";
     const deploy = (status: string) => ({ id: "hdp_1", environment: calls.some((c) => c.path === "/v1/hosting/promote") ? "production" : "staging", status, version: "abc123", error: null, findings: [] });

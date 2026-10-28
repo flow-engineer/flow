@@ -6,7 +6,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { currentToken, deleteCredentials, retryAfterSeconds, saveCredentials } from "../testing/src/flow-login.ts";
 import { plansNext } from "../testing/src/account.ts";
@@ -126,6 +126,8 @@ const agentDir = (name = "cafe") => {
   return dir;
 };
 
+// Each test has its own server and folders, and most of their time is the CLI starting: run them at once.
+describe("account commands", { concurrency: true }, () => {
 test("login prints the code as a pending line, waits through pending and slow_down, then saves the token at mode 0600", async (t) => {
   const flow = await flowServer([{ error: "authorization_pending" }, { error: "slow_down" }, { access_token: TOKEN, expires_at: "2027-01-01T00:00:00Z" }]);
   t.after(flow.close);
@@ -1139,4 +1141,5 @@ test("setup --workspace refused (403 not_a_member, 409 workspace_ambiguous) show
   t.after(flow.close);
   assert.equal((await run(["setup", "--workspace", ""], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } })).code, 1);
   assert.equal((await run(["link", "--workspace", "x".repeat(101)], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } })).code, 1);
+});
 });

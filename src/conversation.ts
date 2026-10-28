@@ -1623,6 +1623,8 @@ export class Conversation {
       kept.timer = null;
       void this.showTyping(channel, kept);
     }, lasts * TYPING_AGAIN);
+    // Typing kept up never holds the process open on its own.
+    kept.timer.unref();
   }
 
   /** Typing is no longer kept up: no timer is left, and nothing waits on it. */

@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadSuite, parseScenario, parseToolFile } from "../testing/src/suite.ts";
 
@@ -82,6 +82,8 @@ function runCli(url: string, dir: string, extra: string[] = []) {
   return spawn(process.execPath, [cli, "test", "--cloud", url, ...extra], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
 }
 
+// Each test has its own fake cloud and folders, and most of their time is the CLI starting: run them at once.
+describe("cli-report", { concurrency: true }, () => {
 test("a stream that dies prints the runs already in, keeps them with the rest as not played, and exits 2", { timeout: 15_000 }, async () => {
   const local = await cloud(false);
   const dir = agentDir({ bye: scenarioYaml("bye", "sms, whatsapp") });
@@ -769,4 +771,5 @@ test("flow show prints a run's record from the cloud with the CI key: checks wit
     assert.equal(missing.code, 1);
     assert.match(missing.stderr, /^The cloud answered 404 not_found: No such run\. No run trn_9 for this agent\.$/m);
   } finally { server.closeAllConnections(); server.close(); }
+});
 });
