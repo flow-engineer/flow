@@ -1,0 +1,24 @@
+# How the agent's messages read: no buttons when there is nothing to pick, menu items in plain
+# words, one idea per message.
+id: reads-like-a-text
+title: Asks three things at once, about a menu kept under point-of-sale titles
+channels: [whatsapp]
+
+person:
+  persona: Alex, curious, not ordering yet; asks several things in one message.
+  goal: Find out what is in the almond croissant, whether anything on the menu is nut-free, and whether they can pay by card.
+
+opening:
+  - say: "whats in the almond croissant, is anything nut free? and can i pay by card"
+
+world: |
+  The menu is as in tests/tools/get_menu.yaml, but the point of sale keeps its raw titles, and
+  get_menu returns them: LATTE SM/LG W/O/A, COLD BREW SM/LG, CROISS ALMD 1PC.
+
+max_turns: 4
+
+expect:
+  judge:
+    - Menu items are named in plain words in the agent's sentences ("the almond croissant"), never as raw titles such as "CROISS ALMD 1PC".
+    - The three questions are answered in short messages or paragraphs, one idea each, not in one dense block.
+    - Buttons or a list appear only where Alex's next step is to pick one of the options they show; the answers themselves carry none, and no button repeats its message's text.

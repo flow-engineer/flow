@@ -2,7 +2,7 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## 0.11.0 (unreleased)
+## 0.12.0 (unreleased)
 
 ### Changes
 
@@ -50,17 +50,19 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `forgetPerson` also deletes the person's web chat outbox.
 - **`flow deploy secrets --from-env` skips `FLOW_WEB_CHAT_SESSION_KEY` and `FLOW_TRUST_PROXY`:**
   Flow's hosting sets them.
-
-- **iMessage has no 24-hour window, and the text now says so.** `flow link --channel imessage`
-  says the agent can reply after you write first, any time later; `docs/agents.md` and the
-  flow-messaging README no longer put iMessage under WhatsApp's 24-hour rule. On iMessage the only
-  timing rule is for typing indicators and read receipts: 5 minutes after the line's last message
-  to that person.
+- **The agent is told how messages read, on every channel.** Three lines in its prompt, after the
+  channel's formatting line: one idea per message or short paragraph, a long answer split into a
+  few short messages; items from a catalogue or tool named in plain words, the exact title kept
+  for an order summary or a list row; and, on channels with buttons or lists, buttons only when
+  the person's next step is to pick one of a few options, never one that just repeats the text.
+  The last replaces the line that offered buttons whenever they chose between options. A
+  channel's `instructions` add to it; `createAgent({ writing: "..." })` replaces it and
+  `writing: false` leaves it out ([docs/channels.md](docs/channels.md#how-messages-read)).
 
 ### Migration notes
 
-- **Flow's hosting: its store must be on 0.11 before a 0.11 agent deploys.** The store runs
-  migration 12; an agent on 0.11 with a store on 0.10 is refused at deploy (`chinwag_too_new`)
+- **Flow's hosting: its store must be on 0.12 before a 0.12 agent deploys.** The store runs
+  migration 12; an agent on 0.12 with a store on 0.11 is refused at deploy (`chinwag_too_new`)
   until Flow updates it. Agents that keep their own database migrate it themselves as they start.
 - **A store of your own that forwards Store calls** (a `StoreApi` other than `Store`) must serve
   the six new methods above, pass `addIdentity`'s new fifth argument on, and run migration 12:
@@ -73,6 +75,164 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   neither has no linked conversations: its turns, prompts and forgetting are as before.
 - Nothing else changes for an agent that does not add `webChat()` and passes no `phone`, but for a
   store of its own (above), which every turn now asks for linked conversations.
+- **The agent's prompt now says how messages read** (no API change; `writing` is a new option).
+  Agents offer fewer buttons and write shorter messages. To restore the earlier button wording, pass
+  `createAgent({ writing: "When they choose between a few options, offer them as buttons so they can tap." })`;
+  `writing: false` leaves Flow Framework's guidance out altogether.
+
+## 0.11.0 (2026-10-28)
+
+### Changes
+
+- **`flow deploy` ships the agent's CLI.** With `src/cli.ts` in the folder, `flow deploy` packs the
+  CLI for the environment's address before anything is sent (a CLI that does not pack stops the
+  deploy, exit 2 or 1 with what to fix), and once the deploy is live publishes it as `flow cli
+  publish` does: `curl -fsSL <the agent's URL> | sh` installs it, and CLIs already installed are
+  offered it by their update check. Before an environment's first deploy there is no address yet,
+  so it is packed once live. `flow deploy promote` publishes a production build of the CLI from the
+  folder once production is live. `--no-cli` leaves the CLI out of both. Without esbuild, or on a
+  Flow whose hosting serves no CLIs (`cli_off`), the deploy goes on and says so in one line. A
+  publish that fails after a live deploy prints why and `flow cli publish --env <env>`, and exits 1.
+  `--json`'s answer has `cli`: `{ published: true, release, current, install }`, `{ published:
+  false, code, message }`, or `null` without a CLI file.
+- **`flow cli publish|rollback|status`: the CLI's releases on Flow's hosting**, with the CI key, on
+  observe's `/v1/hosting/cli` routes. `flow cli publish --env <env> [--server <https url>] [--dir]
+  [--json]` packs the CLI for the environment (its address plus `/mcp`, or the `--server` given, a
+  domain of the agent's own; else the CLI file's `servers.<env>`), asks the host for the release
+  (`POST /v1/hosting/cli/releases` with `{ environment, name, display_name, version, sha256, size,
+  server }`), PUTs the package and the installer
+  to the signed URLs it answers (no key, no `x-goog-*` headers) and makes it current (`POST
+  /v1/hosting/cli/releases/<version>/publish`). It prints the install line; `--json` prints `{ ok,
+  release, current, install, next }`. `flow cli rollback --env <env> <version>` serves an earlier
+  published version again (`POST /v1/hosting/cli/rollback`) and says who is offered it. `flow cli
+  status [--env <env>] [--json]` shows each environment's current version, when and by whom it was
+  published, and its releases, newest first. A refusal prints the host's code (`version_exists`:
+  commit and publish again; `already_published`: use rollback; `cli_off`: this Flow's hosting
+  serves no CLIs) and exits 1.
+- **A published CLI never changes its server unasked.** Before publishing, `flow cli publish` reads
+  the environment's current release (`GET /v1/hosting/cli/releases`); when its `server` differs
+  from the build's, it refuses (exit 1, `--json` code `server_changed`): everyone who installed
+  the CLI would have to sign in again. It says how to keep the server (`defineCli({ servers: {
+  <env>: "<url>" } })`); `--change-server` publishes it anyway. `flow deploy` and promote skip the
+  CLI's publish with a one-line warning and still deploy. A cloud that does not say a release's
+  server is not checked.
+- **After a rollback, an installed CLI is offered the version served.** When `update.latest`
+  answers `rolled_back_from` naming the version running, `acme update` installs the answer's
+  `version` and a person at a terminal sees "acme 1.3.0 was rolled back; the version to use is
+  1.2.0. Run acme update to get it.", though that version is older. Any other version is offered
+  only a newer one, as before.
+- **`FLOW_CLI_BUCKET` is never sent as a secret**: Flow's hosting sets it on the agent's service.
+- **`flow cli pack`: the CLI as one package anyone with Node.js installs.** `flow cli pack --server
+  <staging|production|https url> [--base-url <url>] [--out release/] [--dir .] [--json]` bundles
+  `src/cli.ts` with every dependency (esbuild: ESM, lazy imports kept in chunks of their own,
+  Node 20.19 and newer) and writes `<out>/<name>.tgz`, `<out>/install.sh` and `<out>/release.json`
+  (`{ name, display_name, version, sha256, size, server }`; `--json` prints `{ ok, release, files,
+  next }`). `staging` and `production` are the hosted agent's address (`GET /v1/hosting/address`
+  with the CI key) plus `/mcp`. The server takes the place of the default written in the CLI file
+  (`process.env.ACME_SERVER ?? "http://127.0.0.1:8790/mcp"`), which must be there exactly once,
+  else pack refuses (exit 2). The version is package.json's, the server's name and the git commit:
+  `0.1.3-production.ab12cd3` (`custom` for a URL, `.dirty` with uncommitted tracked changes); a
+  packed CLI's `version` is always the release's. Unless the CLI file sets them, `update.latest` is
+  `<base>/cli/version` and `update.command` is `curl -fsSL <base> | sh`, where `<base>` is
+  `--base-url`, else the hosted address, else the server's origin. Before `npm pack`, the bundle's
+  `--help` must print `USAGE` when started through a link (as npm installs a command) from an
+  empty folder with a fresh config (exit 1 otherwise). esbuild is a new optional peer dependency,
+  `esbuild@0.28.2`, loaded only by `flow cli pack`; without it pack exits 2 with
+  `npm i -D esbuild@0.28.2`. The starter has it as a dev dependency and ignores `release/`.
+- **`defineCli({ servers: { production, staging } })`: the server a CLI keeps.** A pack for an
+  environment uses the CLI file's `servers.<env>` (an https URL, such as
+  `https://cli.acme.com/mcp` on a domain of the agent's own) in place of the hosted address, and
+  needs no CI key for it. People's sign-ins are kept by server, so set it once and never change
+  it. `flow check` refuses one that is not an https URL. The release's `display_name` is
+  `brand.name`, else package.json's `displayName`, else the command's name.
+- **An installer for every packed CLI.** `install.sh` (POSIX sh) needs Node.js 20.19 or newer and
+  npm, downloads `<base>/cli/<name>-<version>.tgz` with curl or wget, checks its sha256 (with
+  `shasum -a 256` or `sha256sum`) before installing it with `npm install --global --prefix
+  ~/.<name>` (`<NAME>_HOME`), without sudo. It refuses another `<name>` already on PATH and says
+  where, links the command into the first writable PATH folder (else `~/.local/bin` and one marked
+  line in the shell's rc file; fish too), and says what to run next. `<NAME>_CLI_URL` installs
+  another package, unchecked. `--base-url` writes the address into the installer for a team that
+  serves it itself; otherwise it keeps the placeholder `__FLOW_CLI_BASE_URL__` for Flow's hosting to
+  fill in with the address it is served from.
+- **Files a CLI reads at run time: `defineCli({ files })` and `cliFile(path)`.** `files:
+  ["context/icon.svg"]` are shipped beside the bundle at the same paths; `cliFile("context/icon.svg")`
+  (from `@flow-engineer/flow/cli`) is the file's path: beside the bundle when packed, in the folder
+  the CLI runs from (the agent's, as `npm run cli` runs it) from the source.
+- **Tables are headed in the brand's accent.** A tool's Markdown table at a terminal had its headers
+  in red (cli-table3's default). They are in `brand.accent`, at the terminal's color depth (RGB,
+  256 or 16 colors, as the welcome banner), else cyan.
+- **A packed CLI's background tool refresh runs no command.** Bundled into one file with the CLI
+  file, the process that refreshes the cached tools in the background also ran the CLI with its
+  internal flag after it, and could exit before writing; `runCli` now returns at once there.
+- **The starter's CLI runs when installed.** npm installs a command as a link, and the starter's
+  `src/cli.ts` compared `process.argv[1]` (the link) with its own path, so an installed `acme` did
+  nothing. It compares `realpathSync(process.argv[1])`.
+
+### Migration notes
+
+- **A CLI file made by `flow new` before this release does nothing once installed.** Change its
+  last line from `if (process.argv[1] === fileURLToPath(import.meta.url)) ...` to
+  `if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) ...`,
+  with `import { realpathSync } from "node:fs";`. `flow cli pack` refuses the old line.
+- **`flow cli pack`, `publish`, `rollback` and `status` are Flow's own.** A tool of one of those
+  names on a server reached with `flow cli` is `flow cli --server <url> <name>` (the server first).
+- **`flow deploy` and `flow deploy promote` now publish `src/cli.ts`.** An agent with a CLI file has
+  it packed before each deploy and published once live. To deploy as before, add `--no-cli`. A CLI
+  file that does not pack now stops the deploy (a CLI on a domain of its own sets
+  `defineCli({ servers })` first, else it is packed for the agent's address): package.json needs a `version`, the folder a git
+  commit, the CLI file its default server written once as a string and the `realpathSync` line
+  above. Add `esbuild@0.28.2` as a dev dependency to have it published.
+
+## 0.10.6 (2026-10-28, not published on its own; shipped in 0.11.0)
+
+### Changes
+
+- **`acme update`, and a notice when a newer CLI is out.** A CLI file can set
+  `update: { command, latest }`. `acme update` runs `command` in a shell (an install script such as
+  `curl -fsSL https://acme.example/install.sh | sh`, or `npm install -g acme@latest`) and shows its
+  output; a failure exits 1 with the command to run by hand. `latest` is a URL answering JSON with a
+  `version` (npm's `https://registry.npmjs.org/<package>/latest` already does), compared with the
+  CLI's `version`: `acme update` says when this is already the newest, and a person at a terminal
+  sees one line after a command when a newer version is out, such as "A new version of acme is out:
+  1.3.0 (you have 1.2.0). Run acme update to get it." It is asked at most once a day (the answer is
+  kept in `update.json` in the CLI's config folder) and given a second after the command at most;
+  scripts, coding agents, `CI` and `--json` never see it or ask. A version with the same
+  major.minor.patch and another suffix (a rebuild) counts as newer. `update` never asks for sign-in.
+  A command of the team's own named `update` replaces Flow's; with `update` set, a tool whose
+  command would be `update` needs another name in `commands` (`flow check` says so).
+
+- **iMessage has no 24-hour window, and the text now says so.** `flow link --channel imessage`
+  says the agent can reply after you write first, any time later; `docs/agents.md` and the
+  flow-messaging README no longer put iMessage under WhatsApp's 24-hour rule. On iMessage the only
+  timing rule is for typing indicators and read receipts: 5 minutes after the line's last message
+  to that person.
+- **The CLI names the paid plans when a trial fills.** Once a channel's free trial has 80% of its
+  people, `setup`, `link` (for its channel) and `status` print one more line, by rule:
+  `Next: the free trial is nearly full on Telegram. More people or your own iMessage number: Shared $25/month or Dedicated $100/month, at https://flow.engineer/dashboard/plans (the workspace owner buys it).`
+  Full, or holding anyone, it names the Shared plan's link
+  (`https://flow.engineer/dashboard/plans?plan=shared`) and how many wait. With `--json` it is the new
+  field `plans` (`{"url", "message"}`, else `null`). `docs/agents.md` has a "Paid plans" section, and
+  the coding-agent skill and the starter's `AGENTS.md` say what Shared, Dedicated and Outbound are and
+  to show the owner the line rather than retry.
+- **Flow Messaging's `hint` and `doc_url` reach the developer.** `FlowMessagingError` has `hint` and
+  `docUrl`; a refused send, edit or unsend throws an Error whose `cause` is it, and the adapter logs
+  the hint and doc_url on the console (`... a send on telegram was refused, permission (plan_ended).
+  <hint> (<doc_url>)`). The agent's Not delivered note is unchanged: the hint is for the developer,
+  not the person. A stream Flow stops for good resolves `stopped` with `channelCode`, `hint` and
+  `docUrl` when Flow gave them, and logs the hint. The starter prints the hint when its stream stops,
+  and for `plan_ended` points to https://flow.engineer/dashboard/plans instead of `setup`.
+- **The join message on Flow's shared lines says Join.** What a phone sends to reach an agent on
+  Flow's shared Telegram bot, WhatsApp number and iMessage line is now `Join <name> (ref <code>)`,
+  such as `Join FlatX agent (ref brave-otter-40718263)`, or `Join my agent (ref <code>)` with no
+  name (was `Hi <name> (ref <code>)`, `Hi there` with none). Flow's service writes it; `setup` and
+  `link` print what it returns, and their help, `flow new`'s and `flow init`'s text and the guides
+  say Join. The agent's first message from that person is the text before `(ref`: `Join FlatX
+  agent`. Links shared already keep working: any message of up to 160 characters ending in
+  `(ref <code>)` joins, and Telegram's Start link is unchanged.
+
+### Migration notes
+
+None.
 
 ## 0.10.5 (2026-10-27)
 

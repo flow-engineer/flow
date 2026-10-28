@@ -5,7 +5,7 @@
 // `flow init` makes the same agent in the current folder, named by `--name`, else after
 // `--display-name`, else after the folder. Inside a clone, `npm run new -- <name>` makes
 // agents/<name>/ instead. `--display-name` is what people call the agent ("FlatX agent"), kept as
-// package.json's displayName: the message a phone sends to reach it is "Hi <it> (ref <code>)".
+// package.json's displayName: the message a phone sends to reach it is "Join <it> (ref <code>)".
 // The café's agent is Pip; the display name takes Pip's place in its prompt (agent/AGENTS.md). Every
 // other name in the agent's code comes from package.json through src/name.ts (its CLI command, the
 // CLI's variables, its MCP server), so nothing here rewrites them. `flow link --display-name` (and
@@ -97,6 +97,12 @@ MCP server and a CLI. It starts as the café example; replace the café with the
   (\`OPENROUTER_API_KEY\`, \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`) wins over it. \`npm start\` runs it in the playground,
   and \`npx @flow-engineer/flow link\` signs in, puts its other keys in \`.env\` and prints the link that
   reaches it from a phone while \`npm start\` runs.
+- The free trial takes 25 people per channel; past that, new people are held (kept, not delivered).
+  More people, or the owner's own iMessage number, is a paid plan only the workspace owner buys, at
+  https://flow.engineer/dashboard/plans: Shared (more people on Flow's shared lines), Dedicated (an own
+  iMessage number) and the Outbound add-on (the agent messages people first). When \`setup\`, \`link\` or
+  \`status\` prints a \`Next:\` line with that link, or an error carries a \`hint\` (\`plan_ended\`: the
+  plan ended), show it to the owner with the link instead of retrying.
 - When the owner asks how to test it, recommend first the playground (\`npm start\`, then open the link
   it prints: the test people and the channels side by side), then their phone (the \`link\`).
 - Your own checks, not the owner's way to test: \`npx @flow-engineer/flow chat\` talks to it in the
@@ -212,9 +218,11 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
   }
 
   const own = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  // esbuild only packs the CLI (flow cli pack), on the developer's computer: a dev dependency.
+  const { esbuild, ...peers } = own.peerDependencies;
   const pkg = {
     name,
-    // What people call it: the message a phone sends to reach it is "Hi <displayName> (ref <code>)".
+    // What people call it: the message a phone sends to reach it is "Join <displayName> (ref <code>)".
     displayName,
     version: "0.1.0",
     private: true,
@@ -225,15 +233,15 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
     engines: own.engines,
     scripts: { start: "node --env-file-if-exists=.env src/main.ts", mcp: "node --env-file-if-exists=.env src/mcp.ts", cli: "node --env-file-if-exists=.env src/cli.ts", test: "flow test", typecheck: "tsc --noEmit" },
     // The café serves its tools over MCP (src/mcp.ts) and as a CLI (src/cli.ts): their SDKs, pinned as Flow Framework pins them.
-    dependencies: { "@flow-engineer/flow": `^${own.version}`, ...own.peerDependencies },
-    devDependencies: { "@types/node": own.devDependencies["@types/node"], typescript: own.devDependencies.typescript },
+    dependencies: { "@flow-engineer/flow": `^${own.version}`, ...peers },
+    devDependencies: { "@types/node": own.devDependencies["@types/node"], typescript: own.devDependencies.typescript, esbuild },
   };
   writeFileSync(join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
   writeFileSync(join(dir, "tsconfig.json"), `${JSON.stringify(TSCONFIG, null, 2)}\n`);
   // An existing .gitignore (flow init in a fresh repository) keeps its lines and gets the missing ones.
   const ignore = join(dir, ".gitignore");
   const ignored = existsSync(ignore) ? readFileSync(ignore, "utf8") : "";
-  const missing = ["node_modules/", ".env", ".flow/"].filter((line) => !ignored.split("\n").includes(line));
+  const missing = ["node_modules/", ".env", ".flow/", "release/"].filter((line) => !ignored.split("\n").includes(line));
   if (missing.length) writeFileSync(ignore, `${ignored}${ignored && !ignored.endsWith("\n") ? "\n" : ""}${missing.join("\n")}\n`);
   // npm install then refuses a Node older than the engines field says, before .ts files fail to load.
   writeFileSync(join(dir, ".npmrc"), "engine-strict=true\n");

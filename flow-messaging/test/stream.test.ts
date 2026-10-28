@@ -201,6 +201,14 @@ test("the backoff starts again only once a connection delivers an event or stays
   s.reconnectsAfter(500);
 });
 
+test("a stream stopped because the plan ended says why and Flow's hint, for the developer to show rather than retry", async (t) => {
+  const s = timedStream(t);
+  const hint = "Choose a plan at https://flow.engineer/dashboard/plans?plan=shared; this key works again once the plan is active.";
+  s.refuse(4401, { type: "authentication", channel_code: "plan_ended", message: "This live key is paused.", hint, doc_url: "https://api.flow.engineer/docs/errors/authentication" });
+  assert.deepEqual(await s.handle.stopped, { code: 4401, type: "authentication", message: "This live key is paused.", channelCode: "plan_ended", hint, docUrl: "https://api.flow.engineer/docs/errors/authentication" });
+  assert.equal(s.warnings.at(-1), `@flow-engineer/flow/flow-messaging: the stream stopped: authentication (plan_ended, 4401). ${hint} (https://api.flow.engineer/docs/errors/authentication)`);
+});
+
 for (const [code, type] of [[4401, "authentication"], [4403, "permission"], [4400, "invalid_request"]] as const) {
   test(`a stream refused with ${code} stops for good, with no reconnect`, async (t) => {
     const s = timedStream(t);

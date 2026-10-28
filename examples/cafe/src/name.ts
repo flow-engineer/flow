@@ -3,7 +3,7 @@
 // - `name` (package.json `name`; keep its `bin` key the same): the package, the CLI command and its
 //   <NAME>_SERVER and <NAME>_TOKEN variables, the MCP server's name.
 // - `displayName` (package.json `displayName`): what people call the agent; a phone reaches it with
-//   "Hi <displayName> (ref <code>)" (`npx @flow-engineer/flow link --display-name <name>` changes it).
+//   "Join <displayName> (ref <code>)" (`npx @flow-engineer/flow link --display-name <name>` changes it).
 
 import { readFileSync } from "node:fs";
 

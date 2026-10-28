@@ -56,7 +56,7 @@ printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check:
 
 Before `init` (or `flow new <folder>`), ask the owner what people should call their agent, such as
 "FlatX agent", and pass it as `--display-name`. It is kept as `displayName` in `package.json`, and
-the message their phone sends to reach the agent is `Hi FlatX agent (ref <code>)`. The name takes the
+the message their phone sends to reach the agent is `Join FlatX agent (ref <code>)`. The name takes the
 starter's (Pip) place in the agent's prompt, `agent/AGENTS.md`, and the playground and MCP server
 read it from `package.json`. `init` names the package, its CLI command and its MCP server after it
 (`flatx-agent`), or after `--name <name>` when given, else after the folder. To rename an agent made already, `link --display-name "<name>"` (or
@@ -82,7 +82,7 @@ For a messaging agent, recommend these, in this order:
 2. **Their phone**: the link from `link` (`say_to_person` in `link --json`), while `npm start` runs.
    It is the channel's own link (`url`): `https://t.me/<bot>?start=<code>` (press Start),
    `https://wa.me/<number>?text=...` or, for iMessage, `sms:<number>?&body=...` (an iPhone or a Mac),
-   each with `Hi <displayName> (ref <code>)` filled in (`join_message`). `page` is the same on
+   each with `Join <displayName> (ref <code>)` filled in (`join_message`). `page` is the same on
    flow.engineer, for a computer without that app.
 
 `flow chat` and `npm test -- --synthetic` (the test cloud) are for you, to check your own work
@@ -160,7 +160,7 @@ before you hand it back; run them yourself, and do not offer them to the owner a
 | 0 | Done | Go on |
 | 1 | Usage, not signed in, not an agent's folder, or a login URL that is not https | Fix the command, or run `next` |
 | 2 | flow.engineer could not be reached, or did not answer in time (`timeout`) | Try again |
-| 3 | Refused: denied, expired, a product failed (for `link`, only when Messaging's part did: observe's alone is exit 0 with a warning), no channel open yet (one closed while others are open is exit 0 with their links), a server with no CLI sign-in (`server_unsupported`), or a free-trial limit (`sandbox_allowance_used`; HTTP 403) | Run `next`; for a trial limit `next` is a sentence: give it to the owner as it is |
+| 3 | Refused: denied, expired, a product failed (for `link`, only when Messaging's part did: observe's alone is exit 0 with a warning), no channel open yet (one closed while others are open is exit 0 with their links), a server with no CLI sign-in (`server_unsupported`), or a free-trial limit (`sandbox_allowance_used`; HTTP 403) | Run `next`; for a trial limit `next` is a sentence: give it to the owner as it is, with the plans link ([Paid plans](#paid-plans)); do not retry |
 | 4 | Sign-in still waiting for the owner's approval, or flow.engineer asked to wait (`slow_down`, HTTP 429) | Approval: ask the owner to approve, then run `next` (the same code is kept). `slow_down`: wait `retry_after` seconds (printed as `Wait <n> s`), then run `next` |
 
 `login` and `link` wait at most `--timeout` seconds (120 by default) before exit 4, and no single
@@ -189,9 +189,36 @@ an error line has it when there were any. Pass them on to the owner.
 
 `setup` also shows the free trial: the people on each channel and those waiting for a place
 (`free trial: 3 of 25 people, 2 waiting for a place`; `trial.<channel>` `{limit, used, held}` in
-`--json`). A person past the limit is held: their messages are kept and reach the agent once a
-place frees up. An older flow.engineer counts messages instead (`3 of 300 messages used`, no
+`--json`). A person past the limit is held: their messages are kept, not delivered, and reach the
+agent once a place frees up (a contact removed) or the owner buys a paid plan. An older flow.engineer counts messages instead (`3 of 300 messages used`, no
 `held`), and on iMessage the people it may reach (`iMessage: 1 of 2 people`, `trial.imessage.contacts`).
+
+### Paid plans
+
+The free trial takes 25 people per channel in all. More is a paid Flow Messaging plan, which only
+the workspace owner buys, self-serve, at https://flow.engineer/dashboard/plans (the Plans dialog
+in the Flow dashboard; `?plan=shared` or `?plan=dedicated` opens it on that plan):
+
+- **Shared**, $25/month: more people on Flow's shared lines (300 a month and 200 a day per
+  channel), with live keys, live at once.
+- **Dedicated**, $100/month: your own iMessage number, 1,000 people a day, SMS/RCS fallback and
+  call forwarding. Flow reviews it before ordering, usually within a day.
+- **Outbound** add-on, +$40/month: the agent messages people first.
+
+`setup`, `link` (for its channel) and `status` add one line, by rule, once a channel's trial has
+80% of its people (`Next: the free trial is nearly full on Telegram. More people or your own
+iMessage number: Shared $25/month or Dedicated $100/month, at https://flow.engineer/dashboard/plans
+(the workspace owner buys it).`), and once it is full or holds anyone, the Shared plan's link:
+
+```
+Next: the free trial is full on Telegram, so new people wait for a place (2 waiting now). More people: Shared $25/month, or Dedicated $100/month with your own iMessage number, at https://flow.engineer/dashboard/plans?plan=shared (the workspace owner buys it).
+```
+
+With `--json` it is `plans` (`{"url", "message"}`, else `null`). Give the line and its link to the
+owner: running `setup` again or retrying does not make room. A live key whose plan ended is
+refused with `channel_code` `plan_ended` (the event stream stops, a send fails); Flow's `hint`
+says where to choose a plan again (the adapter logs it, and `stopped` carries it): show the owner
+the hint and the plans link rather than retrying. Test keys keep working meanwhile.
 
 `chat` exits 1 for anything that stops it before the first message: `no_model_key`, `no_agent`
 (no `src/agent.ts`), `not_built`, `no_test_people`, `no_channel`; with `--json` as
@@ -340,11 +367,14 @@ await agent.listWakeUps({ channel: "whatsapp", address: buyer });
 ## Shared test numbers and privacy
 
 The free trial runs on Flow's shared Telegram bot, WhatsApp number and iMessage line. Sending an
-agent's join message (`Hi <name> (ref <code>)`, what the link fills in) binds that phone to that
+agent's join message (`Join <name> (ref <code>)`, what the link fills in) binds that phone to that
 agent's app on the shared sender, so the person's messages go only to that app; sending another
-app's join message moves them there. Trial chats are
+app's join message moves them there. The agent gets the text before `(ref` as the person's first
+message (`Join <name>`; Telegram's Start sends `/start`); an older `Hi <name> (ref <code>)` still
+joins. Trial chats are
 test data, kept for the account's retention (30 days by default). Do not use the trial for real
-customers' data: connect your own number for that.
+customers' data: connect your own number for that, or, for iMessage, the Dedicated plan's own
+number ([Paid plans](#paid-plans)).
 
 ## Stability
 

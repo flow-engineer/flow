@@ -8,6 +8,7 @@
 // named after the agent (src/name.ts). Every tool is already a command under its own name; this
 // file adds the words and arguments.
 
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { defineCli, runCli } from "../../../cli/src/index.ts";
 import { runningAgent } from "../../../src/index.ts";
@@ -28,4 +29,5 @@ export const cli = defineCli({
   },
 });
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCli(cli, process.argv.slice(2)));
+// Installed, the command is a link to this file: compare where it leads.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) process.exit(await runCli(cli, process.argv.slice(2)));

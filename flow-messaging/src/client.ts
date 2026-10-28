@@ -16,7 +16,7 @@ const TIMEOUT_MS = 20_000;
 /** How far a webhook's signed timestamp may be from now (seconds), as the spec says. */
 const SIGNATURE_TOLERANCE = 300;
 
-/** The spec's typed error ({"error": {type, message, param, channel, channel_code, retry_after, ...}}), or "network". */
+/** The spec's typed error ({"error": {type, message, hint, doc_url, param, channel, channel_code, retry_after, ...}}), or "network". */
 export class FlowMessagingError extends Error {
   readonly status: number;
   readonly type: string;
@@ -26,8 +26,12 @@ export class FlowMessagingError extends Error {
   readonly param?: string;
   /** The conversation's channel, on `unsupported_content` and `outside_window`. */
   readonly channel?: string;
+  /** One sentence for the developer saying what to change for this case (where to buy a plan, say); not for parsing. */
+  readonly hint?: string;
+  /** The error type's documentation page. */
+  readonly docUrl?: string;
 
-  constructor(status: number, type: string, message: string, extra: { channelCode?: string; retryAfter?: number; param?: string; channel?: string } = {}) {
+  constructor(status: number, type: string, message: string, extra: { channelCode?: string; retryAfter?: number; param?: string; channel?: string; hint?: string; docUrl?: string } = {}) {
     super(message);
     this.name = "FlowMessagingError";
     this.status = status;
@@ -36,6 +40,8 @@ export class FlowMessagingError extends Error {
     this.retryAfter = extra.retryAfter;
     this.param = extra.param;
     this.channel = extra.channel;
+    this.hint = extra.hint;
+    this.docUrl = extra.docUrl;
   }
 
   /** Worth trying again later: rate limits, Flow's or the channel's 5xx, no answer. */
@@ -123,7 +129,7 @@ export class Client {
 }
 
 async function errorOf(response: Response): Promise<FlowMessagingError> {
-  let body: { type?: string; message?: string; channel_code?: string; retry_after?: number; param?: string; channel?: string } = {};
+  let body: { type?: string; message?: string; hint?: string; doc_url?: string; channel_code?: string; retry_after?: number; param?: string; channel?: string } = {};
   try {
     const parsed = (await response.json()) as { error?: typeof body };
     if (parsed && typeof parsed.error === "object") body = parsed.error;
@@ -131,7 +137,12 @@ async function errorOf(response: Response): Promise<FlowMessagingError> {
   const header = Number(response.headers.get("retry-after"));
   const retryAfter = typeof body.retry_after === "number" ? body.retry_after : Number.isFinite(header) && response.headers.has("retry-after") ? header : undefined;
   const type = body.type ?? (response.status >= 500 ? "api_error" : "invalid_request");
-  return new FlowMessagingError(response.status, type, body.message ?? `Flow Messaging answered ${response.status}`, { channelCode: body.channel_code, retryAfter, param: body.param, channel: body.channel });
+  return new FlowMessagingError(response.status, type, body.message ?? `Flow Messaging answered ${response.status}`, {
+    channelCode: body.channel_code, retryAfter, param: body.param, channel: body.channel,
+    // An empty hint or doc_url (the spec always sends both) is none.
+    hint: typeof body.hint === "string" && body.hint ? body.hint : undefined,
+    docUrl: typeof body.doc_url === "string" && body.doc_url ? body.doc_url : undefined,
+  });
 }
 
 const wait = (seconds: number) => new Promise<void>((resolve) => setTimeout(resolve, seconds * 1000));

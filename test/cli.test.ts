@@ -284,6 +284,23 @@ test("a tool's format is what people see, rendered at a terminal; --json, --fiel
   assert.equal(await run(cli(["key.id", "manage_url"]), []), "key.id      key_1\nmanage_url  https://acme.test/keys\n");
 });
 
+// cli-table3 paints headers red, and only in named colors: Flow paints them itself.
+test("a rendered table's headers are in the brand's accent, in as many colors as the terminal shows, else cyan", async () => {
+  const report = tool({ name: "report", description: "A report.", input: z.object({}), output: z.object({ rows: z.number() }), signIn: "none", hints: { readOnly: true }, run: () => ({ rows: 1 }), format: () => "| Name | Size |\n|---|---|\n| a | 1 |\n" });
+  const server = await serve({ tools: [report] });
+  const run = async (brand: CliConfig["brand"], env: Record<string, string>) => {
+    const out = io(true); out.channel.env = env;
+    assert.equal(await runCli(defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-")), server, brand }), ["report"], out.channel), 0);
+    return out.out.split("\n").find((line) => line.includes("Name"))!;
+  };
+  const purple = { accent: "#645bff" };
+  assert.match(await run(purple, { TERM: "xterm-256color", COLORTERM: "truecolor" }), /\u001b\[38;2;100;91;255mName\u001b\[39m.*\u001b\[38;2;100;91;255mSize\u001b\[39m/);
+  assert.match(await run(purple, { TERM: "xterm-256color" }), /\u001b\[38;5;63mName/);
+  assert.match(await run(purple, { TERM: "xterm" }), /\u001b\[94mName/);
+  assert.match(await run(undefined, { TERM: "xterm" }), /\u001b\[36mName/, "cyan without a brand accent");
+  assert.doesNotMatch(await run(purple, { TERM: "xterm" }), /\u001b\[31m/, "never cli-table3's red");
+});
+
 test("a group's help lists its subcommands, and the top level lists groups and commands, styled at a terminal", async () => {
   const cli = acme(await serve({ tools: [listOrders, getOrder, cancelOrder] }));
   for (const argv of [["order"], ["order", "-h"]]) {
@@ -865,6 +882,7 @@ test("flow check refuses a brand color or logo a browser cannot use", () => {
   assert.deepEqual(problems({ logo: "data:image/png;base64,iVBORw0KGgo=" }), []);
   assert.deepEqual(problems({ accent: "purple", logo: "http://acme.test/logo.svg" }), ["brand.accent must be a six-digit hex color, for example #b85c00", "brand.logo must be an https URL or a data:image URL"]);
   assert.deepEqual(cliProblems(defineCli({ name: "acme", chat: { accent: "red" } }), []).errors, ["brand.accent must be a six-digit hex color, for example #b85c00"]);
+  assert.deepEqual(cliProblems(defineCli({ name: "acme", servers: { production: "http://cli.acme.test/mcp" } }), []).errors, ["servers.production must be an https URL, such as https://cli.acme.com/mcp"]);
 });
 
 // No test replaces one of the CLI's own commands; this is the one that may be.
@@ -882,6 +900,72 @@ test("a command of the team's own replaces auth status; login and logout stay th
     'command "auth status": only a command of your own (buildCommand) can replace the CLI\'s auth status',
     'command "auth login": auth is the CLI\'s own (auth, tools, skill)',
   ]);
+});
+
+// Updating is the only command that runs a program on the person's computer; flow check holds its option.
+test("update says when this is the newest version, else runs the CLI file's update command and reports a failure", async () => {
+  let newest = "1.2.0";
+  const latest = `${await listen((_req, res) => void res.end(JSON.stringify({ version: newest })))}/latest.json`;
+  const cli = (command: string) => defineCli({ name: "acme", version: "1.2.0", directory: mkdtempSync(join(testDirectory, "flow-cli-update-")), update: { command, latest } });
+  const installs = `node -e "console.log('installed'); console.error('progress')"`;
+  const current = io();
+  assert.equal(await runCli(cli(installs), ["update"], current.channel), 0);
+  assert.equal(current.out, "acme 1.2.0 is the newest version.\n");
+  newest = "1.2.0-production.abc1234";
+  const updated = io();
+  assert.equal(await runCli(cli(installs), ["update"], updated.channel), 0, "a rebuild of the same version is still an update");
+  assert.equal(updated.out, "installed\n");
+  assert.match(updated.err, /Updating acme to 1\.2\.0-production\.abc1234\.\.\.\nprogress/);
+  const failed = io();
+  assert.equal(await runCli(cli(`node -e "process.exit(7)"`), ["update"], failed.channel), 1);
+  assert.match(failed.err, /The update did not finish \(exit 7\)\. Run it again, or run it yourself: node -e/);
+  const help = io();
+  assert.equal(await runCli(cli(installs), ["--help"], help.channel), 0);
+  assert.match(help.out, /update +Update acme to its newest version/);
+  const updateTool = [{ name: "update", inputSchema: {} }];
+  assert.deepEqual(cliProblems(defineCli({ name: "acme", update: { command: "", latest: "ftp://acme.test" } }), updateTool).errors, [
+    "update.command must be the shell command that updates the CLI",
+    "update.latest must be an http or https URL",
+    "update.latest needs version, the version this CLI is, to compare with",
+    'tool update would be the command "update", which is the CLI\'s own while update is set; give it another name in commands',
+  ]);
+  assert.deepEqual(cliProblems(defineCli({ name: "acme", update: { command: installs }, commands: { update: { tool: "update" } } }), updateTool).errors, [], "the CLI file's own update replaces Flow's");
+});
+
+test("a person at a terminal hears of a newer version after a command, asked at most once a day; scripts and --json never", async () => {
+  let asked = 0;
+  const latest = `${await listen((_req, res) => { asked++; res.end(JSON.stringify({ version: "1.3.0" })); })}/latest.json`;
+  const cli = defineCli({ name: "acme", version: "1.2.0", directory: mkdtempSync(join(testDirectory, "flow-cli-notice-")), welcome: false, update: { command: "true", latest } });
+  const run = async (interactive: boolean, argv = ["--help"]) => {
+    const ran = io(interactive);
+    ran.channel.env = {};
+    assert.equal(await runCli(cli, argv, ran.channel), 0);
+    return ran.err;
+  };
+  assert.equal(await run(false), "");
+  assert.equal(asked, 0);
+  assert.match(stripVTControlCharacters(await run(true)), /^\nA new version of acme is out: 1\.3\.0 \(you have 1\.2\.0\)\. Run acme update to get it\.\n$/);
+  assert.match(await run(true), /1\.3\.0/, "the saved answer is shown again");
+  assert.equal(asked, 1);
+  assert.equal(await run(true, ["tools", "--json"]), "");
+  writeFileSync(join(cli.directory!, "update.json"), JSON.stringify({ checkedAt: Date.now() - 25 * 60 * 60_000, latest: "1.3.0" }));
+  await run(true);
+  assert.equal(asked, 2, "a day later it asks again");
+});
+
+test("after a rollback, a CLI on the version rolled back from is offered the current one, though it is older; others are not", async () => {
+  const latest = `${await listen((_req, res) => res.end(JSON.stringify({ version: "1.2.0-production.aaa1111", rolled_back_from: "1.3.0-production.bbb2222" })))}/cli/version`;
+  const cli = (version: string) => defineCli({ name: "acme", version, directory: mkdtempSync(join(testDirectory, "flow-cli-rollback-")), welcome: false, update: { command: "echo updated", latest } });
+  const run = async (version: string, argv: string[]) => {
+    const ran = io(true);
+    ran.channel.env = {};
+    assert.equal(await runCli(cli(version), argv, ran.channel), 0);
+    return { out: ran.out, err: stripVTControlCharacters(ran.err) };
+  };
+  assert.equal((await run("1.3.0-production.bbb2222", ["--help"])).err, "\nacme 1.3.0-production.bbb2222 was rolled back; the version to use is 1.2.0-production.aaa1111. Run acme update to get it.\n");
+  assert.match((await run("1.3.0-production.bbb2222", ["update"])).err, /^Updating acme to 1\.2\.0-production\.aaa1111\.\.\.\n/);
+  assert.equal((await run("1.3.1-production.ccc3333", ["--help"])).err, "", "a version the rollback did not replace is not offered an older one");
+  assert.equal((await run("1.3.1-production.ccc3333", ["update"])).out, "acme 1.3.1-production.ccc3333 is the newest version.\n");
 });
 
 // The help tests cover --help; a bare run is the one place a person and an agent see different things.

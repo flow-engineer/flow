@@ -7,7 +7,7 @@ import { parseArgs, styleText, stripVTControlCharacters } from "node:util";
 import { configDir, isSignedIn, storedAccessToken } from "./auth.ts";
 import { brandOf, HEX, tokenEnvOf, type CliConfig } from "./commands.ts";
 import type { CliIO } from "./run.ts";
-import { codingAgent } from "./welcome.ts";
+import { accentCode, codingAgent } from "./welcome.ts";
 
 export type ChatUpdate =
   | { type: "reply"; text: string }
@@ -140,7 +140,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
     if (flags.values.json) io.write(`${JSON.stringify(result)}\n`);
     else {
       const text = messages.join(humanChat ? "\n\n" : "\n");
-      const rendered = await forTerminal(io.interactive ? safe(text) : text, io);
+      const rendered = await forTerminal(io.interactive ? safe(text) : text, io, config);
       const body = io.interactive ? rendered.trimEnd() : rendered;
       if (humanChat && body) io.write(`\n${paint(["bold", "green"], config.name)}\n${body.split("\n").map(line => `  ${line}`).join("\n")}\n\n`);
       else io.write(`${body}\n`);
@@ -200,12 +200,26 @@ export function forgetChat(config: CliConfig, server: string): void {
   writeFileSync(file, `${JSON.stringify(saved)}\n`, { mode: 0o600 });
 }
 
-/** The same optional Markdown renderer for chat and tool output. Pipes retain the source. */
-export async function forTerminal(markdown: string, io: CliIO): Promise<string> {
+/** The same optional Markdown renderer for chat and tool output, table headers in the brand's accent. Pipes retain the source. */
+export async function forTerminal(markdown: string, io: CliIO, config: CliConfig): Promise<string> {
   const env = io.env ?? process.env;
   if (!io.interactive || env.NO_COLOR || env.TERM === "dumb") return markdown;
   try {
     const [{ Marked }, { markedTerminal }] = await Promise.all([import("marked"), import("marked-terminal")]);
-    return await new Marked(markedTerminal({ showSectionPrefix: false, width: Math.max(20, (process.stdout.columns ?? 80) - 4), reflowText: true }) as never).parse(markdown);
+    // cli-table3 paints headers only in named colors (red by default): it paints none, and each
+    // header cell is painted here, in the accent at the terminal's depth (cyan without one).
+    const extension = markedTerminal({ showSectionPrefix: false, width: Math.max(20, (process.stdout.columns ?? 80) - 4), reflowText: true, tableOptions: { style: { head: [] } } }) as unknown as { renderer: Record<string, (this: unknown, ...args: unknown[]) => string> };
+    const cell = extension.renderer.tablecell!;
+    const code = accentCode(config, env);
+    extension.renderer.tablecell = function (content, flags) {
+      const out = cell.call(this, content, flags);
+      // marked 12 passes the cell's text and its flags; newer marked, one token.
+      const header = ((typeof content === "object" ? content : flags) as { header?: boolean } | undefined)?.header;
+      return header ? `\u001b[${code}m${out.slice(0, -TABLE_CELL_SPLIT.length)}\u001b[39m${TABLE_CELL_SPLIT}` : out;
+    };
+    return await new Marked(extension as never).parse(markdown);
   } catch { return markdown; }
 }
+
+/** What marked-terminal ends each table cell with, before cli-table3 lays the row out. */
+const TABLE_CELL_SPLIT = "^*||*^";

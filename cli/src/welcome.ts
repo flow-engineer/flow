@@ -5,7 +5,7 @@
 
 import { emitKeypressEvents } from "node:readline";
 import { styleText } from "node:util";
-import { brandOf, type CliConfig } from "./commands.ts";
+import { brandOf, HEX, updatesItself, type CliConfig } from "./commands.ts";
 import type { CliIO } from "./run.ts";
 
 /** Claude Code, Cursor and Codex mark their commands' environment; their terminal is not a person's. */
@@ -102,12 +102,18 @@ export function colorCode(hex: string, depth: ReturnType<typeof colorDepth>): st
   return String(BASIC.reduce((best, next) => (distance(next[1]) < distance(best[1]) ? next : best))[0]);
 }
 
-/** The accent for the banner: the brand's, in as many colors as the terminal shows, else cyan. */
-function accent(config: CliConfig, io: CliIO, paint: Paint): (text: string) => string {
+/** The SGR parameters for the brand's accent, in as many colors as the terminal shows, else cyan's; undefined without color. */
+export function accentCode(config: CliConfig, env: Record<string, string | undefined>): string | undefined {
+  const depth = colorDepth(env);
   const hex = brandOf(config).accent;
-  const code = hex && /^#[0-9a-f]{6}$/i.test(hex) && io.interactive ? colorCode(hex, colorDepth(io.env ?? process.env)) : undefined;
-  if (code) return (text) => text.split("\n").map((line) => `\u001b[${code}m${line}\u001b[0m`).join("\n");
-  return (text) => text.split("\n").map((line) => paint("cyan", line)).join("\n");
+  if (depth === 0) return undefined;
+  return (hex && HEX.test(hex) ? colorCode(hex, depth) : undefined) ?? "36";
+}
+
+/** The banner in the accent. */
+function accent(config: CliConfig, io: CliIO): (text: string) => string {
+  const code = io.interactive ? accentCode(config, io.env ?? process.env) : undefined;
+  return (text) => (code ? text.split("\n").map((line) => `\u001b[${code}m${line}\u001b[0m`).join("\n") : text);
 }
 
 /** The welcome screen: banner, version, greeting, then (unless only the top is wanted) sign-in and tips. */
@@ -117,7 +123,7 @@ export function welcomeScreen(config: CliConfig, state: WelcomeState, io: CliIO,
   const indent = (text: string) => text.split("\n").map((line) => (line ? `  ${line}` : line)).join("\n");
   const art = options.banner === false ? undefined : options.banner ?? banner(config.name, io.columns || 80);
   const blocks: string[] = [];
-  if (art) blocks.push(accent(config, io, paint)(indent(art.trimEnd())));
+  if (art) blocks.push(accent(config, io)(indent(art.trimEnd())));
   blocks.push(indent([paint("bold", config.name), config.version ? paint("dim", `v${config.version}`) : ""].filter(Boolean).join(" ")));
   const title = options.title ?? `Welcome to ${brandOf(config).name}`;
   const text = options.text ?? config.description;
@@ -153,7 +159,7 @@ export function waitsForSignIn(config: CliConfig, words: string[]): boolean {
   if (words.includes("--help") || words.includes("-h")) return false;
   const first = words.filter((w) => !w.startsWith("-"));
   const except = typeof config.signInFirst === "object" ? (config.signInFirst.except ?? []) : [];
-  return !["auth", "help", ...except].some((e) => {
+  return !["auth", "help", ...(updatesItself(config) ? ["update"] : []), ...except].some((e) => {
     const parts = e.trim().split(/\s+/);
     return parts.every((p, i) => first[i] === p);
   });
