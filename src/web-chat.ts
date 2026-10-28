@@ -11,15 +11,15 @@
 //   GET  {base}/history                              → 200 { messages, cursor }
 //   GET  {base}/events?after=<seq>                   → SSE (Accept: text/event-stream), else a long-poll:
 //                                                      200 { events, cursor, live } | { reset: true }
-//   POST {base}/messages  { id, text, choice?, page?, context? } → 202 { id, busy? }
+//   POST {base}/messages  { id, text, choice?, page?, context? } → 202 { id }
 //   GET  {base}/widget.js, {base}/widget/<name>.js   the chat box (widget/)
 //
 // What the box shows waits in the visitor's outbox in the store, numbered per visitor: a box that
 // comes back asks for what came after the last number it showed, so each message shows once and in
 // order, through restarts and deploys. Accepted, for send(), means the outbox kept it
 // (docs/guarantees.md). Typing and status lines are live only, never kept. Limits are held in this
-// process's memory, but the daily cap, which is counted in the store. Logs carry ids and counts,
-// never text, addresses or tokens.
+// process's memory; there is no agent-wide daily cap (the workspace's model credit limits still
+// apply). Logs carry ids and counts, never text, addresses or tokens.
 
 import { createHmac, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -82,8 +82,6 @@ export interface WebChatLimits {
   messageChars?: number;
   /** Web chat turns the agent runs at once; more wait in line, with typing shown. Default 20. */
   turnsAtOnce?: number;
-  /** Web chat messages the agent takes a day (UTC); past it visitors get the `busy` reply. Default 5,000. */
-  messagesPerAgentPerDay?: number;
 }
 
 export interface WebChatOptions {
@@ -105,8 +103,6 @@ export interface WebChatOptions {
   /** How many proxies in front of the agent append to X-Forwarded-For (1: the last entry is the client's). Default FLOW_TRUST_PROXY; without it, per-address limits are off. */
   trustProxy?: number;
   limits?: WebChatLimits;
-  /** What a visitor gets once the daily cap is reached: your words, and a link (your WhatsApp: https://wa.me/...). */
-  busy?: { text?: string; link?: { label: string; url: string } };
   /** The channel's name; its send tool is send_<name>. Default "web". */
   name?: string;
   /** The path its routes answer under. Default "/v1/web-chat". */
@@ -133,6 +129,8 @@ const VISITOR_MS = 30 * 24 * 3_600_000;
 /** An identity token is a handoff, not a session: valid at most this long ahead. */
 const IDENTITY_MAX_MS = 10 * 60_000;
 const MAX_BODY = 16_384;
+/** A phone number in E.164: what an identity token's `phone` is. */
+const E164 = /^\+[1-9]\d{6,14}$/;
 const MAX_PAGE = 1_024;
 const MAX_WAIT_SECONDS = 25;
 const PING_MS = 15_000;
@@ -143,7 +141,6 @@ const RECHECK_MS = 2_000;
 /** Event requests one visitor may hold open at once (their tabs). */
 const OPEN_PER_VISITOR = 6;
 const HISTORY = 200;
-const BUSY_TEXT = "We're busy right now and can't reply here. Please message us another way.";
 
 const DEFAULT_LIMITS: Required<WebChatLimits> = {
   newVisitorsPerMinute: 20,
@@ -155,13 +152,13 @@ const DEFAULT_LIMITS: Required<WebChatLimits> = {
   messagesPerAddressPerMinute: 60,
   messageChars: 2000,
   turnsAtOnce: 20,
-  messagesPerAgentPerDay: 5000,
 };
 
-/** A visitor, as their session names them: their address on the channel, and their key when signed in. */
+/** A visitor, as their session names them: their address on the channel, and their key (and verified phone, when given) when signed in. */
 interface Visitor {
   address: string;
   key?: string;
+  phone?: string;
 }
 
 /** What one visitor's open requests wait on: news in their outbox, and the live line (typing, status). */
@@ -338,7 +335,7 @@ export function webChat(options: WebChatOptions = {}): WebChat {
     const bearer = /^Bearer (\S+)$/.exec(request.headers.get("authorization") ?? "")?.[1];
     const claims = bearer ? verify(bearer, [sessionKey], SESSION_AUDIENCE, now()) : null;
     if (!claims || typeof claims.sub !== "string") return null;
-    return { address: claims.sub, ...(typeof claims.key === "string" ? { key: claims.key } : {}) };
+    return { address: claims.sub, ...(typeof claims.key === "string" ? { key: claims.key } : {}), ...(typeof claims.key === "string" && typeof claims.phone === "string" ? { phone: claims.phone } : {}) };
   }
 
   async function session(request: Request, headers: Record<string, string>): Promise<Response> {
@@ -351,18 +348,18 @@ export function webChat(options: WebChatOptions = {}): WebChat {
     const at = now();
     const answer = (visitor: Visitor, credential?: string) => {
       const expires = at + SESSION_MS;
-      const token = sign({ aud: SESSION_AUDIENCE, sub: visitor.address, ...(visitor.key ? { key: visitor.key } : {}), exp: Math.floor(expires / 1000) }, sessionKey);
+      const token = sign({ aud: SESSION_AUDIENCE, sub: visitor.address, ...(visitor.key ? { key: visitor.key } : {}), ...(visitor.phone ? { phone: visitor.phone } : {}), exp: Math.floor(expires / 1000) }, sessionKey);
       return json(200, { session: token, expires_at: expires, signed_in: Boolean(visitor.key), ...(credential ? { visitor: credential } : {}), limits: { message_chars: limits.messageChars } }, headers);
     };
     if (typeof body.identity === "string") {
       if (ip && wrong.blocked(ip)) return problem(429, "rate_limited", "too many wrong identity tokens from this address; try again later", headers, 900);
       const claims = identityKeys.length ? verify(body.identity, identityKeys, IDENTITY_AUDIENCE, at) : null;
       const sub = claims?.sub;
-      if (!claims || typeof sub !== "string" || !sub || sub.length > 200 || typeof claims.exp !== "number" || claims.exp * 1000 > at + IDENTITY_MAX_MS + 60_000) {
+      if (!claims || typeof sub !== "string" || !sub || sub.length > 200 || typeof claims.exp !== "number" || claims.exp * 1000 > at + IDENTITY_MAX_MS + 60_000 || (claims.phone !== undefined && !E164.test(String(claims.phone)))) {
         if (ip) wrong.failed(ip);
-        return problem(401, "identity_invalid", identityKeys.length ? "the identity token is not valid: an HS256 JWT { sub, aud: \"flow-web-chat\", exp } signed with the web chat's identity key, expiring within 10 minutes" : "this agent takes no identity tokens (no FLOW_WEB_CHAT_IDENTITY_KEY)", headers);
+        return problem(401, "identity_invalid", identityKeys.length ? "the identity token is not valid: an HS256 JWT { sub, phone?, aud: \"flow-web-chat\", exp } signed with the web chat's identity key, expiring within 10 minutes, phone in E.164 (+919876543210)" : "this agent takes no identity tokens (no FLOW_WEB_CHAT_IDENTITY_KEY)", headers);
       }
-      return answer({ address: `user:${sub}`, key: sub });
+      return answer({ address: `user:${sub}`, key: sub, ...(typeof claims.phone === "string" ? { phone: claims.phone } : {}) });
     }
     const known = typeof body.visitor === "string" ? verify(body.visitor, [sessionKey], VISITOR_AUDIENCE, at) : null;
     let address = typeof known?.sub === "string" && known.sub.startsWith("visitor:") ? known.sub : null;
@@ -498,11 +495,6 @@ export function webChat(options: WebChatOptions = {}): WebChat {
     const choice = m.choice ? { ...(m.choice.id ? { id: m.choice.id } : {}), title: m.choice.title } : undefined;
     // Echoed into their outbox first, so every tab shows it, and before any reply to it.
     await keep(visitor.address, { type: "message", from: "person", id: m.id, text: choice?.title ?? m.text, ...(choice ? { choice } : {}) }, `in:${m.id}`);
-    const day = new Date(now()).toISOString().slice(0, 10);
-    if ((await agent!.store.webDay(name, day)) >= limits.messagesPerAgentPerDay) {
-      await keep(visitor.address, { type: "message", from: "agent", text: options.busy?.text ?? BUSY_TEXT, ...(options.busy?.link ? { link: options.busy.link } : {}) }, `busy:${m.id}`);
-      return json(202, { id: m.id, busy: true }, headers);
-    }
     const page: PageContext | undefined = m.page || m.context ? { url: m.page?.url ?? "", ...(m.page?.title ? { title: m.page.title } : {}), ...(m.context ? { context: m.context } : {}) } : undefined;
     const taken = await agent!.message({
       channel: name,
@@ -510,13 +502,13 @@ export function webChat(options: WebChatOptions = {}): WebChat {
       messageId: m.id,
       message: { text: choice?.title ?? m.text, ...(choice ? { choice } : {}), ...(page ? { page } : {}) },
       ...(visitor.key ? { key: visitor.key } : {}),
+      ...(visitor.phone ? { phone: visitor.phone } : {}),
     });
     if (taken) {
       // 202 only once the store has it: a write that failed is asked for again.
       await agent!.stored(taken.conversationId);
       if (!(await agent!.store.inboundTaken(taken.conversationId, name, m.id))) return problem(503, "not_stored", "the message was not kept; send it again", headers, 1);
     }
-    await agent!.store.countWebDay(name, day);
     return json(202, { id: m.id }, headers);
   }
 
@@ -577,16 +569,19 @@ export function webChat(options: WebChatOptions = {}): WebChat {
 
 /**
  * A signed-in visitor's identity token, made by your backend once it knows who they are: `sub` is
- * their key (the one your `resolve` gives on other channels), signed with FLOW_WEB_CHAT_IDENTITY_KEY,
- * valid `seconds` (default 300, at most 600). Any HS256 JWT library makes the same:
- * { sub, aud: "flow-web-chat", iat, exp }.
+ * their key (the one your `resolve` gives on other channels), and `phone` (E.164, "+919876543210")
+ * a number your backend verified is theirs, never one they typed in the chat: the agent then knows
+ * what they said on WhatsApp, SMS or iMessage from that number. Signed with
+ * FLOW_WEB_CHAT_IDENTITY_KEY, valid `seconds` (default 300, at most 600). Any HS256 JWT library
+ * makes the same: { sub, phone?, aud: "flow-web-chat", iat, exp }.
  */
-export function webChatIdentity(input: { sub: string; key: string; seconds?: number; now?: number }): string {
+export function webChatIdentity(input: { sub: string; phone?: string; key: string; seconds?: number; now?: number }): string {
   if (typeof input.key !== "string" || input.key.length < 32) throw new Error("webChatIdentity: the key needs at least 32 characters");
   if (typeof input.sub !== "string" || !input.sub || input.sub.length > 200) throw new Error("webChatIdentity: sub is the visitor's key, 1 to 200 characters");
+  if (input.phone !== undefined && !E164.test(input.phone)) throw new Error('webChatIdentity: phone is in E.164, such as "+919876543210"');
   const seconds = Math.min(600, input.seconds ?? 300);
   const at = Math.floor((input.now ?? Date.now()) / 1000);
-  return sign({ sub: input.sub, aud: IDENTITY_AUDIENCE, iat: at, exp: at + seconds }, input.key);
+  return sign({ sub: input.sub, ...(input.phone ? { phone: input.phone } : {}), aud: IDENTITY_AUDIENCE, iat: at, exp: at + seconds }, input.key);
 }
 
 /** An outbox row as the box gets it: the agent's messages and carousels named by their number. */

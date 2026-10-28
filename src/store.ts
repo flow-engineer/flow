@@ -136,8 +136,9 @@ const MIGRATIONS: Array<(t: Types) => string> = [
   // The web chat's outbox (web-chat.ts): what each visitor's browser is shown, numbered per visitor
   // (channel and address) from web_heads, so a browser that comes back reads what came after the last
   // number it showed, once and in order, whichever runner wrote it. An event the business started
-  // keeps its idempotency key, so it is kept once. And each day's count of web messages taken, for
-  // the agent-wide daily cap.
+  // keeps its idempotency key, so it is kept once. And the phone number an identity was verified to
+  // have (a phone channel's, a signed-in visitor's), so a person's conversations on other channels
+  // are found by it (linkedConversations): a new column, filled as identities write, nothing rewritten.
   (t) => `CREATE TABLE web_heads (
      agent_id TEXT NOT NULL, channel TEXT NOT NULL, address TEXT NOT NULL, seq INTEGER NOT NULL,
      PRIMARY KEY (agent_id, channel, address));
@@ -147,9 +148,8 @@ const MIGRATIONS: Array<(t: Types) => string> = [
      PRIMARY KEY (agent_id, channel, address, seq));
    CREATE UNIQUE INDEX web_outbox_key ON web_outbox (agent_id, channel, address, idempotency_key);
    CREATE INDEX web_outbox_at ON web_outbox (agent_id, at);
-   CREATE TABLE web_days (
-     agent_id TEXT NOT NULL, channel TEXT NOT NULL, day TEXT NOT NULL, count INTEGER NOT NULL,
-     PRIMARY KEY (agent_id, channel, day))`,
+   ALTER TABLE identities ADD COLUMN phone TEXT;
+   CREATE INDEX identities_phone ON identities (agent_id, phone) WHERE phone IS NOT NULL`,
 ];
 
 /** One event in a web chat visitor's outbox: its number for that visitor, when it was kept, and what it is. */
@@ -193,6 +193,8 @@ export interface IdentityRow {
   lastMessageAt: number | null;
   /** Where their latest message on this identity came from, so sends to it go back the same way. */
   via: Via;
+  /** The phone number (E.164) this identity was verified to have, when one was: a phone channel's own, a signed-in visitor's. */
+  phone?: string | null;
 }
 
 /** A real provider's webhook, or the test playground (a test person on a simulator). */
@@ -368,11 +370,46 @@ export class Store {
     await this.db.run("INSERT INTO conversations (agent_id, id, person_key, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING", [this.agentId, id, personKey, Date.now()]);
   }
 
-  async addIdentity(conversationId: string, channel: string, address: string, verifiedBy: string): Promise<void> {
+  /**
+   * Adds an identity to a conversation; one already there is kept as it is, but for `phone` (E.164,
+   * verified), which replaces the one it had while it stays in that conversation.
+   */
+  async addIdentity(conversationId: string, channel: string, address: string, verifiedBy: string, phone?: string): Promise<void> {
     await this.db.run(
-      "INSERT INTO identities (agent_id, channel, address, conversation_id, verified_by) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-      [this.agentId, channel, address, conversationId, verifiedBy],
+      `INSERT INTO identities (agent_id, channel, address, conversation_id, verified_by, phone) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (agent_id, channel, address) DO UPDATE SET phone = excluded.phone
+       WHERE excluded.phone IS NOT NULL AND identities.conversation_id = excluded.conversation_id`,
+      [this.agentId, channel, address, conversationId, verifiedBy, phone ?? null],
     );
+  }
+
+  /**
+   * The agent's other conversations with the same person: those that share a verified phone number
+   * with this one (an identity's phone, or a person key that is the number). Only this agent's.
+   */
+  async linkedConversations(conversationId: string): Promise<string[]> {
+    const phones = new Set<string>();
+    const [row] = await this.db.query("SELECT person_key FROM conversations WHERE agent_id = ? AND id = ?", [this.agentId, conversationId]);
+    if (typeof row?.person_key === "string" && row.person_key.startsWith("phone:")) phones.add(row.person_key.slice(6));
+    for (const r of await this.db.query("SELECT phone FROM identities WHERE agent_id = ? AND conversation_id = ? AND phone IS NOT NULL", [this.agentId, conversationId])) phones.add(String(r.phone));
+    if (!phones.size) return [];
+    const list = [...phones];
+    const marks = list.map(() => "?").join(", ");
+    const rows = await this.db.query(
+      `SELECT conversation_id AS id FROM identities WHERE agent_id = ? AND phone IN (${marks})
+       UNION SELECT id FROM conversations WHERE agent_id = ? AND person_key IN (${marks})`,
+      [this.agentId, ...list, this.agentId, ...list.map((p) => `phone:${p}`)],
+    );
+    return [...new Set(rows.map((r) => String(r.id)))].filter((id) => id !== conversationId).sort();
+  }
+
+  /** A conversation's latest history entries stored at `since` or later, at most `limit`, oldest first, with when each was stored. */
+  async recentHistory(conversationId: string, since: number, limit: number): Promise<Array<{ entry: ChatMessage; at: number }>> {
+    const rows = await this.db.query(
+      "SELECT entry, at FROM messages WHERE agent_id = ? AND conversation_id = ? AND at >= ? ORDER BY seq DESC LIMIT ?",
+      [this.agentId, conversationId, since, limit],
+    );
+    return rows.reverse().map((r) => ({ entry: parse<ChatMessage>(r.entry, { role: "user", content: "" }), at: Number(r.at) }));
   }
 
   /** Bind verified login proof; an identity already owned by another account cannot move. */
@@ -578,21 +615,6 @@ export class Store {
          (SELECT channel, address, seq FROM web_outbox WHERE agent_id = ? AND at < ? LIMIT ?)`,
       [this.agentId, this.agentId, before, limit],
     );
-  }
-
-  /** Counts one more web chat message taken on `day` (YYYY-MM-DD) and resolves with the day's count. */
-  async countWebDay(channel: string, day: string): Promise<number> {
-    const [row] = await this.db.query(
-      "INSERT INTO web_days (agent_id, channel, day, count) VALUES (?, ?, ?, 1) ON CONFLICT (agent_id, channel, day) DO UPDATE SET count = web_days.count + 1 RETURNING count",
-      [this.agentId, channel, day],
-    );
-    return Number(row.count);
-  }
-
-  /** The web chat messages taken on `day` (YYYY-MM-DD) so far. */
-  async webDay(channel: string, day: string): Promise<number> {
-    const [row] = await this.db.query("SELECT count FROM web_days WHERE agent_id = ? AND channel = ? AND day = ?", [this.agentId, channel, day]);
-    return Number(row?.count ?? 0);
   }
 
   // The inbox.
@@ -1151,7 +1173,7 @@ function webEventOf(r: Row): WebEventRow {
 }
 
 function identityOf(r: Row): IdentityRow {
-  return { channel: String(r.channel), address: String(r.address), conversationId: String(r.conversation_id), verifiedBy: String(r.verified_by), lastMessageAt: num(r.last_message_at), via: r.via === "playground" ? "playground" : "provider" };
+  return { channel: String(r.channel), address: String(r.address), conversationId: String(r.conversation_id), verifiedBy: String(r.verified_by), lastMessageAt: num(r.last_message_at), via: r.via === "playground" ? "playground" : "provider", phone: typeof r.phone === "string" ? r.phone : null };
 }
 
 function scheduleOf(r: Row): ScheduleRow {

@@ -149,6 +149,12 @@ export function formatLocal(zone: string, ms: number): string {
   return `${WEEKDAYS[p.weekday]} ${p.day} ${MONTHS[p.month - 1]} ${p.year} ${hhmm} (${zoneLabel(zone)})`;
 }
 
+/** "Tue 27 Oct 14:02", in `zone`, with no year or zone named. */
+export function shortLocal(zone: string, ms: number): string {
+  const p = parts(zone, ms);
+  return `${WEEKDAYS[p.weekday]} ${p.day} ${MONTHS[p.month - 1]} ${String(p.hour).padStart(2, "0")}:${String(p.minute).padStart(2, "0")}`;
+}
+
 /** What a rule does, in words, with its zone named. */
 export function describe(rule: Rule, zone: string): string {
   const label = zoneLabel(zone);

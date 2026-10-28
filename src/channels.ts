@@ -49,16 +49,16 @@ export interface Channel {
 
 /** What a channel that serves its own HTTP (`serve`) may use of its agent. */
 export interface ChannelAgent {
-  /** agent.message: a person's message on the channel; `key` only as your server verified it. */
-  message(input: { channel: string; from: string; message: string | Incoming; messageId?: string; key?: string }): Promise<{ conversationId: string; messageId: string } | null>;
+  /** agent.message: a person's message on the channel; `key` and `phone` only as your server verified them. */
+  message(input: { channel: string; from: string; message: string | Incoming; messageId?: string; key?: string; phone?: string }): Promise<{ conversationId: string; messageId: string } | null>;
   /** The conversation a channel identity belongs to, or null when that address never wrote. */
   conversationOf(identity: { channel: string; address: string }): Promise<string | null>;
   /** agent.transcript. */
   transcript(conversationId: string): Promise<TranscriptEntry[]>;
   /** Resolves once what the conversation has taken so far is written to the store. */
   stored(conversationId: string): Promise<void>;
-  /** The agent's store: the web chat's outbox and daily count, and the inbound ids it took. */
-  store: Pick<StoreApi, "appendWebEvent" | "webEvents" | "webHeads" | "countWebDay" | "webDay" | "inboundTaken">;
+  /** The agent's store: the web chat's outbox, and the inbound ids it took. */
+  store: Pick<StoreApi, "appendWebEvent" | "webEvents" | "webHeads" | "inboundTaken">;
 }
 
 /**

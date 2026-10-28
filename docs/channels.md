@@ -7,6 +7,33 @@ Every channel factory and what it takes, from the source types (`src/channels.ts
 A channel's name is how the agent knows it: its send tool is `send_<name>` (lowercase, other
 characters as `_`), and `message({ channel })` names it. `key` and `phone` are reserved.
 
+## One person on several channels
+
+Who a person is comes from what a channel verified, never from what they or the model say. Their
+identities with the same key are one person in **one conversation**: the same number on WhatsApp,
+SMS and iMessage (`phone:+919876543210`), or the key your `resolve` gives (`key:<your id>`), and a
+signed-in web chat visitor's `sub`.
+
+A person can also have **several conversations under different keys** that share a verified phone
+number: a WhatsApp conversation (`phone:+91...`) and a web chat signed in as `key:member-7` whose
+identity token carries that number (`webChatIdentity({ sub, phone })`). They stay separate
+conversations, nothing is moved or re-keyed, but each turn of one is shown what the person said,
+and what the agent sent them, lately in the others: the last 20 messages of the last 7 days, oldest
+first, each with its channel and time, as data in the turn's prompt. So "what are my bids?" on the
+web is answered knowing the WhatsApp chat. Each reply still goes out on the channel the message came
+in on: the agent has no send tool for the other conversation's channels.
+
+- **Verified numbers only.** A phone channel's own number (WhatsApp, SMS, iMessage), a number your
+  backend puts in a signed-in visitor's identity token, or `agent.message({ ..., phone })` from
+  your server code (a Telegram contact the person shared as their own, checked against the sender).
+  Never a number someone types: an anonymous web visitor stays apart whatever they write.
+- **One agent only.** Conversations are linked within one agent's store, never across agents or
+  businesses, also when several agents share a database.
+- **Forgetting is everywhere.** `agent.forgetPerson` deletes the person's conversation and every
+  conversation linked to it by a verified number.
+- Identities first seen before 0.11 keep their number from their next message on; until then a
+  phone channel's conversation is still found by its `phone:` key.
+
 ## `whatsapp(provider, options?)`
 
 `options`:
@@ -110,7 +137,6 @@ the `flowchat:open` and `flowchat:message` events.
 | `sessionKey` | Signs visitors' sessions and anonymous ids, at least 32 characters. Default `FLOW_WEB_CHAT_SESSION_KEY`, which Flow's hosting sets; without either, a random key per process (sessions and anonymous visitors then end at a restart) |
 | `trustProxy` | How many proxies in front of the agent append to `X-Forwarded-For`; the client's address is that many entries from the end. Default `FLOW_TRUST_PROXY` (Flow's hosting sets `1`). Without it, the limits per network address are off |
 | `limits` | `WebChatLimits`, below |
-| `busy` | `{ text?, link? }`: what a visitor gets once the daily cap is reached, such as your WhatsApp: `{ text: "We're busy, message us on WhatsApp", link: { label: "WhatsApp", url: "https://wa.me/15550100" } }` |
 | `name`, `base` | The channel's name (default `web`) and where its routes answer (default `/v1/web-chat`) |
 | `info`, `instructions` | What your box can show, over `WEB_CHAT` (narrow it for a box of your own); your guidance for the agent on this channel |
 
@@ -118,19 +144,22 @@ the `flowchat:open` and `flowchat:message` events.
 they come back), kept in the browser, and the agent knows them as `web:visitor:<id>`. Safari deletes
 what a script stored after 7 days without a visit; they then start afresh. To make a signed-in
 visitor the same person as on WhatsApp, your backend signs them a short identity token, an HS256
-JWT `{ sub, aud: "flow-web-chat", exp }` (`iat` optional) valid at most 10 minutes, `sub` being the key your
-`resolve` gives for them; any JWT library makes it, or in Node:
+JWT `{ sub, phone?, aud: "flow-web-chat", exp }` (`iat` optional) valid at most 10 minutes, `sub`
+being the key your `resolve` gives for them and `phone` (E.164, `+919876543210`) the number your
+backend verified is theirs, if it has one; any JWT library makes it, or in Node:
 
 ```ts
 import { webChatIdentity } from "@flow-engineer/flow/web-chat";
 app.get("/api/flow-chat-identity", requireLogin, (req, res) =>
-  res.json({ token: webChatIdentity({ sub: req.user.id, key: process.env.FLOW_WEB_CHAT_IDENTITY_KEY }) }));
+  res.json({ token: webChatIdentity({ sub: req.user.id, phone: req.user.verifiedPhone, key: process.env.FLOW_WEB_CHAT_IDENTITY_KEY }) }));
 ```
 
 and the script tag names that same-origin URL: `data-identity-url="/api/flow-chat-identity"`. The
 box exchanges the token for a session; the person is then `key:<sub>`, with all of their
-conversation and every tool. An anonymous visitor's chat stays apart from their account when they
-sign in.
+conversation and every tool. With `phone`, their turns are also shown what they said lately on
+WhatsApp, SMS or iMessage from that number, and those channels' turns what they said here
+([One person on several channels](#one-person-on-several-channels)). An anonymous visitor's chat
+stays apart from their account when they sign in.
 
 **The page they wrote from.** Each message carries the page (`url`, `title`) and the site's own
 details (`data-context`, or `FlowChat.setContext({...})`), at most 1 KB (the box drops the title,
@@ -138,7 +167,7 @@ then the details, then the URL's query to fit), the URL on one of the allowed si
 get it as `context.page` (`{ url, title?, context? }`).
 
 **Protection.** The allowed sites stop other websites embedding the agent; they do not stop a
-script, which can send any `Origin`. Sessions, limits and the daily cap stop scripts:
+script, which can send any `Origin`. Sessions and limits stop scripts:
 
 | `WebChatLimits` | Default |
 |---|---|
@@ -148,12 +177,12 @@ script, which can send any `Origin`. Sessions, limits and the daily cap stop scr
 | `messagesPerAddressPerMinute` | 60 per network address, all its visitors together |
 | `messageChars` | 2,000 characters a message (bodies at most 16 KB) |
 | `turnsAtOnce` | 20 web chat turns at once; more wait their turn, with typing shown |
-| `messagesPerAgentPerDay` | 5,000 web chat messages a day (UTC), counted in the store; past it each visitor gets the `busy` reply and the agent is not called |
 
 Wrong identity tokens are refused after 10 per address in 15 minutes. The limits are held in the
 process's memory (exact on Flow's hosting, which runs one instance per environment; per process
-when you run several), but the daily cap. Logs carry ids and counts, never text, addresses or
-tokens.
+when you run several). There is no cap on the agent's web chat messages a day: the workspace's
+model credit limits still apply, and an agent-wide daily cap may come in a later release. Logs
+carry ids and counts, never text, addresses or tokens.
 
 **The HTTP contract**, for a box of your own (all under `/v1/web-chat`, JSON, errors
 `{ error, message, retry_after? }`; every call but `session` with `Authorization: Bearer <session>`;
@@ -164,7 +193,7 @@ CORS for the allowed sites):
 | `POST /session { visitor?, identity? }` | `200 { session, expires_at, signed_in, visitor?, limits }`: a session for 1 hour. Give the stored `visitor` credential to stay the same visitor (the answer has it renewed: store it), or an `identity` token. `401 identity_invalid`, `429 rate_limited` |
 | `GET /history` | `200 { messages, cursor }`: the conversation on this channel, oldest first (entries older than the outbox have `seq: 0`), and the newest number |
 | `GET /events?after=<seq>` | With `Accept: text/event-stream`: server-sent events `hello { cursor }`, `message` (each event, its number as the SSE `id`), `live { typing, status }`, `reset` (read the history again), `reconnect { cursor }` after 14 minutes, a ping every 15 s. Otherwise a long-poll of up to 25 s (`wait=<seconds>` for less): `200 { events, cursor, live }` or `{ reset: true }`. Show each number once |
-| `POST /messages { id, text, choice?, page?, context? }` | `202 { id }` once the store has it; the same `id` again is taken once. `202 { id, busy: true }` past the daily cap. `400`, `413`, `429` with `retry_after`, `503` (send it again) |
+| `POST /messages { id, text, choice?, page?, context? }` | `202 { id }` once the store has it; the same `id` again is taken once. `400`, `413`, `429` with `retry_after`, `503` (send it again) |
 | `GET /widget.js`, `GET /widget/<name>.js` | The chat box |
 
 An event is `{ seq, at, type }` with `type` `message` (`from: "agent"`: `id`, Markdown `text`,

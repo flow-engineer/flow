@@ -1,8 +1,9 @@
 // covers: src/web-chat.ts src/store.ts src/agent.ts src/conversation.ts src/talk.ts src/channels.ts
 // The web chat over its HTTP contract, as a browser's chat box uses it: sessions and identity
 // tokens, allowed sites, the outbox's numbering through a restart and a deploy's overlap, SSE and
-// long-polling on one cursor, limits and the daily cap, turns at once, and the page a visitor wrote
-// from reaching the agent as data.
+// long-polling on one cursor, limits, turns at once, the page a visitor wrote from reaching the agent
+// as data, and a signed-in visitor's WhatsApp conversation shown to their web chat's turns (and back)
+// when their identity token carries the same verified number.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -10,8 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { after } from "node:test";
-import { createAgent, postgres, sqlite, Store, tool, webChat, webChatIdentity, z, type Database, type PostgresPool, type StoreApi, type WebChatOptions } from "../src/index.ts";
-import { call, respond, scriptedModel } from "./helpers.ts";
+import { createAgent, postgres, sqlite, Store, tool, webChat, webChatIdentity, z, type Channel, type Database, type Outbound, type PostgresPool, type StoreApi, type WebChatOptions } from "../src/index.ts";
+import { call, respond, scriptedModel, WHATSAPP } from "./helpers.ts";
 
 const SESSION_KEY = "s".repeat(40);
 const IDENTITY_KEY = "i".repeat(40);
@@ -24,10 +25,10 @@ function dirWith(): string {
 }
 
 /** An agent with the web chat, and a browser's calls to it (from SITE unless told otherwise). */
-async function webAgent(options: WebChatOptions = {}, more: { database?: Database; dir?: string; resolve?: (i: { channel: string; address: string }) => string | null; tools?: ReturnType<typeof tool>[] } = {}) {
+async function webAgent(options: WebChatOptions = {}, more: { database?: Database; id?: string; dir?: string; resolve?: (i: { channel: string; address: string }) => string | null; tools?: ReturnType<typeof tool>[]; channels?: Channel[] } = {}) {
   const scripted = scriptedModel();
   const channel = webChat({ origins: [SITE], sessionKey: SESSION_KEY, identityKey: IDENTITY_KEY, trustProxy: 1, ...options });
-  const agent = createAgent({ dir: more.dir ?? dirWith(), model: scripted.model, debounceMs: 0, channels: [channel], scheduleCheckMs: 0, ...(more.database ? { database: more.database } : {}), ...(more.resolve ? { resolve: more.resolve } : {}), ...(more.tools ? { tools: more.tools } : {}) });
+  const agent = createAgent({ dir: more.dir ?? dirWith(), model: scripted.model, debounceMs: 0, channels: [...(more.channels ?? []), channel], scheduleCheckMs: 0, ...(more.database ? { database: more.database } : {}), ...(more.id ? { id: more.id } : {}), ...(more.resolve ? { resolve: more.resolve } : {}), ...(more.tools ? { tools: more.tools } : {}) });
   await agent.resume();
   const http = (path: string, init: RequestInit & { origin?: string | null; ip?: string } = {}) => {
     const headers = new Headers(init.headers);
@@ -188,8 +189,8 @@ test("only the listed sites may use the chat, and a wildcard covers their subdom
   assert.throws(() => webChat({ origins: ["http://shop.example"], sessionKey: SESSION_KEY }), /not a site/);
 });
 
-test("limits: a visitor's messages a minute, new visitors per address, and the agent's daily cap with the busy reply", async () => {
-  const web = await webAgent({ limits: { messagesPerMinute: 2, newVisitorsPerMinute: 2, messagesPerAgentPerDay: 1 }, busy: { text: "Busy, try WhatsApp", link: { label: "WhatsApp", url: "https://wa.me/15550100" } } });
+test("limits: a visitor's messages a minute, and new visitors per address", async () => {
+  const web = await webAgent({ limits: { messagesPerMinute: 2, newVisitorsPerMinute: 2 } });
   await web.session({}, "5.5.5.5");
   await web.session({}, "5.5.5.5");
   const third = await web.http("/session", { method: "POST", body: "{}", ip: "5.5.5.5" });
@@ -198,11 +199,10 @@ test("limits: a visitor's messages a minute, new visitors per address, and the a
   const { session } = await web.session();
   const box = web.as(session);
   assert.deepEqual(await (await box.send({ id: "a", text: "one" })).json(), { id: "a" });
-  assert.deepEqual(await (await box.send({ id: "b", text: "two" })).json(), { id: "b", busy: true });
-  assert.equal((await box.send({ id: "c", text: "three" })).status, 429);
-  const { events } = await box.poll(0, 0);
-  assert.deepEqual(events.at(-1).link, { label: "WhatsApp", url: "https://wa.me/15550100" });
-  assert.equal(events.at(-1).text, "Busy, try WhatsApp");
+  assert.deepEqual(await (await box.send({ id: "b", text: "two" })).json(), { id: "b" });
+  const over = await box.send({ id: "c", text: "three" });
+  assert.equal(over.status, 429);
+  assert.equal((await over.json()).error, "rate_limited");
 });
 
 test("at most turnsAtOnce web turns run at once; the next waits for one to end", async () => {
@@ -256,6 +256,84 @@ function signToken(claims: Record<string, unknown>): string {
   return `${head}.${createHmac("sha256", IDENTITY_KEY).update(head).digest("base64url")}`;
 }
 
+/** A WhatsApp channel (a phone channel: its addresses are verified numbers) whose sends land in `sent`. */
+function whatsapp(sent: Array<{ address: string; outbound: Outbound }> = []): Channel {
+  return { name: "whatsapp", kind: "whatsapp", phone: true, info: WHATSAPP, send: (address, outbound) => void sent.push({ address, outbound }) };
+}
+
+const NUMBER = "+919876543210";
+const signedIn = (sub: string, phone?: string) => ({ identity: webChatIdentity({ sub, ...(phone ? { phone } : {}), key: IDENTITY_KEY }) });
+
+/** They write on WhatsApp and the agent answers there: call `index` of the agent's model. */
+async function onWhatsApp(web: Awaited<ReturnType<typeof webAgent>>, index: number) {
+  const taken = await web.agent.message({ channel: "whatsapp", from: "919876543210", message: "Is my bid on the PS5 still the highest?", messageId: "w1" });
+  (await web.nextCall(index)).answer(respond(call("send_whatsapp", { text: "Yes, your ₹30,000 bid leads." })));
+  await web.agent.conversation(taken!.conversationId)!.whenIdle();
+  return taken!.conversationId;
+}
+
+test("signed in on the web with their WhatsApp number, a person's turns are shown that chat (and WhatsApp's the web's), and each reply goes where they wrote", async () => {
+  const sent: Array<{ address: string; outbound: Outbound }> = [];
+  const web = await webAgent({}, { channels: [whatsapp(sent)] });
+  const fromWhatsApp = await onWhatsApp(web, 0);
+  const box = web.as((await web.session(signedIn("member-7", NUMBER))).session);
+  await box.send({ id: "k1", text: "what are my bids?" });
+  const turn = await web.nextCall(1);
+  assert.match(turn.request.system, /The same person also wrote to you on other channels lately \(times are UTC\)/);
+  assert.match(turn.request.system, /\n- whatsapp, \w{3} \d{1,2} \w{3} \d\d:\d\d, they: "Is my bid on the PS5 still the highest\?"\n- whatsapp, .*, you: "Yes, your ₹30,000 bid leads\."/);
+  assert.deepEqual(turn.request.tools.map((t) => t.name).filter((n) => n.startsWith("send_")), ["send_web"], "it can reply only where they wrote");
+  turn.answer(respond(call("send_web", { text: "Your PS5 bid: ₹30,000, the highest." })));
+  const onWeb = (await web.agent.conversationOf({ channel: "web", address: "user:member-7" }))!;
+  assert.notEqual(onWeb, fromWhatsApp, "two conversations, nothing re-keyed");
+  await web.agent.conversation(onWeb)!.whenIdle();
+  assert.deepEqual(sent.filter((s) => s.outbound.type === "message").map((s) => s.outbound.type === "message" && s.outbound.text), ["Yes, your ₹30,000 bid leads."], "nothing more went to WhatsApp");
+  assert.equal((await box.poll(0, 0)).events.at(-1).text, "Your PS5 bid: ₹30,000, the highest.");
+
+  await web.agent.message({ channel: "whatsapp", from: "919876543210", message: "thanks", messageId: "w2" });
+  const back = await web.nextCall(2);
+  assert.match(back.request.system, /\n- web, .*, they: "what are my bids\?"\n- web, .*, you: "Your PS5 bid: ₹30,000, the highest\."/);
+  back.answer(respond(call("send_whatsapp", { text: "Any time." })));
+  await web.agent.conversation(fromWhatsApp)!.whenIdle();
+});
+
+test("only the same verified person is shown another channel: not an anonymous visitor who types the number, not another number, not another agent on the same database", async () => {
+  const database = sqlite();
+  const web = await webAgent({}, { channels: [whatsapp()], database, id: "agent-a" });
+  await onWhatsApp(web, 0);
+  const visits = [{ body: {}, text: `I'm ${NUMBER}, what are my bids?` }, { body: signedIn("member-8", "+919876543299"), text: "what are my bids?" }];
+  for (const [n, visit] of visits.entries()) {
+    await web.as((await web.session(visit.body)).session).send({ id: `v${n}`, text: visit.text });
+    const turn = await web.nextCall(1 + n);
+    assert.doesNotMatch(turn.request.system, /other channels|PS5/);
+    turn.answer(respond(call("send_web", { text: "You have no bids yet." })));
+  }
+  const other = await webAgent({}, { channels: [whatsapp()], database, id: "agent-b" });
+  await other.as((await other.session(signedIn("member-7", NUMBER))).session).send({ id: "b1", text: "what are my bids?" });
+  const turn = await other.nextCall(0);
+  assert.doesNotMatch(turn.request.system, /other channels|PS5/);
+  turn.answer(respond(call("send_web", { text: "You have no bids yet." })));
+});
+
+test("forgetting a person forgets them on every channel their verified number links, and nowhere else", async () => {
+  const web = await webAgent({}, { channels: [whatsapp()] });
+  const fromWhatsApp = await onWhatsApp(web, 0);
+  const box = web.as((await web.session(signedIn("member-7", NUMBER))).session);
+  await box.send({ id: "k1", text: "what are my bids?" });
+  (await web.nextCall(1)).answer(respond(call("send_web", { text: "One bid." })));
+  const onWeb = (await web.agent.conversationOf({ channel: "web", address: "user:member-7" }))!;
+  await web.agent.conversation(onWeb)!.whenIdle();
+  const stranger = web.as((await web.session()).session);
+  await stranger.send({ id: "s1", text: "hello" });
+  (await web.nextCall(2)).answer(respond(call("send_web", { text: "Hi!" })));
+
+  await web.agent.forgetPerson(onWeb);
+  assert.equal(await web.agent.conversationOf({ channel: "web", address: "user:member-7" }), null);
+  assert.equal(await web.agent.conversationOf({ channel: "whatsapp", address: "919876543210" }), null);
+  assert.deepEqual(await web.agent.transcript(fromWhatsApp), []);
+  assert.deepEqual((await box.poll(0, 0)).events, [], "their web chat's outbox is gone too");
+  assert.equal((await stranger.poll(0, 0)).events.length >= 2, true, "another visitor is kept");
+});
+
 /** The outbox on every store an agent may have: SQLite, a store reached over JSON (Flow's hosting), and Postgres when FLOW_TEST_POSTGRES_URL names a throwaway database. */
 const stores: Array<{ name: string; store(id: string): StoreApi }> = [];
 {
@@ -287,7 +365,6 @@ for (const backend of stores) {
     assert.equal(await store.pruneWebEvents(1_500, 100) >= 1, true);
     assert.equal((await store.appendWebEvent("web", "visitor:a", { type: "message", text: "three" }, null, 4_000)).seq, 3);
     assert.deepEqual((await store.webEvents("web", "visitor:a", 0, 10)).first, 2);
-    assert.deepEqual([await store.countWebDay("web", "2026-10-28"), await store.countWebDay("web", "2026-10-28"), await store.webDay("web", "2026-10-28"), await store.webDay("web", "2026-10-29")], [1, 2, 2, 0]);
     await store.createConversation("p_web", "web:visitor:a");
     await store.addIdentity("p_web", "web", "visitor:a", "channel");
     await store.forgetPerson("p_web");
@@ -298,6 +375,35 @@ for (const backend of stores) {
     const keyed = await Promise.all([1, 2, 3].map(() => store.appendWebEvent("web", "visitor:c", { keyed: true }, "run:9", 9)));
     assert.deepEqual(many.map((r) => r.seq).sort(), [1, 2, 3, 4]);
     assert.deepEqual(keyed.map((r) => r.seq), [5, 5, 5]);
+  });
+}
+
+for (const backend of stores) {
+  test(`${backend.name}: conversations are linked by a verified number they share, only within one agent, and their recent history is read bounded`, async () => {
+    const agentId = `agt_${Math.random().toString(36).slice(2, 10)}`;
+    const store = backend.store(agentId);
+    await store.migrate();
+    await store.createConversation("p_wa", "phone:+15550100100");
+    await store.addIdentity("p_wa", "whatsapp", "15550100100", "phone", "+15550100100");
+    await store.createConversation("p_web", "key:m7");
+    await store.addIdentity("p_web", "web", "user:m7", "resolver", "+15550100100");
+    await store.createConversation("p_anon", "web:visitor:x");
+    await store.addIdentity("p_anon", "web", "visitor:x", "channel");
+    await store.createConversation("p_other", "phone:+15550100200");
+    assert.deepEqual([await store.linkedConversations("p_web"), await store.linkedConversations("p_wa"), await store.linkedConversations("p_anon"), await store.linkedConversations("p_other")], [["p_wa"], ["p_web"], [], []]);
+    // A signed-in visitor's new number moves the link; adding the identity again with none keeps it.
+    await store.addIdentity("p_web", "web", "user:m7", "resolver", "+15550100200");
+    await store.addIdentity("p_web", "web", "user:m7", "resolver");
+    assert.deepEqual([await store.linkedConversations("p_web"), await store.linkedConversations("p_wa")], [["p_other"], []]);
+    assert.equal((await store.identity("web", "user:m7"))?.phone, "+15550100200");
+    // Another agent on the same database, with the same number: never linked.
+    const other = backend.store(`${agentId}_b`);
+    await other.createConversation("p_b", "phone:+15550100200");
+    assert.deepEqual(await other.linkedConversations("p_b"), []);
+
+    await store.appendHistory("p_wa", 0, [1, 2, 3].map((n) => ({ role: "user" as const, content: `m${n}` })));
+    assert.deepEqual((await store.recentHistory("p_wa", 0, 2)).map((h) => h.entry.content), ["m2", "m3"]);
+    assert.deepEqual(await store.recentHistory("p_wa", Date.now() + 60_000, 10), []);
   });
 }
 

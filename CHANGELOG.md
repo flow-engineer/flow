@@ -19,20 +19,34 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
     keeps a week.
   - Anonymous visitors keep an id for 30 days; a signed-in visitor's identity token, signed by
     your backend with `webChatIdentity()` (`@flow-engineer/flow/web-chat`, or any JWT library),
-    makes them the same person as `resolve`'s key on WhatsApp.
+    makes them the same person as `resolve`'s key on WhatsApp. Its optional `phone` claim (E.164,
+    a number your backend verified) links their web chat to their WhatsApp, SMS and iMessage
+    conversations from that number (below).
   - Allowed sites (`origins`, `FLOW_WEB_CHAT_ORIGINS`), 1-hour sessions, limits per network
-    address and per visitor, 20 web turns at once and a daily cap (5,000 messages) with your own
-    `busy` reply.
+    address and per visitor, and 20 web turns at once. There is no agent-wide daily cap: the
+    workspace's model credit limits apply, and a cap may come in a later release.
   - Each message carries the page it was written from and the site's details: the agent reads one
     line of data per turn, tools get `context.page`.
   - The chat box (`widget/`): a 4 KB launcher, the panel on first open, Shadow DOM, buttons, lists,
     photos and carousels, a full-screen sheet on phones, English and Hindi, keyboard and screen
     reader support.
+- **The agent remembers what a person said on their other channels.** A person's conversations
+  under different keys that share a verified phone number (WhatsApp as `phone:+91...`, and the web
+  chat signed in as `key:member-7` with that number in its token) stay separate, but each turn is
+  shown the person's recent messages in the others, and the agent's to them: the last 20 of the
+  last 7 days, each with its channel and time, as data. Each reply still goes on the channel the
+  message came in on. Verified numbers only (a phone channel's, an identity token's `phone`,
+  `agent.message({ ..., phone })` from server code), never one typed; one agent's conversations
+  only. `agent.forgetPerson` now also forgets the person's linked conversations. docs/channels.md,
+  "One person on several channels".
 - **Channels can serve their own HTTP** (`Channel.serve(agent)`) and cap their turns at once
-  (`Channel.turnSlot()`); `agent.message({ ..., key })` takes a server-verified key, and
-  `agent.conversationOf({ channel, address })` finds a channel identity's conversation.
-- **Store migration 12:** the tables `web_heads`, `web_outbox` and `web_days`, and the Store methods
-  `appendWebEvent`, `webEvents`, `webHeads`, `pruneWebEvents`, `countWebDay` and `webDay`.
+  (`Channel.turnSlot()`); `agent.message({ ..., key, phone })` takes a server-verified key and
+  phone number, and `agent.conversationOf({ channel, address })` finds a channel identity's
+  conversation.
+- **Store migration 12:** the tables `web_heads` and `web_outbox`, the column `identities.phone`
+  (the number an identity was verified to have, filled as identities write; nothing is rewritten)
+  and its index, and the Store methods `appendWebEvent`, `webEvents`, `webHeads`, `pruneWebEvents`,
+  `linkedConversations` and `recentHistory`; `addIdentity` takes the verified number.
   `forgetPerson` also deletes the person's web chat outbox.
 - **`flow deploy secrets --from-env` skips `FLOW_WEB_CHAT_SESSION_KEY` and `FLOW_TRUST_PROXY`:**
   Flow's hosting sets them.
@@ -49,10 +63,14 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   migration 12; an agent on 0.11 with a store on 0.10 is refused at deploy (`chinwag_too_new`)
   until Flow updates it. Agents that keep their own database migrate it themselves as they start.
 - **A store of your own that forwards Store calls** (a `StoreApi` other than `Store`) must serve
-  the six new methods above, and run migration 12, before the agent uses `webChat()`.
+  the six new methods above, pass `addIdentity`'s new fifth argument on, and run migration 12:
+  every turn now calls `linkedConversations`.
 - **Adding `webChat()` to the starter:** its placeholder `customUI("web", provider)` has the same
   name, and two channels cannot share one (`flow: two channels have the same name`). Replace the
   placeholder with `webChat({ origins: [...] })`.
+- **`agent.forgetPerson` reaches further** only for a person with linked conversations, which needs
+  a number from an identity token's `phone` or `agent.message({ phone })`. An agent that passes
+  neither has no linked conversations: its turns, prompts and forgetting are as before.
 - Nothing else changes for an agent that does not add `webChat()`.
 
 ## 0.10.5 (2026-10-27)

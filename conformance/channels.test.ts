@@ -49,8 +49,6 @@ conformance("webChat()", builtIn((take) => {
     },
     webEvents: (...a) => store.webEvents(...a),
     webHeads: (...a) => store.webHeads(...a),
-    countWebDay: (...a) => store.countWebDay(...a),
-    webDay: (...a) => store.webDay(...a),
     inboundTaken: (...a) => store.inboundTaken(...a),
   };
   // On an agent too (the ordering check makes one), its outbox is the held one.

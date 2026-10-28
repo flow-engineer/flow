@@ -6,7 +6,9 @@
 // Who a person is gets fixed when their message arrives, from what the channel verified, never
 // from anything the model or a tool says: the owner's own key from `resolve`, else the phone
 // number of a phone channel (SMS, WhatsApp, iMessage verify it), else that channel's address alone.
-// Identities with the same key are one person in one conversation.
+// Identities with the same key are one person in one conversation. A person's conversations under
+// other keys that share a verified phone number with theirs (WhatsApp, and the web chat signed in
+// with that number) stay apart, but each turn is shown what they said lately in the others.
 //
 // Test people, declared in `testPeople`, can also write from the test playground (`simulate`), a
 // different phone for the same person: same identity, history, lookups and schedules. Each identity
@@ -17,7 +19,7 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { ATTACH_EVENTS, type FlowEvents } from "./business-events/engine.ts";
 import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
-import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Profile, type TranscriptEntry } from "./conversation.ts";
+import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Elsewhere, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
 import { indexDeclared, recordsOf, type RecordCollection, type Records } from "./records.ts";
@@ -509,6 +511,7 @@ export class Agent {
       windowClosed: (nudge, to) => this.windowClosed(nudge, to),
       get tagChannels() { return channels.size > 1; },
       links: (id) => this.links(id),
+      elsewhere: (id) => this.elsewhere(id),
       settle: (target, status, reason, messageId) => this.settle(target, status, reason, messageId),
     };
     for (const channel of this.channelsByName.values()) {
@@ -548,11 +551,15 @@ export class Agent {
    * the agent knows the message by, or null when `intercept` or a keyword answered it. Give the
    * provider's own `messageId`: the same one again (a webhook retried) is not taken twice. `key` is
    * the person's own key as your server verified it (a signed-in web chat visitor), never from a
-   * browser's body: the person is then `resolve`'s same key on every channel.
+   * browser's body: the person is then `resolve`'s same key on every channel. `phone` (E.164) is a
+   * number your server or the platform verified is theirs (a signed-in visitor's, a Telegram contact
+   * they shared as their own), never one they typed: their conversations on phone channels with
+   * that number are then the same person's, which each turn is shown lately.
    */
-  async message(input: { channel: string; from: string; message: string | Incoming; messageId?: string; key?: string }): Promise<{ conversationId: string; messageId: string } | null> {
-    const { key, ...rest } = input;
-    return this.released(await this.take(this.channelOf(input.channel), { ...rest, via: "provider", ...(key ? { verifiedKey: key } : {}) }));
+  async message(input: { channel: string; from: string; message: string | Incoming; messageId?: string; key?: string; phone?: string }): Promise<{ conversationId: string; messageId: string } | null> {
+    const { key, phone, ...rest } = input;
+    if (phone !== undefined && !/^\+[1-9]\d{6,14}$/.test(phone)) throw new Error(`flow: phone is a verified number in E.164 ("+919876543210"), not "${phone}"`);
+    return this.released(await this.take(this.channelOf(input.channel), { ...rest, via: "provider", ...(key ? { verifiedKey: key } : {}), ...(phone ? { verifiedPhone: phone } : {}) }));
   }
 
   /**
@@ -760,11 +767,43 @@ export class Agent {
   /**
    * Forgets a person: a turn in progress stops, and everything kept about them goes (history,
    * inbox, background tools, schedules and their runs, nudges, no-contact rules, identities, the
-   * conversation, and the records naming them in a person field). Their next message starts from
-   * nothing. For someone with no conversation who is named in records: `agent.records.forgetPerson`.
+   * conversation, and the records naming them in a person field), in this conversation and in their
+   * others that share a verified phone number with it (the web chat signed in with their WhatsApp
+   * number). Their next message starts from nothing. For someone with no conversation who is named
+   * in records: `agent.records.forgetPerson`.
    */
   async forgetPerson(conversationId: string): Promise<void> {
     await this.settings.ready;
+    const linked = await this.store.linkedConversations(conversationId);
+    for (const id of [conversationId, ...linked]) await this.forgetConversation(id);
+  }
+
+  /**
+   * What the person said, and the agent sent them, lately in their other conversations (those that
+   * share a verified phone number with this one): the last ELSEWHERE_MESSAGES of the last
+   * ELSEWHERE_DAYS, oldest first, for this conversation's turn to be shown. Only this agent's.
+   */
+  private async elsewhere(conversationId: string): Promise<Elsewhere[]> {
+    const linked = await this.store.linkedConversations(conversationId);
+    if (!linked.length) return [];
+    // History rows are stamped with the wall clock when stored, so the window is measured on it.
+    const since = Date.now() - ELSEWHERE_DAYS * DAY_MS;
+    const only = [...this.channelsByName.keys()][0] ?? "chat";
+    const lines: Elsewhere[] = [];
+    for (const id of linked) {
+      await this.conversations.get(id)?.stored();
+      // Tool calls and their results come between messages: read several entries per message wanted.
+      for (const e of transcriptOf(await this.store.recentHistory(id, since, ELSEWHERE_MESSAGES * 4), only)) {
+        if (e.kind !== "in" && e.kind !== "out") continue;
+        const shown = e.kind === "out" ? (e.carousel ? `[cards: ${e.carousel.map((c) => c.text).filter(Boolean).join(" | ")}]` : e.image ? "[a photo]" : "") : "";
+        const text = [e.text, shown].filter(Boolean).join(" ");
+        if (text) lines.push({ channel: e.channel, at: e.at, from: e.kind === "in" ? "person" : "agent", text });
+      }
+    }
+    return lines.sort((a, b) => a.at - b.at).slice(-ELSEWHERE_MESSAGES);
+  }
+
+  private async forgetConversation(conversationId: string): Promise<void> {
     const resident = this.conversations.get(conversationId);
     if (resident) {
       resident.close();
@@ -803,7 +842,7 @@ export class Agent {
 
   private async arrive(adapter: Channel, input: Arrival) {
     await this.settings.ready;
-    const identity = await this.conversationFor(adapter, input.channel, input.from, input.person, input.verifiedKey);
+    const identity = await this.conversationFor(adapter, input.channel, input.from, input.person, input.verifiedKey, input.verifiedPhone);
     if (input.via === "playground") {
       const address = viaKey(input.channel, input.from);
       if (input.verifiedKey || input.visitor) this.playgroundVisitors.set(address, { key: input.verifiedKey, visitor: input.visitor });
@@ -860,10 +899,17 @@ export class Agent {
   }
 
   /** The identity a message comes from, made (and linked to its person's conversation) the first time it writes. */
-  private async conversationFor(adapter: Channel, channel: string, address: string, testPerson?: TestPerson, verifiedKey?: string): Promise<IdentityRow> {
+  private async conversationFor(adapter: Channel, channel: string, address: string, testPerson?: TestPerson, verifiedKey?: string, verifiedPhone?: string): Promise<IdentityRow> {
+    // The number this identity is verified to have: a phone channel's address, else what server code verified.
+    const number = adapter.phone ? normalizePhone(address, adapter.kind === "whatsapp" ? undefined : this.countryCode) : verifiedPhone ?? "";
     const known = await this.store.identity(channel, address);
     if (known) {
       if (verifiedKey && (await this.store.conversation(known.conversationId))?.personKey !== `key:${verifiedKey}`) throw new Error("chinwag: channel identity belongs to a different person");
+      // Kept from now on: an identity from before numbers were kept, or a signed-in visitor's new number.
+      if (number && known.phone !== number) {
+        await this.store.addIdentity(known.conversationId, channel, address, known.verifiedBy, number);
+        return { ...known, phone: number };
+      }
       return known;
     }
     let personKey: string;
@@ -872,9 +918,9 @@ export class Agent {
       // Not a phone channel: their playground address joins the person their number is.
       [personKey, verifiedBy] = [await this.testPersonKey(testPerson, adapter), "test person"];
     } else {
-      const phone = adapter.phone ? normalizePhone(address, adapter.kind === "whatsapp" ? undefined : this.countryCode) : "";
-      const owner = verifiedKey ?? await this.options.resolve?.({ channel, address, ...(phone ? { phone } : {}) });
-      [personKey, verifiedBy] = owner ? [`key:${owner}`, "resolver"] : phone ? [`phone:${phone}`, "phone"] : [`${channel}:${address}`, "channel"];
+      const owner = verifiedKey ?? await this.options.resolve?.({ channel, address, ...(number ? { phone: number } : {}) });
+      // Only a phone channel's number is the person's key; one verified elsewhere links, never joins (linkedConversations).
+      [personKey, verifiedBy] = owner ? [`key:${owner}`, "resolver"] : adapter.phone && number ? [`phone:${number}`, "phone"] : [`${channel}:${address}`, "channel"];
     }
     let row = await this.store.conversationByKey(personKey);
     if (!row) {
@@ -886,8 +932,8 @@ export class Agent {
       if (!this.conversations.has(row.id)) this.rows.set(row.id, row);
     }
     const id = row.id;
-    await this.store.addIdentity(id, channel, address, verifiedBy);
-    return { channel, address, conversationId: id, verifiedBy, lastMessageAt: null, via: "provider" };
+    await this.store.addIdentity(id, channel, address, verifiedBy, number || undefined);
+    return { channel, address, conversationId: id, verifiedBy, lastMessageAt: null, via: "provider", phone: number || null };
   }
 
   /**
@@ -1622,6 +1668,8 @@ export class Agent {
 
 interface Arrival {
   verifiedKey?: string;
+  /** A number (E.164) server code verified is the person's (agent.message's `phone`). */
+  verifiedPhone?: string;
   visitor?: string;
   channel: string;
   from: string;
@@ -1661,6 +1709,9 @@ export function createAgent(options: AgentOptions): Agent {
 }
 
 const DAY_MS = 24 * 60 * 60_000;
+/** How far back, and how many messages, a turn is shown of the person's other conversations. */
+const ELSEWHERE_DAYS = 7;
+const ELSEWHERE_MESSAGES = 20;
 /** A number as a business writes one: 7 to 15 digits, with an optional + or 00 and spaces, dots, dashes or brackets. */
 const PHONE_NUMBER = /^(?:\+|00)?(?:[\s().-]*\d){7,15}[\s().-]*$/;
 export const DEFAULT_QUIET_HOURS: QuietHours = { from: "22:00", to: "07:00" };
