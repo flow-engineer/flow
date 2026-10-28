@@ -49,7 +49,7 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
                             Print the link that opens a chat with this agent from a phone; signs in
                             and runs setup first when this folder is not set up yet. --display-name
                             (here and on setup) renames the agent: package.json's displayName and
-                            its prompt, agent/AGENTS.md; the phone link then says "Hi <name>"
+                            its prompt, agent/AGENTS.md; the phone link then says "Join <name>"
   flow status [--json]      What this folder has and lacks: FLOW_KEY and the model key (never their
                             values) with the trial credit left, the workspace, the
                             sign-in, each channel's sender in .env, and, signed in, which channels
@@ -519,7 +519,7 @@ function agentDisplayName(dir = process.cwd()): string {
   return named || (pkg.name ?? basename(dir)).replace(/^@[^/]+\//, "").replace(/-/g, " ");
 }
 
-/** The /try page with the agent's name (`n`), so it fills in "Hi <name> (ref <code>)". */
+/** The /try page with the agent's name (`n`), so it fills in "Join <name> (ref <code>)". */
 function namedPage(url: string, name: string): string {
   const parsed = URL.parse(url);
   if (!parsed) return url;

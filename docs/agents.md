@@ -56,7 +56,7 @@ printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check:
 
 Before `init` (or `flow new <folder>`), ask the owner what people should call their agent, such as
 "FlatX agent", and pass it as `--display-name`. It is kept as `displayName` in `package.json`, and
-the message their phone sends to reach the agent is `Hi FlatX agent (ref <code>)`. The name takes the
+the message their phone sends to reach the agent is `Join FlatX agent (ref <code>)`. The name takes the
 starter's (Pip) place in the agent's prompt, `agent/AGENTS.md`, and the playground and MCP server
 read it from `package.json`. `init` names the package, its CLI command and its MCP server after it
 (`flatx-agent`), or after `--name <name>` when given, else after the folder. To rename an agent made already, `link --display-name "<name>"` (or
@@ -82,7 +82,7 @@ For a messaging agent, recommend these, in this order:
 2. **Their phone**: the link from `link` (`say_to_person` in `link --json`), while `npm start` runs.
    It is the channel's own link (`url`): `https://t.me/<bot>?start=<code>` (press Start),
    `https://wa.me/<number>?text=...` or, for iMessage, `sms:<number>?&body=...` (an iPhone or a Mac),
-   each with `Hi <displayName> (ref <code>)` filled in (`join_message`). `page` is the same on
+   each with `Join <displayName> (ref <code>)` filled in (`join_message`). `page` is the same on
    flow.engineer, for a computer without that app.
 
 `flow chat` and `npm test -- --synthetic` (the test cloud) are for you, to check your own work
@@ -367,9 +367,11 @@ await agent.listWakeUps({ channel: "whatsapp", address: buyer });
 ## Shared test numbers and privacy
 
 The free trial runs on Flow's shared Telegram bot, WhatsApp number and iMessage line. Sending an
-agent's join message (`Hi <name> (ref <code>)`, what the link fills in) binds that phone to that
+agent's join message (`Join <name> (ref <code>)`, what the link fills in) binds that phone to that
 agent's app on the shared sender, so the person's messages go only to that app; sending another
-app's join message moves them there. Trial chats are
+app's join message moves them there. The agent gets the text before `(ref` as the person's first
+message (`Join <name>`; Telegram's Start sends `/start`); an older `Hi <name> (ref <code>)` still
+joins. Trial chats are
 test data, kept for the account's retention (30 days by default). Do not use the trial for real
 customers' data: connect your own number for that, or, for iMessage, the Dedicated plan's own
 number ([Paid plans](#paid-plans)).

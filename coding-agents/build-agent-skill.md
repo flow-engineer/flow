@@ -362,7 +362,7 @@ To chat with the agent from the owner's phone, with no tunnel and no key made by
 from the agent's folder (`npx @flow-engineer/flow init --display-name "<name>"` makes a starter in
 an empty one, named `flatx-agent` after it unless `--name` says otherwise: first ask the owner what
 people should call their agent, such as "FlatX agent" (see "Names"); the
-phone's first message is `Hi FlatX agent (ref <code>)`, and `package.json`'s `displayName` keeps it;
+phone's first message is `Join FlatX agent (ref <code>)` (the agent reads `Join FlatX agent`), and `package.json`'s `displayName` keeps it;
 `link --display-name "<name>"` renames it later, in `package.json` and `agent/AGENTS.md`).
 Only `chat` reads stdin; `init` asks for the name only in a terminal, and nothing else asks for input.
 

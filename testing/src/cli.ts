@@ -53,7 +53,7 @@ const NEW_LINE = `  flow new <name> [--display-name <name>]
   flow init [--name <name>] [--display-name <name>]
                             Make that agent in the current folder.
                             --display-name is what people call it, such as "FlatX agent": a
-                            phone reaches it with "Hi FlatX agent (ref <code>)" (asked for when
+                            phone reaches it with "Join FlatX agent (ref <code>)" (asked for when
                             run in a terminal; else the name in words).
                             --name is its package, CLI command and MCP server name, such as
                             flatx-agent (else the display name in lowercase and dashes, else
@@ -245,7 +245,7 @@ async function askDisplayName(given: string | undefined, packageName: string): P
   const fallback = displayNameOf(undefined, packageName);
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    return (await rl.question(`What should people call your agent? Their phone says "Hi <it>" (Enter for "${fallback}"): `)).trim() || undefined;
+    return (await rl.question(`What should people call your agent? Their phone says "Join <it>" (Enter for "${fallback}"): `)).trim() || undefined;
   } finally {
     rl.close();
   }
@@ -253,7 +253,7 @@ async function askDisplayName(given: string | undefined, packageName: string): P
 
 const namedLine = (dir: string) => {
   const displayName = (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { displayName?: string }).displayName;
-  return `People call it "${displayName}" (package.json displayName, and its prompt agent/AGENTS.md): a phone reaches it with "Hi ${displayName} (ref <code>)".`;
+  return `People call it "${displayName}" (package.json displayName, and its prompt agent/AGENTS.md): a phone reaches it with "Join ${displayName} (ref <code>)".`;
 };
 
 const displayNameFlag = (values as { "display-name"?: string })["display-name"];

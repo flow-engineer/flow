@@ -108,7 +108,7 @@ test("the name people call the agent (--display-name) is package.json's displayN
   const result = spawnSync(process.execPath, [cli, "init", "--display-name", "FlatX agent"], { cwd: here, env: { PATH: process.env.PATH }, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(readFileSync(join(here, "package.json"), "utf8")).displayName, "FlatX agent");
-  assert.match(result.stdout, /a phone reaches it with "Hi FlatX agent \(ref <code>\)"/);
+  assert.match(result.stdout, /a phone reaches it with "Join FlatX agent \(ref <code>\)"/);
 });
 
 test("every name in a new agent's code comes from its package.json: the CLI, its variables and examples, and the MCP server", async (t) => {

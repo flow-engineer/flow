@@ -83,7 +83,7 @@ from it unless they want another), and tell them where people see each name:
   - the plugins `flow plugin` makes: the plugin's name and its MCP server's (`--name` overrides),
     with package.json's `description` as the plugin's description.
 - **`displayName`**, what people call the agent (`Skycast`): `--display-name`. People see it as:
-  - the message their phone sends to reach it, `Hi Skycast (ref <code>)`, filled in by the link
+  - the message their phone sends to reach it, `Join Skycast (ref <code>)`, filled in by the link
     `link` prints and by its /try page;
   - the name the agent gives itself in chats, from its prompt `agent/AGENTS.md`.
   The owner also sees it on the playground and in what `npm start` and `npm run mcp` print.
