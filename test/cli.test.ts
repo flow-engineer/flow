@@ -884,6 +884,57 @@ test("a command of the team's own replaces auth status; login and logout stay th
   ]);
 });
 
+// Updating is the only command that runs a program on the person's computer; flow check holds its option.
+test("update says when this is the newest version, else runs the CLI file's update command and reports a failure", async () => {
+  let newest = "1.2.0";
+  const latest = `${await listen((_req, res) => void res.end(JSON.stringify({ version: newest })))}/latest.json`;
+  const cli = (command: string) => defineCli({ name: "acme", version: "1.2.0", directory: mkdtempSync(join(testDirectory, "flow-cli-update-")), update: { command, latest } });
+  const installs = `node -e "console.log('installed'); console.error('progress')"`;
+  const current = io();
+  assert.equal(await runCli(cli(installs), ["update"], current.channel), 0);
+  assert.equal(current.out, "acme 1.2.0 is the newest version.\n");
+  newest = "1.2.0-production.abc1234";
+  const updated = io();
+  assert.equal(await runCli(cli(installs), ["update"], updated.channel), 0, "a rebuild of the same version is still an update");
+  assert.equal(updated.out, "installed\n");
+  assert.match(updated.err, /Updating acme to 1\.2\.0-production\.abc1234\.\.\.\nprogress/);
+  const failed = io();
+  assert.equal(await runCli(cli(`node -e "process.exit(7)"`), ["update"], failed.channel), 1);
+  assert.match(failed.err, /The update did not finish \(exit 7\)\. Run it again, or run it yourself: node -e/);
+  const help = io();
+  assert.equal(await runCli(cli(installs), ["--help"], help.channel), 0);
+  assert.match(help.out, /update +Update acme to its newest version/);
+  const updateTool = [{ name: "update", inputSchema: {} }];
+  assert.deepEqual(cliProblems(defineCli({ name: "acme", update: { command: "", latest: "ftp://acme.test" } }), updateTool).errors, [
+    "update.command must be the shell command that updates the CLI",
+    "update.latest must be an http or https URL",
+    "update.latest needs version, the version this CLI is, to compare with",
+    'tool update would be the command "update", which is the CLI\'s own while update is set; give it another name in commands',
+  ]);
+  assert.deepEqual(cliProblems(defineCli({ name: "acme", update: { command: installs }, commands: { update: { tool: "update" } } }), updateTool).errors, [], "the CLI file's own update replaces Flow's");
+});
+
+test("a person at a terminal hears of a newer version after a command, asked at most once a day; scripts and --json never", async () => {
+  let asked = 0;
+  const latest = `${await listen((_req, res) => { asked++; res.end(JSON.stringify({ version: "1.3.0" })); })}/latest.json`;
+  const cli = defineCli({ name: "acme", version: "1.2.0", directory: mkdtempSync(join(testDirectory, "flow-cli-notice-")), welcome: false, update: { command: "true", latest } });
+  const run = async (interactive: boolean, argv = ["--help"]) => {
+    const ran = io(interactive);
+    ran.channel.env = {};
+    assert.equal(await runCli(cli, argv, ran.channel), 0);
+    return ran.err;
+  };
+  assert.equal(await run(false), "");
+  assert.equal(asked, 0);
+  assert.match(stripVTControlCharacters(await run(true)), /^\nA new version of acme is out: 1\.3\.0 \(you have 1\.2\.0\)\. Run acme update to get it\.\n$/);
+  assert.match(await run(true), /1\.3\.0/, "the saved answer is shown again");
+  assert.equal(asked, 1);
+  assert.equal(await run(true, ["tools", "--json"]), "");
+  writeFileSync(join(cli.directory!, "update.json"), JSON.stringify({ checkedAt: Date.now() - 25 * 60 * 60_000, latest: "1.3.0" }));
+  await run(true);
+  assert.equal(asked, 2, "a day later it asks again");
+});
+
 // The help tests cover --help; a bare run is the one place a person and an agent see different things.
 test("a bare run at a terminal welcomes a person; agents and pipes get the help, and every part can be replaced", async () => {
   const cli = { ...acme(await serve({ tools: [listOrders] })), version: "1.2.0", description: "Order coffee." };
