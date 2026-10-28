@@ -59,7 +59,9 @@ and are `message.in`/`message.out` events marked `answered: true`);
 `deadlineMs` (default 60,000) is the longest a reply waits for a tool before it moves to the
 background (set a tool's own `deadlineMs` for a known-slow one); `partialAfterMs` (default 5,000)
 is how long a finished tool's result waits for the others of its response; `shareUpdates` turns live status lines on web and app UIs off, or replaces their
-guidance with a string; `routes` (`{ "/v1/events": (request) => Response }`) are HTTP routes the
+guidance with a string; `writing` replaces Flow Framework's guidance on how messages read (buttons
+only for a pick, catalogue titles in plain words, one idea per message) with a string, or `false`
+leaves it out (a channel's `instructions` add to it for that channel); `routes` (`{ "/v1/events": (request) => Response }`) are HTTP routes the
 agent serves beside its chat, such as a business's event push, answered by `agent.fetch(request)`
 (and by the test cloud with a test's events); `onTick(now)` is work of your own on the agent's clock
 (held sends, reminders timed from your data), run with each check for due scheduled messages.

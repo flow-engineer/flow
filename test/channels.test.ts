@@ -1,8 +1,38 @@
 // covers: src/conversation.ts src/talk.ts src/channels.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SMS_KEYWORDS, US_CARRIER_KEYWORDS, keywordOf, sms } from "../src/channels.ts";
+import { SMS_KEYWORDS, US_CARRIER_KEYWORDS, customUI, keywordOf, sms, whatsapp } from "../src/channels.ts";
+import { talkInstructions } from "../src/talk.ts";
+import type { ChannelInfo } from "../src/types.ts";
+import { IMESSAGE, TELEGRAM } from "../flow-messaging/src/index.ts";
+import { channelOf, platform } from "../simulators/src/platforms.ts";
 import { SMS, WHATSAPP, call, harness, respond, say, users } from "./helpers.ts";
+
+test("every chat channel's prompt says how messages read; only channels with buttons or lists say when to offer them", () => {
+  const prompt = (name: string, info: ChannelInfo) => talkInstructions([{ name, info }], { shareUpdates: true });
+  const texting = "- Write like a person texting: one idea per message or short paragraph. Split a long answer into a few short messages, not one dense block.";
+  const items = '- Name items from a catalogue or tool in plain words ("an oat latte", not "LATTE OAT LG 16OZ"); keep the exact title only where precision matters, such as an order summary or a list row.';
+  const wa = prompt("whatsapp", whatsapp({ sendMessage: async () => {} }).info);
+  assert.ok(
+    wa.endsWith(
+      [texting, items, "- Buttons (or a list when there are more than 3) only when their next step is to pick one of a few options, so they can tap; otherwise none, and never a button that just repeats your text."].join("\n"),
+    ),
+    wa,
+  );
+  const channels = {
+    sms: sms({ sendMessage: async () => {} }).info,
+    imessage: IMESSAGE,
+    telegram: TELEGRAM,
+    web: channelOf(platform("web")),
+    app: customUI("app", { sendMessage: async () => {} }).info,
+  };
+  for (const [name, info] of Object.entries(channels)) {
+    const text = prompt(name, info);
+    assert.ok(text.includes(`${texting}\n${items}`), name);
+    assert.equal(/only when their next step is to pick/.test(text), Boolean(info.buttons || info.lists), name);
+  }
+  assert.match(prompt("telegram", TELEGRAM), /\n- Buttons only when their next step/);
+});
 
 test("a channel without reactions or status offers only its send tool", async () => {
   const h = harness([], 50, { reactions: false, status: false });

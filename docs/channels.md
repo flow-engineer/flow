@@ -7,6 +7,28 @@ Every channel factory and what it takes, from the source types (`src/channels.ts
 A channel's name is how the agent knows it: its send tool is `send_<name>` (lowercase, other
 characters as `_`), and `message({ channel })` names it. `key` and `phone` are reserved.
 
+## How messages read
+
+On every channel the agent's prompt carries Flow Framework's guidance on how messages read, after
+the channel's formatting line (`src/talk.ts`):
+
+```
+- Write like a person texting: one idea per message or short paragraph. Split a long answer into a few short messages, not one dense block.
+- Name items from a catalogue or tool in plain words ("an oat latte", not "LATTE OAT LG 16OZ"); keep the exact title only where precision matters, such as an order summary or a list row.
+- Buttons (or a list when there are more than 3) only when their next step is to pick one of a few options, so they can tap; otherwise none, and never a button that just repeats your text.
+```
+
+The buttons line is there only on a channel that has buttons or lists (WhatsApp, Telegram, a custom
+UI whose `info` declares them), worded for what it has.
+
+- **Add to it** for one channel with that channel's `instructions`: they come after it in the
+  prompt, while the person is on that channel (`whatsapp(provider, { instructions: "Offer the three
+  plans as buttons whenever pricing comes up." })`).
+- **Replace it** for every channel with `createAgent({ writing: "..." })`: your text takes the place
+  of all three lines.
+- **Leave it out** with `createAgent({ writing: false })`, and say how messages read in your own
+  `AGENTS.md`.
+
 ## `whatsapp(provider, options?)`
 
 `options`:

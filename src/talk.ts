@@ -223,6 +223,8 @@ export interface TalkSettings {
   shareUpdates: boolean;
   /** The owner's own guidance for when and what to share; replaces Flow Framework's default line. */
   shareUpdatesInstructions?: string;
+  /** How messages read: Flow Framework's guidance when left out, the owner's own (a string), or none (false). */
+  writing?: string | false;
 }
 
 export function talkSpecs(channels: ChannelView[], settings: TalkSettings): ToolSpec[] {
@@ -250,6 +252,28 @@ const FORMATTING = {
   markdown: "Markdown works here.",
 };
 
+// How messages read, on every chat channel; the agent's `writing` option replaces these lines or leaves them out.
+const WRITING = [
+  "Write like a person texting: one idea per message or short paragraph. Split a long answer into a few short messages, not one dense block.",
+  'Name items from a catalogue or tool in plain words ("an oat latte", not "LATTE OAT LG 16OZ"); keep the exact title only where precision matters, such as an order summary or a list row.',
+];
+
+/** When to offer buttons or a list, on channels that have them. */
+function choicesLine(channels: ChannelInfo[]): string | null {
+  const buttons = channels.find((c) => c.buttons)?.buttons;
+  const lists = channels.some((c) => c.lists);
+  if (!buttons && !lists) return null;
+  const what = !buttons ? "A list" : !lists ? "Buttons" : channels.length === 1 ? `Buttons (or a list when there are more than ${buttons.max})` : "Buttons or a list";
+  return `${what} only when their next step is to pick one of a few options, so they can tap; otherwise none, and never a button that just repeats your text.`;
+}
+
+/** Flow Framework's writing guidance for these channels, or the owner's, as prompt lines. */
+function writingLines(channels: ChannelInfo[], settings: TalkSettings): string[] {
+  if (settings.writing !== undefined) return settings.writing ? [`- ${settings.writing}`] : [];
+  const choices = choicesLine(channels);
+  return [...WRITING, ...(choices ? [choices] : [])].map((line) => `- ${line}`);
+}
+
 export function talkInstructions(channels: ChannelView[], settings: TalkSettings): string {
   if (channels.length > 1) return severalChannels(channels, settings);
   const channel = channels[0].info;
@@ -266,10 +290,8 @@ export function talkInstructions(channels: ChannelView[], settings: TalkSettings
     "- IMPORTANT: A message you send with tool calls reaches them before those tools run. So say what you are about to do (\"I'm booking that now\"), never that it is done (\"I've booked it\", \"done\"): the outcome comes once, after the result arrives. Never send a placeholder.",
     "- Their messages start with an id in brackets, like [m3].",
     `- ${FORMATTING[channel.formatting ?? "plain"]}`,
+    ...writingLines([channel], settings),
   ];
-  if (channel.buttons || channel.lists) {
-    lines.push("- When they choose between a few options, offer them as " + (channel.buttons ? "buttons" : "a list") + (channel.buttons && channel.lists ? " (or a list when there are more than " + channel.buttons.max + ")" : "") + " so they can tap.");
-  }
   if (channel.status && settings.shareUpdates) {
     lines.push(
       `- ${settings.shareUpdatesInstructions ?? "While several tools run one after another, keep them posted with share_updates: a few words on what you are doing now."}`,
@@ -292,6 +314,7 @@ function severalChannels(channels: ChannelView[], settings: TalkSettings): strin
     "- After they write, the first thing you do must reach them on every channel they are waiting on: your answer, or, if you need tools first, an acknowledgement there in the same response as those tool calls.",
     "- Call every tool you can in one response; wait for a result only when another call needs it.",
     "- IMPORTANT: A message you send with tool calls reaches them before those tools run. So say what you are about to do (\"I'm booking that now\"), never that it is done (\"I've booked it\", \"done\"): the outcome comes once, after the result arrives. Never send a placeholder.",
+    ...writingLines(channels.map((c) => c.info), settings),
     ...channels.map((c) => `- On ${c.name}: ${FORMATTING[c.info.formatting ?? "plain"]}${c.info.buttons ? ` Up to ${c.info.buttons.max} buttons.` : ""}${c.instructions ? ` ${c.instructions}` : ""}`),
   ];
   if (channels.some((c) => c.info.status) && settings.shareUpdates) {
