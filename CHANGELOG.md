@@ -25,6 +25,21 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   flow-messaging README no longer put iMessage under WhatsApp's 24-hour rule. On iMessage the only
   timing rule is for typing indicators and read receipts: 5 minutes after the line's last message
   to that person.
+- **The CLI names the paid plans when a trial fills.** Once a channel's free trial has 80% of its
+  people, `setup`, `link` (for its channel) and `status` print one more line, by rule:
+  `Next: the free trial is nearly full on Telegram. More people or your own iMessage number: Shared $25/month or Dedicated $100/month, at https://flow.engineer/dashboard/plans (the workspace owner buys it).`
+  Full, or holding anyone, it names the Shared plan's link
+  (`https://flow.engineer/dashboard/plans?plan=shared`) and how many wait. With `--json` it is the new
+  field `plans` (`{"url", "message"}`, else `null`). `docs/agents.md` has a "Paid plans" section, and
+  the coding-agent skill and the starter's `AGENTS.md` say what Shared, Dedicated and Outbound are and
+  to show the owner the line rather than retry.
+- **Flow Messaging's `hint` and `doc_url` reach the developer.** `FlowMessagingError` has `hint` and
+  `docUrl`; a refused send, edit or unsend throws an Error whose `cause` is it, and the adapter logs
+  the hint and doc_url on the console (`... a send on telegram was refused, permission (plan_ended).
+  <hint> (<doc_url>)`). The agent's Not delivered note is unchanged: the hint is for the developer,
+  not the person. A stream Flow stops for good resolves `stopped` with `channelCode`, `hint` and
+  `docUrl` when Flow gave them, and logs the hint. The starter prints the hint when its stream stops,
+  and for `plan_ended` points to https://flow.engineer/dashboard/plans instead of `setup`.
 
 ### Migration notes
 

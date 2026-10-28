@@ -40,5 +40,11 @@ if (fm) {
   // Events sent while it was not running come when it starts again (.flow/ keeps the last one handled).
   const live = fm.start(agent, { cursorFile: ".flow/flow-messaging-cursor", port: port + 1 });
   console.log(`On ${channelNames(channels)} through Flow Messaging (${live.mode}). The phone link: npx @flow-engineer/flow link`);
-  live.stopped.then((why) => console.error(`Flow Messaging stopped: ${why.message} Then: npx @flow-engineer/flow setup`));
+  // Flow's hint says what to do; a paused plan (plan_ended) is bought again, a refused key made again.
+  live.stopped.then((why) => {
+    const then = why.channelCode === "plan_ended"
+      ? "Then the workspace owner chooses a plan: https://flow.engineer/dashboard/plans"
+      : why.type === "authentication" ? "Then: npx @flow-engineer/flow setup" : "";
+    console.error([`Flow Messaging stopped: ${why.message}`, why.hint, then].filter(Boolean).join(" "));
+  });
 }

@@ -54,7 +54,7 @@ const agent = createAgent({
 await agent.resume();
 
 const live = fm.start(agent, { cursorFile: ".flow/flow-messaging-cursor" });
-live.stopped.then((why) => console.error(`Flow Messaging refused the stream: ${why.message}`));
+live.stopped.then((why) => console.error(`Flow Messaging refused the stream: ${why.message} ${why.hint ?? ""}`));
 ```
 
 That's it on a laptop: with no webhook secret, `fm.start` opens the event stream (`fm.stream(agent)`
@@ -83,7 +83,10 @@ each, in log order, to the same handler as the webhook.
   keeps events (30 days by default). Without it, a dropped stream still resumes, but a restart
   starts from now. A cursor older than Flow's log starts again from now, and says so.
 - **Stops for good** on a refused key or request (close codes 4401, 4403, 4400): `stopped`
-  resolves with the code, type and Flow's message. `close()` ends the stream.
+  resolves with the code, type and Flow's message, and Flow's `channelCode`, `hint` and `docUrl`
+  when it gave them. Show the hint rather than retrying: `channelCode` `plan_ended` means the
+  account's paid plan ended (its live keys are paused, test keys keep working), and the workspace
+  owner chooses a plan again at https://flow.engineer/dashboard/plans. `close()` ends the stream.
 - **Replies go over HTTP**, with their Idempotency-Keys, so they never wait for the stream.
 - The stream cannot send `Flow-Version`, so its events come in the version your app was pinned to.
 
@@ -243,7 +246,9 @@ Typing indicators and read receipts work for 5 minutes after the line's last mes
 
 - `verifySignature(body, header, secrets)`: checks a `Flow-Signature` header yourself.
 - `FlowMessagingError`: the API's typed error (`status`, `type`, `channelCode`, `retryAfter`,
-  `param`, `channel`).
+  `param`, `channel`, `hint`, `docUrl`). A refused send's Error has it as `cause`; its message is
+  the agent's Not delivered note, which leaves the hint out (it is for the developer, not the person),
+  so the adapter logs the hint and `doc_url` on the console instead.
 - `API_VERSION`: the API version every request asks for, `2026-11-01`.
 - `TELEGRAM`, `IMESSAGE`: the Telegram and iMessage channels' limits, as framework `ChannelInfo`s.
 

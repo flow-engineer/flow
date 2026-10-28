@@ -97,6 +97,12 @@ MCP server and a CLI. It starts as the café example; replace the café with the
   (\`OPENROUTER_API_KEY\`, \`OPENAI_API_KEY\`, \`ANTHROPIC_API_KEY\` or \`GEMINI_API_KEY\`) wins over it. \`npm start\` runs it in the playground,
   and \`npx @flow-engineer/flow link\` signs in, puts its other keys in \`.env\` and prints the link that
   reaches it from a phone while \`npm start\` runs.
+- The free trial takes 25 people per channel; past that, new people are held (kept, not delivered).
+  More people, or the owner's own iMessage number, is a paid plan only the workspace owner buys, at
+  https://flow.engineer/dashboard/plans: Shared (more people on Flow's shared lines), Dedicated (an own
+  iMessage number) and the Outbound add-on (the agent messages people first). When \`setup\`, \`link\` or
+  \`status\` prints a \`Next:\` line with that link, or an error carries a \`hint\` (\`plan_ended\`: the
+  plan ended), show it to the owner with the link instead of retrying.
 - When the owner asks how to test it, recommend first the playground (\`npm start\`, then open the link
   it prints: the test people and the channels side by side), then their phone (the \`link\`).
 - Your own checks, not the owner's way to test: \`npx @flow-engineer/flow chat\` talks to it in the
