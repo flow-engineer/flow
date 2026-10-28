@@ -10,45 +10,15 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { after, before, test } from "node:test";
 import { cliReleaseCli } from "../testing/src/deploy.ts";
 import { installer, type PackedCli } from "../testing/src/cli-pack.ts";
+import { cliAgentFolder } from "./helpers.ts";
 
-const framework = fileURLToPath(new URL("../cli/src/index.ts", import.meta.url));
 const scratch = mkdtempSync(join(tmpdir(), "flow-cli-pack-test-"));
 after(() => rmSync(scratch, { recursive: true, force: true }));
-
-const CLI_FILE = (options: { guard?: string; agent?: string; servers?: Record<string, string>; brand?: false } = {}) => `#!/usr/bin/env node
-import { readFileSync, realpathSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { cliFile, defineCli, runCli } from ${JSON.stringify(framework)};
-
-export const cli = defineCli({
-  name: "acme",
-  server: process.env.ACME_SERVER ?? "http://127.0.0.1:8790/mcp",${options.agent ? `\n  agent: ${JSON.stringify(options.agent)},` : ""}
-  description: readFileSync(cliFile("context/about.txt"), "utf8").trim(),
-${options.brand === false ? "" : `  brand: { name: "Acme's Coffee" },\n`}${options.servers ? `  servers: ${JSON.stringify(options.servers)},\n` : ""}  files: ["context/about.txt"],
-});
-
-if (${options.guard ?? "process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)"}) process.exit(await runCli(cli, process.argv.slice(2)));
-`;
-
-/** An agent folder with a CLI file, committed to git. */
-function agentFolder(cliFile = CLI_FILE()): string {
-  const dir = mkdtempSync(join(scratch, "agent-"));
-  mkdirSync(join(dir, "src"));
-  mkdirSync(join(dir, "context"));
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "acme", displayName: "Acme Coffee", version: "0.1.0", type: "module" }));
-  writeFileSync(join(dir, "src", "cli.ts"), cliFile);
-  writeFileSync(join(dir, "context", "about.txt"), "Coffee, ordered from a terminal.\n");
-  const git = (...args: string[]) => execFileSync("git", ["-c", "user.email=t@example.com", "-c", "user.name=t", ...args], { cwd: dir, stdio: "ignore" });
-  git("init", "-q");
-  git("add", "-A");
-  git("commit", "-qm", "agent");
-  return dir;
-}
 
 /** The cloud and the address the hosted agent is served from: one fake for both. */
 let base = "";
@@ -88,7 +58,7 @@ async function flowCli(argv: string[], env: NodeJS.ProcessEnv = {}) {
 let packed: Promise<{ dir: string; out: string; code: number; stdout: string; printed: string }> | undefined;
 function packStaging() {
   packed ??= (async () => {
-    const dir = agentFolder();
+    const dir = cliAgentFolder(scratch);
     const out = join(dir, "release");
     return { dir, out, ...(await flowCli(["pack", "--server", "staging", "--dir", dir, "--json"], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: base })) };
   })();
@@ -221,7 +191,7 @@ test("the packed CLI installs and runs on Node 20.19", { skip: !existsSync(NODE_
 });
 
 test("pack refuses a CLI file whose default server the bundle does not have exactly once, and writes nothing", async () => {
-  const dir = agentFolder(CLI_FILE({ agent: "http://127.0.0.1:8790/mcp" }));
+  const dir = cliAgentFolder(scratch, { agent: "http://127.0.0.1:8790/mcp" });
   const { code, printed } = await flowCli(["pack", "--server", "https://mcp.acme.example/mcp", "--dir", dir]);
   assert.equal(code, 2);
   assert.match(printed, /src\/cli\.ts's default server "http:\/\/127\.0\.0\.1:8790\/mcp" must be written once, as a string, for pack to put https:\/\/mcp\.acme\.example\/mcp in its place; the bundle has it 2 times\./);
@@ -229,14 +199,14 @@ test("pack refuses a CLI file whose default server the bundle does not have exac
 });
 
 test("pack refuses a CLI that does not start through a link, as npm installs it", async () => {
-  const dir = agentFolder(CLI_FILE({ guard: "process.argv[1] === fileURLToPath(import.meta.url)" }));
+  const dir = cliAgentFolder(scratch, { guard: "process.argv[1] === fileURLToPath(import.meta.url)" });
   const { code, printed } = await flowCli(["pack", "--server", "https://mcp.acme.example/mcp", "--dir", dir]);
   assert.equal(code, 1);
   assert.match(printed, /The packed CLI's --help printed no USAGE \(nothing at all: does src\/cli\.ts run runCli when started through a link\? Compare realpathSync\(process\.argv\[1\]\)/);
 });
 
 test("an https --server makes a custom build; --base-url, where it is served from yourself, is written into install.sh", async () => {
-  const dir = agentFolder();
+  const dir = cliAgentFolder(scratch);
   const out = mkdtempSync(join(scratch, "out-"));
   const { code, stdout, printed } = await flowCli(["pack", "--server", "https://mcp.acme.example/mcp", "--base-url", "https://get.acme.example/", "--out", out, "--dir", dir, "--json"]);
   assert.equal(code, 0, printed);
@@ -249,7 +219,7 @@ test("an https --server makes a custom build; --base-url, where it is served fro
 });
 
 test("defineCli({ servers }) is what a pack for that environment uses, with no address asked; without a brand name the release is named by package.json's displayName", async () => {
-  const dir = agentFolder(CLI_FILE({ servers: { production: "https://cli.acme.example/mcp" }, brand: false }));
+  const dir = cliAgentFolder(scratch, { servers: { production: "https://cli.acme.example/mcp" }, brand: false });
   const before = calls.length;
   const { code, stdout, printed } = await flowCli(["pack", "--server", "production", "--dir", dir, "--json"], { FLOW_FRAMEWORK_CLOUD: base });
   assert.equal(code, 0, printed);

@@ -953,6 +953,21 @@ test("a person at a terminal hears of a newer version after a command, asked at 
   assert.equal(asked, 2, "a day later it asks again");
 });
 
+test("after a rollback, a CLI on the version rolled back from is offered the current one, though it is older; others are not", async () => {
+  const latest = `${await listen((_req, res) => res.end(JSON.stringify({ version: "1.2.0-production.aaa1111", rolled_back_from: "1.3.0-production.bbb2222" })))}/cli/version`;
+  const cli = (version: string) => defineCli({ name: "acme", version, directory: mkdtempSync(join(testDirectory, "flow-cli-rollback-")), welcome: false, update: { command: "echo updated", latest } });
+  const run = async (version: string, argv: string[]) => {
+    const ran = io(true);
+    ran.channel.env = {};
+    assert.equal(await runCli(cli(version), argv, ran.channel), 0);
+    return { out: ran.out, err: stripVTControlCharacters(ran.err) };
+  };
+  assert.equal((await run("1.3.0-production.bbb2222", ["--help"])).err, "\nacme 1.3.0-production.bbb2222 was rolled back; the version to use is 1.2.0-production.aaa1111. Run acme update to get it.\n");
+  assert.match((await run("1.3.0-production.bbb2222", ["update"])).err, /^Updating acme to 1\.2\.0-production\.aaa1111\.\.\.\n/);
+  assert.equal((await run("1.3.1-production.ccc3333", ["--help"])).err, "", "a version the rollback did not replace is not offered an older one");
+  assert.equal((await run("1.3.1-production.ccc3333", ["update"])).out, "acme 1.3.1-production.ccc3333 is the newest version.\n");
+});
+
 // The help tests cover --help; a bare run is the one place a person and an agent see different things.
 test("a bare run at a terminal welcomes a person; agents and pipes get the help, and every part can be replaced", async () => {
   const cli = { ...acme(await serve({ tools: [listOrders] })), version: "1.2.0", description: "Order coffee." };

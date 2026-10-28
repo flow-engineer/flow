@@ -186,7 +186,7 @@ if (process.argv[2] === "mcp") {
   await withPeers("mcp update", () => import("../../mcp/src/client.ts"));
   process.exit(await mcpUpdateCli());
 }
-if (process.argv[2] === "cli" && process.argv[3] === "pack") process.exit(await cliReleaseCli(process.argv.slice(3)));
+if (process.argv[2] === "cli" && ["pack", "publish", "rollback", "status"].includes(process.argv[3] ?? "")) process.exit(await cliReleaseCli(process.argv.slice(3)));
 if (process.argv[2] === "cli") {
   // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client and @stricli/core, optional peers.
   const { defineCli, runCli } = await withPeers("cli", () => import("../../cli/src/index.ts"));

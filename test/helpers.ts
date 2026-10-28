@@ -1,6 +1,8 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createAgent, sqlite, tool, type AgentOptions, type Database, type TemplateDefinition, type TestPerson } from "../src/index.ts";
 import type { ChannelInfo, ChannelKind, ChatMessage, Keywords, Model, ModelRequest, ModelResponse, Outbound, FlowEvent, ToolCall } from "../src/index.ts";
 
@@ -179,4 +181,40 @@ export function multi(options: {
     }
   }
   return { agent, out, texts, message, events, callWith, dir, database, sentWhere, ...scripted };
+}
+
+/**
+ * An agent folder in `parent`, committed to git, for `flow cli pack`: a CLI file over the
+ * framework's own source, named acme, that ships context/about.txt and reads its description from
+ * it. `guard` replaces the line that starts it; `agent` sets an agent URL, `servers` its servers;
+ * `brand: false` leaves its brand name out (package.json's displayName is Acme Coffee).
+ */
+export function cliAgentFolder(parent: string, options: { guard?: string; agent?: string; servers?: Record<string, string>; brand?: false } = {}): string {
+  const framework = fileURLToPath(new URL("../cli/src/index.ts", import.meta.url));
+  const dir = mkdtempSync(join(parent, "agent-"));
+  mkdirSync(join(dir, "src"));
+  mkdirSync(join(dir, "context"));
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "acme", displayName: "Acme Coffee", version: "0.1.0", type: "module" }));
+  writeFileSync(join(dir, "package-lock.json"), "{}");
+  writeFileSync(join(dir, "src", "agent.ts"), "export function buildAgent() {}\n");
+  writeFileSync(join(dir, "src", "cli.ts"), `#!/usr/bin/env node
+import { readFileSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { cliFile, defineCli, runCli } from ${JSON.stringify(framework)};
+
+export const cli = defineCli({
+  name: "acme",
+  server: process.env.ACME_SERVER ?? "http://127.0.0.1:8790/mcp",${options.agent ? `\n  agent: ${JSON.stringify(options.agent)},` : ""}
+  description: readFileSync(cliFile("context/about.txt"), "utf8").trim(),
+${options.brand === false ? "" : `  brand: { name: "Acme's Coffee" },\n`}${options.servers ? `  servers: ${JSON.stringify(options.servers)},\n` : ""}  files: ["context/about.txt"],
+});
+
+if (${options.guard ?? "process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)"}) process.exit(await runCli(cli, process.argv.slice(2)));
+`);
+  writeFileSync(join(dir, "context", "about.txt"), "Coffee, ordered from a terminal.\n");
+  const git = (...args: string[]) => execFileSync("git", ["-c", "user.email=t@example.com", "-c", "user.name=t", ...args], { cwd: dir, stdio: "ignore" });
+  git("init", "-q");
+  git("add", "-A");
+  git("commit", "-qm", "agent");
+  return dir;
 }
