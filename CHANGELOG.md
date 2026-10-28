@@ -2,6 +2,37 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.13.0 (unreleased)
+
+### Changes
+
+- **Markdown is fixed before it goes out on WhatsApp.** WhatsApp reads only its own marks, so an
+  agent's `**bold**` showed its asterisks, `# Heading` its hash and a table its pipes. Every send on
+  a channel with `formatting: "whatsapp"` is now fitted after `beforeSend` and before the content
+  rules: `**x**`/`__x__` → `*x*`, `~~x~~` → `~x~`, `# Heading` → `*Heading*`, `[text](url)` →
+  `text (url)`, a table → one line per row, `<b>`/`<i>`/`<s>`/`<br>` → marks and line breaks.
+  WhatsApp's own marks, quotes, lists, URLs and code are left as written. What went is what the
+  history, the transcript and `message.out` keep ([docs/channels.md](docs/channels.md#fitted-to-the-channel)).
+
+  Before: `## Sizes\n**M** fits 40in.\n| Size | Price |\n|---|---|\n| M | ₹1,499 |`
+  After: `*Sizes*\n*M* fits 40in.\nSize — Price\nM — ₹1,499`
+- **Buttons your code sends on iMessage or SMS are no longer dropped.** A `beforeSend` that added
+  buttons or a list on a channel that shows neither had them left out without a word; they now go
+  as numbered options after the text (`1. Yes\n2. Another time`).
+- **What was fixed is recorded.** `message.out` carries `fixed`, the codes of what Flow changed
+  (`markdown_bold`, `markdown_strike`, `header`, `link`, `table`, `html`, `options_as_text`), and a
+  trace's send span carries them as `flow.fixed`, also with trace content off.
+- `fitText(formatting, text)` and the type `FormatFix` are exported, for checking a text the way a
+  send fits it.
+
+### Migration notes
+
+None. Messages on WhatsApp change only where they held Markdown or HTML WhatsApp shows as raw
+characters; a `beforeSend` still gets the agent's text as written. On iMessage and SMS, buttons or a
+list from your code now show as numbered text where they were dropped; a tap's id does not come
+back, so read the person's reply ("1", or the option's words) as text. Telegram, iMessage's
+Markdown, the web chat and custom UIs are unchanged.
+
 ## 0.12.0 (2026-10-28)
 
 ### Changes

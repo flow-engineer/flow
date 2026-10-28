@@ -151,6 +151,19 @@ test("without content on, traces hold no text: no messages, replies, tool inputs
   assert.doesNotMatch(JSON.stringify(request.body), /Thursday|thursday/);
 });
 
+test("a send span names what Flow fixed in the message for its channel (flow.fixed), with content off too", async () => {
+  const endpoint = await fakeEndpoint();
+  const whatsappInfo = { reactions: false, status: false, formatting: "whatsapp" as const };
+  const h = agentFor(endpoint.url, false, undefined, [{ name: "sms", kind: "sms", info: whatsappInfo, phone: true, send: () => {} }]);
+  await h.agent.message({ channel: "sms", from: "+15550100123", message: "Open today?" });
+  (await h.nextCall(0)).answer(respond(call("send_sms", { text: "## Today\nOpen till **6**" })));
+  const request = await endpoint.next(1);
+  endpoint.close();
+  const send = request.body.resourceSpans[0].scopeSpans[0].spans.find((s: any) => s.name === "send sms");
+  assert.equal(attrs(send)["flow.fixed"], "markdown_bold,header");
+  assert.deepEqual(h.sent, ["*Today*\nOpen till *6*"]);
+});
+
 test("the endpoint refusing traces never touches the conversation, is logged once, and never shows the key", async (t) => {
   const warnings: string[] = [];
   t.mock.method(console, "warn", (...args: unknown[]) => void warnings.push(args.map(String).join(" ")));
