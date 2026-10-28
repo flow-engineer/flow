@@ -11,7 +11,9 @@
 //   customUI("app", new MyApp())                         your own web or mobile UI, with your params
 
 import type { z } from "zod";
-import type { CarouselCard, ChannelInfo, ListRow, Outbound, Photo, ReplyButton, SendReceipt, Template, TemplateDefinition } from "./types.ts";
+import type { TranscriptEntry } from "./conversation.ts";
+import type { StoreApi } from "./store.ts";
+import type { CarouselCard, ChannelInfo, Incoming, ListRow, Outbound, Photo, ReplyButton, SendReceipt, Template, TemplateDefinition } from "./types.ts";
 
 export type ChannelKind = "sms" | "whatsapp" | "custom";
 
@@ -33,6 +35,30 @@ export interface Channel {
   keywords?: Keywords;
   /** Resolves once the channel has the outbound (the platform accepted it), optionally with a receipt; see Deliver. */
   send(address: string, outbound: Outbound): Promise<void | SendReceipt> | void | SendReceipt;
+  /**
+   * HTTP the channel serves itself (the web chat's), under `path` and every path below it: called
+   * once, as createAgent makes the agent, and answered by `agent.fetch` beside the agent's `routes`.
+   */
+  serve?(agent: ChannelAgent): { path: string; handle(request: Request): Promise<Response> };
+  /**
+   * Waits for a slot before a turn that answers a message on this channel, and resolves with the
+   * function that gives it back: a cap on this channel's turns at once (the web chat's).
+   */
+  turnSlot?(): Promise<() => void>;
+}
+
+/** What a channel that serves its own HTTP (`serve`) may use of its agent. */
+export interface ChannelAgent {
+  /** agent.message: a person's message on the channel; `key` only as your server verified it. */
+  message(input: { channel: string; from: string; message: string | Incoming; messageId?: string; key?: string }): Promise<{ conversationId: string; messageId: string } | null>;
+  /** The conversation a channel identity belongs to, or null when that address never wrote. */
+  conversationOf(identity: { channel: string; address: string }): Promise<string | null>;
+  /** agent.transcript. */
+  transcript(conversationId: string): Promise<TranscriptEntry[]>;
+  /** Resolves once what the conversation has taken so far is written to the store. */
+  stored(conversationId: string): Promise<void>;
+  /** The agent's store: the web chat's outbox and daily count, and the inbound ids it took. */
+  store: Pick<StoreApi, "appendWebEvent" | "webEvents" | "webHeads" | "countWebDay" | "webDay" | "inboundTaken">;
 }
 
 /**

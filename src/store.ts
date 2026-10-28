@@ -133,7 +133,34 @@ const MIGRATIONS: Array<(t: Types) => string> = [
   () => `ALTER TABLE schedules ADD COLUMN schedule_key TEXT;
    CREATE UNIQUE INDEX schedules_key ON schedules (agent_id, schedule_key, conversation_id) WHERE status = 'active' AND schedule_key IS NOT NULL;
    CREATE INDEX schedules_conversation ON schedules (agent_id, conversation_id, status)`,
+  // The web chat's outbox (web-chat.ts): what each visitor's browser is shown, numbered per visitor
+  // (channel and address) from web_heads, so a browser that comes back reads what came after the last
+  // number it showed, once and in order, whichever runner wrote it. An event the business started
+  // keeps its idempotency key, so it is kept once. And each day's count of web messages taken, for
+  // the agent-wide daily cap.
+  (t) => `CREATE TABLE web_heads (
+     agent_id TEXT NOT NULL, channel TEXT NOT NULL, address TEXT NOT NULL, seq INTEGER NOT NULL,
+     PRIMARY KEY (agent_id, channel, address));
+   CREATE TABLE web_outbox (
+     agent_id TEXT NOT NULL, channel TEXT NOT NULL, address TEXT NOT NULL, seq INTEGER NOT NULL,
+     event TEXT NOT NULL, idempotency_key TEXT, at ${t.int} NOT NULL,
+     PRIMARY KEY (agent_id, channel, address, seq));
+   CREATE UNIQUE INDEX web_outbox_key ON web_outbox (agent_id, channel, address, idempotency_key);
+   CREATE INDEX web_outbox_at ON web_outbox (agent_id, at);
+   CREATE TABLE web_days (
+     agent_id TEXT NOT NULL, channel TEXT NOT NULL, day TEXT NOT NULL, count INTEGER NOT NULL,
+     PRIMARY KEY (agent_id, channel, day))`,
 ];
+
+/** One event in a web chat visitor's outbox: its number for that visitor, when it was kept, and what it is. */
+export interface WebEventRow {
+  seq: number;
+  at: number;
+  event: Record<string, unknown>;
+}
+
+/** Thrown inside appendWebEvent's transaction when its idempotency key was kept meanwhile: rolls the number back. */
+class KeptMeanwhile extends Error {}
 
 /** Quiet hours, "HH:MM" to "HH:MM" in the person's own time; they may wrap midnight. */
 export interface QuietHours {
@@ -393,6 +420,11 @@ export class Store {
       const names = [conversationId, ...(personKey ? [personKey] : []), ...(personKey?.startsWith("phone:") ? [personKey.slice(6)] : []), ...identities.map((i) => `${i.channel}:${i.address}`)];
       await deleteNaming(tx, this.agentId, names);
       await tx.run("DELETE FROM schedule_runs WHERE agent_id = ? AND schedule_id IN (SELECT id FROM schedules WHERE agent_id = ? AND conversation_id = ?)", [this.agentId, ...scope]);
+      // Their web chat outboxes, by the identities they wrote from (the numbering goes too: a browser
+      // still holding a number reads its history again).
+      for (const table of ["web_outbox", "web_heads"]) {
+        await tx.run(`DELETE FROM ${table} WHERE agent_id = ? AND (channel, address) IN (SELECT channel, address FROM identities WHERE agent_id = ? AND conversation_id = ?)`, [this.agentId, ...scope]);
+      }
       for (const table of ["schedules", "nudges", "no_contact", "background_tools", "inbox", "messages", "inbound", "identities"]) {
         await tx.run(`DELETE FROM ${table} WHERE agent_id = ? AND conversation_id = ?`, scope);
       }
@@ -477,6 +509,90 @@ export class Store {
       await tx.run("INSERT INTO upkeep (agent_id, job, next_at) VALUES (?, ?, 0) ON CONFLICT DO NOTHING", [this.agentId, job]);
       return (await tx.run("UPDATE upkeep SET next_at = ? WHERE agent_id = ? AND job = ? AND next_at <= ?", [nextAt, this.agentId, job, now])) > 0;
     });
+  }
+
+  // The web chat's outbox (web-chat.ts).
+
+  /**
+   * Keeps one event for a web chat visitor under the next number of theirs, and resolves with it once
+   * it is kept (that is the web chat accepting a send). With `idempotencyKey`, an event already kept
+   * under that key for them is returned instead, and nothing is kept.
+   */
+  async appendWebEvent(channel: string, address: string, event: Record<string, unknown>, idempotencyKey: string | null, at: number): Promise<WebEventRow> {
+    const scope = [this.agentId, channel, address];
+    const kept = async (db: Omit<Database, "transaction">) => {
+      if (idempotencyKey === null) return null;
+      const [row] = await db.query("SELECT seq, at, event FROM web_outbox WHERE agent_id = ? AND channel = ? AND address = ? AND idempotency_key = ?", [...scope, idempotencyKey]);
+      return row ? webEventOf(row) : null;
+    };
+    try {
+      return await this.db.transaction(async (tx) => {
+        const earlier = await kept(tx);
+        if (earlier) return earlier;
+        // The visitor's number goes up under the row's lock, so two runners never give one number twice.
+        const [head] = await tx.query(
+          "INSERT INTO web_heads (agent_id, channel, address, seq) VALUES (?, ?, ?, 1) ON CONFLICT (agent_id, channel, address) DO UPDATE SET seq = web_heads.seq + 1 RETURNING seq",
+          scope,
+        );
+        const seq = Number(head.seq);
+        const added = await tx.run("INSERT INTO web_outbox (agent_id, channel, address, seq, event, idempotency_key, at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING", [...scope, seq, json(event), idempotencyKey, at]);
+        if (!added) throw new KeptMeanwhile();
+        return { seq, at, event };
+      });
+    } catch (error) {
+      if (!(error instanceof KeptMeanwhile)) throw error;
+      const earlier = await kept(this.db);
+      if (!earlier) throw new Error("flow: a web chat event was kept and is gone");
+      return earlier;
+    }
+  }
+
+  /**
+   * A web chat visitor's events numbered after `after`, oldest first, at most `limit`; with the oldest
+   * number still kept (null when none is) and the newest number ever given them (0 for none), so the
+   * caller can tell a gap (older events deleted) or a number never given.
+   */
+  async webEvents(channel: string, address: string, after: number, limit: number): Promise<{ events: WebEventRow[]; first: number | null; last: number }> {
+    const scope = [this.agentId, channel, address];
+    const [head] = await this.db.query("SELECT seq FROM web_heads WHERE agent_id = ? AND channel = ? AND address = ?", scope);
+    const [oldest] = await this.db.query("SELECT MIN(seq) AS seq FROM web_outbox WHERE agent_id = ? AND channel = ? AND address = ?", scope);
+    const rows = await this.db.query("SELECT seq, at, event FROM web_outbox WHERE agent_id = ? AND channel = ? AND address = ? AND seq > ? ORDER BY seq LIMIT ?", [...scope, after, limit]);
+    return { events: rows.map(webEventOf), first: num(oldest?.seq), last: Number(head?.seq ?? 0) };
+  }
+
+  /** The newest number given to each of these visitors (0 for none yet). */
+  async webHeads(channel: string, addresses: string[]): Promise<Record<string, number>> {
+    const heads: Record<string, number> = Object.fromEntries(addresses.map((a) => [a, 0]));
+    for (let i = 0; i < addresses.length; i += 500) {
+      const some = addresses.slice(i, i + 500);
+      const rows = await this.db.query(`SELECT address, seq FROM web_heads WHERE agent_id = ? AND channel = ? AND address IN (${some.map(() => "?").join(", ")})`, [this.agentId, channel, ...some]);
+      for (const r of rows) heads[String(r.address)] = Number(r.seq);
+    }
+    return heads;
+  }
+
+  /** Deletes up to `limit` web chat events kept before `before` (their numbers stay given); returns how many it deleted. */
+  async pruneWebEvents(before: number, limit: number): Promise<number> {
+    return this.db.run(
+      `DELETE FROM web_outbox WHERE agent_id = ? AND (channel, address, seq) IN
+         (SELECT channel, address, seq FROM web_outbox WHERE agent_id = ? AND at < ? LIMIT ?)`,
+      [this.agentId, this.agentId, before, limit],
+    );
+  }
+
+  /** Counts one more web chat message taken on `day` (YYYY-MM-DD) and resolves with the day's count. */
+  async countWebDay(channel: string, day: string): Promise<number> {
+    const [row] = await this.db.query(
+      "INSERT INTO web_days (agent_id, channel, day, count) VALUES (?, ?, ?, 1) ON CONFLICT (agent_id, channel, day) DO UPDATE SET count = web_days.count + 1 RETURNING count",
+      [this.agentId, channel, day],
+    );
+    return Number(row.count);
+  }
+
+  /** The web chat messages taken on `day` (YYYY-MM-DD) so far. */
+  async webDay(channel: string, day: string): Promise<number> {
+    const [row] = await this.db.query("SELECT count FROM web_days WHERE agent_id = ? AND channel = ? AND day = ?", [this.agentId, channel, day]);
+    return Number(row?.count ?? 0);
   }
 
   // The inbox.
@@ -1028,6 +1144,10 @@ function conversationOf(r: Row): ConversationRow {
     recentChannels: parse<string[]>(r.recent_channels, []),
     turns: Number(r.turns ?? 0),
   };
+}
+
+function webEventOf(r: Row): WebEventRow {
+  return { seq: Number(r.seq), at: Number(r.at), event: parse<Record<string, unknown>>(r.event, {}) };
 }
 
 function identityOf(r: Row): IdentityRow {

@@ -25,6 +25,10 @@
       "types": "./dist/flow-messaging/src/index.d.ts",
       "default": "./dist/flow-messaging/src/index.js"
     },
+    "./web-chat": {
+      "types": "./dist/src/web-chat.d.ts",
+      "default": "./dist/src/web-chat.js"
+    },
     "./testing": {
       "types": "./dist/testing/src/index.d.ts",
       "default": "./dist/testing/src/index.js"

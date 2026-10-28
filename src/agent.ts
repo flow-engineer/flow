@@ -414,6 +414,8 @@ export class Agent {
   private readonly countryCode: string | undefined;
   private readonly traces: Traces | null;
   private readonly version: string | undefined;
+  /** The HTTP the channels serve themselves (`Channel.serve`), by path. */
+  private readonly served: Array<{ path: string; handle(request: Request): Promise<Response> }> = [];
 
   constructor(options: AgentOptions) {
     options = withHost(options);
@@ -477,6 +479,10 @@ export class Agent {
       deadlineMs: options.deadlineMs ?? 60_000,
       partialAfterMs: options.partialAfterMs ?? 5_000,
       debounceMs: options.debounceMs ?? 300,
+      turnSlot: (name) => {
+        const channel = channels.get(name);
+        return channel?.turnSlot ? () => channel.turnSlot!() : undefined;
+      },
       maxSteps: options.maxSteps ?? 8,
       historyTokens: options.history?.maxTokens ?? defaultHistoryTokens(options.model.contextTokens),
       toolResultChars: options.history?.toolResultChars ?? 12_000,
@@ -505,6 +511,22 @@ export class Agent {
       links: (id) => this.links(id),
       settle: (target, status, reason, messageId) => this.settle(target, status, reason, messageId),
     };
+    for (const channel of this.channelsByName.values()) {
+      if (!channel.serve) continue;
+      const served = channel.serve({
+        message: (input) => this.message(input),
+        conversationOf: (identity) => this.conversationOf(identity),
+        transcript: (id) => this.transcript(id),
+        stored: async (id) => {
+          await this.conversations.get(id)?.stored();
+        },
+        store: this.store,
+      });
+      if (!served.path.startsWith("/") || served.path.endsWith("/")) throw new Error(`flow: channel ${channel.name} serves "${served.path}": a path starting with /, not ending with one`);
+      const clash = [...Object.keys(options.routes ?? {}), ...this.served.map((s) => s.path)].find((p) => p === served.path || p.startsWith(`${served.path}/`) || served.path.startsWith(`${p}/`));
+      if (clash) throw new Error(`flow: channel ${channel.name} serves ${served.path}, which overlaps the route ${clash}`);
+      this.served.push(served);
+    }
     const every = options.scheduleCheckMs ?? 5_000;
     if (every > 0) setInterval(() => void this.runDue().catch((error) => console.warn("flow: scheduled messages:", error)), every).unref();
   }
@@ -524,10 +546,13 @@ export class Agent {
   /**
    * A message from a person on a channel set up in `channels`. Returns the conversation and the id
    * the agent knows the message by, or null when `intercept` or a keyword answered it. Give the
-   * provider's own `messageId`: the same one again (a webhook retried) is not taken twice.
+   * provider's own `messageId`: the same one again (a webhook retried) is not taken twice. `key` is
+   * the person's own key as your server verified it (a signed-in web chat visitor), never from a
+   * browser's body: the person is then `resolve`'s same key on every channel.
    */
-  async message(input: { channel: string; from: string; message: string | Incoming; messageId?: string }): Promise<{ conversationId: string; messageId: string } | null> {
-    return this.released(await this.take(this.channelOf(input.channel), { ...input, via: "provider" }));
+  async message(input: { channel: string; from: string; message: string | Incoming; messageId?: string; key?: string }): Promise<{ conversationId: string; messageId: string } | null> {
+    const { key, ...rest } = input;
+    return this.released(await this.take(this.channelOf(input.channel), { ...rest, via: "provider", ...(key ? { verifiedKey: key } : {}) }));
   }
 
   /**
@@ -1076,6 +1101,12 @@ export class Agent {
   }
 
   /** What the business and the person set for someone, by a channel identity they wrote from; null for someone who never wrote. */
+  /** The conversation a channel identity belongs to, or null when that address never wrote. */
+  async conversationOf(identity: { channel: string; address: string }): Promise<string | null> {
+    await this.settings.ready;
+    return (await this.store.identity(identity.channel, identity.address))?.conversationId ?? null;
+  }
+
   async contact(to: { channel: string; address: string }): Promise<Contact | null> {
     await this.settings.ready;
     // Found as a nudge finds them, so `if (!(await agent.contact(to))) return;` guards a nudge to that address.
@@ -1272,9 +1303,12 @@ export class Agent {
 
   /** Answers a request to one of `routes` by its path; 404 for any other. */
   async fetch(request: Request): Promise<Response> {
-    const route = this.options.routes?.[new URL(request.url).pathname];
-    if (!route) return Response.json({ error: "no such route" }, { status: 404 });
-    return route(request);
+    const path = new URL(request.url).pathname;
+    const route = this.options.routes?.[path];
+    if (route) return route(request);
+    const served = this.served.find((s) => path === s.path || path.startsWith(`${s.path}/`));
+    if (served) return served.handle(request);
+    return Response.json({ error: "no such route" }, { status: 404 });
   }
 
   async nudge(input: NudgeInput): Promise<NudgeResult> {
@@ -1397,7 +1431,8 @@ export class Agent {
 
   /**
    * Looks for due scheduled messages once and hands each to its conversation. Returns how many.
-   * Once an hour, one runner also deletes provider message ids older than `keepMessageIdsDays`.
+   * Once an hour, one runner also deletes provider message ids older than `keepMessageIdsDays`,
+   * and the web chat's outbox events older than 7 days.
    */
   async runDue(): Promise<number> {
     await this.settings.ready;
@@ -1442,6 +1477,9 @@ export class Agent {
     if (!(await this.store.claimUpkeep("prune_message_ids", now, now + HOUR_MS))) return;
     const before = now - (this.options.keepMessageIdsDays ?? 7) * 24 * HOUR_MS;
     while ((await this.store.pruneInbound(before, PRUNE_BATCH)) === PRUNE_BATCH);
+    // The web chat's outbox keeps a week; a box asking for older reads the history again.
+    if (!this.served.length || !(await this.store.claimUpkeep("prune_web_outbox", now, now + HOUR_MS))) return;
+    while ((await this.store.pruneWebEvents(now - 7 * 24 * HOUR_MS, PRUNE_BATCH)) === PRUNE_BATCH);
   }
 
   /** The agent's channels without their sends: what the simulators and the test cloud play. */

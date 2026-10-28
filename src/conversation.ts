@@ -54,10 +54,10 @@ import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { recordsUntil, type Records } from "./records.ts";
 import { addWakeUp, scheduleTools, wakeUpsOf, wakeUpsSection, wakeUpTools, type WakeUps } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
-import { EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput, contentRefusalText, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
+import { EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput, contentRefusalText, pageLine, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal } from "./time.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
-import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
+import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 
 export interface ConversationSettings {
   model: Model;
@@ -78,6 +78,8 @@ export interface ConversationSettings {
   /** When one tool of a response is done and others still run this long after, the finished results go back. */
   partialAfterMs: number;
   debounceMs: number;
+  /** The channel's wait for a turn slot (Channel.turnSlot), when it caps its turns at once. */
+  turnSlot?: (channel: string) => (() => Promise<() => void>) | undefined;
   maxSteps: number;
   /** About how many tokens one model call may carry (instructions, tools and history). */
   historyTokens: number;
@@ -221,6 +223,8 @@ interface Pending {
   choiceId?: string;
   channel: string;
   media?: Media[];
+  /** The page of the business's site it was written from (the web chat). */
+  page?: PageContext;
   inbox?: number;
   /** Answered with no model call: the agent reads it with what was sent back, and it starts no turn. */
   answer?: Answer;
@@ -305,6 +309,8 @@ export class Conversation {
   /** The agent's wake-ups as this conversation's tools have them (`context.wakeUps`): none added once it is closed. */
   private readonly wakeUps: WakeUps;
   private recentChannels: string[] = [];
+  /** The page of the business's site they last wrote from (the web chat), and on which channel. */
+  private page: { channel: string; page: PageContext } | null = null;
   private promptDestination?: { channel: string; address?: string };
   private timeZone: string | null = null;
   /** Their own quiet hours ("off": none), or null for the agent's. */
@@ -530,14 +536,15 @@ export class Conversation {
   /** The message is ready for the agent: it joins the reply in progress, or starts one. */
   private arrive(incoming: Incoming, id: string, channel: string, ownId: boolean, files: Files): void {
     const at = this.settings.now();
-    const item: Pending = { id, text: describe(incoming, files), shown: shownText(incoming, files), ...choiceOf(incoming), channel, ...(files.media.length ? { media: files.media } : {}) };
+    const item: Pending = { id, text: describe(incoming, files), shown: shownText(incoming, files), ...choiceOf(incoming), channel, ...(files.media.length ? { media: files.media } : {}), ...(incoming.page ? { page: incoming.page } : {}) };
     this.pending.push(item);
+    if (item.page) this.page = { channel, page: item.page };
     this.recentChannels = [...this.recentChannels, channel].slice(-5);
     const link = this.channels.get(channel);
     if (link) link.lastMessageAt = at;
     const fields = { messageCount: this.messageCount, recentChannels: this.recentChannels };
     this.persist(async () => {
-      const payload = { id, text: item.text, shown: item.shown, ...(item.choice ? { choice: true } : {}), ...(item.choiceId ? { choiceId: item.choiceId } : {}), channel, ...(item.media ? { media: item.media.map(stored) } : {}) };
+      const payload = { id, text: item.text, shown: item.shown, ...(item.choice ? { choice: true } : {}), ...(item.choiceId ? { choiceId: item.choiceId } : {}), channel, ...(item.media ? { media: item.media.map(stored) } : {}), ...(item.page ? { page: item.page } : {}) };
       const inbox = await this.settings.store.addMessage(this.id, payload, ownId ? { channel, messageId: id } : undefined);
       if (inbox === null) {
         // Another runner took this provider id first (a retry reached both): the message is theirs.
@@ -690,7 +697,8 @@ export class Conversation {
     const p = row.payload as Record<string, any>;
     if (row.kind === "message") {
       // Its photos and PDFs are named, not shown: their bytes were never stored.
-      this.pending.push({ id: p.id, text: p.text, shown: p.shown ?? p.text, ...(p.choice ? { choice: true } : {}), ...(typeof p.choiceId === "string" ? { choiceId: p.choiceId } : {}), channel: p.channel, inbox: row.id, ...(Array.isArray(p.media) ? { media: p.media } : {}), ...(p.answer ? { answer: p.answer } : {}) });
+      this.pending.push({ id: p.id, text: p.text, shown: p.shown ?? p.text, ...(p.choice ? { choice: true } : {}), ...(typeof p.choiceId === "string" ? { choiceId: p.choiceId } : {}), channel: p.channel, inbox: row.id, ...(Array.isArray(p.media) ? { media: p.media } : {}), ...(p.answer ? { answer: p.answer } : {}), ...(p.page ? { page: p.page } : {}) });
+      if (p.page) this.page = { channel: p.channel, page: p.page };
       this.messageIds.set(p.id, p.channel);
       if (!p.answer) {
         this.unanswered.add(p.channel);
@@ -1037,10 +1045,15 @@ export class Conversation {
       for (;;) {
         if (this.closed) break;
         if (this.unread() || this.notes.some((n) => !n.wait) || this.resumeTurn) {
+          // A channel that caps its turns at once (the web chat's): wait for a slot, typing shown.
+          const slot = [...this.unanswered].map((c) => this.settings.turnSlot?.(c)).find(Boolean);
+          const giveBack = slot ? await slot() : null;
           try {
             await this.turn();
           } catch (error) {
             await this.turnFailed(error);
+          } finally {
+            giveBack?.();
           }
           // The turn is over: typing stops, unless a message of theirs is waiting for the next one.
           if (!this.unread() && !this.preparing) await this.stopTyping();
@@ -1107,6 +1120,11 @@ export class Conversation {
   }
 
   /** The channel of the person's latest message. */
+  /** The page they last wrote from, while their latest message is on that page's channel. */
+  private pageNow(): PageContext | undefined {
+    return this.page && this.page.channel === this.currentChannel() ? this.page.page : undefined;
+  }
+
   private currentChannel(): string {
     return (!this.theirMessages ? this.promptDestination?.channel ?? this.owed.at(-1)?.channel : undefined) ?? this.recentChannels.at(-1) ?? [...this.channels.keys()][0] ?? "chat";
   }
@@ -1263,7 +1281,8 @@ export class Conversation {
       const views = this.views();
       const several = views.length > 1;
       this.sendTools = new Map(views.map((v) => [sendToolName(v.name), v.name]));
-      const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, wakeUps, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), context].filter(Boolean).join("\n\n");
+      const page = this.pageNow();
+      const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, wakeUps, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), page ? pageLine(page) : "", context].filter(Boolean).join("\n\n");
       const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
       const specs = [...ownSpecs, ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk)];
       const abort = new AbortController();
@@ -1935,7 +1954,8 @@ export class Conversation {
     const key = createHash("sha256").update(`${this.id}\u0000${this.turns}\u0000${call.name}\u0000${input}`).digest("hex").slice(0, 32);
     // The agent's events side as it is now (attach() may come after createAgent), only when there is one.
     const events = this.settings.events?.();
-    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal, records: this.records, wakeUps: this.wakeUps, ...(events ? { events } : {}) };
+    const page = this.pageNow();
+    const identityContext = { conversationId: this.id, person: this.personKey, key: this.personKey.startsWith("key:") ? this.personKey.slice(4) : null, channel: this.currentChannel(), address: this.channels.get(this.currentChannel())?.address, callId: call.id, idempotencyKey: key, signal: this.lifetime.signal, records: this.records, wakeUps: this.wakeUps, ...(events ? { events } : {}), ...(page ? { page } : {}) };
     const credentials = this.settings.credentialProvider?.(identityContext) ?? this.settings.credentials;
     let context = toolContext(identityContext, credentials);
     let authorize!: () => void;
