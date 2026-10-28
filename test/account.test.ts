@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { currentToken, deleteCredentials, retryAfterSeconds, saveCredentials } from "../testing/src/flow-login.ts";
+import { plansNext } from "../testing/src/account.ts";
 
 const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
 const TOKEN = "fcli_secret_token_1234";
@@ -329,7 +330,7 @@ test("link in a folder not set up signs in, resuming a code already waiting, run
     url: "https://t.me/FlowSandboxBot?start=brave-otter-1", page, join_message: "Hi cafe (ref brave-otter-1)", channel: "telegram", join_code: "brave-otter-1", reply_only: false,
     say_to_person: `Your Telegram link: https://t.me/FlowSandboxBot?start=brave-otter-1 Open it and press Start. On a computer without Telegram, open ${page} instead.`,
     model_key: { set: false, env: null, flow_credit: null, message: NO_KEY }, running: false,
-    next: "add your own model key to .env (flow.engineer gave no trial credit), then npm start, then send the link above",
+    next: "add your own model key to .env (flow.engineer gave no trial credit), then npm start, then send the link above", plans: null,
   });
   assert.ok(!("next" in result.lines[2]!), "setup's next list is not given as well: one next per run");
   assert.match(result.err, /answers only once \.env has a model key/, "with no model key it does not say the phone chats with it");
@@ -997,6 +998,23 @@ test("a trial answer with held counts people (Flow Messaging since Oct 2026): se
   const status = await run(["status"], { url: flow.url, config: temp(), cwd, env });
   assert.equal(status.code, 0, status.err);
   assert.match(status.out, /^iMessage: sender in \.env; open now \(free trial: 1 of 25 people\)$/m);
+  // A full trial names the plans and where the owner buys one, on each.
+  for (const said of [set, link, status]) assert.ok(said.out.split("\n").includes(PLANS_FULL), said.out);
+});
+
+const PLANS_FULL = "Next: the free trial is full on Telegram, so new people wait for a place (2 waiting now). More people: Shared $25/month, or Dedicated $100/month with your own iMessage number, at https://flow.engineer/dashboard/plans?plan=shared (the workspace owner buys it).";
+
+test("the paid plans are named by rule: at 80% of a trial's people, the plans page; full or holding anyone, the Shared plan's link", () => {
+  const at = (used: number, held = 0) => plansNext({ telegram: { limit: 25, used, held } });
+  assert.equal(at(19), undefined, "under 80%");
+  assert.deepEqual(at(20), { url: "https://flow.engineer/dashboard/plans", message: "the free trial is nearly full on Telegram. More people or your own iMessage number: Shared $25/month or Dedicated $100/month, at https://flow.engineer/dashboard/plans (the workspace owner buys it)." });
+  assert.equal(at(25)?.url, "https://flow.engineer/dashboard/plans?plan=shared");
+  assert.match(at(25)!.message, /^the free trial is full on Telegram, so new people wait for a place\. More people/);
+  assert.equal(`Next: ${plansNext({ telegram: { limit: 25, used: 25, held: 2 }, whatsapp: { limit: 25, used: 3, held: 0 } })!.message}`, PLANS_FULL);
+  assert.match(plansNext({ telegram: { limit: 25, used: 25, held: 1 }, imessage: { limit: 25, used: 24, held: 2 } })!.message, /full on Telegram and iMessage, so new people wait for a place \(3 waiting now\)/);
+  assert.equal(plansNext({ whatsapp: { limit: 300, used: 299 } }), undefined, "an older answer counting messages");
+  assert.equal(plansNext({ telegram: { limit: null, used: 900, held: 0 } }), undefined, "an unlimited trial");
+  assert.equal(plansNext(null), undefined);
 });
 
 test("link and setup --display-name rename the agent: package.json's displayName and its prompt, then the phone link says Hi <name>", async (t) => {

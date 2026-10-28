@@ -97,6 +97,12 @@ export interface StreamStop {
   code: number;
   type: string;
   message: string;
+  /** Why, more narrowly: `plan_ended` when the account's paid plan ended (its live keys are paused). */
+  channelCode?: string;
+  /** What to do about it, for the developer (where to choose a plan, say); show it rather than retrying. */
+  hint?: string;
+  /** The error type's documentation page. */
+  docUrl?: string;
 }
 
 export interface StreamHandle {
@@ -191,6 +197,8 @@ const STREAM_FINAL = new Set([4401, 4403, 4400]);
 interface FlowError {
   type?: string;
   message?: string;
+  hint?: string;
+  doc_url?: string;
   channel_code?: string;
   param?: string;
   channel?: string;
@@ -290,7 +298,10 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       registered();
       return await receipt;
     } catch (error) {
-      throw error instanceof FlowMessagingError ? new Error(reason(error)) : error;
+      if (!(error instanceof FlowMessagingError)) throw error;
+      if (!error.retryable) hinted(`a send on ${route.name}`, error);
+      // The message is the agent's note; the Flow error (its hint and doc_url) stays on `cause` for the developer.
+      throw new Error(reason(error), { cause: error });
     } finally {
       registered();
     }
@@ -343,6 +354,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         if (done || !status) return done;
         if (status === "failed" || status === "unsent") {
           const type = error?.type ?? (status === "unsent" ? "unsent" : "channel_error");
+          hinted(`message ${message.id} on ${route.name}`, { type, channelCode: error?.channel_code, hint: error?.hint, docUrl: error?.doc_url });
           finish(new Error(reason({ type, channelCode: error?.channel_code, param: error?.param, channel: error?.channel, message: error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" })));
         } else if ((PROGRESS[status] ?? -1) >= PROGRESS[target]!) finish(PROGRESS[status]! >= PROGRESS.delivered! ? "delivered" : "sent");
         return done;
@@ -383,7 +395,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       await call();
     } catch (error) {
       if (!(error instanceof FlowMessagingError)) throw error;
-      throw new Error(`${detailed({ type: error.type, channelCode: error.channelCode, param: error.param, channel: error.channel })}: ${error.message}`);
+      if (!error.retryable) hinted("an edit or unsend", error);
+      throw new Error(`${detailed({ type: error.type, channelCode: error.channelCode, param: error.param, channel: error.channel })}: ${error.message}`, { cause: error });
     }
   }
 
@@ -743,6 +756,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       const target = typeof c.message_id === "string" ? c.message_id : "";
       const text = c.kind === "edit" ? `edit of ${target}: ${textOf(c)}` : c.kind === "unsend" ? `unsend of ${target}` : textOf(m.content);
       const type = m.error?.type ?? "channel_error";
+      hinted(`message ${m.id}`, { type, channelCode: m.error?.channel_code, hint: m.error?.hint, docUrl: m.error?.doc_url });
       if (text) agent.undelivered(conversationId, text, reason({ type, channelCode: m.error?.channel_code, param: m.error?.param, channel: m.error?.channel, message: m.error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" }));
     }
   }
@@ -850,7 +864,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       // Node's WebSocket cannot set headers: the key goes as a subprotocol beside "flow", which Flow selects.
       const ws = new WebSocket(url, ["flow", `flow.key.${apiKey}`]);
       socket = ws;
-      let refusal: { type?: string; message?: string; param?: string; retry_after?: number } | undefined;
+      let refusal: { type?: string; message?: string; hint?: string; doc_url?: string; channel_code?: string; param?: string; retry_after?: number } | undefined;
       // A socket that opens is not yet healthy: a refused stream opens, sends an error frame and closes.
       // The backoff starts again once the connection delivers an event or stays open STREAM_HEALTHY_MS;
       // a failing event keeps its backoff across reconnects.
@@ -887,8 +901,11 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
           closed = true;
           const type = refusal?.type ?? (code === 4401 ? "authentication" : code === 4403 ? "permission" : "invalid_request");
           const why = refusal?.message ?? reason ?? "Flow Messaging refused the stream.";
-          console.warn(`@flow-engineer/flow/flow-messaging: the stream stopped: ${type} (${code})`);
-          return void stop({ code, type, message: why });
+          const hint = refusal?.hint || undefined;
+          const docUrl = refusal?.doc_url || undefined;
+          const channelCode = refusal?.channel_code || undefined;
+          console.warn(`@flow-engineer/flow/flow-messaging: the stream stopped: ${type} (${channelCode ? `${channelCode}, ` : ""}${code})${hint ? `. ${hint}` : ""}${docUrl ? ` (${docUrl})` : ""}`);
+          return void stop({ code, type, message: why, ...(channelCode ? { channelCode } : {}), ...(hint ? { hint } : {}), ...(docUrl ? { docUrl } : {}) });
         }
         // 1012 follows a reconnect frame: at once. Else back off, never less than Flow's retry_after.
         if (code === 1012) {
@@ -1050,6 +1067,16 @@ function templateParams(t: Template): Record<string, unknown> {
 function detailed(e: { type: string; channelCode?: string; param?: string; channel?: string }): string {
   const detail = [e.channelCode, ...(e.type === "unsupported_content" ? [e.param && `param ${e.param}`, e.channel && `on ${e.channel}`] : [])].filter(Boolean);
   return detail.length ? `${e.type} (${detail.join(", ")})` : e.type;
+}
+
+/**
+ * A refusal's hint (and doc_url) for the developer, on the console: what to change, such as where to
+ * buy a plan. The agent's note leaves it out (the hint is written for developers, never for the person
+ * the agent talks to). outside_window is a state the conversation handles, so it is not logged.
+ */
+function hinted(what: string, e: { type: string; channelCode?: string; hint?: string; docUrl?: string }): void {
+  if ((!e.hint && !e.docUrl) || e.type === "outside_window") return;
+  console.warn(`@flow-engineer/flow/flow-messaging: ${what} was refused, ${detailed(e)}.${e.hint ? ` ${e.hint}` : ""}${e.docUrl ? ` (${e.docUrl})` : ""}`);
 }
 
 function reason(e: { type: string; channelCode?: string; param?: string; channel?: string; message: string; retryable: boolean }): string {

@@ -53,7 +53,9 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
   flow status [--json]      What this folder has and lacks: FLOW_KEY and the model key (never their
                             values) with the trial credit left, the workspace, the
                             sign-in, each channel's sender in .env, and, signed in, which channels
-                            are open now and their free-trial counts`;
+                            are open now and their free-trial counts. setup, link and status name
+                            the paid plans (https://flow.engineer/dashboard/plans) once a channel's
+                            trial has 80% of its people or holds new ones`;
 
 const USAGE = `Usage:\n${ACCOUNT_LINES}
 
@@ -687,6 +689,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   // A first run's order: a model key if there is none, the playground (npm start), then the phone.
   // chat and test --synthetic are the coding agent's own checks, not the owner's way to test.
   const next = [...(model.next ? [model.next] : []), "npm start", ...(answer.next?.length ? answer.next : [NEXT.link])];
+  const plans = plansNext(trial);
   if (json) {
     out({
       agent: answer.agent_id, join_code: answer.join_code, env_written: { ".env": written }, minted: answer.minted ?? [],
@@ -699,7 +702,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
       flow_key: { set: Boolean(before.get(FLOW_KEY) || process.env[FLOW_KEY]?.trim()), minted: flowKey?.minted === true,
         ...(flowKey?.minted ? { kid: flowKey.kid ?? null, mode: flowKey.mode ?? null, scopes: flowKey.scopes ?? [], previous_expires_at: flowKey.previous_expires_at ?? null } : {}) },
       // link's own line (or its error) has the run's next steps: one list per run.
-      ...(forLink ? {} : { next }), warnings,
+      ...(forLink ? {} : { next, plans: plans ?? null }), warnings,
     });
   }
   say(answer.agent_id ? `Agent ${answer.agent_id}. In .env:` : "In .env:");
@@ -717,6 +720,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
     const added = addedToRunning((n) => had.get(n) || process.env[n]?.trim(), (n) => before.get(n) || process.env[n]?.trim());
     if (added) say(`If npm start is running, restart it to add ${added}.`);
     say(`Next: ${next.join(", then ")}`);
+    if (plans) say(`Next: ${plans.message}`);
   }
   return { answer, warnings };
 }
@@ -741,6 +745,36 @@ const trialNote = (t: { limit: number | null; used: number; held?: number } | un
   const count = trialCount(t);
   return count ? ` (free trial: ${count})` : "";
 };
+
+/**
+ * Flow Messaging's paid plans, as the Plans dialog in the Flow dashboard sells them (Oct 2026). Setup's
+ * answer carries no prices, so they are kept here, once. `?plan=shared` or `?plan=dedicated` opens the
+ * dialog on that plan; only the workspace owner can buy.
+ */
+const PLANS = { url: "https://flow.engineer/dashboard/plans", shared: "Shared $25/month", dedicated: "Dedicated $100/month" };
+
+/**
+ * The paid plans as a next step, by rule: when a channel's free trial (counted in people, `held`
+ * present) has 80% of its people or more, or holds anyone past the limit. Full or holding names the
+ * Shared plan's link and that new people wait; nearly full, the plans page. Undefined otherwise (an
+ * unlimited trial, or an older answer counting messages).
+ */
+export function plansNext(trial: Record<string, { limit: number | null; used: number; held?: number } | null | undefined> | null | undefined): { url: string; message: string } | undefined {
+  const counted = CHANNELS.flatMap((c) => {
+    const t = trial?.[c];
+    return t && typeof t.limit === "number" && typeof t.held === "number" ? [{ name: CHANNEL_NAME[c]!, limit: t.limit, used: t.used, held: t.held }] : [];
+  });
+  const names = (list: typeof counted) => list.map((t) => t.name).join(" and ");
+  const full = counted.filter((t) => t.held > 0 || t.used >= t.limit);
+  if (full.length) {
+    const waiting = full.reduce((sum, t) => sum + t.held, 0);
+    const url = `${PLANS.url}?plan=shared`;
+    return { url, message: `the free trial is full on ${names(full)}, so new people wait for a place${waiting ? ` (${waiting} waiting now)` : ""}. More people: ${PLANS.shared}, or ${PLANS.dedicated} with your own iMessage number, at ${url} (the workspace owner buys it).` };
+  }
+  const near = counted.filter((t) => t.used >= 0.8 * t.limit);
+  if (!near.length) return undefined;
+  return { url: PLANS.url, message: `the free trial is nearly full on ${names(near)}. More people or your own iMessage number: ${PLANS.shared} or ${PLANS.dedicated}, at ${PLANS.url} (the workspace owner buys it).` };
+}
 
 /** An answer's field when it is an object (flow_key, model_credit), else undefined (an older server sends none). */
 function objectField<T>(fields: Record<string, unknown>, name: string): T | undefined {
@@ -853,7 +887,8 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     ...(!joinCode || !value(SETUP_ENV.messaging_key) ? [NEXT.link] : CHANNELS.filter((c) => channels[c]!.open && !channels[c]!.sender).map((c) => `${NEXT.link} --channel ${c}`)),
   ];
   const workspace = value(WORKSPACE_ENV) || "personal";
-  if (json) out({ model_key: model.report, flow_key: { set: Boolean(value(FLOW_KEY)) }, workspace, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, next });
+  const plans = plansNext(Object.fromEntries(CHANNELS.map((c) => [c, channels[c]!.trial])));
+  if (json) out({ model_key: model.report, flow_key: { set: Boolean(value(FLOW_KEY)) }, workspace, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, next, plans: plans ?? null });
   if (model.report.env && model.report.env !== FLOW_KEY) say(value(FLOW_KEY) ? `${FLOW_KEY} is set.` : `${FLOW_KEY}: not set yet (${RUN} setup writes it).`);
   say(model.line);
   say(`Workspace: ${workspace}`);
@@ -865,6 +900,7 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     say(`${CHANNEL_NAME[c]}: ${c === "telegram" ? `Flow Messaging key ${where}` : `sender ${where}`}${now}${trialNote(trial ?? undefined)}`);
   }
   if (next.length) say(`Next: ${next.join(", then ")}`);
+  if (plans) say(`Next: ${plans.message}`);
   say(DEPLOY_HINT);
 }
 
@@ -988,11 +1024,13 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
       ? `restart npm start (it runs at ${running.url}${added ? ` and lacks ${added}` : " and reads .env and its name only when it starts"}), then send the link above`
       : `send the link above (npm start is running at ${running.url})`;
   const next = [...(model.next ? [model.next] : []), runStep];
+  // The plans when the trial of the channel the link is on is (nearly) full, as its counts above.
+  const plans = plansNext({ [channel]: trial?.[channel] });
   if (json) {
     out({
       url: first.link, page: first.page, join_message: first.message, channel, join_code: joinCode, reply_only: Boolean(replyOnly), say_to_person: sayToPerson,
       ...(notOpen ? { not_open: options.channel, message: notOpen, links: Object.fromEntries(links.map(([c, d]) => [c, d.link])) } : {}),
-      model_key: model.report, running: running ? { url: running.url } : false, next: next.join(", then "),
+      model_key: model.report, running: running ? { url: running.url } : false, next: next.join(", then "), plans: plans ?? null,
       // Setup's warnings when it ran just now (also on its own line above), such as observe's part failing.
       ...(warnings.length ? { warnings } : {}),
     });
@@ -1022,6 +1060,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
   if (model.next) say(model.line);
   for (const [c] of links) if (REPLY_ONLY[c]) say(REPLY_ONLY[c]!);
   say(`Next: ${next.join(", then ")}.`);
+  if (plans) say(`Next: ${plans.message}`);
   say(DEPLOY_HINT);
 }
 
