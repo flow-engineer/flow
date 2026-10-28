@@ -1,4 +1,4 @@
-// covers: testing/src/deploy.ts src/traces.ts
+// covers: testing/src/deploy.ts src/traces.ts testing/src/cli-pack.ts
 // `flow deploy` (testing/src/deploy.ts) against a fake cloud: the CI key from the environment or
 // the agent's .env, the folder packed without its secrets or dependencies, a deploy followed until
 // live or refused, an agent on a newer Flow Framework than hosting's refused before the upload,
@@ -11,7 +11,8 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { deployCli, logsCli, pack, parseEnv, sinceSeconds } from "../testing/src/deploy.ts";
+import { fileURLToPath } from "node:url";
+import { cliReleaseCli, deployCli, logsCli, pack, parseEnv, sinceSeconds } from "../testing/src/deploy.ts";
 
 interface Call {
   method: string;
@@ -22,7 +23,7 @@ interface Call {
 }
 
 /** A fake cloud: the routes `flow deploy` calls, a deploy that builds once then ends as `ending`. */
-async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean; neverDeployed?: boolean; framework?: string } = {}) {
+async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean; neverDeployed?: boolean; framework?: string; cli?: boolean } = {}) {
   const calls: Call[] = [];
   let looks = 0;
   const server = createServer(async (req, res) => {
@@ -51,6 +52,12 @@ async function cloud(options: { ending?: "live" | "refused"; address?: boolean; 
       const after = new URL(path, url).searchParams.get("after");
       return send(200, after ? { lines: [{ time: "2026-10-20T10:00:02Z", severity: "ERROR", text: "second" }], next: "c2" } : { lines: [{ time: "2026-10-20T10:00:01Z", severity: "INFO", text: "first" }], next: "c1" });
     }
+    if (path.startsWith("/v1/hosting/cli/") && !options.cli) return res.writeHead(404, { "content-type": "text/plain" }).end("404 page not found");
+    const release = (status: string) => ({ name: "acme", version: (calls.find((c) => c.path === "/v1/hosting/cli/releases")?.body?.version as string) ?? "1.0.0-staging", sha256: "0".repeat(64), size: 10, status });
+    if (req.method === "POST" && path === "/v1/hosting/cli/releases") return send(201, { release: release("uploading"), upload_urls: { tgz: `${url}/upload/cli-tgz`, installer: `${url}/upload/cli-installer` } });
+    if (req.method === "PUT" && path.startsWith("/upload/cli-")) return send(200, {});
+    if (req.method === "POST" && /^\/v1\/hosting\/cli\/releases\/[^/]+\/publish$/.test(path)) return send(200, { release: release("live") });
+    if (req.method === "POST" && path === "/v1/hosting/cli/rollback") return send(200, { release: { ...release("live"), version: "1.0.0-staging.old" } });
     if (req.method === "PUT" && path.startsWith("/v1/hosting/secrets/")) {
       const name = path.split("/").at(-1)!;
       // As the host: an agent exists once its first deploy is made.
@@ -76,7 +83,7 @@ async function run(argv: string[], env: NodeJS.ProcessEnv, stdin?: string) {
   console.error = (...a: unknown[]) => void err.push(a.join(" "));
   try {
     const options = { pollMs: 1, maxPolls: 2, now: () => Date.parse("2026-10-20T11:00:00Z"), readStdin: () => stdin ?? "" };
-    const code = argv[0] === "logs" ? await logsCli(argv.slice(1), env, options) : await deployCli(argv, env, options);
+    const code = argv[0] === "logs" ? await logsCli(argv.slice(1), env, options) : argv[0] === "cli" ? await cliReleaseCli(argv.slice(1), env, options) : await deployCli(argv, env, options);
     return { code, stdout: out.join("\n"), printed: [...out, ...err].join("\n") };
   } finally {
     console.log = log;
@@ -382,4 +389,45 @@ test("the framework check deploys as before on the same line, or when the cloud 
     assert.equal(code, 0, printed);
     assert.deepEqual(fake.calls.slice(0, 2).map((c) => `${c.method} ${c.path}`), ["GET /v1/hosting/framework", "POST /v1/hosting/deploys"]);
   }
+});
+
+/** An agent folder with a CLI file that runs when installed. */
+function agentWithCli(): string {
+  const dir = agentFolder();
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "acme", version: "1.0.0", type: "module" }));
+  const index = JSON.stringify(fileURLToPath(new URL("../cli/src/index.ts", import.meta.url)));
+  writeFileSync(
+    join(dir, "src", "cli.ts"),
+    `import { realpathSync } from "node:fs";\nimport { fileURLToPath } from "node:url";\nimport { defineCli, runCli } from ${index};\nexport const cli = defineCli({ name: "acme" });\nif (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) process.exit(await runCli(cli, process.argv.slice(2)));\n`,
+  );
+  return dir;
+}
+
+test("deploy publishes the CLI once the agent is live, for its address; cli rollback serves an earlier one; a cloud with no CLI routes deploys as before", async () => {
+  const fake = await cloud({ address: true, cli: true });
+  const dir = agentWithCli();
+  const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url };
+  const { code, printed } = await run(["--dir", dir, "--version", "abc123"], env);
+  assert.equal(code, 0, printed);
+  const after = fake.calls.map((c) => `${c.method} ${c.path.split("?")[0]}`).slice(fake.calls.findIndex((c) => c.path.startsWith("/v1/hosting/address")));
+  assert.deepEqual(after, ["GET /v1/hosting/address", "POST /v1/hosting/cli/releases", "PUT /upload/cli-tgz", "PUT /upload/cli-installer", `POST /v1/hosting/cli/releases/${encodeURIComponent(fake.calls.find((c) => c.path === "/v1/hosting/cli/releases")!.body!.version as string)}/publish`]);
+  const made = fake.calls.find((c) => c.path === "/v1/hosting/cli/releases")!.body!;
+  assert.equal(made.environment, "staging");
+  assert.equal(made.name, "acme");
+  assert.match(made.version as string, /^1\.0\.0-staging/);
+  assert.match(made.sha256 as string, /^[0-9a-f]{64}$/);
+  assert.ok(fake.calls.find((c) => c.path === "/upload/cli-installer")!.bytes > 0);
+  assert.match(printed, /Install the CLI: curl -fsSL https:\/\/agent-staging\.example\.com \| sh/);
+
+  const back = await run(["cli", "rollback", "1.0.0-staging.old", "--dir", dir, "--json"], env);
+  assert.equal(back.code, 0, back.printed);
+  assert.deepEqual(fake.calls.at(-1)!.body, { environment: "staging", version: "1.0.0-staging.old" });
+  assert.equal(JSON.parse(back.stdout).release.version, "1.0.0-staging.old");
+
+  const old = await cloud({ address: true });
+  const { code: oldCode, printed: oldPrinted } = await run(["--dir", dir, "--version", "abc123"], { ...env, FLOW_FRAMEWORK_CLOUD: old.url });
+  assert.equal(oldCode, 0, oldPrinted);
+  assert.match(oldPrinted, /The CLI was not published: Publishing a CLI is not available on this Flow yet/);
+  const skipped = await run(["--dir", dir, "--version", "abc123", "--no-cli"], { ...env, FLOW_FRAMEWORK_CLOUD: old.url });
+  assert.doesNotMatch(skipped.printed, /CLI/);
 });

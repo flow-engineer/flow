@@ -932,7 +932,7 @@ test("update says when this is the newest version, else runs the CLI file's upda
   assert.deepEqual(cliProblems(defineCli({ name: "acme", update: { command: installs }, commands: { update: { tool: "update" } } }), updateTool).errors, [], "the CLI file's own update replaces Flow's");
 });
 
-test("a person at a terminal hears of a newer version after a command, asked at most once a day; scripts and --json never", async () => {
+test("a person at a terminal hears of a newer version after a command, or that theirs was withdrawn, asked at most once a day; scripts and --json never", async () => {
   let asked = 0;
   const latest = `${await listen((_req, res) => { asked++; res.end(JSON.stringify({ version: "1.3.0" })); })}/latest.json`;
   const cli = defineCli({ name: "acme", version: "1.2.0", directory: mkdtempSync(join(testDirectory, "flow-cli-notice-")), welcome: false, update: { command: "true", latest } });
@@ -951,6 +951,13 @@ test("a person at a terminal hears of a newer version after a command, asked at 
   writeFileSync(join(cli.directory!, "update.json"), JSON.stringify({ checkedAt: Date.now() - 25 * 60 * 60_000, latest: "1.3.0" }));
   await run(true);
   assert.equal(asked, 2, "a day later it asks again");
+  // A rolled-back build: the published version is older, but this one is withdrawn.
+  const withdrawn = `${await listen((_req, res) => res.end(JSON.stringify({ version: "1.1.0", withdrawn: ["1.2.0"] })))}/version.json`;
+  const rolledBack = defineCli({ ...cli, directory: mkdtempSync(join(testDirectory, "flow-cli-notice-")), update: { command: "true", latest: withdrawn } });
+  const ran = io(true);
+  ran.channel.env = {};
+  assert.equal(await runCli(rolledBack, ["--help"], ran.channel), 0);
+  assert.match(stripVTControlCharacters(ran.err), /This version of acme \(1\.2\.0\) was withdrawn; 1\.1\.0 replaces it\. Run acme update to get it\./);
 });
 
 // The help tests cover --help; a bare run is the one place a person and an agent see different things.

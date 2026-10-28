@@ -73,18 +73,19 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "esbuild": "0.25.11",
     "openai": "^7.32.0",
     "yaml": "^2.9.1",
     "zod": "^4.6.6"
   },
   "peerDependencies": {
+    "@mariozechner/pi-tui": "0.73.1",
     "@modelcontextprotocol/client": "2.3.1",
     "@modelcontextprotocol/server": "2.3.1",
     "@stricli/core": "1.3.0",
     "marked": "12.0.2",
     "marked-terminal": "7.3.0",
-    "oidc-provider": "9.12.2",
-    "@mariozechner/pi-tui": "0.73.1"
+    "oidc-provider": "9.12.2"
   },
   "peerDependenciesMeta": {
     "@modelcontextprotocol/client": {
@@ -110,6 +111,7 @@
     }
   },
   "devDependencies": {
+    "@mariozechner/pi-tui": "0.73.1",
     "@modelcontextprotocol/client": "2.3.1",
     "@modelcontextprotocol/server": "2.3.1",
     "@stricli/core": "1.3.0",
@@ -119,7 +121,6 @@
     "marked": "12.0.2",
     "marked-terminal": "7.3.0",
     "oidc-provider": "9.12.2",
-    "typescript": "^7.0.2",
-    "@mariozechner/pi-tui": "0.73.1"
+    "typescript": "^7.0.2"
   }
 }

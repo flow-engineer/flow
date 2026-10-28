@@ -105,6 +105,7 @@ should be what a newcomer sees first.
 ## A complete CLI file
 
 ```ts
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { command, defineCli, runCli } from "@flow-engineer/flow/cli";
 
@@ -128,8 +129,16 @@ export const cli = defineCli({
   },
 });
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCli(cli, process.argv.slice(2)));
+// Installed, the command is npm's symlink to this file: compare real paths.
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) process.exit(await runCli(cli, process.argv.slice(2)));
 ```
+
+## Ship it
+
+Never write a pack script or an installer. `npx @flow-engineer/flow cli pack --server production`
+makes the installable build and its `install.sh`; on Flow's hosting `flow deploy` publishes it and
+prints `curl -fsSL https://<address> | sh` (`flow-framework-mcp`, "A CLI for the organization").
+Name the files the CLI reads at run time in `files`.
 
 Keep these choices in the CLI file, or files it imports. Tools never carry them: the MCP server
 and the messaging agent use the same tools unchanged.

@@ -240,17 +240,33 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) process.exit(await runCl
   runs the command they typed; without a person (agents, CI) the command exits 3 with the sign-in
   command. `auth`, `help`, `update` and `--help` never ask; `signInFirst: { except: ["docs"], message }` lets
   the team's own commands through and words the question. A token in `<NAME>_TOKEN` counts as signed in.
-- Installed, it is the organization's own command: `"bin": { "acme": "src/cli.ts" }` in its package
-  (node runs `.ts` files outside `node_modules`; publish a compiled `.js` bin to npm). While building
-  it, run it with `npm run cli -- order -h`: npm takes flags before `--` as its own.
+- Installed, it is the organization's own command. Ship it with `flow cli pack`, never a pack
+  script of your own: `npx @flow-engineer/flow cli pack --server production` (or `staging`, or an
+  MCP URL) bundles `src/cli.ts` with esbuild, bakes in that server (`<NAME>_SERVER` still overrides
+  it), the version (`<package version>-<env>.<commit>`) and `update`, installs the result into a
+  scratch prefix and runs `--help` through its bin link, then writes `release/`: the pinned
+  `<name>-<version>.tgz`, `<name>.tgz`, `install.sh` and `version.json`. On Flow's hosting,
+  `flow deploy` does this itself once the agent is live and serves them from the agent's address
+  (`curl -fsSL https://<address> | sh`); `flow cli publish` re-publishes the CLI alone, `flow cli
+  rollback <version>` serves an earlier one, `flow cli status` lists them, and `--no-cli` skips it.
+  Elsewhere, serve the four files together at `--base-url` (default the server's origin plus `/cli`;
+  `install.sh` may also be the site's `/`). People need Node.js (the package's `engines.node`). The
+  installer installs into `~/.<name>` without sudo, checks the download's sha256, never replaces
+  another `<name>` on PATH, and links the command onto PATH (`<NAME>_HOME`, `<NAME>_CLI_URL`).
+- The CLI file must run when it is the program started through a symlink, as npm's bin link starts
+  it: compare real paths, `if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url))`.
+  Files it reads at run time go in `files: ["context/catalog.json"]`, paths from the package's
+  folder; read them as `new URL("../context/catalog.json", import.meta.url)` from `src/cli.ts`, which
+  finds them both in the checkout and installed (the bundle is `dist/cli.js`). While building it,
+  run it with `npm run cli -- order -h`: npm takes flags before `--` as its own.
 - `update: { command, latest }` gives the CLI `acme update`, which runs `command` in a shell (the
-  team's install script, such as `curl -fsSL https://acme.example/install.sh | sh`, or
-  `npm install -g acme@latest`). `latest` is a URL answering JSON with a `version` (npm's
-  `https://registry.npmjs.org/acme/latest` does; else publish a `latest.json` beside each build), and
-  needs `version` set to the CLI's own (read it from package.json). With it, `acme update` says when
-  this is already the newest, and a person at a terminal sees one line after a command when a newer
-  one is out, asked at most once a day; never agents, CI or `--json`. Each release must raise the
-  version and update `latest`. A command of the team's own named `update` replaces Flow's.
+  team's install script, or `npm install -g acme@latest`). A packed CLI gets it by itself, pointing at
+  where it was published; set it only to update some other way. `latest` is a URL answering JSON with
+  a `version` (npm's `https://registry.npmjs.org/acme/latest` does) and optionally `withdrawn`, the
+  versions taken back (a rollback lists them), and needs `version` set to the CLI's own. With it,
+  `acme update` says when this is already the newest, and a person at a terminal sees one line after
+  a command when a newer one is out or theirs was withdrawn, asked at most once a day; never agents,
+  CI or `--json`. A command of the team's own named `update` replaces Flow's.
 - A tool with `format` prints its own text, rendered at a terminal (as written when piped, for
   `NO_COLOR`, or without `marked`); `--json`, `--fields`, `columns` and `view` show its data.
 - Every tool command takes `--json` and `--fields a,b`; one that changes things takes `--dry-run`; one
