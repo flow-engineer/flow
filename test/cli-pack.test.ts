@@ -20,7 +20,7 @@ const framework = fileURLToPath(new URL("../cli/src/index.ts", import.meta.url))
 const scratch = mkdtempSync(join(tmpdir(), "flow-cli-pack-test-"));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
-const CLI_FILE = (options: { guard?: string; agent?: string } = {}) => `#!/usr/bin/env node
+const CLI_FILE = (options: { guard?: string; agent?: string; servers?: Record<string, string>; brand?: false } = {}) => `#!/usr/bin/env node
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { cliFile, defineCli, runCli } from ${JSON.stringify(framework)};
@@ -29,8 +29,7 @@ export const cli = defineCli({
   name: "acme",
   server: process.env.ACME_SERVER ?? "http://127.0.0.1:8790/mcp",${options.agent ? `\n  agent: ${JSON.stringify(options.agent)},` : ""}
   description: readFileSync(cliFile("context/about.txt"), "utf8").trim(),
-  brand: { name: "Acme's Coffee" },
-  files: ["context/about.txt"],
+${options.brand === false ? "" : `  brand: { name: "Acme's Coffee" },\n`}${options.servers ? `  servers: ${JSON.stringify(options.servers)},\n` : ""}  files: ["context/about.txt"],
 });
 
 if (${options.guard ?? "process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)"}) process.exit(await runCli(cli, process.argv.slice(2)));
@@ -41,7 +40,7 @@ function agentFolder(cliFile = CLI_FILE()): string {
   const dir = mkdtempSync(join(scratch, "agent-"));
   mkdirSync(join(dir, "src"));
   mkdirSync(join(dir, "context"));
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "acme", version: "0.1.0", type: "module" }));
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "acme", displayName: "Acme Coffee", version: "0.1.0", type: "module" }));
   writeFileSync(join(dir, "src", "cli.ts"), cliFile);
   writeFileSync(join(dir, "context", "about.txt"), "Coffee, ordered from a terminal.\n");
   const git = (...args: string[]) => execFileSync("git", ["-c", "user.email=t@example.com", "-c", "user.name=t", ...args], { cwd: dir, stdio: "ignore" });
@@ -247,4 +246,16 @@ test("an https --server makes a custom build; --base-url, where it is served fro
   assert.match(readFileSync(join(out, "install.sh"), "utf8"), /^BASE_URL="https:\/\/get\.acme\.example"$/m);
   const help = execFileSync(process.execPath, [join(unpack(join(out, "acme.tgz")), "dist", "cli.js"), "update", "--help"], { env: fresh(), encoding: "utf8" });
   assert.match(help, /Runs: curl -fsSL https:\/\/get\.acme\.example \| sh/);
+});
+
+test("defineCli({ servers }) is what a pack for that environment uses, with no address asked; without a brand name the release is named by package.json's displayName", async () => {
+  const dir = agentFolder(CLI_FILE({ servers: { production: "https://cli.acme.example/mcp" }, brand: false }));
+  const before = calls.length;
+  const { code, stdout, printed } = await flowCli(["pack", "--server", "production", "--dir", dir, "--json"], { FLOW_FRAMEWORK_CLOUD: base });
+  assert.equal(code, 0, printed);
+  const { release } = JSON.parse(stdout) as { release: PackedCli };
+  assert.equal(release.server, "https://cli.acme.example/mcp");
+  assert.match(release.version, /^0\.1\.0-production\./);
+  assert.equal(release.display_name, "Acme Coffee");
+  assert.equal(calls.length, before, "no CI key needed, no address asked");
 });

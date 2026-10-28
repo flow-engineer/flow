@@ -23,6 +23,12 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   empty folder with a fresh config (exit 1 otherwise). esbuild is a new optional peer dependency,
   `esbuild@0.28.2`, loaded only by `flow cli pack`; without it pack exits 2 with
   `npm i -D esbuild@0.28.2`. The starter has it as a dev dependency and ignores `release/`.
+- **`defineCli({ servers: { production, staging } })`: the server a CLI keeps.** A pack for an
+  environment uses the CLI file's `servers.<env>` (an https URL, such as
+  `https://cli.acme.com/mcp` on a domain of the agent's own) in place of the hosted address, and
+  needs no CI key for it. People's sign-ins are kept by server, so set it once and never change
+  it. `flow check` refuses one that is not an https URL. The release's `display_name` is
+  `brand.name`, else package.json's `displayName`, else the command's name.
 - **An installer for every packed CLI.** `install.sh` (POSIX sh) needs Node.js 20.19 or newer and
   npm, downloads `<base>/cli/<name>-<version>.tgz` with curl or wget, checks its sha256 (with
   `shasum -a 256` or `sha256sum`) before installing it with `npm install --global --prefix

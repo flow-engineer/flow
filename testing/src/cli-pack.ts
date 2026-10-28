@@ -13,7 +13,7 @@ import { dirname, isAbsolute, join, normalize } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import { brandOf, type CliConfig } from "../../cli/src/commands.ts";
+import { httpsUrl, type CliConfig } from "../../cli/src/commands.ts";
 import { packageRoot } from "./new.ts";
 
 /** A CLI's command name, as its package, its folder (~/.<name>) and its <NAME>_HOME are named. */
@@ -58,7 +58,7 @@ export async function packCli(options: PackOptions): Promise<PackedCli> {
   const { dir, server, out, say } = options;
   const entry = join(dir, "src", "cli.ts");
   if (!existsSync(entry)) throw new PackError(`No src/cli.ts in ${dir}: flow cli pack packs the agent's CLI file.`, 2);
-  const pkg = readJson(join(dir, "package.json")) as { version?: unknown };
+  const pkg = readJson(join(dir, "package.json")) as { version?: unknown; displayName?: unknown };
   if (typeof pkg.version !== "string" || !/^\d+\.\d+\.\d+/.test(pkg.version)) throw new PackError(`${join(dir, "package.json")} needs a version (such as 0.1.0): the CLI's version starts with it.`, 2);
   const cli = await loadCli(dir, entry);
   if (!CLI_NAME.test(cli.name)) throw new PackError(`The CLI's name "${cli.name}" must be lowercase letters, digits and -, starting with a letter, at most 40: it names its package, its folder and its <NAME>_HOME.`, 2);
@@ -98,7 +98,7 @@ export async function packCli(options: PackOptions): Promise<PackedCli> {
       writeFileSync(file.path, text);
     }
     const shipped = copyFiles(dir, staged, cli.files ?? []);
-    const display = brandOf(cli).name;
+    const display = cli.brand?.name ?? (typeof pkg.displayName === "string" && pkg.displayName.trim() ? pkg.displayName.trim() : cli.name);
     writeFileSync(join(staged, "package.json"), `${JSON.stringify({
       name: cli.name, version, description: cli.description ?? `The ${display} CLI`, type: "module",
       bin: { [cli.name]: "dist/cli.js" }, files: ["dist", ...shipped], engines: { node: ">=20.19" },
@@ -117,6 +117,16 @@ export async function packCli(options: PackOptions): Promise<PackedCli> {
   } finally {
     rmSync(staged, { recursive: true, force: true });
   }
+}
+
+/**
+ * The server the CLI file names for an environment (defineCli({ servers })), for a pack in place of
+ * the hosted address; undefined when it names none.
+ */
+export async function fixedServer(dir: string, environment: "staging" | "production"): Promise<string | undefined> {
+  const url = (await loadCli(dir, join(dir, "src", "cli.ts"))).servers?.[environment];
+  if (url !== undefined && !httpsUrl(url)) throw new PackError(`servers.${environment} in src/cli.ts must be an https URL, such as https://cli.acme.com/mcp.`, 2);
+  return url;
 }
 
 /** The installer for this release; the base URL stays a placeholder unless the release is self-hosted. */

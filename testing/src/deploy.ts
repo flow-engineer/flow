@@ -764,9 +764,10 @@ export const CLI_RELEASE_USAGE = `Usage:
         install.sh     its installer: curl -fsSL <base-url> | sh
         release.json   { name, display_name, version, sha256, size, server }
 
-  --server     The MCP server the packed CLI uses: staging or production (the hosted agent's
-               address, asked of the cloud with the CI key, plus /mcp), or an https URL. It takes
-               the place of the default server written in src/cli.ts, which must be there once.
+  --server     The MCP server the packed CLI uses: staging or production (the CLI file's
+               servers.<env> when set, else the hosted agent's address, asked of the cloud with the
+               CI key, plus /mcp), or an https URL. It takes the place of the default server
+               written in src/cli.ts, which must be there once.
                The CLI keeps sign-ins by server: never change it for a CLI people already use.
   --base-url   Where you serve install.sh and <name>-<version>.tgz yourself: install.sh downloads
                <base-url>/cli/<name>-<version>.tgz. Without it install.sh is for Flow's hosting,
@@ -821,11 +822,16 @@ export async function cliReleaseCli(argv: string[], env: NodeJS.ProcessEnv = pro
   if (values["base-url"] !== undefined && !https(values["base-url"])) return fail("usage", `--base-url is an https URL\n\n${CLI_RELEASE_USAGE}`, 2);
   const dir = resolve(values.dir!);
   const { key, cloud, api } = cloudOf(dir, env, values.cloud);
-  const { packCli, PackError } = await import("./cli-pack.ts");
+  const { fixedServer, packCli, PackError } = await import("./cli-pack.ts");
   try {
     let target = server!;
     let base = values["base-url"];
-    if (hosted) {
+    // The CLI file's own server for the environment (defineCli({ servers })), else the hosted address.
+    const fixed = hosted && existsSync(join(dir, "src", "cli.ts")) ? await fixedServer(dir, server) : undefined;
+    if (fixed) {
+      target = fixed;
+      base ??= new URL(fixed).origin;
+    } else if (hosted) {
       if (!key) return fail("no_ci_key", NO_KEY, 2, `${RUN} setup`);
       const { url } = await api<{ url?: string | null }>("GET", `/v1/hosting/address?environment=${server}`);
       if (!url) throw new Refused(`${server} has no address yet: deploy the agent there first`, "no_address");

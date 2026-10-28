@@ -298,6 +298,10 @@ the server's name and the git commit: `0.1.3-production.ab12cd3` (`custom` for a
 with uncommitted changes), so commit first. It needs esbuild: `npm i -D esbuild@0.28.2` (the
 starter has it). Add `release/` to `.gitignore`.
 
+- `servers: { production: "https://cli.acme.com/mcp" }` fixes the server a pack for that
+  environment uses, in place of the hosted address (`flow cli pack --server production` and every
+  `flow deploy` read it). Set it before the first release when the CLI lives on a domain of its
+  own, and never change it.
 - Write the default server once, as a string: `server: process.env.ACME_SERVER ?? "http://127.0.0.1:8790/mcp"`.
   Pack puts the release's server in its place (the variable still overrides it) and refuses a
   file where that string is missing or written twice.
@@ -323,7 +327,9 @@ Domains, and what never changes once people have the CLI:
   server URL, so a build with another one signs everyone out. Choose it before the first release.
 - A team whose MCP server people already use can launch only the CLI on a domain of its own,
   such as `cli.acme.com`: add it to the agent as an extra domain (dashboard, Settings → Domains)
-  and pack with `--server https://cli.acme.com/mcp`. The existing MCP server stays where it is.
+  and set `servers: { production: "https://cli.acme.com/mcp" }` in the CLI file once; packs for
+  production then use it, whatever the agent's own address. The existing MCP server stays where
+  it is.
 - Later, `mcp.acme.com` can be added as another extra domain of the same agent; shipped CLIs keep
   `cli.acme.com`. When the MCP server moves there, add its `https://mcp.acme.com/mcp` to the
   OAuth bridge's `resources` (`oauth-bridge-skill.md`), beside the ones already there.

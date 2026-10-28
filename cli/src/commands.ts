@@ -81,6 +81,13 @@ export interface CliConfig {
   version?: string;
   /** The organization's MCP endpoint. Else `--server` or <NAME>_SERVER. */
   server?: string;
+  /**
+   * The MCP server a CLI packed for an environment uses (`flow cli pack --server production`, and
+   * flow deploy), in place of the hosted agent's address: an https URL such as
+   * https://cli.acme.com/mcp, a domain of the agent's own. People's sign-ins are kept by server, so
+   * once a CLI is out, this never changes.
+   */
+  servers?: { production?: string; staging?: string };
   /** The agent terminal URL; default the server origin plus /agent/terminal. */
   agent?: string;
   /**
@@ -457,6 +464,11 @@ function outputFields(tool: ToolInfo): Set<string> | null {
   return fields;
 }
 
+/** An https URL with a host. */
+export function httpsUrl(url: string): boolean {
+  return /^https:\/\/[^/\s]/.test(url) && URL.canParse(url);
+}
+
 /** A brand accent: a six-digit hex color. */
 export const HEX = /^#[0-9a-f]{6}$/i;
 
@@ -473,6 +485,9 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
   if (accent !== undefined && !HEX.test(accent)) errors.push(`brand.accent must be a six-digit hex color, for example #b85c00`);
   const logoError = logo === undefined ? undefined : logoProblem(logo);
   if (logoError) errors.push(logoError);
+  for (const [environment, url] of Object.entries(config.servers ?? {})) {
+    if (url !== undefined && !httpsUrl(url)) errors.push(`servers.${environment} must be an https URL, such as https://cli.acme.com/mcp`);
+  }
   if (config.update) {
     if (!config.update.command?.trim()) errors.push("update.command must be the shell command that updates the CLI");
     if (config.update.latest !== undefined && !/^https?:$/.test(URL.canParse(config.update.latest) ? new URL(config.update.latest).protocol : "")) errors.push("update.latest must be an http or https URL");

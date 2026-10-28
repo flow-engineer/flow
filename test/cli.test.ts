@@ -882,6 +882,7 @@ test("flow check refuses a brand color or logo a browser cannot use", () => {
   assert.deepEqual(problems({ logo: "data:image/png;base64,iVBORw0KGgo=" }), []);
   assert.deepEqual(problems({ accent: "purple", logo: "http://acme.test/logo.svg" }), ["brand.accent must be a six-digit hex color, for example #b85c00", "brand.logo must be an https URL or a data:image URL"]);
   assert.deepEqual(cliProblems(defineCli({ name: "acme", chat: { accent: "red" } }), []).errors, ["brand.accent must be a six-digit hex color, for example #b85c00"]);
+  assert.deepEqual(cliProblems(defineCli({ name: "acme", servers: { production: "http://cli.acme.test/mcp" } }), []).errors, ["servers.production must be an https URL, such as https://cli.acme.com/mcp"]);
 });
 
 // No test replaces one of the CLI's own commands; this is the one that may be.
