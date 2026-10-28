@@ -14,6 +14,7 @@ platform refused it**, with the platform's reason. Accepted means the platform t
 |---|---|
 | Flow Messaging (WhatsApp, SMS, Telegram, iMessage) | Flow reports `message.sent`: the channel itself took it (not only Flow's `202`, which means queued). `waitFor: "delivered"` waits for `message.delivered` instead, where the channel reports it. |
 | `whatsapp(provider)`, `sms(provider)`, `customUI(name, provider)` | Your provider's `sendMessage` (or `sendCarousel`, `sendTemplate`) resolves. Write it to resolve when your platform's API accepted the message, not before. |
+| `webChat()` | The visitor's outbox in the agent's store kept it, under the visitor's next number: the chat box reads it from there. It rejects when that write fails. |
 | The playground and the test cloud | The simulator has it. |
 
 A send may resolve with a receipt (`SendReceipt`) saying how far the message got: `sent`,
@@ -64,6 +65,10 @@ What follows from it:
 Platforms deliver at least once: a webhook is retried until it is answered, and Flow Messaging
 redelivers events it is not sure arrived. The agent takes each message once:
 
+- The web chat's box sends each message with its own id, the same on every retry: it is the
+  message's id for the agent, so a retry is a `message.duplicate`. `POST /messages` answers `202`
+  only once the store has the message (its id is recorded with it); a write that failed answers
+  `503`, and the box sends it again.
 - Flow Messaging events are dropped when their id was handled before in this process (the last
   10,000), so a redelivery, or the same event by both the stream and a webhook, reaches the agent
   once. A failure to handle an event answers the webhook 500 (or does not move the stream's cursor),
@@ -91,6 +96,14 @@ redelivers events it is not sure arrived. The agent takes each message once:
   `channel_timeout_unknown_outcome` (it may have arrived). Idempotency keys cannot undo that.
 - One runner works on a conversation at a time (a lease in the database), so a deploy's overlap
   never answers one message twice.
+- **The web chat shows each message once, in order.** What the box shows waits in the visitor's
+  outbox in the store, numbered per visitor (their tabs and devices share it, and their own
+  messages are echoed into it). The box asks for everything after the last number it showed, and
+  ignores a number it already showed, so a phone that slept, a dropped connection, a restart or a
+  deploy loses nothing and repeats nothing. A request waiting on one runner wakes when that runner
+  keeps an event and checks the store every 2 seconds for what another runner kept (a deploy's
+  overlap). The outbox keeps a week; a box asking for older reads the history again. Typing and
+  status lines are live only: one sent while no box is connected is lost.
 - **Scheduled messages and wake-ups** are rows in the store. When one comes due, one runner claims
   it and writes its turn into the conversation's inbox in one transaction, so it runs once, also
   with several runners or across a restart. A scheduled message found more than 30 minutes late is
@@ -111,7 +124,8 @@ provider does its part:
 ## The conformance suite
 
 `conformance/` runs each adapter through the checks above against a platform the checks hold:
-`whatsapp()`, `sms()` and `customUI()` over a provider that waits for the check, and each Flow
+`whatsapp()`, `sms()` and `customUI()` over a provider that waits for the check, `webChat()` over
+an outbox that waits for it, and each Flow
 Messaging channel with its signal coming by webhook, by the stream and by reading the message back.
 For each one it checks that `send()` resolves only after the platform accepted the message, rejects
 with the platform's reason, passes idempotency keys on, resolves a carousel only after its last

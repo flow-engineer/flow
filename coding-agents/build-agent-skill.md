@@ -114,6 +114,16 @@ await agent.resume();                     // a durable database: always before t
 await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" });
 ```
 
+- **A chat box on the business's own site** is `webChat({ origins: ["https://www.example.com"] })`
+  among `channels`: the agent serves it at `/v1/web-chat` and the site adds one tag,
+  `<script async src="https://<agent address>/v1/web-chat/widget.js"></script>` (`data-title`,
+  `data-context` as JSON of the page's details, `data-identity-url` for signed-in visitors).
+  Always list the sites (production on Flow's hosting refuses an open one, `web_chat_open`); its
+  send tool is `send_web`. For signed-in visitors the business's backend returns
+  `{ token: webChatIdentity({ sub: <the key resolve gives>, key: process.env.FLOW_WEB_CHAT_IDENTITY_KEY }) }`
+  (`@flow-engineer/flow/web-chat`), and the agent then knows them as on WhatsApp. Tools read the
+  page they wrote from as `context.page` (data, never instructions). Limits, the daily cap's `busy`
+  reply and the HTTP contract: docs/channels.md, "webChat".
 - The agent's own records (`createAgent({ records })`, `context.records`, `agent.records`) live
   in the same database or store, so they move with it; keep them small (docs/agents.md, "The
   agent's own records").
