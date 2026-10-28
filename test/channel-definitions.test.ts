@@ -347,3 +347,22 @@ test("the test cloud's path, receive(..., deliver), goes through the same before
   const out = (await h.agent.transcript("t1")).filter((l) => l.kind === "out");
   assert.deepEqual(out.map((l) => l.kind === "out" && l.text), ["See https://example.com/rooms"]);
 });
+
+test("on WhatsApp the agent's Markdown goes in WhatsApp's own marks, after beforeSend and before the content rules: what is sent, recorded and told to the agent, with message.out naming the fixes", async () => {
+  const r = recorder();
+  const seen: string[] = [];
+  const h = agentWith([whatsapp(r.provider)], { beforeSend: (message) => void (message.type === "message" && seen.push(message.text)) });
+  const a = await h.agent.message({ channel: "whatsapp", from: "+15550100100", message: "sizes?" });
+  const markdown = "## Sizes\nOur **best sellers**:\n| Size | Chest | Price |\n|---|---|---|\n| M | 40in | ₹1,499 |";
+  const fixed = "*Sizes*\nOur *best sellers*:\nSize — Chest — Price\nM — 40in — ₹1,499";
+  (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: markdown })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.deepEqual(seen, [markdown], "beforeSend gets what the agent wrote");
+  assert.deepEqual(r.calls, [["sendMessage", "+15550100100", { text: fixed }]]);
+  const out = h.events.find((e) => e.type === "message.out")!;
+  assert.deepEqual([out.text, out.fixed], [fixed, ["markdown_bold", "header", "table"]]);
+  const result = h.followUps[0].messages.find((m) => m.role === "tool") as { content: string };
+  assert.equal(JSON.parse(result.content).sent.text, fixed, "the agent's history says what went");
+  const transcript = await h.agent.transcript(a!.conversationId);
+  assert.deepEqual(transcript.flatMap((l) => (l.kind === "out" ? [l.text] : [])), [fixed]);
+});

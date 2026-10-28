@@ -260,13 +260,34 @@ offers are ever set.
 | `preview` | `false`: send with link previews off (a message the business started) |
 | `idempotencyKey` | Set on a send the business starts (a nudge, a scheduled text), the same in every process: a provider that takes one sends it once |
 
+## Fitted to the channel
+
+Every message, carousel and edit is fitted to its channel after `beforeSend` and before the content
+rules, so what is checked, sent and recorded (`message.out`, the history, the transcript) is what
+the person sees. Only what is unambiguous changes, and a fitted message comes through unchanged.
+
+- **WhatsApp** (`formatting: "whatsapp"`): `**x**` and `__x__` → `*x*`, `***x***` → `*_x_*`, `~~x~~` →
+  `~x~`, a `# Heading` line → `*Heading*`, `[text](url)` → `text (url)` (the url alone when it is the
+  text), a table → one line per row with its cells joined by " — " (the separator row dropped),
+  `<b>`/`<strong>`, `<i>`/`<em>`, `<s>`/`<del>` → `*`, `_`, `~`, and `<br>` → a line break. WhatsApp's own
+  marks (`*x*`, `_x_`, `~x~`), quotes, bullets, numbered lists, URLs and anything in code
+  (`` `x` ``, ```` ```x``` ````) are left as written.
+- **iMessage and SMS** (a `platform` with neither `buttons` nor `lists`): buttons or a list your code
+  sends (from `beforeSend`) go as numbered options after the text (`1. Yes`), never dropped.
+- Telegram, iMessage and the web chat render Markdown themselves: their text is not changed.
+
+`message.out` names what was fixed in `fixed` (`markdown_bold`, `markdown_strike`, `header`, `link`,
+`table`, `html`, `options_as_text`), and so does the trace's send span, as `flow.fixed`
+(comma-separated codes, also with trace content off). `fitText(formatting, text)` (exported) returns
+`{ text, fixed }` for any text.
+
 ## ChannelInfo
 
 What a channel can show; Flow Framework offers the agent only what is set, and fits each message to it.
 
 | Field | What it is |
 |---|---|
-| `formatting` | `plain`, `whatsapp` or `markdown` |
+| `formatting` | `plain`, `whatsapp` or `markdown`. With `whatsapp`, Markdown and HTML WhatsApp does not read are turned into its own marks before each send ([below](#fitted-to-the-channel)) |
 | `maxLength` | The most characters one message can carry |
 | `replies` | A message can quote one of the person's |
 | `buttons` | `{ max, labelMax }`: reply buttons |

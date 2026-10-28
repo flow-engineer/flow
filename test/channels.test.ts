@@ -1,7 +1,7 @@
 // covers: src/conversation.ts src/talk.ts src/channels.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SMS_KEYWORDS, US_CARRIER_KEYWORDS, customUI, keywordOf, sms, whatsapp } from "../src/channels.ts";
+import { SMS as SMS_INFO, SMS_KEYWORDS, US_CARRIER_KEYWORDS, WHATSAPP as WHATSAPP_INFO, customUI, fitOutbound, fitText, keywordOf, sms, whatsapp } from "../src/channels.ts";
 import { talkInstructions } from "../src/talk.ts";
 import type { ChannelInfo } from "../src/types.ts";
 import { IMESSAGE, TELEGRAM } from "../flow-messaging/src/index.ts";
@@ -86,4 +86,58 @@ test("SMS takes only STOP to opt out by default; the fuller US carrier list is o
   for (const text of ["STOP", "unsubscribe", "Cancel.", "quit", "end", "stopall"]) assert.equal(keywordOf(carrier.keywords, text), "stop", text);
   assert.equal(keywordOf(carrier.keywords, "unstop"), "start");
   for (const text of ["cancel my order", "end of the day"]) assert.equal(keywordOf(carrier.keywords, text), null, text);
+});
+
+test("on WhatsApp, Markdown and HTML it does not read become its own marks, each fix named, and a fixed text stays as it is", () => {
+  const cases: Array<[string, string, string[]]> = [
+    ["Our **best sellers** and __new__ ones", "Our *best sellers* and *new* ones", ["markdown_bold"]],
+    ["***Last*** day", "*_Last_* day", ["markdown_bold"]],
+    ["~~₹1,999~~ ₹1,499", "~₹1,999~ ₹1,499", ["markdown_strike"]],
+    ["## Delivery\nTwo days.", "*Delivery*\nTwo days.", ["header"]],
+    ["# **Sizes** #", "*Sizes*", ["markdown_bold", "header"]],
+    ["See [the size guide](https://shop.example/sizes).", "See the size guide (https://shop.example/sizes).", ["link"]],
+    ["[https://shop.example](https://shop.example) or <https://shop.example/help>", "https://shop.example or https://shop.example/help", ["link"]],
+    ["| Size | Chest | Price |\n|---|:---:|---:|\n| M | 40in | ₹1,499 |\n| L | 42in | ₹1,599 |", "Size — Chest — Price\nM — 40in — ₹1,499\nL — 42in — ₹1,599", ["table"]],
+    ["Size | Price\n--- | ---\nM | ₹1,499\n\nAnything else?", "Size — Price\nM — ₹1,499\n\nAnything else?", ["table"]],
+    ["| M | **40in** |\n| L | 42in |", "M — *40in*\nL — 42in", ["markdown_bold", "table"]],
+    ["<b>Open</b> <i>today</i> <s>Sunday</s><br>till <strong>6</strong><BR/>bye", "*Open* _today_ ~Sunday~\ntill *6*\nbye", ["html"]],
+  ];
+  for (const [text, want, fixed] of cases) {
+    assert.deepEqual(fitText("whatsapp", text), { text: want, fixed }, text);
+    assert.deepEqual(fitText("whatsapp", want), { text: want, fixed: [] }, `${want} is fixed already`);
+  }
+});
+
+test("on WhatsApp its own marks, quotes, lists, code and URLs go as written; other formattings are never touched", () => {
+  const alone = [
+    "*bold* _italic_ ~struck~",
+    "> they said\n- one\n* two\n1. three",
+    "Run `**not bold**` and `a | b`",
+    "```\n## not a heading\n| a | b |\n|---|---|\n**x** [t](https://x.example)\n```",
+    "https://x.example/a__b__c?q=**1**&r=~~2~~",
+    "#hashtag, 2 | 3, and *5* x *3*",
+  ];
+  for (const text of alone) assert.deepEqual(fitText("whatsapp", text), { text, fixed: [] }, text);
+  const markdown = "## Sizes\n**M** is [here](https://x.example)\n| a | b |\n|---|---|";
+  for (const formatting of ["markdown", "plain", undefined] as const) assert.deepEqual(fitText(formatting, markdown), { text: markdown, fixed: [] });
+});
+
+test("buttons or a list on a platform with neither (iMessage, SMS) become numbered options in the text; elsewhere, and on Telegram and iMessage's Markdown, the message goes as it was", () => {
+  const buttons = { type: "message" as const, text: "Table for two at 8?", buttons: ["Yes", { id: "no", label: "Another time" }] };
+  const list = { type: "message" as const, text: "", list: { button: "Sizes", rows: [{ id: "m", title: "M", description: "40in" }, { id: "l", title: "L" }] } };
+  for (const info of [IMESSAGE, SMS_INFO]) {
+    assert.deepEqual(fitOutbound(info, buttons), { outbound: { type: "message", text: "Table for two at 8?\n\n1. Yes\n2. Another time" }, fixed: ["options_as_text"] });
+    assert.deepEqual(fitOutbound(info, list), { outbound: { type: "message", text: "1. M — 40in\n2. L" }, fixed: ["options_as_text"] });
+  }
+  const markdown = { type: "message" as const, text: "## Sizes\n**M** is [here](https://x.example)\n| a | b |\n|---|---|", buttons: ["Yes"] };
+  for (const info of [TELEGRAM, WHATSAPP_INFO, customUI("app", { sendMessage: async () => {} }).info]) {
+    const plain = { ...markdown, text: "Pick one" };
+    assert.equal(fitOutbound(info, plain).outbound, plain, "a channel with buttons, or a custom UI, gets them");
+  }
+  for (const info of [TELEGRAM, IMESSAGE]) {
+    const { buttons: _b, ...text } = markdown;
+    assert.deepEqual(fitOutbound(info, text), { outbound: text, fixed: [] }, `${info.platform} renders the Markdown itself`);
+  }
+  const template = { type: "template" as const, name: "order_update", body: ["**42**"] };
+  assert.deepEqual(fitOutbound(WHATSAPP_INFO, template), { outbound: template, fixed: [] }, "a template goes as declared");
 });

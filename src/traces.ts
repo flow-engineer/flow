@@ -12,6 +12,8 @@
 // and the endpoint has no messages to show or grade.
 // The one exception is the MCP server's built-in feedback tool: what a caller writes there is meant
 // for the team, so its call's span carries it (`flow.feedback.about`, `.message`, `.tool`) either way.
+// A send span's `flow.fixed` names what Flow fixed in the message for its channel (FormatFix codes,
+// such as `markdown_bold,table`): codes only, so it goes either way too.
 //
 // Under `flow test`, which plays the agent in this process, every trace says so: the CLI sets
 // FLOW_FRAMEWORK_RUN_KIND=test before it loads the agent, and FLOW_FRAMEWORK_TEST_SESSION once the session opens.
@@ -213,18 +215,20 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
   }
 
   /** A message sent outside any turn (one the business wrote, or a rule's answer, sent as is): a trace of its own. */
-  function alone(conversationId: string, at: number, channel: string, text: unknown) {
+  function alone(conversationId: string, at: number, channel: string, text: unknown, fixed: unknown) {
     const turn: Turn = { traceId: hex(16), rootId: hex(8), start: at, inbound: [], spans: [], tools: new Map(), replyChannel: channel };
-    turn.spans.push(reply(turn, at, channel, text));
+    turn.spans.push(reply(turn, at, channel, text, fixed));
     record(conversationId, turn, false, at);
   }
 
-  function reply(turn: Turn, at: number, channel: string, text: unknown): Span {
+  function reply(turn: Turn, at: number, channel: string, text: unknown, fixed: unknown): Span {
     turn.replyChannel ??= channel;
     // The platform, as on the root span; the span's name has the channel's own name.
     const kind = kindOf(channel);
     const attributes = kind ? [attr("chinwag.channel", kind)] : [];
     if (content && typeof text === "string") attributes.push(attr("chinwag.agent_reply", clip(text)));
+    // What Flow fixed so the message reads as the channel shows it (FormatFix codes, comma-separated): codes, never content.
+    if (Array.isArray(fixed) && fixed.length) attributes.push(attr("flow.fixed", fixed.join(",")));
     return child(turn, `send ${channel}`, at, at, attributes);
   }
 
@@ -312,8 +316,8 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
       case "model.error":
         return finish(id, true, e.at);
       case "message.out":
-        if (!turn || e.answered) return alone(id, e.at, String(e.channel), e.text);
-        turn.spans.push(reply(turn, e.at, String(e.channel), e.text));
+        if (!turn || e.answered) return alone(id, e.at, String(e.channel), e.text, e.fixed);
+        turn.spans.push(reply(turn, e.at, String(e.channel), e.text, e.fixed));
         return;
       case "model.call": {
         if (!turn) return;

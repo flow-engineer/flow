@@ -166,6 +166,13 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   the same button id on two cards, an SMS over 10 segments) is refused before it goes, with
   Flow Messaging's own error, in the playground, the test cloud and production alike; the agent is
   told it and sends again.
+- Just before those rules (after `beforeSend`), Flow fits the text to the channel (`fitText`): on
+  WhatsApp, `**x**`/`__x__` → `*x*`, `~~x~~` → `~x~`, `# Heading` → `*Heading*`, `[text](url)` →
+  `text (url)`, a table → one line per row, `<b>`/`<i>`/`<br>` → marks and line breaks; WhatsApp's own
+  marks and code stay as written. On iMessage and SMS, buttons or a list (from your code; the agent
+  has none there) go as numbered options after the text. What went is what is recorded, and
+  `message.out`'s `fixed` names each fix (`markdown_bold`, `table`, `options_as_text`, ...), as does
+  the trace's send span (`flow.fixed`).
 - To check, rewrite or refuse messages yourself (card text, links, wording), use `createAgent`'s
   `beforeSend: (message, { channel, address, info, origin }) => ...`: return nothing to send it,
   another message to send that, or `{ refuse: "why" }`. Never wrap a channel's `send` for it: the

@@ -412,6 +412,124 @@ export function fitMessage<M extends { text: string; link?: { label: string; url
 }
 
 /**
+ * What Flow Framework fixed in a message just before it went, so it reads as its channel shows it:
+ * a send's `message.out` event carries them as `fixed`, and its trace's send span as `flow.fixed`.
+ * `markdown_bold` (`**x**`, `__x__`), `markdown_strike` (`~~x~~`), `header` (`# x`), `link`
+ * (`[text](url)`), `table` and `html` (`<b>`, `<i>`, `<s>`, `<br>`) are WhatsApp's; `options_as_text`
+ * is buttons or a list written into the text on a platform that shows neither (iMessage, SMS).
+ */
+export type FormatFix = "markdown_bold" | "markdown_strike" | "header" | "link" | "table" | "html" | "options_as_text";
+
+const FIXES: FormatFix[] = ["markdown_bold", "markdown_strike", "header", "link", "table", "html", "options_as_text"];
+
+/**
+ * A text as a channel with this formatting reads it, and what was fixed. On WhatsApp, the Markdown
+ * and HTML it does not read become its own marks: `**x**` and `__x__` → `*x*`, `~~x~~` → `~x~`, a
+ * `# Heading` line → `*Heading*`, `[text](url)` → `text (url)` (the url alone when it is the text), a
+ * table → one line per row, its cells joined with " — ", `<b>`/`<i>`/`<s>` → `*`/`_`/`~` and `<br>` → a
+ * line break. What WhatsApp reads already (`*x*`, `_x_`, `~x~`, quotes, bullets, numbered lists) and
+ * everything in code (`` `x` ``, ```` ```x``` ````) and in URLs is left as written, and a fixed text
+ * comes back the same. Other formattings: the text as written.
+ */
+export function fitText(formatting: ChannelInfo["formatting"], text: string): { text: string; fixed: FormatFix[] } {
+  if (formatting !== "whatsapp") return { text, fixed: [] };
+  const fixed = new Set<FormatFix>();
+  const fix = (code: FormatFix, to: string) => (fixed.add(code), to);
+  const held: string[] = [];
+  const hold = (s: string) => `\u0000${held.push(s) - 1}\u0000`;
+  // Code is shown as written.
+  let s = text.replace(/```[\s\S]*?```/g, hold).replace(/`[^`\n]+`/g, hold);
+  s = tableLines(s, () => fixed.add("table"));
+  s = s.replace(/<br\s*\/?>/gi, () => fix("html", "\n"));
+  for (const [tags, mark] of [["b|strong", "*"], ["i|em", "_"], ["s|del|strike", "~"]]) {
+    s = s.replace(new RegExp(`<(${tags})>([^<\\n]*?\\S[^<\\n]*?)</\\1>`, "gi"), (_m, _tag, inner: string) => fix("html", marked(mark, inner)));
+  }
+  s = s.replace(/<(https?:\/\/[^\s<>]+)>/g, (_m, url: string) => fix("link", hold(url)));
+  s = s.replace(/\[([^\]\n]+)\]\(([^\s()]+(?:\([^\s()]*\)[^\s()]*)*)\)/g, (_m, label: string, url: string) => fix("link", label.trim() === url ? hold(url) : `${label} (${hold(url)})`));
+  // A URL keeps its own * _ ~.
+  s = s.replace(/https?:\/\/[^\s<>]*[^\s<>*_~.,;:!?'")\]]/g, hold);
+  s = s.replace(/\*\*\*(?=\S)([^*\n]*?\S)\*\*\*/g, (_m, inner: string) => fix("markdown_bold", `*_${inner}_*`));
+  s = s.replace(/\*\*(?=\S)([^\n]*?\S)\*\*/g, (_m, inner: string) => fix("markdown_bold", `*${inner}*`));
+  s = s.replace(/(?<!\w)__(?=\S)([^\n]*?\S)__(?!\w)/g, (_m, inner: string) => fix("markdown_bold", `*${inner}*`));
+  s = s.replace(/~~(?=\S)([^\n]*?\S)~~/g, (_m, inner: string) => fix("markdown_strike", `~${inner}~`));
+  // A heading is a bold line: bold inside it is the heading's own.
+  s = s.replace(/^ {0,3}#{1,6}[ \t]+(.*?\S)(?:[ \t]+#+)?[ \t]*$/gm, (_m, inner: string) => fix("header", `*${inner.replace(/\*([^*\n]+)\*/g, "$1")}*`));
+  s = s.replace(/\u0000(\d+)\u0000/g, (_m, i: string) => held[Number(i)]!);
+  return { text: s, fixed: FIXES.filter((f) => fixed.has(f)) };
+}
+
+/** A mark around text, its outer spaces kept outside (WhatsApp reads `*x*`, never `* x *`). */
+function marked(mark: string, inner: string): string {
+  const [, lead, core, trail] = /^(\s*)([\s\S]*?)(\s*)$/.exec(inner)!;
+  return `${lead}${mark}${core}${mark}${trail}`;
+}
+
+/**
+ * Markdown tables as one line per row, the cells joined with " — " and the separator row dropped. A
+ * table is a header line with a pipe over a separator line (`|---|---|`, `---|---`), and the lines
+ * with a pipe after it; or two or more lines that start and end with a pipe.
+ */
+function tableLines(text: string, found: () => void): string {
+  const lines = text.split("\n");
+  const framed = (line: string | undefined) => line !== undefined && /^\s*\|.*\|\s*$/.test(line);
+  const separator = (line: string | undefined) => line !== undefined && line.includes("|") && /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(line);
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    let end = i;
+    if (lines[i]!.includes("|") && separator(lines[i + 1])) {
+      end = i + 2;
+      while (end < lines.length && lines[end]!.includes("|") && lines[end]!.trim()) end++;
+    } else if (framed(lines[i]) && framed(lines[i + 1])) {
+      end = i + 2;
+      while (framed(lines[end])) end++;
+    }
+    if (end === i) {
+      out.push(lines[i]!);
+      continue;
+    }
+    found();
+    for (const line of lines.slice(i, end)) {
+      if (separator(line)) continue;
+      const cells = line.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "").split(/(?<!\\)\|/).map((c) => c.trim().replaceAll("\\|", "|")).filter(Boolean);
+      if (cells.length) out.push(cells.join(" — "));
+    }
+    i = end - 1;
+  }
+  return out.join("\n");
+}
+
+/**
+ * An outbound as its channel shows it, and what was fixed, just before it is checked and sent: its
+ * text (and a carousel's cards') in the channel's formatting (fitText), and on a platform that shows
+ * neither buttons nor lists (iMessage, SMS), a message's buttons or list rows as numbered options
+ * after its text, so they never go missing. A template goes as declared.
+ */
+export function fitOutbound<O extends Outbound>(info: ChannelInfo, outbound: O): { outbound: O; fixed: FormatFix[] } {
+  if (outbound.type !== "message" && outbound.type !== "carousel") return { outbound, fixed: [] };
+  const fixed = new Set<FormatFix>();
+  const fit = (text: string) => {
+    const f = fitText(info.formatting, text);
+    f.fixed.forEach((code) => fixed.add(code));
+    return f.text;
+  };
+  if (outbound.type === "carousel") {
+    const cards = outbound.cards.map((card) => (card.text === undefined ? card : { ...card, text: fit(card.text) }));
+    const text = fit(outbound.text);
+    return fixed.size ? { outbound: { ...outbound, text, cards }, fixed: FIXES.filter((f) => fixed.has(f)) } : { outbound, fixed: [] };
+  }
+  let message: Extract<Outbound, { type: "message" }> = outbound;
+  const options = message.buttons?.length ? message.buttons.map((b) => replyButton(b).label) : message.list?.rows.map((r) => (r.description ? `${r.title} — ${r.description}` : r.title));
+  if (options?.length && info.platform && !info.buttons && !info.lists) {
+    const { buttons: _buttons, list: _list, ...rest } = message;
+    const numbered = options.map((label, i) => `${i + 1}. ${label}`).join("\n");
+    message = { ...rest, text: message.text ? `${message.text}\n\n${numbered}` : numbered };
+    fixed.add("options_as_text");
+  }
+  const text = fit(message.text);
+  return fixed.size ? { outbound: { ...message, text } as O, fixed: FIXES.filter((f) => fixed.has(f)) } : { outbound, fixed: [] };
+}
+
+/**
  * Each platform's content limits as Flow Messaging enforces them (its API spec, flow-engineer/sdk,
  * and the checks its server runs on every send: the channel's text, caption and buttons-text limits,
  * SMS segments). They are the platforms' own (WhatsApp's, Telegram's), with Flow Messaging's

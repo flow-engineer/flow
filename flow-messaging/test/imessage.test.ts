@@ -1,4 +1,4 @@
-// covers: flow-messaging/src/index.ts
+// covers: flow-messaging/src/index.ts src/channels.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -6,7 +6,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, fitMessage, sqlite, type ChatMessage, type Database, type FlowEvent } from "../../src/index.ts";
+import { createAgent, fitMessage, sqlite, type AgentOptions, type ChatMessage, type Database, type FlowEvent } from "../../src/index.ts";
 import { call, respond, scriptedModel, users } from "./helpers.ts";
 import { fakeFlow, sign, SECRET, type Recorded } from "./fake.ts";
 import { flowMessaging, IMESSAGE } from "../src/index.ts";
@@ -15,7 +15,7 @@ const IM = { id: "conv_im", channel: "imessage", sender: "snd_IM", contact: "ct_
 const post = (path: string) => (r: Recorded) => r.method === "POST" && r.path === path;
 
 /** An agent on Flow's iMessage line (its sender from FLOW_MESSAGING_IMESSAGE_SENDER) and Telegram, its webhook served. */
-async function imessageAgent(flow: { url: string }, options: { database?: Database } = {}) {
+async function imessageAgent(flow: { url: string }, options: { database?: Database; beforeSend?: AgentOptions["beforeSend"] } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "flow-fm-im-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
@@ -26,7 +26,7 @@ async function imessageAgent(flow: { url: string }, options: { database?: Databa
   const channels = [fm.telegram({ sender: "snd_TG" }), fm.imessage()];
   if (saved === undefined) delete process.env.FLOW_MESSAGING_IMESSAGE_SENDER;
   else process.env.FLOW_MESSAGING_IMESSAGE_SENDER = saved;
-  const agent = createAgent({ dir, model: scripted.model, channels, database: options.database, debounceMs: 0, deadlineMs: 50, scheduleCheckMs: 0, events: [(e) => events.push(e)] });
+  const agent = createAgent({ dir, model: scripted.model, channels, database: options.database, debounceMs: 0, deadlineMs: 50, scheduleCheckMs: 0, events: [(e) => events.push(e)], beforeSend: options.beforeSend });
   if (options.database) await agent.resume();
   const server = createServer(fm.webhook(agent));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -78,6 +78,20 @@ test("an iMessage message reaches the agent by its sender, and the reply (its Ma
   assert.deepEqual((await flow.request(post("/v0/conversations/conv_im/typing"))).body, {});
   assert.equal(flow.sends("/v0/messages").length, 0, "a reply never starts a new conversation");
   await live.agent.conversation(live.events[0]!.conversationId)!.whenIdle();
+});
+
+test("buttons your code adds on iMessage (beforeSend) go as numbered options in the text, never dropped; message.out says so", async (t) => {
+  const flow = await fakeFlow();
+  const live = await imessageAgent(flow, { beforeSend: (message) => (message.type === "message" ? { ...message, buttons: ["Yes", { id: "later", label: "Another time" }] } : undefined) });
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_im = { id: "ct_im", channel: "imessage", address: { handle: "+15550100100", phone: "+15550100100" } };
+  assert.equal(await live.deliver(received("msg_b", "A table tonight?")), 200);
+  (await live.nextCall(0)).answer(respond(call("send_imessage", { text: "For two at **8pm**?" })));
+  const sent = await flow.request(post("/v0/conversations/conv_im/basic"));
+  assert.deepEqual(sent.body, { text: "For two at 8pm?\n\n1. Yes\n2. Another time", imessage: { styles: [{ start: 11, length: 3, style: "bold" }] } });
+  await live.agent.conversation(live.events[0]!.conversationId)!.whenIdle();
+  const out = live.events.find((e) => e.type === "message.out")!;
+  assert.deepEqual([out.text, out.buttons, out.fixed], ["For two at **8pm**?\n\n1. Yes\n2. Another time", undefined, ["options_as_text"]]);
 });
 
 test("on iMessage the agent fixes a wrong bid by edit_message (its Markdown as iMessage's styles); an edit or unsend Flow refuses at the call (too late, the first message, a message that went by SMS) goes back to the model with Flow's reason, and nothing is sent instead", async (t) => {

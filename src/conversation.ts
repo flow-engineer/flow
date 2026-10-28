@@ -47,7 +47,7 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type ContentRefusal } from "./channels.ts";
+import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, fitOutbound, type ContentRefusal, type FormatFix } from "./channels.ts";
 import type { FlowEvents } from "./business-events/engine.ts";
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
@@ -645,7 +645,7 @@ export class Conversation {
       } else if (result) {
         // What went is what the history keeps.
         if (result.sent.type === "message") answer.reply = result.sent.text;
-        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent), channel, direct: true, answered: true, ...idDetail(result.receipt) });
+        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent), channel, direct: true, answered: true, ...idDetail(result.receipt), ...fixedDetail(result.fixed) });
       }
       if (!this.running && !this.timer) void this.run();
     };
@@ -1505,7 +1505,7 @@ export class Conversation {
       // What went, after beforeSend, is what the events, the history and the transcript keep.
       const sent = result.sent as Extract<Outbound, { type: "message" | "carousel" }>;
       const changed = JSON.stringify(sent) !== JSON.stringify(outbound);
-      this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, ...(changed ? { rewritten: true } : {}), ...idDetail(result.receipt) });
+      this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, ...(changed ? { rewritten: true } : {}), ...idDetail(result.receipt), ...fixedDetail(result.fixed) });
       this.sent(result.receipt);
       this.sentThisTurn.add(input.text.trim());
       this.sentThisTurn.add(sent.text.trim());
@@ -1683,13 +1683,13 @@ export class Conversation {
   }
 
   /**
-   * A message, carousel or template to the person: through the owner's beforeSend, then the
-   * platform's content rules, then the channel. Returns what went (what the events, the history and
-   * the transcript keep), why it was refused (also a `message.refused` event), or why it failed on
-   * the way. `link` is the channel's link when it is not this conversation's current one. With
+   * A message, carousel or template to the person: through the owner's beforeSend, fitted to the
+   * channel (fitOutbound, its fixes returned as `fixed`), then the platform's content rules, then
+   * the channel. Returns what went (what the events, the history and the transcript keep), why it
+   * was refused (also a `message.refused` event), or why it failed on the way. `link` is the channel's link when it is not this conversation's current one. With
    * `edit`, the draft is new text for that message of the agent's: it goes as an edit.
    */
-  private async sendMessage(channel: string, draft: OutboundMessage, origin: SendContext["origin"], link = this.channels.get(channel), edit?: string): Promise<{ sent: OutboundMessage; receipt?: SendReceipt } | { refused: string } | { failure: string }> {
+  private async sendMessage(channel: string, draft: OutboundMessage, origin: SendContext["origin"], link = this.channels.get(channel), edit?: string): Promise<{ sent: OutboundMessage; receipt?: SendReceipt; fixed?: FormatFix[] } | { refused: string } | { failure: string }> {
     if (this.closed) return { failure: "this person was forgotten" };
     if (!link) return { failure: `no way to reach them on ${channel} right now` };
     const refuse = (outbound: OutboundMessage, by: "beforeSend" | "content", reason: string, refusal?: ContentRefusal) => {
@@ -1718,6 +1718,10 @@ export class Conversation {
       if (outbound.type !== "message") return refuse(draft, "beforeSend", `Not sent: beforeSend returned a ${outbound.type} for an edit.`);
       outbound = { type: "message", text: outbound.text };
     }
+    // As the channel shows it (WhatsApp's own marks, options written out where there are no buttons): what is checked, sent and kept.
+    const fitted = fitOutbound(link.info, outbound);
+    outbound = fitted.outbound;
+    const fixed = fitted.fixed.length ? { fixed: fitted.fixed } : {};
     const refusal = contentRefusal(link.info, outbound);
     if (refusal) return refuse(outbound, "content", contentRefusalText(link.info, refusal), refusal);
     let receipt: void | SendReceipt;
@@ -1732,7 +1736,7 @@ export class Conversation {
     if (receipt?.status === "unconfirmed") {
       this.settings.emit(this.id, "message.slow", { channel, origin, text: outbound.type === "template" ? outbound.name : outbound.text, ...(receipt.waitedMs !== undefined ? { waitedMs: receipt.waitedMs } : {}) });
     }
-    return { sent: outbound, ...(receipt ? { receipt } : {}) };
+    return { sent: outbound, ...(receipt ? { receipt } : {}), ...fixed };
   }
 
   /** The agent's own messages it may edit or unsend, by id. */
@@ -1811,7 +1815,7 @@ export class Conversation {
       this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(d.channel), arguments: JSON.stringify(sentArgs(sent)) }] });
       this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel: d.channel, ...this.ownId(d.channel, result.receipt) }) });
     }
-    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel: d.channel, direct: true, ...idDetail(result.receipt) });
+    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel: d.channel, direct: true, ...idDetail(result.receipt), ...fixedDetail(result.fixed) });
     settle("sent", undefined, result.receipt?.messageId);
   }
 
@@ -2042,7 +2046,7 @@ export class Conversation {
     const callId = `auth_${randomUUID()}`;
     this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(channel), arguments: JSON.stringify(sentArgs(sent)) }] });
     this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel, authentication: true }) });
-    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, authentication: true, ...idDetail(result.receipt) });
+    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, authentication: true, ...idDetail(result.receipt), ...fixedDetail(result.fixed) });
     this.sent();
     this.sentThisTurn.add(prompt.message.trim());
     await this.acknowledged(channel);
@@ -2269,6 +2273,11 @@ function clipOutput(text: string): string {
 /** The platform's id for a sent message, on its message.out event, when the channel gave one. */
 function idDetail(receipt?: SendReceipt): { messageId?: string } {
   return receipt?.messageId ? { messageId: receipt.messageId } : {};
+}
+
+/** What Flow fixed in a send so it reads as its channel shows it (FormatFix codes), on its message.out. */
+function fixedDetail(fixed?: FormatFix[]): { fixed?: FormatFix[] } {
+  return fixed?.length ? { fixed } : {};
 }
 
 function outDetail(sent: OutboundMessage): Record<string, unknown> {
