@@ -835,8 +835,8 @@ function updateCommand(config: CliConfig, io: CliIO): StricliCommand<CliContext>
     parameters: {},
     async func() {
       const newest = latest && config.version ? await newestVersion(config, io.signal ?? AbortSignal.timeout(10_000)) : undefined;
-      if (newest !== undefined && !isNewer(newest, config.version!)) return void io.write(`${config.name} ${config.version} is the newest version.\n`);
-      io.writeError(`Updating ${config.name}${newest ? ` to ${newest}` : ""}...\n`);
+      if (newest !== undefined && !offered(newest, config.version!)) return void io.write(`${config.name} ${config.version} is the newest version.\n`);
+      io.writeError(`Updating ${config.name}${newest ? ` to ${newest.version}` : ""}...\n`);
       const code = await new Promise<number | string>((done) => {
         const child = spawn(command, { shell: true, stdio: ["inherit", "pipe", "pipe"], env: io.env ?? process.env, signal: io.signal });
         child.stdout.on("data", (chunk) => io.write(String(chunk)));
@@ -858,29 +858,45 @@ async function updateNotice(config: CliConfig, argv: string[], io: CliIO, signal
   const env = io.env ?? process.env;
   if (!config.update?.latest || !config.version || !person(io) || env.CI || argv.includes("--json") || (argv[0] === "update" && updatesItself(config))) return undefined;
   const file = join(configDir(config), "update.json");
-  let saved: { checkedAt?: number; latest?: string } = {};
+  let saved: { checkedAt?: number; latest?: string; rolledBackFrom?: string } = {};
   try { saved = JSON.parse(readFileSync(file, "utf8")); } catch {}
-  let newest = typeof saved.latest === "string" ? saved.latest : undefined;
+  let newest: Newest | undefined = typeof saved.latest === "string" ? { version: saved.latest, ...(typeof saved.rolledBackFrom === "string" ? { rolledBackFrom: saved.rolledBackFrom } : {}) } : undefined;
   const checkedAt = Number(saved.checkedAt);
   if (!(Date.now() - checkedAt < UPDATE_EVERY_MS && checkedAt <= Date.now())) {
     // Saved before asking: a check that fails or is cut short waits a day like one that answered.
-    const save = (value: object) => { try { mkdirSync(dirname(file), { recursive: true, mode: 0o700 }); writeFileSync(file, JSON.stringify(value), { mode: 0o600 }); } catch {} };
-    save({ checkedAt: Date.now(), ...(newest ? { latest: newest } : {}) });
+    const save = (value: Newest | undefined) => { try { mkdirSync(dirname(file), { recursive: true, mode: 0o700 }); writeFileSync(file, JSON.stringify({ checkedAt: Date.now(), ...(value ? { latest: value.version, rolledBackFrom: value.rolledBackFrom } : {}) }), { mode: 0o600 }); } catch {} };
+    save(newest);
     const answer = await newestVersion(config, signal);
-    if (answer !== undefined) save({ checkedAt: Date.now(), latest: newest = answer });
+    if (answer !== undefined) save(newest = answer);
   }
-  if (!newest || !isNewer(newest, config.version)) return undefined;
+  if (!newest || !offered(newest, config.version)) return undefined;
   const paint = painter(io);
-  return `\n${paint("dim", `A new version of ${config.name} is out: ${newest} (you have ${config.version}).`)} Run ${paint("cyan", `${config.name} update`)} to get it.\n`;
+  const line = newest.rolledBackFrom === config.version
+    ? `${config.name} ${config.version} was rolled back; the version to use is ${newest.version}.`
+    : `A new version of ${config.name} is out: ${newest.version} (you have ${config.version}).`;
+  return `\n${paint("dim", line)} Run ${paint("cyan", `${config.name} update`)} to get it.\n`;
 }
 
-/** The version update.latest names, or undefined when it cannot be read. */
-async function newestVersion(config: CliConfig, signal: AbortSignal): Promise<string | undefined> {
+/** What update.latest answers: its version and, after a rollback (flow cli rollback), the version it replaced. */
+interface Newest {
+  version: string;
+  rolledBackFrom?: string;
+}
+
+/** Whether to offer `newest` to a CLI that is `current`: a newer build, or the one that replaced it in a rollback. */
+function offered(newest: Newest, current: string): boolean {
+  return isNewer(newest.version, current) || (newest.rolledBackFrom === current && newest.version !== current);
+}
+
+/** The version update.latest names (and rolled_back_from, the one a rollback replaced), or undefined when it cannot be read. */
+async function newestVersion(config: CliConfig, signal: AbortSignal): Promise<Newest | undefined> {
   try {
     const response = await fetch(config.update!.latest!, { signal, headers: { accept: "application/json" } });
     if (!response.ok) return undefined;
-    const version = ((await response.json()) as { version?: unknown })?.version;
-    return typeof version === "string" && /^v?\d+\.\d+\.\d+/.test(version) ? version : undefined;
+    const answer = (await response.json()) as { version?: unknown; rolled_back_from?: unknown } | null;
+    const version = answer?.version;
+    if (typeof version !== "string" || !/^v?\d+\.\d+\.\d+/.test(version)) return undefined;
+    return { version, ...(typeof answer!.rolled_back_from === "string" ? { rolledBackFrom: answer!.rolled_back_from } : {}) };
   } catch { return undefined; }
 }
 

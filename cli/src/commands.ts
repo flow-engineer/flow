@@ -156,8 +156,9 @@ export interface CliConfig {
    * `npm install -g acme@latest`) and shows its output. With `latest`, a URL answering JSON with a
    * `version` (npm's https://registry.npmjs.org/acme/latest answers so), `acme update` first says
    * when `version` is already the newest, and a person at a terminal sees one line after a command
-   * when a newer one is out, checked at most once a day. A command of your own named `update`
-   * replaces Flow's.
+   * when a newer one is out, checked at most once a day. When the answer's `rolled_back_from` is
+   * this version (`flow cli rollback`), its `version` is offered too, though older. A command of
+   * your own named `update` replaces Flow's.
    */
   update?: { command: string; latest?: string };
   /**

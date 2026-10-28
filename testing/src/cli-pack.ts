@@ -44,12 +44,17 @@ export interface PackOptions {
   say: (line: string) => void;
 }
 
-/** Why a pack stopped, and the exit code: 2 for what the folder must change, 1 for a build that failed. */
+/**
+ * Why a pack stopped, and the exit code: 2 for what the folder must change, 1 for a build that
+ * failed. `code` is no_esbuild when esbuild is not installed, else pack_failed.
+ */
 export class PackError extends Error {
   readonly exit: number;
-  constructor(message: string, exit: number) {
+  readonly code: "pack_failed" | "no_esbuild";
+  constructor(message: string, exit: number, code: PackError["code"] = "pack_failed") {
     super(message);
     this.exit = exit;
+    this.code = code;
   }
 }
 
@@ -191,7 +196,7 @@ async function loadEsbuild(): Promise<typeof import("esbuild")> {
   } catch (error) {
     if ((error as { code?: string }).code !== "ERR_MODULE_NOT_FOUND") throw error;
     const pin = (readJson(join(packageRoot(), "package.json")).peerDependencies as Record<string, string>).esbuild;
-    throw new PackError(`flow cli pack bundles the CLI with esbuild: npm i -D esbuild@${pin}`, 2);
+    throw new PackError(`flow cli pack bundles the CLI with esbuild: npm i -D esbuild@${pin}`, 2, "no_esbuild");
   }
 }
 

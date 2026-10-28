@@ -2,10 +2,48 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## Unreleased
+## 0.11.0 (2026-10-28)
 
 ### Changes
 
+- **`flow deploy` ships the agent's CLI.** With `src/cli.ts` in the folder, `flow deploy` packs the
+  CLI for the environment's address before anything is sent (a CLI that does not pack stops the
+  deploy, exit 2 or 1 with what to fix), and once the deploy is live publishes it as `flow cli
+  publish` does: `curl -fsSL <the agent's URL> | sh` installs it, and CLIs already installed are
+  offered it by their update check. Before an environment's first deploy there is no address yet,
+  so it is packed once live. `flow deploy promote` publishes a production build of the CLI from the
+  folder once production is live. `--no-cli` leaves the CLI out of both. Without esbuild, or on a
+  Flow whose hosting serves no CLIs (`cli_off`), the deploy goes on and says so in one line. A
+  publish that fails after a live deploy prints why and `flow cli publish --env <env>`, and exits 1.
+  `--json`'s answer has `cli`: `{ published: true, release, current, install }`, `{ published:
+  false, code, message }`, or `null` without a CLI file.
+- **`flow cli publish|rollback|status`: the CLI's releases on Flow's hosting**, with the CI key, on
+  observe's `/v1/hosting/cli` routes. `flow cli publish --env <env> [--server <https url>] [--dir]
+  [--json]` packs the CLI for the environment (its address plus `/mcp`, or the `--server` given, a
+  domain of the agent's own; else the CLI file's `servers.<env>`), asks the host for the release
+  (`POST /v1/hosting/cli/releases` with `{ environment, name, display_name, version, sha256, size,
+  server }`), PUTs the package and the installer
+  to the signed URLs it answers (no key, no `x-goog-*` headers) and makes it current (`POST
+  /v1/hosting/cli/releases/<version>/publish`). It prints the install line; `--json` prints `{ ok,
+  release, current, install, next }`. `flow cli rollback --env <env> <version>` serves an earlier
+  published version again (`POST /v1/hosting/cli/rollback`) and says who is offered it. `flow cli
+  status [--env <env>] [--json]` shows each environment's current version, when and by whom it was
+  published, and its releases, newest first. A refusal prints the host's code (`version_exists`:
+  commit and publish again; `already_published`: use rollback; `cli_off`: this Flow's hosting
+  serves no CLIs) and exits 1.
+- **A published CLI never changes its server unasked.** Before publishing, `flow cli publish` reads
+  the environment's current release (`GET /v1/hosting/cli/releases`); when its `server` differs
+  from the build's, it refuses (exit 1, `--json` code `server_changed`): everyone who installed
+  the CLI would have to sign in again. It says how to keep the server (`defineCli({ servers: {
+  <env>: "<url>" } })`); `--change-server` publishes it anyway. `flow deploy` and promote skip the
+  CLI's publish with a one-line warning and still deploy. A cloud that does not say a release's
+  server is not checked.
+- **After a rollback, an installed CLI is offered the version served.** When `update.latest`
+  answers `rolled_back_from` naming the version running, `acme update` installs the answer's
+  `version` and a person at a terminal sees "acme 1.3.0 was rolled back; the version to use is
+  1.2.0. Run acme update to get it.", though that version is older. Any other version is offered
+  only a newer one, as before.
+- **`FLOW_CLI_BUCKET` is never sent as a secret**: Flow's hosting sets it on the agent's service.
 - **`flow cli pack`: the CLI as one package anyone with Node.js installs.** `flow cli pack --server
   <staging|production|https url> [--base-url <url>] [--out release/] [--dir .] [--json]` bundles
   `src/cli.ts` with every dependency (esbuild: ESM, lazy imports kept in chunks of their own,
@@ -58,8 +96,14 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   last line from `if (process.argv[1] === fileURLToPath(import.meta.url)) ...` to
   `if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) ...`,
   with `import { realpathSync } from "node:fs";`. `flow cli pack` refuses the old line.
-- **`flow cli pack` is Flow's own.** A tool named `pack` on a server reached with `flow cli` is
-  `flow cli --server <url> pack` (the server first).
+- **`flow cli pack`, `publish`, `rollback` and `status` are Flow's own.** A tool of one of those
+  names on a server reached with `flow cli` is `flow cli --server <url> <name>` (the server first).
+- **`flow deploy` and `flow deploy promote` now publish `src/cli.ts`.** An agent with a CLI file has
+  it packed before each deploy and published once live. To deploy as before, add `--no-cli`. A CLI
+  file that does not pack now stops the deploy (a CLI on a domain of its own sets
+  `defineCli({ servers })` first, else it is packed for the agent's address): package.json needs a `version`, the folder a git
+  commit, the CLI file its default server written once as a string and the `realpathSync` line
+  above. Add `esbuild@0.28.2` as a dev dependency to have it published.
 
 ## 0.10.6 (2026-10-28)
 
