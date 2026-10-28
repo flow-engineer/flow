@@ -71,7 +71,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - **`agent.forgetPerson` reaches further** only for a person with linked conversations, which needs
   a number from an identity token's `phone` or `agent.message({ phone })`. An agent that passes
   neither has no linked conversations: its turns, prompts and forgetting are as before.
-- Nothing else changes for an agent that does not add `webChat()`.
+- Nothing else changes for an agent that does not add `webChat()` and passes no `phone`, but for a
+  store of its own (above), which every turn now asks for linked conversations.
 
 ## 0.10.5 (2026-10-27)
 

@@ -25,8 +25,10 @@ in on: the agent has no send tool for the other conversation's channels.
 
 - **Verified numbers only.** A phone channel's own number (WhatsApp, SMS, iMessage), a number your
   backend puts in a signed-in visitor's identity token, or `agent.message({ ..., phone })` from
-  your server code (a Telegram contact the person shared as their own, checked against the sender).
-  Never a number someone types: an anonymous web visitor stays apart whatever they write.
+  your own channel code, in E.164 (your app's signed-in user; on a Telegram integration of your
+  own, a contact the person shared whose user id is the sender's). Flow Messaging's channels pass
+  none beyond the phone channels' own. Never a number someone types: an anonymous web visitor stays
+  apart whatever they write.
 - **One agent only.** Conversations are linked within one agent's store, never across agents or
   businesses, also when several agents share a database.
 - **Forgetting is everywhere.** `agent.forgetPerson` deletes the person's conversation and every

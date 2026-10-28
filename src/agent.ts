@@ -553,8 +553,8 @@ export class Agent {
    * provider's own `messageId`: the same one again (a webhook retried) is not taken twice. `key` is
    * the person's own key as your server verified it (a signed-in web chat visitor), never from a
    * browser's body: the person is then `resolve`'s same key on every channel. `phone` (E.164) is a
-   * number your server or the platform verified is theirs (a signed-in visitor's, a Telegram contact
-   * they shared as their own), never one they typed: their conversations on phone channels with
+   * number your server or the platform verified is theirs (a signed-in visitor's; on a Telegram
+   * integration of your own, a contact they shared whose user id is the sender's), never one they typed: their conversations on phone channels with
    * that number are then the same person's, which each turn is shown lately.
    */
   async message(input: { channel: string; from: string; message: string | Incoming; messageId?: string; key?: string; phone?: string }): Promise<{ conversationId: string; messageId: string } | null> {
