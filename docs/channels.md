@@ -29,6 +29,35 @@ UI whose `info` declares them), worded for what it has.
 - **Leave it out** with `createAgent({ writing: false })`, and say how messages read in your own
   `AGENTS.md`.
 
+## One person on several channels
+
+Who a person is comes from what a channel verified, never from what they or the model say. Their
+identities with the same key are one person in **one conversation**: the same number on WhatsApp,
+SMS and iMessage (`phone:+919876543210`), or the key your `resolve` gives (`key:<your id>`), and a
+signed-in web chat visitor's `sub`.
+
+A person can also have **several conversations under different keys** that share a verified phone
+number: a WhatsApp conversation (`phone:+91...`) and a web chat signed in as `key:member-7` whose
+identity token carries that number (`webChatIdentity({ sub, phone })`). They stay separate
+conversations, nothing is moved or re-keyed, but each turn of one is shown what the person said,
+and what the agent sent them, lately in the others: the last 20 messages of the last 7 days, oldest
+first, each with its channel and time, as data in the turn's prompt. So "what are my bids?" on the
+web is answered knowing the WhatsApp chat. Each reply still goes out on the channel the message came
+in on: the agent has no send tool for the other conversation's channels.
+
+- **Verified numbers only.** A phone channel's own number (WhatsApp, SMS, iMessage), a number your
+  backend puts in a signed-in visitor's identity token, or `agent.message({ ..., phone })` from
+  your own channel code, in E.164 (your app's signed-in user; on a Telegram integration of your
+  own, a contact the person shared whose user id is the sender's). Flow Messaging's channels pass
+  none beyond the phone channels' own. Never a number someone types: an anonymous web visitor stays
+  apart whatever they write.
+- **One agent only.** Conversations are linked within one agent's store, never across agents or
+  businesses, also when several agents share a database.
+- **Forgetting is everywhere.** `agent.forgetPerson` deletes the person's conversation and every
+  conversation linked to it by a verified number.
+- Identities first seen before 0.12 keep their number from their next message on; until then a
+  phone channel's conversation is still found by its `phone:` key.
+
 ## `whatsapp(provider, options?)`
 
 `options`:
@@ -82,6 +111,120 @@ Your own web or mobile chat. `name` is the channel's name. `provider` (a `Custom
 | `status?(to, text \| null)` | A short line of what the agent is doing, in your loading indicator; `null` clears it |
 | `editMessage?(to, messageId, text)` | New text for a message the agent sent, by the `messageId` your `sendMessage` resolved with (`{ status: "sent", messageId }`). With it the agent is offered `edit_message`; reject to refuse an edit, and the reason goes to the agent |
 | `unsendMessage?(to, messageId)` | Takes back a message the agent sent, by that id. With it the agent is offered `unsend_message` |
+
+## `webChat(options?)`
+
+The agent in a chat box on the business's own site, served by the agent itself: no Flow Messaging,
+no other service. Add the channel and `createAgent` serves its routes under `/v1/web-chat` (through
+`agent.fetch`, beside your own `routes`):
+
+```ts
+import { createAgent, webChat } from "@flow-engineer/flow";
+
+export function buildAgent({ events, tools, host } = {}) {
+  return createAgent({
+    dir, model, events, host, tools: tools ?? myTools,
+    // With `host`, Flow Messaging's channels (WhatsApp, Telegram, ...) are added beside it.
+    channels: [webChat({ origins: ["https://www.example.com"] })],
+  });
+}
+```
+
+and the site adds one script tag, served by the agent, so it always matches the agent's version.
+A site with a CSP adds the agent's address to `script-src` and `connect-src` (and `'self'` to
+`connect-src` for `data-identity-url`), and `https:` (or the photos' hosts) to `img-src`; `style-src`
+needs nothing (the box uses constructable stylesheets; Safari before 16.4 falls back to a `<style>`
+element, which needs `'unsafe-inline'`). Sites that enforce Trusted Types are not supported yet:
+
+```html
+<script async src="https://<agent address>/v1/web-chat/widget.js"
+  data-title="Ask us" data-context='{"listing":"ps5-disc"}'></script>
+```
+
+The agent's send tool is `send_web`; `beforeSend`, content rules, traces (channel `web`) and tests
+behave as on every channel, and the playground plays it as its web simulator. Two channels cannot
+share a name: the starter `flow new` writes has a placeholder `customUI("web", provider)`; replace it
+with `webChat()` (or give one of them another `name`).
+
+The box's script tag takes `data-title`, `data-greeting`, `data-avatar` (an https URL),
+`data-context` (JSON), `data-identity-url`, `data-theme` (`auto`, `light`, `dark`), `data-position`
+(`right`, `left`) and `data-lang` (`en`, `hi`; default the page's language). Theme it with CSS
+properties on the `flow-chat` element (`--flow-chat-accent`, `--flow-chat-accent-text`,
+`--flow-chat-font`, `--flow-chat-radius`). The page can call `FlowChat.open()`, `.close()`,
+`.setContext({...})`, `.signIn()` (asks `data-identity-url` again) and `.signOut()`, and listen for
+the `flowchat:open` and `flowchat:message` events.
+
+| Option | What it does |
+|---|---|
+| `origins` | The sites the box may be on: `https://www.example.com`, or `https://*.example.com` for any subdomain (not the bare domain); `http://` only for `localhost` and `127.0.0.1`. Joined with `FLOW_WEB_CHAT_ORIGINS` (comma-separated). None at all: any site may embed the agent and spend its credit, for development only; Flow's hosting refuses it in production (`web_chat_open`) |
+| `identityKey` | For signed-in visitors: the key your backend signs their identity tokens with, at least 32 characters, or several while you rotate it. Default `FLOW_WEB_CHAT_IDENTITY_KEY` (comma-separated) |
+| `sessionKey` | Signs visitors' sessions and anonymous ids, at least 32 characters. Default `FLOW_WEB_CHAT_SESSION_KEY`, which Flow's hosting sets; without either, a random key per process (sessions and anonymous visitors then end at a restart) |
+| `trustProxy` | How many proxies in front of the agent append to `X-Forwarded-For`; the client's address is that many entries from the end. Default `FLOW_TRUST_PROXY` (Flow's hosting sets `1`). Without it, the limits per network address are off |
+| `limits` | `WebChatLimits`, below |
+| `name`, `base` | The channel's name (default `web`) and where its routes answer (default `/v1/web-chat`) |
+| `info`, `instructions` | What your box can show, over `WEB_CHAT` (narrow it for a box of your own); your guidance for the agent on this channel |
+
+**Who the visitor is.** Anonymous by default: the box gets an id that lasts 30 days (renewed while
+they come back), kept in the browser, and the agent knows them as `web:visitor:<id>`. Safari deletes
+what a script stored after 7 days without a visit; they then start afresh. To make a signed-in
+visitor the same person as on WhatsApp, your backend signs them a short identity token, an HS256
+JWT `{ sub, phone?, aud: "flow-web-chat", exp }` (`iat` optional) valid at most 10 minutes, `sub`
+being the key your `resolve` gives for them and `phone` (E.164, `+919876543210`) the number your
+backend verified is theirs, if it has one; any JWT library makes it, or in Node:
+
+```ts
+import { webChatIdentity } from "@flow-engineer/flow/web-chat";
+app.get("/api/flow-chat-identity", requireLogin, (req, res) =>
+  res.json({ token: webChatIdentity({ sub: req.user.id, phone: req.user.verifiedPhone, key: process.env.FLOW_WEB_CHAT_IDENTITY_KEY }) }));
+```
+
+and the script tag names that same-origin URL: `data-identity-url="/api/flow-chat-identity"`. The
+box exchanges the token for a session; the person is then `key:<sub>`, with all of their
+conversation and every tool. With `phone`, their turns are also shown what they said lately on
+WhatsApp, SMS or iMessage from that number, and those channels' turns what they said here
+([One person on several channels](#one-person-on-several-channels)). An anonymous visitor's chat
+stays apart from their account when they sign in.
+
+**The page they wrote from.** Each message carries the page (`url`, `title`) and the site's own
+details (`data-context`, or `FlowChat.setContext({...})`), at most 1 KB (the box drops the title,
+then the details, then the URL's query to fit), the URL on one of the allowed sites. The agent reads it as one line of data in its turn, never as instructions, and tools
+get it as `context.page` (`{ url, title?, context? }`).
+
+**Protection.** The allowed sites stop other websites embedding the agent; they do not stop a
+script, which can send any `Origin`. Sessions and limits stop scripts:
+
+| `WebChatLimits` | Default |
+|---|---|
+| `newVisitorsPerMinute`, `newVisitorsPerDay` | 20 and 300 new visitors per network address (generous: mobile networks put many people behind one address) |
+| `messagesPerMinute`, `messagesPerDay` | 8 and 60 per anonymous visitor |
+| `signedInMessagesPerMinute`, `signedInMessagesPerDay` | 15 and 300 per signed-in visitor |
+| `messagesPerAddressPerMinute` | 60 per network address, all its visitors together |
+| `messageChars` | 2,000 characters a message (bodies at most 16 KB) |
+| `turnsAtOnce` | 20 web chat turns at once; more wait their turn, with typing shown |
+
+Wrong identity tokens are refused after 10 per address in 15 minutes. The limits are held in the
+process's memory (exact on Flow's hosting, which runs one instance per environment; per process
+when you run several). There is no cap on the agent's web chat messages a day: the workspace's
+model credit limits still apply, and an agent-wide daily cap may come in a later release. Logs
+carry ids and counts, never text, addresses or tokens.
+
+**The HTTP contract**, for a box of your own (all under `/v1/web-chat`, JSON, errors
+`{ error, message, retry_after? }`; every call but `session` with `Authorization: Bearer <session>`;
+CORS for the allowed sites):
+
+| Call | What it does |
+|---|---|
+| `POST /session { visitor?, identity? }` | `200 { session, expires_at, signed_in, visitor?, limits }`: a session for 1 hour. Give the stored `visitor` credential to stay the same visitor (the answer has it renewed: store it), or an `identity` token. `401 identity_invalid`, `429 rate_limited` |
+| `GET /history` | `200 { messages, cursor }`: the conversation on this channel, oldest first (entries older than the outbox have `seq: 0`), and the newest number |
+| `GET /events?after=<seq>` | With `Accept: text/event-stream`: server-sent events `hello { cursor }`, `message` (each event, its number as the SSE `id`), `live { typing, status }`, `reset` (read the history again), `reconnect { cursor }` after 14 minutes, a ping every 15 s. Otherwise a long-poll of up to 25 s (`wait=<seconds>` for less): `200 { events, cursor, live }` or `{ reset: true }`. Show each number once |
+| `POST /messages { id, text, choice?, page?, context? }` | `202 { id }` once the store has it; the same `id` again is taken once. `400`, `413`, `429` with `retry_after`, `503` (send it again) |
+| `GET /widget.js`, `GET /widget/<name>.js` | The chat box |
+
+An event is `{ seq, at, type }` with `type` `message` (`from: "agent"`: `id`, Markdown `text`,
+`replyTo?`, `buttons?`, `list?`, `link?`, `image?`; `from: "person"`: their `id`, `text`, `choice?`),
+`carousel` (`id`, `text`, `cards`) or `reaction` (`messageId`, `emoji`). A tap on a button or a
+row is sent as `text: <label>, choice: { id, title: <label> }`. Not on the web chat yet: files from
+visitors, edits and unsends.
 
 ## Flow Messaging: `fm.whatsapp()`, `fm.telegram()`, `fm.imessage()`, `fm.sms()`
 

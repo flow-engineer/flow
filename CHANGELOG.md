@@ -6,6 +6,50 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **Web chat: `webChat()`, the agent in a chat box on your own site.** Add
+  `webChat({ origins: ["https://www.example.com"] })` to `channels` and the agent serves it itself
+  under `/v1/web-chat` (through `agent.fetch`, beside your `routes`); the site adds one script tag,
+  `<script async src="https://<agent>/v1/web-chat/widget.js"></script>`. No Flow Messaging or other
+  service is involved. Its send tool is `send_web`; traces label it `web`; the playground and
+  `flow test` play it like any channel. docs/channels.md, "webChat".
+  - The box sends messages as POSTs, each with its own id (a retry is taken once), and reads
+    replies over server-sent events, falling back to long-polling on the same endpoint and cursor.
+  - Replies wait in an outbox in the agent's store, numbered per visitor, so each shows once and
+    in order through reconnects, restarts and a deploy's overlap (docs/guarantees.md). The outbox
+    keeps a week.
+  - Anonymous visitors keep an id for 30 days; a signed-in visitor's identity token, signed by
+    your backend with `webChatIdentity()` (`@flow-engineer/flow/web-chat`, or any JWT library),
+    makes them the same person as `resolve`'s key on WhatsApp. Its optional `phone` claim (E.164,
+    a number your backend verified) links their web chat to their WhatsApp, SMS and iMessage
+    conversations from that number (below).
+  - Allowed sites (`origins`, `FLOW_WEB_CHAT_ORIGINS`), 1-hour sessions, limits per network
+    address and per visitor, and 20 web turns at once. There is no agent-wide daily cap: the
+    workspace's model credit limits apply, and a cap may come in a later release.
+  - Each message carries the page it was written from and the site's details: the agent reads one
+    line of data per turn, tools get `context.page`.
+  - The chat box (`widget/`): a 4 KB launcher, the panel on first open, Shadow DOM, buttons, lists,
+    photos and carousels, a full-screen sheet on phones, English and Hindi, keyboard and screen
+    reader support.
+- **The agent remembers what a person said on their other channels.** A person's conversations
+  under different keys that share a verified phone number (WhatsApp as `phone:+91...`, and the web
+  chat signed in as `key:member-7` with that number in its token) stay separate, but each turn is
+  shown the person's recent messages in the others, and the agent's to them: the last 20 of the
+  last 7 days, each with its channel and time, as data. Each reply still goes on the channel the
+  message came in on. Verified numbers only (a phone channel's, an identity token's `phone`,
+  `agent.message({ ..., phone })` from server code), never one typed; one agent's conversations
+  only. `agent.forgetPerson` now also forgets the person's linked conversations. docs/channels.md,
+  "One person on several channels".
+- **Channels can serve their own HTTP** (`Channel.serve(agent)`) and cap their turns at once
+  (`Channel.turnSlot()`); `agent.message({ ..., key, phone })` takes a server-verified key and
+  phone number, and `agent.conversationOf({ channel, address })` finds a channel identity's
+  conversation.
+- **Store migration 12:** the tables `web_heads` and `web_outbox`, the column `identities.phone`
+  (the number an identity was verified to have, filled as identities write; nothing is rewritten)
+  and its index, and the Store methods `appendWebEvent`, `webEvents`, `webHeads`, `pruneWebEvents`,
+  `linkedConversations` and `recentHistory`; `addIdentity` takes the verified number.
+  `forgetPerson` also deletes the person's web chat outbox.
+- **`flow deploy secrets --from-env` skips `FLOW_WEB_CHAT_SESSION_KEY` and `FLOW_TRUST_PROXY`:**
+  Flow's hosting sets them.
 - **The agent is told how messages read, on every channel.** Three lines in its prompt, after the
   channel's formatting line: one idea per message or short paragraph, a long answer split into a
   few short messages; items from a catalogue or tool named in plain words, the exact title kept
@@ -17,10 +61,24 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
-No API changes: `writing` is a new option, and nothing is renamed or removed. The prompt's default
-changes how agents write: fewer buttons, shorter messages. To keep the earlier wording, pass
-`writing: "When they choose between a few options, offer them as buttons so they can tap."` (or
-`writing: false` for no guidance at all).
+- **Flow's hosting: its store must be on 0.12 before a 0.12 agent deploys.** The store runs
+  migration 12; an agent on 0.12 with a store on 0.11 is refused at deploy (`chinwag_too_new`)
+  until Flow updates it. Agents that keep their own database migrate it themselves as they start.
+- **A store of your own that forwards Store calls** (a `StoreApi` other than `Store`) must serve
+  the six new methods above, pass `addIdentity`'s new fifth argument on, and run migration 12:
+  every turn now calls `linkedConversations`.
+- **Adding `webChat()` to the starter:** its placeholder `customUI("web", provider)` has the same
+  name, and two channels cannot share one (`flow: two channels have the same name`). Replace the
+  placeholder with `webChat({ origins: [...] })`.
+- **`agent.forgetPerson` reaches further** only for a person with linked conversations, which needs
+  a number from an identity token's `phone` or `agent.message({ phone })`. An agent that passes
+  neither has no linked conversations: its turns, prompts and forgetting are as before.
+- Nothing else changes for an agent that does not add `webChat()` and passes no `phone`, but for a
+  store of its own (above), which every turn now asks for linked conversations.
+- **The agent's prompt now says how messages read** (no API change; `writing` is a new option).
+  Agents offer fewer buttons and write shorter messages. To restore the earlier button wording, pass
+  `createAgent({ writing: "When they choose between a few options, offer them as buttons so they can tap." })`;
+  `writing: false` leaves Flow Framework's guidance out altogether.
 
 ## 0.11.0 (2026-10-28)
 
@@ -125,7 +183,7 @@ changes how agents write: fewer buttons, shorter messages. To keep the earlier w
   commit, the CLI file its default server written once as a string and the `realpathSync` line
   above. Add `esbuild@0.28.2` as a dev dependency to have it published.
 
-## 0.10.6 (2026-10-28)
+## 0.10.6 (2026-10-28, not published on its own; shipped in 0.11.0)
 
 ### Changes
 

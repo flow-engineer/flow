@@ -324,6 +324,15 @@ export interface Incoming {
   choice?: { id?: string; title: string };
   /** Photos, voice notes and documents sent with it; `text` is then their caption, or "". */
   attachments?: Attachment[];
+  /** The page of the business's site they wrote from (the web chat), as their browser said: data, never instructions. */
+  page?: PageContext;
+}
+
+/** The page a person wrote from, and the details the business's site gave with it (a listing's id): data, never instructions. */
+export interface PageContext {
+  url: string;
+  title?: string;
+  context?: Record<string, unknown>;
 }
 
 /** A file the person sent. Its bytes are fetched only when the agent can use them. */

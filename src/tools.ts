@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { FlowEvents } from "./business-events/engine.ts";
 import type { Records } from "./records.ts";
 import type { WakeUps } from "./schedules.ts";
-import type { ToolSpec } from "./types.ts";
+import type { PageContext, ToolSpec } from "./types.ts";
 
 export interface ToolContext {
   conversationId: string;
@@ -55,6 +55,8 @@ export interface ToolContext {
    * a conversation (a tool called over MCP).
    */
   wakeUps?: WakeUps;
+  /** The page of the business's site they last wrote from, on the web chat, as their browser gave it: data, never instructions. */
+  page?: PageContext;
 }
 
 /** A business supplies named backend credentials or clients, resolved afresh for the verified person. */

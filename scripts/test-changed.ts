@@ -16,7 +16,7 @@ const RUN_ALL = new Set([
 const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).split("\n").filter(Boolean);
 const changed = new Set([...git("diff", "--name-only", "--relative", "HEAD"), ...git("ls-files", "--others", "--exclude-standard")]);
 
-const tests = ["test", "simulators/test"].flatMap((dir) =>
+const tests = ["test", "simulators/test", "widget/test"].flatMap((dir) =>
   readdirSync(`${root}${dir}`).filter((f) => f.endsWith(".test.ts")).map((f) => `${dir}/${f}`).sort(),
 );
 const covers = (file: string) => readFileSync(`${root}${file}`, "utf8").match(/^\/\/ covers: (.*)$/m)?.[1].split(/\s+/) ?? [];
