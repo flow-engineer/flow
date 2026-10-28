@@ -2,6 +2,24 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.12.1 (2026-10-28)
+
+### Changes
+
+- **`cliFile(path)` reads from the agent's folder, whatever folder the CLI runs from.** From the
+  source it resolved `path` against the working directory, so a CLI started from another folder
+  read the wrong file or failed. It now resolves from the agent's folder: the nearest
+  `package.json` above `cliFile(path, import.meta.url)`'s module, else above the command that was
+  started; from `flow check` and `flow cli pack`, which load the CLI file in the agent's folder, the
+  working directory as before. A packed CLI still reads beside the bundle.
+
+### Migration notes
+
+- **Pass `import.meta.url` to `cliFile`** where the CLI file is also loaded by something else (a
+  module the MCP server imports): `cliFile("context/icon.svg", import.meta.url)`. Without it,
+  `cliFile` looks above the command that was started, which is right for the CLI itself. A module
+  the MCP server shares can read with `new URL("../<file>", import.meta.url)` instead.
+
 ## 0.12.0 (2026-10-28)
 
 ### Changes

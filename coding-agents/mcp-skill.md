@@ -322,8 +322,12 @@ starter has it). Add `release/` to `.gitignore`.
   packs, pack runs the bundle's `--help` through a link from an empty folder and refuses it
   without `USAGE`.
 - Files the CLI reads at run time (an icon, a JSON catalogue) go in `files: ["context/icon.svg"]`
-  and are read with `readFileSync(cliFile("context/icon.svg"))` (`cliFile` from
-  `@flow-engineer/flow/cli`): beside the bundle when packed, in the agent's folder from the source.
+  and are read with `readFileSync(cliFile("context/icon.svg", import.meta.url))` (`cliFile` from
+  `@flow-engineer/flow/cli`): beside the bundle when packed; from the source, in the agent's folder
+  (the nearest package.json above the module), whatever folder the CLI runs from. A module the MCP
+  server loads too (a catalogue shared by both) reads with
+  `readFileSync(new URL("../context/catalog.json", import.meta.url))` instead, which works from the
+  source and from the bundle when the module sits one level below the package root (`src/`).
 - A packed CLI's `version` is the release's. Without `update` in the CLI file, `acme update` runs
   `curl -fsSL <base> | sh` and people hear of a newer version from `<base>/cli/version`; `<base>`
   is the hosted agent's address, else `--base-url`, else the server's origin.

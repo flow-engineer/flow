@@ -5,7 +5,8 @@
 // commands of its own. cliProblems is the rule-based check that keeps that file true to the tools;
 // it never judges taste.
 
-import { resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Command as StricliCommand, CommandContext } from "@stricli/core";
 import { FEEDBACK_NUDGE } from "../../src/skills.ts";
@@ -243,10 +244,24 @@ export function defineCli(config: CliConfig): CliConfig {
 
 /**
  * Where a file of defineCli's files is: packed, beside the bundle (the package's own folder); from
- * the source, in the folder the CLI runs from, the agent's folder as `npm run cli` runs it.
+ * the source, in the agent's folder, the nearest one with a package.json above `from` (a module's
+ * import.meta.url), else above the command that was started. Flow's own commands that load the CLI
+ * file (flow check, flow cli pack) run in the agent's folder: from them, the working directory.
  */
-export function cliFile(path: string): string {
-  return typeof __FLOW_CLI_RELEASE__ === "undefined" ? resolve(path) : fileURLToPath(new URL(`../${path}`, import.meta.url));
+export function cliFile(path: string, from?: string): string {
+  if (typeof __FLOW_CLI_RELEASE__ !== "undefined") return fileURLToPath(new URL(`../${path}`, import.meta.url));
+  const start = from ? fileURLToPath(new URL(from)) : process.argv[1] ? realpathSync(process.argv[1]) : undefined;
+  const root = start ? packageFolder(dirname(start)) : undefined;
+  const flow = root !== undefined && root === packageFolder(dirname(fileURLToPath(import.meta.url)));
+  return resolve(root && !flow ? root : process.cwd(), path);
+}
+
+/** The nearest folder at or above `dir` with a package.json. */
+function packageFolder(dir: string): string | undefined {
+  for (let at = dir; ; at = dirname(at)) {
+    if (existsSync(join(at, "package.json"))) return at;
+    if (dirname(at) === at) return undefined;
+  }
 }
 
 /**
