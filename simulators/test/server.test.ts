@@ -1,4 +1,4 @@
-// covers: simulators/src/server.ts simulators/src/platforms.ts cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts src/agent.ts src/conversation.ts src/channels.ts src/http.ts
+// covers: simulators/src/server.ts simulators/src/platforms.ts cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts src/agent.ts src/conversation.ts src/channels.ts src/http.ts src/web-chat.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, request } from "node:http";
@@ -7,8 +7,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { z } from "zod";
 import { mcpServer } from "../../mcp/src/index.ts";
-import { createAgent, sqlite, tool, WHATSAPP_CAROUSELS, type ChannelInfo, type ChannelSummary, type Deliver, type Incoming, type Model, type TemplateDefinition } from "../../src/index.ts";
-import { WHATSAPP, call, gate, multi, respond } from "../../test/helpers.ts";
+import { createAgent, sqlite, tool, webChat, WHATSAPP_CAROUSELS, type ChannelInfo, type ChannelSummary, type Deliver, type Incoming, type Model, type TemplateDefinition } from "../../src/index.ts";
+import { WHATSAPP, call, gate, multi, respond, scriptedModel } from "../../test/helpers.ts";
 import { IMESSAGE, TELEGRAM } from "../../flow-messaging/src/index.ts";
 import { playgroundClock, simulators, type AgentConnection, type Line } from "../src/index.ts";
 
@@ -385,6 +385,30 @@ test("a carousel shows as one message to swipe through; a tap on card 2's button
     await h.agent.conversation(id)!.whenIdle();
     const tap = (await h.agent.transcript(id)).find((e) => e.kind === "in" && e.choice);
     assert.ok(tap?.kind === "in" && tap.choiceId === "details:b", "the transcript keeps which button it was");
+  } finally {
+    await server.close();
+  }
+});
+
+test("the playground plays a webChat() channel in the web simulator, its carousel as one message; nothing reaches the web outbox", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "flow-sim-web-"));
+  writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
+  const scripted = scriptedModel();
+  const database = sqlite();
+  const agent = createAgent({ dir, model: scripted.model, database, channels: [webChat({ sessionKey: "w".repeat(40) })], testPeople: [SAM], debounceMs: 0, scheduleCheckMs: 0 });
+  const server = await simulators().listen(agent, 0);
+  try {
+    const sent = await fetch(`${server.url}/api/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "web", person: SAM.phone, text: "any flats?" }) });
+    assert.equal(sent.status, 202);
+    const card = (id: string) => ({ image: { url: `https://example.com/${id}.jpg` }, text: `Listing ${id}`, buttons: [{ id: `details:${id}`, label: "Details" }] });
+    (await scripted.nextCall(0)).answer(respond(call("send_web", { text: "Two listings", carousel: [card("a"), card("b")] })));
+    const id = (await agent.testConversation(SAM.phone))!;
+    await agent.conversation(id)!.whenIdle();
+    const { lines } = (await (await fetch(`${server.url}/api/transcript?channel=web&person=${encodeURIComponent(SAM.phone)}`)).json()) as { lines: Line[] };
+    const shown = lines.filter((l) => l.kind === "out");
+    assert.equal(shown.length, 1);
+    assert.ok(shown[0].kind === "out" && shown[0].carousel?.length === 2);
+    assert.deepEqual(await database.query("SELECT seq FROM web_outbox"), [], "playground replies stay in the simulator");
   } finally {
     await server.close();
   }
