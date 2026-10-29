@@ -84,8 +84,13 @@ team's own ASCII art (or `false` for none); `welcome: false` shows the help inst
 
 When nearly every tool needs an account, add `signInFirst: true`: a signed-out person is offered
 Sign in or Exit before any command, then the command they typed runs; an agent gets exit 3 with
-`acme auth login`. Leave it off when some commands work signed out (public search, docs), or list
-those in `signInFirst: { except: ["docs"] }`. `auth`, `help` and `--help` never ask.
+`acme login`. Leave it off when some commands work signed out (public search, docs), or list
+those in `signInFirst: { except: ["docs"] }`. The sign-in commands, `help` and `--help` never ask.
+
+`login` and `logout` are top level. When the product's users expect a group (`acme auth login`),
+set `signIn: { login: "auth login", logout: "auth logout" }`; every hint follows. Flow has no
+`whoami` or status command: when people need to see the account, plan or credits, write one of the
+team's own that calls the account tool, and name it as the product's users would (`whoami`).
 
 ## 8. Check it
 

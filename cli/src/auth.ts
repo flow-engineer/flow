@@ -22,7 +22,7 @@ import {
   type StoredOAuthTokens,
   type OAuthDiscoveryState,
 } from "@modelcontextprotocol/client";
-import { brandOf, HEX, logoProblem, type CliConfig, type SignInPage } from "./commands.ts";
+import { brandOf, HEX, logoProblem, signInCommand, type CliConfig, type SignInPage } from "./commands.ts";
 
 interface Saved {
   client?: StoredOAuthClientInformation;
@@ -159,7 +159,7 @@ async function advertisedClient(server: string): Promise<string | undefined> {
 
 /**
  * Whether this computer's sign-in predates the server's CLI client (it registered itself, as any
- * host does), so the tools kept to the CLI stay hidden until `auth login`. False when unsure.
+ * host does), so the tools kept to the CLI stay hidden until the next sign-in. False when unsure.
  */
 export async function signedInAsOtherClient(config: CliConfig, server: string): Promise<boolean> {
   const saved = readAll(config)[server];
@@ -185,6 +185,7 @@ export function signInPageHtml(page: SignInPage, nonce: string): string {
   const ok = status === "signed-in";
   const name = escape(brand.name);
   const cli = escape(page.cli);
+  const command = escape(page.command);
   const logo = brand.logo && !logoProblem(brand.logo)
     ? `<img class="logo" src="${escape(brand.logo)}" alt="${name}">`
     : `<div class="wordmark"><span class="initial" aria-hidden="true">${escape([...brand.name.trim()][0]?.toUpperCase() ?? "")}</span>${name}</div>`;
@@ -234,12 +235,12 @@ ${logo}
 <div class="terminal" aria-hidden="true">
 <div class="bar"><i></i><i></i><i></i><span>${cli}</span></div>
 <div class="lines">
-<div><span class="prompt">$</span> ${cli} auth login</div>
+<div><span class="prompt">$</span> ${command}</div>
 ${ok ? `<div class="good">✓ Signed in to ${name}</div>` : `<div class="fail">✕ Sign-in didn't finish</div><div class="dim"># run it again to try once more</div>`}
-<div><span class="prompt">$</span> ${ok ? "" : `${cli} auth login`}<span class="cursor"></span></div>
+<div><span class="prompt">$</span> ${ok ? "" : command}<span class="cursor"></span></div>
 </div>
 </div>
-<p class="close">${ok ? "You can close this tab." : `Run <strong>${cli} auth login</strong> in your terminal to try again.`}</p>
+<p class="close">${ok ? "You can close this tab." : `Run <strong>${command}</strong> in your terminal to try again.`}</p>
 </main>
 <script nonce="${nonce}">
 history.replaceState(null, "", location.pathname);
@@ -252,7 +253,7 @@ ${ok ? "setTimeout(function () { window.close(); }, 1500);" : ""}
 
 /** The page a sign-in ends on: the team's own when it has one (else, or if it throws, Flow's), never cached. */
 function sendPage(config: CliConfig, res: ServerResponse, code: number, status: SignInPage["status"], message: string): void {
-  const page: SignInPage = { status, brand: brandOf(config), cli: config.name, message };
+  const page: SignInPage = { status, brand: brandOf(config), cli: config.name, command: signInCommand(config), message };
   const nonce = randomBytes(16).toString("base64");
   let html: string | undefined;
   try { html = config.signInPage?.(page); } catch {}

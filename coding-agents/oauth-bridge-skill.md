@@ -19,7 +19,7 @@ origin. It has no login page: it sends the person to the brand's own login and b
 its accounts, its login and every token.
 
 ```
-Claude / ChatGPT / <cli> auth login
+Claude / ChatGPT / <cli> login
         │ discovery, registration, PKCE         (the agent's origin: /.well-known/..., /reg, /auth, /token)
         ▼
 oauthBridge ── 303 ─► brand login page ?nonce&return_to&client&resource ─► person signs in as usual
