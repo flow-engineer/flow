@@ -449,13 +449,19 @@ key is `FLOW_FRAMEWORK_CLOUD_KEY` (`flow setup` writes it into `.env`).
 npx @flow-engineer/flow deploy --json                           # staging, the first time too: sends .env's values as secrets
                                                                 # (names printed, never values), builds, follows it to live; run its next
 npx @flow-engineer/flow deploy promote --json                   # staging's live version to production, once the owner has tried it
-npx @flow-engineer/flow deploy status --json                    # what is live in each environment: version, when, URL
+npx @flow-engineer/flow deploy status --json                    # what is live in each environment: version, when, URL, trace text
 npx @flow-engineer/flow logs --since 15m                        # the hosted agent's log lines (--follow for new ones)
 npx @flow-engineer/flow conversations --grade wrong --since 7d  # its conversations with a reply graded wrong
 npx @flow-engineer/flow conversations show <id>                 # one of them: each reply's grade, rule, reason and quote
 npx @flow-engineer/flow issues                                  # the problems the grades add up to, with a suggested fix
 printf '%s' "$VALUE" | npx @flow-engineer/flow deploy secret NAME --env production   # one secret by hand, from stdin
 ```
+
+Hosting's traces carry message text by default; `deploy status` says so per environment
+(`trace text: on (Flow's default)`, or `off (set by you)`). When the owner wants it off in
+production: `echo 0 | npx @flow-engineer/flow deploy secret FLOW_FRAMEWORK_TRACES_CONTENT --env production`,
+then `npx @flow-engineer/flow deploy promote` (`echo 1` turns it back on). Going back to Flow's default
+means deleting that secret on the dashboard: tell the owner, since a CI key cannot delete secrets.
 
 Promote, or `deploy --env production`, only when the owner says so. A refused deploy lists the
 hosting lint's findings (`deploy.findings`): fix the errors and deploy again. An agent locked to a

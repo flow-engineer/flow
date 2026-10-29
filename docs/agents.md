@@ -452,10 +452,17 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
 - `promote` moves staging's live version to production, with no new build. Production keeps its
   own secrets: promote sends the `.env`'s new or changed values there first (`--no-secrets` sends none).
 - `status` shows, per environment (both unless `--env`), the deploy serving it (`status`, `version`,
-  `id`, `updated_at`), its URL and a newer one still building. `--json` prints
+  `id`, `updated_at`), its URL and a newer one still building, and whether its traces carry message
+  text: `trace text: on (Flow's default)` or `trace text: off (set by you)` (`deploy.trace_text`,
+  `{ on, source: "flow" | "owner" }`; nothing, and `null` in `--json`, on a Flow that does not say).
+  `--json` prints
   `{ ok, environments: { staging: { deploy, pending, url, from } | null, production: ... }, next }`;
   `from` is `list` (the cloud's list) or `this_folder` (the last deploy from `.flow/deploys.json`, on
   a Flow whose cloud does not list deploys to a CI key yet).
+- Trace text is on by default in hosting. To switch it off in production, set the secret, then
+  promote: `echo 0 | npx @flow-engineer/flow deploy secret FLOW_FRAMEWORK_TRACES_CONTENT --env production`,
+  then `npx @flow-engineer/flow deploy promote` (`echo 1` switches it back on). Deleting that secret
+  on the dashboard (the agent's secrets) goes back to Flow's default at the next deploy.
 - `logs` prints the hosted agent's log lines from `--since` (30s, 15m, 1h, 2d; default 1h), and with
   `--follow` keeps printing new ones; `--json` is one `{ time, severity, text }` per line. On a Flow
   whose cloud has no logs route yet it says so: `error.code` `not_available`, exit 1.

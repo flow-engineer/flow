@@ -707,10 +707,16 @@ function remembered(dir: string, environment: string): string | undefined {
   }
 }
 
+/** Whether a deploy's revision sends message text in its traces, and whether that is Flow's default or the owner's secret (absent on an older Flow). */
+interface TraceText {
+  on: boolean;
+  source: "flow" | "owner";
+}
+
 interface EnvironmentStatus {
   environment: string;
   /** The deploy serving it: the newest live one; else the newest. */
-  deploy: (Deploy & { created_at?: string; updated_at?: string; source?: string }) | null;
+  deploy: (Deploy & { created_at?: string; updated_at?: string; source?: string; trace_text?: TraceText | null }) | null;
   /** A newer deploy still on its way (building, deploying), when there is one. */
   pending: { id: string; status: string; version: string | null } | null;
   url: string | null;
@@ -761,6 +767,7 @@ async function status(ctx: Ctx, environments: string[]): Promise<number> {
     const when = d.updated_at ?? d.created_at;
     ctx.say(`${f.environment}: ${d.status}${d.version ? `, version ${d.version}` : ""}, deploy ${d.id}${when ? `, ${d.status === "live" ? "deployed" : "updated"} ${when}` : ""}${f.from === "this_folder" ? " (the last deploy from this folder)" : ""}`);
     if (d.status === "live") ctx.say(`  URL: ${f.url ?? NO_URL}`);
+    if (d.trace_text) ctx.say(`  trace text: ${d.trace_text.on ? "on" : "off"} (${d.trace_text.source === "owner" ? "set by you" : "Flow's default"})`);
     if (f.pending) ctx.say(`  then ${f.pending.id}${f.pending.version ? ` (${f.pending.version})` : ""}: ${f.pending.status}…`);
   }
   ctx.say(`Next: ${next}`);
@@ -775,6 +782,7 @@ const pick = (d: NonNullable<EnvironmentStatus["deploy"]>) => ({
   source: d.source ?? null,
   created_at: d.created_at ?? null,
   updated_at: d.updated_at ?? null,
+  trace_text: d.trace_text ?? null,
 });
 
 interface LogLine {

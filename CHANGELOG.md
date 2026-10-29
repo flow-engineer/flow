@@ -2,6 +2,21 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.14.2 (2026-10-29)
+
+### Changes
+
+- **`flow deploy status` says whether each environment's traces carry message text**, and who
+  chose it: `trace text: on (Flow's default)` or `trace text: off (set by you)`, from the deploy's
+  `trace_text: { on, source: "flow" | "owner" }`. `--json` includes it as `deploy.trace_text`
+  (`null`, and no line printed, on a Flow that does not say). To switch it in production:
+  `echo 0 | npx @flow-engineer/flow deploy secret FLOW_FRAMEWORK_TRACES_CONTENT --env production`,
+  then `npx @flow-engineer/flow deploy promote`.
+
+### Migration notes
+
+None.
+
 ## 0.14.1 (2026-10-29)
 
 ### Changes
