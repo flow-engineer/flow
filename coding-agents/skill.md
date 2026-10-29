@@ -138,7 +138,8 @@ FLOW_FRAMEWORK_TRACES_CONTENT=1                          # send what was written
 Without `FLOW_FRAMEWORK_TRACES_CONTENT=1` the dashboard
 gets ids, timing, model calls and tool names but no messages, so nothing to show or grade. `setup`
 writes it (with a comment saying so) when the traces key it adds is a test key (`otk_test_`, the
-Staging dashboard) and `.env` does not set it already; set it to 0 for metadata only. Or in
+Staging dashboard) and `.env` does not set it already; set it to 0 for metadata only. Under `flow test`
+content is on unless it is 0, since `--synthetic` says the test files hold no real data. Or in
 code: `createAgent({ ..., traces: { url, key, content: true, version: "v3" } })`. Traces are sent in the
 background after each turn and a failed send is dropped (logged once), so a dashboard outage never
 touches a chat; call `await agent.flushTraces()` before the process exits. Tests run under
@@ -157,3 +158,10 @@ git commit (`<sha>+dirty` with uncommitted changes), else `package.json`'s `vers
 in code wins. `flow test` and `flow deploy` use the same label, `agent.status().version` returns it,
 and the agent logs it once when it starts (`flow: agent version <v> (from <where>)`). A value outside
 1 to 100 letters, digits and `. _ : / + -` is not sent.
+Each trace's root span says what started it, `flow.turn.trigger`: `person`, `nudge`, `event`,
+`wake_up`, `task`, `queued_message` or `direct` (with content on, `flow.turn.trigger_text` is the
+nudge's prompt, the wake-up's note or the background result). A message sent as written (a nudge's
+`text` or `template`, a rule's answer) is a trace of its own, its send span `flow.message.as_written`.
+A nudge your code records inside a tool call (say a tool in the seller's conversation telling the
+buyer) links its trace to that call: a span link with `flow.link.kind` `queued_by`, and
+`flow.origin.trace_id`, `.span_id`, `.conversation_id`, `.tool_call_id`, `.tool_name` on the root.

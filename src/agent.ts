@@ -17,7 +17,7 @@
 
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
-import { ATTACH_EVENTS, type FlowEvents } from "./business-events/engine.ts";
+import { ATTACH_EVENTS, NUDGE_TRIGGER, type FlowEvents } from "./business-events/engine.ts";
 import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
 import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Elsewhere, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
@@ -28,7 +28,7 @@ import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFil
 import { Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
 import { clock, quietUntil, validZone } from "./time.ts";
 import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } from "./tools.ts";
-import { agentVersion, setting, traces, tracesFromEnv, type Traces, type TracesOptions } from "./traces.ts";
+import { activeCall, agentVersion, setting, traces, tracesFromEnv, type QueuedBy, type Traces, type TracesOptions, type TurnTrigger } from "./traces.ts";
 import type { BeforeSend, ChannelInfo, Deliver, Incoming, Model, Outbound, SendReceipt, Template, TemplateDefinition, Transcribe } from "./types.ts";
 
 /** What a host supplies to an agent: `createAgent({ ..., host })`. */
@@ -1194,7 +1194,7 @@ export class Agent {
   /** The fallback template for a held nudge, once, and the event that says it wanted a template of its own. */
   private async sendFallback(conversationId: string, to: { channel: string; address: string }, nudge: string, body: Record<string, unknown>): Promise<void> {
     this.settings.emit(conversationId, "template.missing", { nudge, channel: to.channel, ...(body.text !== undefined ? { text: body.text } : { prompt: body.prompt }) });
-    await this.recordNudge({ to, template: this.options.fallbackTemplate!, idempotencyKey: `fallback:${nudge}` });
+    await this.recordNudge({ to, template: this.options.fallbackTemplate!, idempotencyKey: `fallback:${nudge}`, [NUDGE_TRIGGER]: "direct" } as NudgeInput);
   }
 
   /**
@@ -1392,6 +1392,10 @@ export class Agent {
     }
     const identity = await this.nudgeIdentity(input.to, input.template !== undefined, options.via);
     if (!identity) return { id: "", status: "refused", reason: "unknown_person" };
+    // Kept with it for its trace: what queued it (a business event, Flow's own fallback), and where code ran then.
+    const trigger = (input as { [NUDGE_TRIGGER]?: TurnTrigger })[NUDGE_TRIGGER];
+    const queuedBy = this.queuedByNow();
+    const tags = { ...(trigger === "event" || trigger === "direct" ? { trigger } : {}), ...(queuedBy ? { queuedBy } : {}) };
     const to = { channel: input.to.channel, address: identity.address };
     const id = `n_${randomUUID().slice(0, 8)}`;
     const conversationId = identity.conversationId;
@@ -1414,11 +1418,11 @@ export class Agent {
     }
     if (input.at !== undefined) {
       const zone = (await this.store.conversation(conversationId))?.timeZone ?? this.options.timeZone ?? "UTC";
-      const schedule = businessSchedule(conversationId, input.to.channel, input.at, zone, { text: input.text, prompt: input.prompt }, input.respectQuietHours !== false, input.idempotencyKey ?? null);
+      const schedule = businessSchedule(conversationId, input.to.channel, input.at, zone, { text: input.text, prompt: input.prompt }, input.respectQuietHours !== false, input.idempotencyKey ?? null, queuedBy);
       const added = await add({ ...record, body: { text: input.text, prompt: input.prompt, at: input.at }, status: "scheduled" }, schedule);
       return typeof added === "number" ? { id, status: "scheduled" } : added;
     }
-    const body = { address: to.address, ...(input.template ? { template: input.template } : input.text !== undefined ? { text: input.text, ...(input.link ? { link: input.link } : {}) } : { prompt: input.prompt }) };
+    const body = { address: to.address, ...(input.template ? { template: input.template } : input.text !== undefined ? { text: input.text, ...(input.link ? { link: input.link } : {}) } : { prompt: input.prompt }), ...tags };
     const now = this.now();
     const quietEnds = input.respectQuietHours === false ? null : await this.quietEnd(conversationId, now);
     if (quietEnds !== null) {
@@ -1442,6 +1446,14 @@ export class Agent {
     if (typeof added !== "number") return added;
     void this.wake(conversationId, added);
     return { id, status: "queued" };
+  }
+
+  /** Where a nudge recorded now was queued by: the conversation and tool call code runs in, and its span when traces are on. */
+  private queuedByNow(): QueuedBy | undefined {
+    const at = activeCall.getStore();
+    if (!at) return undefined;
+    const span = this.traces?.spanOf(at.conversationId, at.toolCallId);
+    return { ...(span ?? {}), conversationId: at.conversationId, ...(at.toolCallId ? { toolCallId: at.toolCallId } : {}), ...(at.toolName ? { toolName: at.toolName } : {}) };
   }
 
   /**

@@ -305,7 +305,8 @@ kept with the session.
 The open goes to the front door with the key; the session then plays at the tunnel the cloud
 answers, with the session's own token. `--agent-version` (else the version the agent's traces
 carry: `FLOW_AGENT_VERSION`, the CI's commit, the folder's git commit or `package.json`'s `version`) and
-`--ref` (else GitHub's branch) are kept with the session; `flow test` prints the version, and keeps it
+`--ref` (else the CI's branch: GitHub's, GitLab's, Buildkite's or CircleCI's, else the folder's git
+branch; the repository's default branch goes beside it) are kept with the session; `flow test` prints the version, and keeps it
 in `--json` and `.flow/last-session.json` as `agentVersion`. A CI step (GitHub Actions shown):
 
 ```yaml

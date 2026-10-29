@@ -29,6 +29,7 @@ import {
   type Outbound,
   type PendingSend,
 } from "../src/index.ts";
+import { NUDGE_TRIGGER } from "../src/business-events/engine.ts";
 import { call, respond, scriptedModel } from "./helpers.ts";
 
 const SECRET = "whsec_test_events";
@@ -463,10 +464,11 @@ test("nudges are capped per day, per topic per day and per week; raised ones ski
   assert.deepEqual(h.reasons(weekly.eventId), ["cap: 5 nudges a week"]);
 });
 
-test("a nudge goes as its template, and when that fails as the agent's words with the stop line", async () => {
+test("a nudge goes as its template, and when that fails as the agent's words with the stop line; each send says it is an event's, for its trace", async () => {
   const h = setup({ template: "failed", reply: () => null });
   await h.events.schedule(h.nudgeSend("product:p1"));
   assert.deepEqual(h.sent.map(kindOf), ["template:watched_update", "phrased", "text"]);
+  assert.deepEqual(h.sent.map((n) => (n as { [NUDGE_TRIGGER]?: string })[NUDGE_TRIGGER]), ["event", "event", "event"]);
   assert.match(h.sent[1]!.prompt!, /end it with this line as written: Reply \*not interested\* to stop these\./);
   assert.equal(h.sent[2]!.text, "News on product:p1.\n\nReply *not interested* to stop these.");
 });
