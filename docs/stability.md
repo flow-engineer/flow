@@ -54,7 +54,7 @@ their defaults, and what `buildAgent` is passed by `flow test` and Flow's hostin
 ### The `flow` command
 
 - Commands: `new`, `init`, `chat`, `records export`, `test`, `show`, `check`, `check-endpoint`, `mcp update`, `cli`,
-  `plugin`, `login`, `logout`, `whoami`, `setup`, `link`, `status`, `deploy` (and `deploy promote`,
+  `plugin`, `login`, `logout`, `whoami`, `setup`, `link`, `status`, `projects list`, `projects delete`, `deploy` (and `deploy promote`,
   `deploy status`), `logs`, `--version`; their flags as `--help` prints them.
 - `--json` fields, and the `next` lines ([agents.md](agents.md)).
 - Exit codes: `flow test` 0 passed, 1 failed or invalid, 2 errored or not reachable, 3 refused, 130
