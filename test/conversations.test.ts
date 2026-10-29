@@ -49,8 +49,16 @@ const issues = { issues: [
   { id: "iss_2", title: "Answers in English to Hindi", status: "open", conversations: 1, first_seen: "2026-10-28T10:00:00Z", last_seen: "2026-10-28T10:00:00Z", suggested_fix: null },
 ] };
 
-/** A fake flow.engineer: pages of conversations (at most 100 asked, as Flow's), one conversation, the issues, and a refusal for cnv_bad. */
-async function server() {
+const feedback = { days: 30, words_withheld: false, feedback: [
+  { id: "jf_2", kind: "test_check", reason: "check_out_of_date", todo: "Change this check in the scenario file.", note: "We stopped asking for the order number.", at: "2026-10-29T08:00:00Z",
+    scenario: "scenarios/refund.yaml", channel: "whatsapp", check: "Asks for the order number", check_index: 1, run: "run_1", session: "ses_1", message: null, conversation: null, rules: null },
+  { id: "jf_1", kind: "reply_grade", reason: "grader_wrong", todo: "The reply was fine: do not change the agent for it.", note: null, at: "2026-10-28T08:00:00Z",
+    scenario: null, channel: null, check: null, check_index: null, run: null, session: null, message: "m2", conversation: "cnv_1", rules: ["no-made-up-actions", "tone"] },
+] };
+
+/** A fake flow.engineer: pages of conversations (at most 100 asked, as Flow's), one conversation, the issues (none resolved),
+ * the team's feedback only when given one (else 404, as an older Flow), and a refusal for cnv_bad. */
+async function server(options: { feedback?: unknown } = {}) {
   const asked: Array<{ url: string; authorization?: string }> = [];
   const http = createServer((req, res) => {
     asked.push({ url: req.url!, authorization: req.headers.authorization });
@@ -67,7 +75,8 @@ async function server() {
         : json(200, { conversations: [conversation("cnv_1", 1), conversation("cnv_2", 2)], next_cursor: "c2" });
     }
     if (url.pathname === "/v1/agent/conversations/cnv_1") return json(200, detail);
-    if (url.pathname === "/v1/agent/issues") return json(200, issues);
+    if (url.pathname === "/v1/agent/issues") return json(200, url.searchParams.get("status") === "resolved" ? { issues: [] } : issues);
+    if (url.pathname === "/v1/agent/feedback" && options.feedback) return json(200, options.feedback);
     if (url.pathname === "/v1/agent/conversations/cnv_busy") {
       res.setHeader("retry-after", "30");
       return json(503, { error: { code: "insights_unavailable", type: "unavailable", message: "Grades cannot be read right now.", hint: "Try again shortly." } });
@@ -158,12 +167,12 @@ test("flow conversations show prints the transcript with each graded reply's lab
   } finally { fake.close(); }
 });
 
-test("flow issues lists each issue with its suggested fix", { timeout: 15_000 }, async () => {
+test("flow issues lists each issue with its suggested fix; an older Flow without the feedback route adds nothing", { timeout: 15_000 }, async () => {
   const fake = await server();
   try {
     const listed = await flow(["issues", "--status", "all", "--cloud", fake.url], agentDir());
     assert.equal(listed.code, 0, listed.stderr);
-    assert.equal(fake.asked[0]!.url, "/v1/agent/issues?status=all");
+    assert.deepEqual(fake.asked.map((a) => a.url), ["/v1/agent/issues?status=all", "/v1/agent/feedback?days=30"]);
     assert.equal(listed.stdout, [
       "ID     STATUS  CONVERSATIONS  LAST SEEN             TITLE",
       "iss_1  open    3              2026-10-29 09:00:04Z  Claims actions it did not take",
@@ -171,6 +180,38 @@ test("flow issues lists each issue with its suggested fix", { timeout: 15_000 },
       "iss_2  open    1              2026-10-28 10:00:00Z  Answers in English to Hindi",
       "",
     ].join("\n"));
+  } finally { fake.close(); }
+});
+
+test("flow issues prints the team's feedback under the issues, and when there are none; --json is the issues' JSON only", { timeout: 15_000 }, async () => {
+  const fake = await server({ feedback });
+  try {
+    const dir = agentDir();
+    const listed = await flow(["issues", "--cloud", fake.url], dir);
+    assert.equal(listed.code, 0, listed.stderr);
+    const team = [
+      "",
+      "Feedback from your team (last 30 days): 2",
+      "  check out of date  scenarios/refund.yaml (whatsapp), check 2: Asks for the order number",
+      "    note: We stopped asking for the order number.",
+      "    todo: Change this check in the scenario file.",
+      "  grade marked wrong  conversation cnv_1, reply m2, rules no-made-up-actions, tone",
+      "    todo: The reply was fine: do not change the agent for it.",
+      "",
+    ];
+    assert.equal(listed.stdout, [
+      "ID     STATUS  CONVERSATIONS  LAST SEEN             TITLE",
+      "iss_1  open    3              2026-10-29 09:00:04Z  Claims actions it did not take",
+      "    fix: Only say a refund is done after refund_order returns ok.",
+      "iss_2  open    1              2026-10-28 10:00:00Z  Answers in English to Hindi",
+      ...team,
+    ].join("\n"));
+    const none = await flow(["issues", "--status", "resolved", "--cloud", fake.url], dir);
+    assert.equal(none.stdout, ["No resolved issues.", ...team].join("\n"));
+    const asked = fake.asked.length;
+    const json = await flow(["issues", "--json", "--cloud", fake.url], dir);
+    assert.equal(json.stdout, JSON.stringify(issues));
+    assert.equal(fake.asked.length, asked + 1);
   } finally { fake.close(); }
 });
 
