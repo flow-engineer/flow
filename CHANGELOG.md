@@ -2,6 +2,23 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.14.4 (2026-10-29)
+
+### Changes
+
+- **`flow issues` prints your team's feedback under the issues**, from Flow's
+  `GET /v1/agent/feedback?days=30`, also when there are no issues: `Feedback from your team (last
+  30 days): N`, then one line per item, `check out of date  <scenario> (<channel>), check <n>:
+  <check>` (a test check a teammate marked out of date: change it in the scenario file) or
+  `grade marked wrong  conversation <id>, reply <id>, rules <ids>` (a reply's grade a teammate
+  marked wrong: do not change the agent for it), each with its `note:` and `todo:`. A Flow without
+  the route prints nothing more. `--json` is unchanged: the issues' JSON only.
+- The coding-agent skill says how to act on each kind of feedback.
+
+### Migration notes
+
+None.
+
 ## 0.14.3 (2026-10-29)
 
 ### Changes
