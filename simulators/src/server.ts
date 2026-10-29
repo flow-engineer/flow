@@ -71,7 +71,7 @@ import {
   type TranscriptEntry,
 } from "../../src/index.ts";
 import type { Agent } from "../../src/agent.ts";
-import type { CliConfig } from "../../cli/src/commands.ts";
+import { signInWords, type CliConfig } from "../../cli/src/commands.ts";
 import type { CliIO } from "../../cli/src/run.ts";
 import { requireToken, sameSecret, serveNode, wrongTries } from "../../src/http.ts";
 import { PLATFORMS, channelOf, platform as platformOf, smsSegments, wirePayload, type Platform, type Wire } from "./platforms.ts";
@@ -274,7 +274,7 @@ function localCliRunner(options: LocalCliOptions, base: string): Handler & { clo
       let argv: string[];
       try { argv = cliWords(text); } catch (error) { return json(res, 400, { error: (error as Error).message }); }
       if (argv[0] === s.config.name) argv.shift();
-      if (argv.some((w) => /^--(server|token)(=|$)/.test(w))) return json(res, 400, { error: "This runner uses its configured server and its own sign-in. Use auth login." });
+      if (argv.some((w) => /^--(server|token)(=|$)/.test(w))) return json(res, 400, { error: `This runner uses its configured server and its own sign-in. Use ${signInWords(s.config).login}.` });
       if (argv[0] === "skill" && argv.some((w) => /^--write(=|$)/.test(w))) return json(res, 400, { error: "Use the installed CLI to write a skill to your computer; this runner can display it with skill." });
       emit(s, "input", `$ ${text}\n`);
       s.running = true;
@@ -957,7 +957,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       const channels = agent.channels().map((c) => ({ name: c.name, kind: c.kind, platform: platformFor(c) }));
       return json(res, 200, {
         platforms: PLATFORMS, channels, people: agent.testPeople(), cards: options.cards ?? [], authentication: !!options.authentication,
-        ...(cli && localRequest(req) ? { localCli: { channel: cli.options.channel, name: cli.options.config.name } } : {}),
+        ...(cli && localRequest(req) ? { localCli: { channel: cli.options.channel, name: cli.options.config.name, login: signInWords(cli.options.config).login } } : {}),
         templates: (agent.templates?.() ?? []).map((t) => ({ name: t.name, body: t.body })),
         panel: { person: !!(agent.contact && agent.outbox), nudge: !!agent.recordNudge, clock: !!(options.clock && agent.runDue), records: !!agent.records?.collections.length },
       });

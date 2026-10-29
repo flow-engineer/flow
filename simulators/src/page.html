@@ -1129,7 +1129,7 @@
       $("cliSend").disabled = cliRunning && !cliWaiting;
       $("cliSend").textContent = cliRunning ? "Send ↵" : "Run ↵";
       $("cliInput").placeholder = cliWaiting ? "Type a reply…" : cliRunning ? "Command running…" : `${localCli.name} --help`;
-      $("cliState").textContent = cliWaiting ? "Waiting for input" : cliRunning ? "Running" : "Ready · use auth login to sign in, chat to talk, or --help for commands";
+      $("cliState").textContent = cliWaiting ? "Waiting for input" : cliRunning ? "Running" : `Ready · use ${localCli.login} to sign in, chat to talk, or --help for commands`;
     } catch { if (epoch === cliEpoch) $("cliState").textContent = "Connection interrupted · reconnecting…"; }
     if (epoch === cliEpoch && isLocalCli()) setTimeout(() => pollCli(epoch), 400);
   }

@@ -141,8 +141,7 @@ it `mcpServer` refuses such a tool, since no caller could be told apart.
   `client: { id, kind: "cli" }` from `verify` for tokens issued to it.
 
 A CLI signed in before the server knew its client (it registered itself, as any host does) does
-not see these commands until `acme auth login`; an unknown command then says so, and `acme auth
-status --json` has `"renew": true`. Its cached tool list is never reused for the new sign-in. Other
+not see these commands until `acme login`; an unknown command then says so. Its cached tool list is never reused for the new sign-in. Other
 clients' scopes, sign-in and the brand's own checks still apply: this keeps a tool away from other
 hosts, it is not a defence against someone signing in as the CLI with their own account (a public
 client), who only gets their own data. `flow check` warns about a tool kept to the CLI when the
@@ -216,9 +215,19 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
 - A command of the team's own is any Stricli command: `"report daily": { command: buildCommand({ ... }) }`
   with `buildCommand` from `@stricli/core`; inside it, `this.cli.call(tool, input)` calls the server's
   tools and `this.cli.print(value, { json })` prints like the rest.
-  One of the CLI's own may be replaced this way: `"auth status": { command: buildCommand({ ... }) }`
-  shows the team's own account details (call a tool such as `whoami`); `auth login`, `auth logout`,
-  `tools` and `skill` stay the CLI's.
+  The CLI has no status command of its own: a team that wants one writes it, named and placed as
+  it likes, such as `whoami: { command: buildCommand({ docs: { brief: "Your account" }, parameters: {},
+  async func() { this.cli.print(await this.cli.call("account_info", {})); } }) }`.
+- `acme login` and `acme logout` sign in and out. `signIn: { login: "auth login", logout: "auth logout" }`
+  moves them (into a group of any name, beside the team's own commands there); every message, the
+  welcome, the generated skill and the sign-in page say the command as set, and `signInFirst` never
+  asks before them. Their words are refused to other commands (`defineCli` throws, `flow check`
+  says which), and freed when moved. `signIn.beforeLogout: async ({ server, token }) => { ... }` runs
+  the team's own step first, such as revoking the server's session with the stored token; if it
+  throws, its message is shown and the person is still signed out on this computer.
+  `tools` and `skill` stay the CLI's. The words before 0.14 (`auth login`, `auth logout`, `auth
+  status`) still work for a release, hidden from help, each saying what replaces it, unless the
+  team's own commands use them.
 - `exclude: ["api_keys_reveal"]` gives those tools no command of their own: not in help, completion
   or the CLI's skill. Use it when a command of the team's own wraps a tool (one that copies a key
   without printing it), or a tool has no place on the command line. The tools stay on the server,
@@ -228,10 +237,10 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
   (default the command's name): "Welcome to Olostep", the chat's title, "Olostep is ready" on the
   sign-in page and the client name a sign-in screen shows, while commands keep the command's name; `logo` an https or `data:image` URL, `accent` a six-digit hex color
   (`chat.accent` is its older name and still works); `flow check` refuses a bad color or logo.
-- `auth login` ends on a branded page in the browser: the logo (else the name's initial), the
+- `acme login` ends on a branded page in the browser: the logo (else the name's initial), the
   accent, and "Head back to your terminal" only once the code is exchanged and the tokens are
   saved, else what went wrong and the command to try again. It tries to close the tab and stays up
-  where the browser refuses. `signInPage: ({ status, brand, cli, message }) => html` replaces it
+  where the browser refuses. `signInPage: ({ status, brand, cli, command, message }) => html` replaces it
   with the team's own; it never gets the code, token or state, and is sent with no caching.
 - Run with no command at a terminal, the CLI shows a welcome: its name in block letters (in
   the brand's accent when set), `version`, "Welcome to <name>", `description`, whether the person is signed
@@ -240,7 +249,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
   help instead. Coding agents (Claude Code, Codex, Cursor), scripts and pipes always get the help.
 - `signInFirst: true` asks a person who is not signed in to Sign in or Exit before any command, then
   runs the command they typed; without a person (agents, CI) the command exits 3 with the sign-in
-  command. `auth`, `help`, `update` and `--help` never ask; `signInFirst: { except: ["docs"], message }` lets
+  command. The sign-in commands, `help`, `update` and `--help` never ask; `signInFirst: { except: ["docs"], message }` lets
   the team's own commands through and words the question. A token in `<NAME>_TOKEN` counts as signed in.
 - Installed, it is the organization's own command: `"bin": { "acme": "src/cli.ts" }` in its package
   (node runs `.ts` files outside `node_modules`). While building it, run it with
@@ -256,11 +265,16 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
   version and update `latest`. A command of the team's own named `update` replaces Flow's.
 - A tool with `format` prints its own text, rendered at a terminal (as written when piped, for
   `NO_COLOR`, or without `marked`); `--json`, `--fields`, `columns` and `view` show its data.
+  Every color the CLI shows (help, welcome, chat, Markdown) comes from one palette made from
+  `brand.accent`; red is only for failures. A code block is highlighted only when it names its
+  language (```` ```json ````). `colors: { accent, muted, success, warning, error, heading, link,
+  code, key, string, number, keyword, comment }` replaces any part with a color's name (`"green"`,
+  `"gray"`), a six-digit hex color, or `false` for the terminal's own; `flow check` refuses others.
 - Every tool command takes `--json` and `--fields a,b`; one that changes things takes `--dry-run`; one
   that may delete or overwrite asks first in a terminal and needs `--yes` without one. Exit codes: 0
   done, 1 the tool failed, 2 wrong command or arguments (with the help to read), 3 sign-in needed, 4
   needs `--yes`, 5 the server could not be reached. `--server <url>` and `--token <token>` work on
-  every command. `acme auth login` signs in on the organization's own login (tokens in
+  every command. `acme login` signs in on the organization's own login (tokens in
   `~/.config/acme/`, mode 600), `ACME_TOKEN` is for CI, `acme tools` lists every tool and schema, and
   `acme skill list` (or bare `skill`) lists the generated `acme-cli` guide and workflow skill names
   and descriptions. `acme skill get booking refunds` reads only those skills; `--json` returns an
@@ -394,7 +408,7 @@ to `play.listen(agent, port, options)` or a locally mounted `play.handler(agent,
 `cli` is the team's existing `defineCli` configuration, with its server URL; the named channel
 must exist. This opens an independent CLI session in that tab, with real stdout/stderr, exit
 codes, interactive input and confirmation prompts. It does not use the selected test person's
-identity. Run `auth login`, open the login link and return, then use commands or `chat` (`/exit`
+identity. Run `login` (or the CLI's `signIn.login`), open the login link and return, then use commands or `chat` (`/exit`
 leaves chat). Reload reconnects. New CLI session discards only this runner's temporary sign-in;
 server restart or 30 minutes without browser activity also ends it. Clear output keeps sign-in.
 An operation already accepted by the agent may still complete after its client session ends.
@@ -470,7 +484,7 @@ CLI file reads the running agent's URL with `runningAgent(dir)`.
 Without `auth`, or with `guests: true` beside it, a CLI that is not signed in chats as a guest: it
 sends a random id it keeps (header `flow-guest`), and the agent keeps that guest's conversation on
 this channel only, never joined to an account (`ctx.key` is null), so a tool that needs sign-in
-asks for it. With `auth` and no `guests`, chat answers 401 until `auth login`. Guests run turns on
+asks for it. With `auth` and no `guests`, chat answers 401 until `acme login`. Guests run turns on
 the agent's model key; limit them in front of the route if strangers can reach it.
 
 `terminalServer` accepts `path` and `channel` overrides. It verifies auth on every POST that carries a token,

@@ -21,7 +21,7 @@ A messaging agent can itself be a server-side client: its channel connection cre
 2. **The brand already exposes an OAuth authorization server.** Use it for MCP and CLI connections. On chat channels that need account sign-in, send a connection link to its existing login. A Google sign-in button in an app is not by itself an OAuth authorization server for MCP clients.
 3. **The brand has an ordinary login.** Use that login as the authentication step behind Flow’s OAuth bridge (or a self-hosted OAuth server); the `flow-framework-oauth-bridge` skill (`oauth-bridge-skill.md`) is the setup and the local test. Phone OTP, email, social login, company SSO and custom login can all finish the same connection. The brand confirms the signed-in account server-side and owns credential issuance and refresh; the OAuth layer coordinates client registration, one-time codes, PKCE and the brand-authorized token exchange. Do not add a Flow grant-selection screen by default. An existing provider can have its own required screens.
 
-A phone-first brand uses case 1 on WhatsApp and case 3 for its CLI: `auth login` opens the brand’s phone login in a browser, phone verification signs in, and OAuth returns to the CLI. The user never has to create an email account just to use another interface.
+A phone-first brand uses case 1 on WhatsApp and case 3 for its CLI: `login` opens the brand’s phone login in a browser, phone verification signs in, and OAuth returns to the CLI. The user never has to create an email account just to use another interface.
 
 ## Verified phone → account
 

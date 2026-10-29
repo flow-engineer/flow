@@ -72,7 +72,7 @@ from it unless they want another), and tell them where people see each name:
   <name>` takes it; `flow init --name <name>` too, else it is `--display-name` in lowercase and
   dashes, else the folder's name. People see it as:
   - the CLI command they type (package.json's `bin` key), in its help and every hint it prints
-    (`skycast-agent auth login`), and as the speaker in `skycast-agent chat`;
+    (`skycast-agent login`), and as the speaker in `skycast-agent chat`;
   - the CLI's variables `SKYCAST_AGENT_SERVER` and `SKYCAST_AGENT_TOKEN`, and its folder
     `~/.config/skycast-agent/`;
   - the CLI's sign-in: it registers itself with the login server as "skycast-agent CLI", which a

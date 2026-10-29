@@ -3,10 +3,11 @@ import { stripVTControlCharacters } from "node:util";
 import { CURSOR_MARKER, Editor, Markdown, ProcessTerminal, Text, TUI, matchesKey, truncateToWidth, visibleWidth, type Component, type Focusable, type Terminal, type MarkdownTheme } from "@mariozechner/pi-tui";
 
 import type { ChatSession, ChatUpdate } from "./terminal.ts";
-import { nearest256 } from "./welcome.ts";
+import { palette, type Palette } from "./colors.ts";
+import type { ColorPart } from "./commands.ts";
 
 type Entry =
-  | { kind: "user" | "reply" | "notice"; text: string; body: Component }
+  | { kind: "user" | "reply" | "notice" | "error"; text: string; body: Component }
   | { kind: "tool"; id: string; name: string; input?: unknown; output?: unknown; state: "running" | "done" | "failed" | "detached"; ms?: number };
 type ScrollAnchor = { entry: Entry | "help" | "empty"; row: number };
 
@@ -20,13 +21,6 @@ const clean = (text: string) => stripVTControlCharacters(text).replace(/[\x00-\x
 const describe = (value: unknown) => clean(typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "");
 
 // Approximate brand colors with the portable 256-color palette; never require RGB support.
-function brandColor(hex?: string): { code: string; rgb?: number[] } {
-  if (hex === undefined) return { code: "36" }; // The terminal profile's own cyan.
-  if (!/^#[0-9a-f]{6}$/i.test(hex)) throw new Error("chat.accent must be a six-digit hex color.");
-  const rgb = [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16));
-  return { code: `38;5;${nearest256(rgb)}`, rgb };
-}
-
 /** Session state and layout; the terminal is injected so layout/input tests never need a real TTY. */
 export class ChatView implements Component, Focusable {
   readonly editor: Editor;
@@ -48,6 +42,7 @@ export class ChatView implements Component, Focusable {
   private readonly color: (code: string, text: string) => string;
   private readonly dim: (text: string) => string;
   private readonly accent: (text: string) => string;
+  private readonly part: (part: ColorPart, text: string) => string;
   private readonly accentRgb?: number[];
 
   private tui: TUI;
@@ -57,12 +52,16 @@ export class ChatView implements Component, Focusable {
     this.tui = tui; this.session = session; this.exit = exit;
     this.color = (code, text) => session.color === false ? text : `\x1b[${code}m${text}\x1b[0m`;
     this.dim = text => this.color(this.light === undefined ? "22;39" : this.light ? "22;38;5;243" : "22;38;5;247", text);
-    const accent = brandColor(session.accent);
-    this.accentRgb = accent.rgb;
-    this.accent = text => this.color(`22;${accent.code}`, text);
+    // The CLI's colors (colors.ts); a session made without them gets Flow's from its accent, in the portable 256 colors.
+    const colors: Palette = session.colors ?? palette({ name: session.name, brand: session.accent ? { accent: session.accent } : undefined }, { TERM: "xterm-256color" }, session.color !== false);
+    this.part = (part, text) => this.color(`22;${colors[part]?.open ?? "39"}`, text);
+    // Muted text follows the terminal's background, unless the CLI file set it.
+    if (colors.chosen.has("muted")) this.dim = text => this.part("muted", text);
+    this.accentRgb = colors.accent?.rgb;
+    this.accent = text => this.part("accent", text);
     this.markdown = {
-      heading: text => this.color("1;39", text),
-      link: this.accent, linkUrl: this.dim, code: this.accent,
+      heading: text => this.color(`1;${colors.heading?.open ?? "39"}`, text),
+      link: text => this.part("link", text), linkUrl: this.dim, code: text => this.part("code", text),
       codeBlock: text => this.color("39", text), codeBlockBorder: this.dim,
       quote: this.dim, quoteBorder: this.dim, hr: this.dim, listBullet: this.accent,
       bold: text => this.color("1", text), italic: text => this.color("3", text),
@@ -100,7 +99,7 @@ export class ChatView implements Component, Focusable {
   animate() { if (this.busy) { this.tick++; this.tui.requestRender(); } }
   stop() { this.busy?.abort(); }
 
-  private append(kind: "user" | "reply" | "notice", text: string) {
+  private append(kind: "user" | "reply" | "notice" | "error", text: string) {
     const safe = clean(text);
     const body = kind === "reply" ? new Markdown(safe, 0, 0, this.markdown) : new Text(safe, 0, 0);
     this.entries.push({ kind, text: safe, body });
@@ -158,7 +157,8 @@ export class ChatView implements Component, Focusable {
     this.tui.requestRender();
     try { await this.session.send(text, event => { if (!request.signal.aborted) this.update(event); }, request.signal); }
     catch (error) {
-      this.append("notice", request.signal.aborted ? "Stopped waiting. Work already accepted by the agent may still finish." : error instanceof Error ? error.message : "Could not finish the request.");
+      if (request.signal.aborted) this.append("notice", "Stopped waiting. Work already accepted by the agent may still finish.");
+      else this.append("error", error instanceof Error ? error.message : "Could not finish the request.");
       if (!this.editor.getText()) this.editor.setText(text);
     } finally {
       for (const entry of this.entries) if (entry.kind === "tool" && entry.state === "running") entry.state = "detached";
@@ -256,13 +256,13 @@ export class ChatView implements Component, Focusable {
           const ms = entry.ms === undefined ? "" : ` · ${(entry.ms / 1000).toFixed(1)}s`;
           if (this.entries[index - 1]?.kind !== "tool") timeline.push("");
           const name = entry.state === "running" ? this.shimmer(entry.name) : this.color("22;39", entry.name);
-          const state = entry.state === "failed" ? this.color("31", "failed") : entry.state === "running" ? this.dim("running") : entry.state === "detached" ? this.dim("still running after you stopped waiting") : "";
+          const state = entry.state === "failed" ? this.part("error", "failed") : entry.state === "running" ? this.dim("running") : entry.state === "detached" ? this.dim("still running after you stopped waiting") : "";
           timeline.push(panelLine(`${this.accent("▏")} ${name}${state ? `  ${state}` : ""}${this.dim(ms)}`));
           if (this.details) {
             if (entry.input !== undefined) timeline.push(...new Text(`${this.color("1;39", "Input")}\n${describe(entry.input)}`, 4, 0).render(contentWidth).map(line => panelLine(line)));
             if (entry.output !== undefined) timeline.push(...new Text(`${this.color("1;39", "Result")}\n${describe(entry.output)}`, 4, 0).render(contentWidth).map(line => panelLine(line)));
           }
-        } else if (entry.kind === "notice") timeline.push(...new Text(this.dim(entry.text), 0, 0).render(contentWidth), "");
+        } else if (entry.kind === "notice" || entry.kind === "error") timeline.push(...new Text(entry.kind === "error" ? this.part("error", entry.text) : this.dim(entry.text), 0, 0).render(contentWidth), "");
         else {
           if (entry.kind === "user") {
             timeline.push("");

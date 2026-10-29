@@ -152,7 +152,7 @@ test("the CLI signs in through the bridge on the brand's own login, and the tool
     const link = /^  (http\S+)$/m.exec(text)?.[1];
     if (link) void browse(link);
   };
-  assert.equal(await runCli({ ...cli, openUrl: () => {} }, ["auth", "login"], login), 0, login.err);
+  assert.equal(await runCli({ ...cli, openUrl: () => {} }, ["login"], login), 0, login.err);
   assert.match(login.err, /paste this link into the one you want/);
   const signedIn = io();
   assert.equal(await runCli(cli, ["whoami", "--json"], signedIn), 0, signedIn.err);
@@ -178,9 +178,9 @@ test("the CLI signs in through the bridge on the brand's own login, and the tool
   const stored = JSON.stringify(await database.query("SELECT * FROM flow_oauth_artifacts"));
   assert.doesNotMatch(stored, /brand-(at|rt)-/, "the bridge keeps none of the brand's tokens");
 
-  assert.equal(await runCli(cli, ["auth", "logout"], io()), 0);
+  assert.equal(await runCli(cli, ["logout"], io()), 0);
   assert.equal(await runCli(cli, ["whoami"], io()), 3);
-  assert.equal(await runCli(cli, ["auth", "login"], io()), 0);
+  assert.equal(await runCli(cli, ["login"], io()), 0);
   assert.equal(await runCli(cli, ["whoami", "--json"], io()), 0);
   assert.deepEqual(unstamped(), []);
 });
@@ -266,14 +266,11 @@ test("a tool kept to the CLI is listed and called only for the CLI's own sign-in
   writeFileSync(file, JSON.stringify({ [server]: { client: host.client, tokens: host.tokens, tokensSavedAt: Date.now() } }));
   const old = io();
   assert.equal(await runCli(cli, ["api-keys-reveal", "--key-id", "k1"], old), 2);
-  assert.match(old.err, /Some commands need a new sign-in: run `acme auth login` to see them\./);
-  const status = io();
-  assert.equal(await runCli(cli, ["auth", "status", "--json"], status), 0);
-  assert.deepEqual(JSON.parse(status.out), { server, signedIn: true, source: "login", renew: true });
+  assert.match(old.err, /Some commands need a new sign-in: run `acme login` to see them\./);
 
   // A new sign-in is the CLI's own client: the command works, and no cached list from before is reused.
   const login = io();
-  assert.equal(await runCli(cli, ["auth", "login"], login), 0, login.err);
+  assert.equal(await runCli(cli, ["login"], login), 0, login.err);
   assert.equal(JSON.parse(readFileSync(file, "utf8"))[server].client.client_id, document.client_id);
   const listed = io();
   assert.equal(await runCli(cli, ["tools", "--json"], listed), 0, listed.err);
@@ -281,9 +278,6 @@ test("a tool kept to the CLI is listed and called only for the CLI's own sign-in
   const revealed = io();
   assert.equal(await runCli(cli, ["api-keys-reveal", "--key-id", "k1", "--json"], revealed), 0, revealed.err);
   assert.deepEqual(JSON.parse(revealed.out), { key: "secret-k1" });
-  const renewed = io();
-  assert.equal(await runCli(cli, ["auth", "status", "--json"], renewed), 0);
-  assert.equal(JSON.parse(renewed.out).renew, false);
 });
 
 /** The bridge and its MCP server for a brand, on a loopback origin of their own. */

@@ -14,17 +14,16 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { styleText } from "node:util";
 import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider, type Tool as McpTool } from "@modelcontextprotocol/client";
 import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
-import { configDir, isSignedIn, signedInAsOtherClient, signIn, signOut, storedProvider } from "./auth.ts";
+import { configDir, isSignedIn, signedInAsOtherClient, signIn, signOut, storedAccessToken, storedProvider } from "./auth.ts";
+import { colorsAt, painter, severity, type Paint } from "./colors.ts";
 import { chooseAtTerminal, person, signInQuestion, tips, waitsForSignIn, welcomeScreen } from "./welcome.ts";
 import { SKILLS_META } from "../../src/skills.ts";
 import { FORMATTED } from "../../src/tools.ts";
 import { FULL_CATALOG_META } from "../../mcp/src/describe.ts";
 import {
   BUILT_IN,
-  REPLACEABLE,
   commandEntries,
   feedbackUsage,
   commandTable,
@@ -34,7 +33,10 @@ import {
   findCommand,
   withDefaults,
   isCustom,
+  oldAuth,
   OWN_FLAGS,
+  signInCommand,
+  signInWords,
   skillFile,
   tokenEnvOf,
   typeHint,
@@ -68,7 +70,8 @@ export interface CliIO {
   /** Ask a yes-or-no question (only when interactive). */
   confirm(question: string): Promise<boolean>;
   /** Pick one of a few options (only when interactive): the chosen index, or undefined to leave. Omitted asks with confirm. */
-  choose?(question: string, options: string[]): Promise<number | undefined>;
+  /** `selected` paints the line the arrow is on, in the CLI's colors. */
+  choose?(question: string, options: string[], selected?: (text: string) => string): Promise<number | undefined>;
   /** The terminal's width, which decides whether the welcome banner fits; default 80. */
   columns?: number;
 }
@@ -93,7 +96,7 @@ export function processIO(): CliIO {
       } finally { rl.close(); }
     },
     get columns() { return process.stdout.columns; },
-    choose: (question, options) => chooseAtTerminal(question, options, !process.env.NO_COLOR && process.env.TERM !== "dumb"),
+    choose: (question, options, selected) => chooseAtTerminal(question, options, selected),
     async confirm(question) {
       const rl = createInterface({ input: process.stdin, output: process.stderr });
       try {
@@ -166,6 +169,7 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
 
 async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<number> {
   const env = io.env ?? process.env;
+  const paint = painter(colorsAt(config, io));
   const { rest, server: given, token: givenToken, refresh } = connectionFlags(config, argv);
   // A group with a default subcommand, alone, shows its help rather than running the default.
   if (rest.length && config.defaultCommands?.[rest.join(" ")] !== undefined) rest.push("--help");
@@ -176,20 +180,20 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
   const welcome = bare && config.welcome !== false && person(io);
   // A bare run without a person is a request for the help, which needs no sign-in.
   if (server && !signedIn && waitsForSignIn(config, rest) && (!bare || person(io))) {
-    const login = `${config.name} auth login`;
+    const login = signInCommand(config);
     if (!person(io)) {
       io.writeError(`${signInQuestion(config)} Run \`${login}\` (or set ${tokenEnvOf(config)}), then run this again.\n`);
       return EXIT.signIn;
     }
     // Before a command its output stays the command's own (--json), so the screen goes to stderr.
     if (config.welcome !== false) (bare ? io.write : io.writeError)(welcomeScreen(config, { server, signedIn, tokenEnv: tokenEnvOf(config) }, io, true));
-    const chosen = io.choose ? await io.choose(signInQuestion(config), ["Sign in", "Exit"]) : (await io.confirm(`${signInQuestion(config)} Sign in now?`) ? 0 : undefined);
+    const chosen = io.choose ? await io.choose(signInQuestion(config), ["Sign in", "Exit"], (text) => painter(colorsAt(config, io))(["bold", "accent"], text)) : (await io.confirm(`${signInQuestion(config)} Sign in now?`) ? 0 : undefined);
     if (chosen !== 0) { io.writeError(`Not signed in. Run \`${login}\` when you are ready.\n`); return EXIT.signIn; }
     try { await signIn(config, server, io.signal, (text) => io.writeError(text)); }
-    catch (error) { const problem = error instanceof CliExit ? error : explain(config, server, error); io.writeError(`${problem.message}\n`); return problem.code; }
+    catch (error) { const problem = error instanceof CliExit ? error : explain(config, server, error); io.writeError(`${paint(severity(problem.code), problem.message)}\n`); return problem.code; }
     forgetChat(config, server);
     io.writeError(`Signed in to ${server}.\n`);
-    if (bare) { if (config.welcome !== false) io.write(`\n${tips(config, painter(io))}\n\n`); else rest.push("--help"); }
+    if (bare) { if (config.welcome !== false) io.write(`\n${tips(config, painter(colorsAt(config, io)))}\n\n`); else rest.push("--help"); }
     else io.writeError("\n");
     if (welcome) return EXIT.ok;
   } else if (welcome) {
@@ -234,7 +238,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     writeDiscovery(file, { format: 2, at: started, server: serverVersion(connected), tools });
     return before !== JSON.stringify(tools);
   };
-  if (server && rest[0] !== "auth" && (!localOnly || refresh)) {
+  if (server && !signingIn(config, rest) && (!localOnly || refresh)) {
     try {
       file = await discoveryFile(config, server, token);
       cached = refresh ? undefined : readDiscovery(file);
@@ -247,7 +251,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     }
   }
   if (io.signal?.aborted) { await client?.close(); return EXIT.failed; }
-  if (problem && !asksHelp) { io.writeError(`${problem.message}\n`); return problem.code; }
+  if (problem && !asksHelp) { io.writeError(`${paint(severity(problem.code), problem.message)}\n`); return problem.code; }
 
   // A connected server's version is available without another tools/list. Refresh before a
   // generated call if it changed, then rebuild its parser and approval flags before sending it.
@@ -290,6 +294,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
         print: (value, options = {}) => output.write(`${render(value, options)}\n`),
       } };
       const refused = (error: unknown) => badArguments(config, wordsKnown(rest.filter(w => !w.startsWith("-")), config, tools), error, field => field);
+      const exitOf = (error: unknown) => error instanceof CliReparse ? EXIT.usage : error instanceof CliExit ? error.code : needsSignIn(error) ? EXIT.signIn : refused(error) ? EXIT.usage : EXIT.failed;
       const app = buildApplication(routes(config, server, tools, async tool => {
         try { await prepare(tool); }
         catch (error) { if (error instanceof CliReparse) reparse = true; throw error; }
@@ -298,11 +303,12 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
         scanner: { caseStyle: "original" },
         localization: { text: { ...text_en, exceptionWhileParsingArguments(exc, ansiColor) {
           executing = false;
-          return text_en.exceptionWhileParsingArguments.call(this, exc, ansiColor);
+          return paint("error", text_en.exceptionWhileParsingArguments.call(this, exc, ansiColor));
         }, exceptionWhileRunningCommand(exc, ansiColor) {
-          return exc instanceof CliReparse ? "" : exc instanceof CliExit ? exc.message : refused(exc)?.message ?? text_en.exceptionWhileRunningCommand.call(this, exc, ansiColor);
+          if (exc instanceof CliReparse) return "";
+          return paint(severity(exitOf(exc)), exc instanceof CliExit ? exc.message : refused(exc)?.message ?? text_en.exceptionWhileRunningCommand.call(this, exc, ansiColor));
         } } },
-        determineExitCode: error => error instanceof CliReparse ? EXIT.usage : error instanceof CliExit ? error.code : needsSignIn(error) ? EXIT.signIn : refused(error) ? EXIT.usage : EXIT.failed,
+        determineExitCode: exitOf,
       });
       await runStricli({ ...app, integrations: { ...app.integrations, output: { hooks: { "command:start"() {
         io.write(out); io.writeError(err); out = ""; err = ""; executing = true;
@@ -318,12 +324,11 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
       if (asksHelp) {
         const heading = (text: string) => `(?:\\u001b\\[4m)?${text}(?:\\u001b\\[24m)?\\n`;
         out = out.replace(new RegExp(`(${heading(text_en.headers.flags)}(?:  .*\\n)+)\\n+${heading(text_en.headers.commands)}[\\s\\S]*$`), "$1");
-        const paint = painter(io);
         out = out.replace(new RegExp(`^(?:${heading(text_en.headers.usage)})(?:  .*\\n)+`), `${paint("bold", text_en.headers.usage)}\n  ${config.name} <command> [flags]\n  ${config.name} <command> --help\n`);
         out = out.replace(new RegExp(`\\n${heading(text_en.headers.flags)}`), `\n${paint("bold", text_en.headers.flags)}\n`);
       }
       io.write(out); io.writeError(err);
-      if (problem) io.writeError(`\n${problem.message}\n`);
+      if (problem) io.writeError(`\n${paint(severity(problem.code), problem.message)}\n`);
       if (code < 0) {
         const words = rest.filter(w => !w.startsWith("-"));
         if (code === ExitCode.UnknownCommand && server && !token && await signedInAsOtherClient(config, server)) io.writeError(`${RENEW(config)}\n`);
@@ -344,7 +349,8 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
 
 /** The words of the command line that name a group or command, for the help hint. */
 function wordsKnown(words: string[], config: CliConfig, tools: ToolInfo[]): string[] {
-  const paths = [...commandTable(config, tools).map((c) => c.words.join(" ")), ...BUILT_IN, "auth login", "auth logout", "auth status"];
+  const commands = commandTable(config, tools).map((c) => c.words.join(" "));
+  const paths = [...commands, ...BUILT_IN, ...Object.values(signInWords(config)), ...oldAuth(config, commands)];
   const known: string[] = [];
   for (const w of words) {
     const next = [...known, w].join(" ");
@@ -516,7 +522,7 @@ if (refreshWorker) {
 
 /** Why the server could not be used, as one line and an exit code. */
 function explain(config: CliConfig, server: string, error: unknown): CliExit {
-  if (needsSignIn(error)) return new CliExit(EXIT.signIn, `Sign in first: ${config.name} auth login (or set ${tokenEnvOf(config)}).`);
+  if (needsSignIn(error)) return new CliExit(EXIT.signIn, `Sign in first: ${signInCommand(config)} (or set ${tokenEnvOf(config)}).`);
   const status = error instanceof SdkHttpError ? (error.data as { status?: number } | undefined)?.status : undefined;
   const why = short((error as Error).message);
   return new CliExit(EXIT.unreachable, status ? `${server} answered ${status}, not as an MCP server: is this its /mcp address? (${why})` : `Could not reach ${server}: ${why}`);
@@ -569,23 +575,33 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
   interface Node {
     command?: StricliCommand<CliContext>;
     children: Map<string, Node>;
+    /** The CLI's own (sign-in), and kept out of help (the old auth words). */
+    own?: boolean;
+    hidden?: boolean;
   }
   const root: Node = { children: new Map() };
   const feedback = feedbackUsage(config, tools);
-  const replaced = new Map<string, StricliCommand<CliContext>>();
-  for (const c of commandTable(config, tools)) {
-    const words = c.words.join(" ");
-    if (REPLACEABLE.has(words) && c.config && isCustom(c.config)) {
-      replaced.set(words, c.config.command);
-      continue;
+  const place = (words: string[], node: Omit<Node, "children">) => {
+    let at = root;
+    for (const word of words) {
+      if (!at.children.has(word)) at.children.set(word, { children: new Map() });
+      at = at.children.get(word)!;
     }
-    let node = root;
-    for (const word of c.words) {
-      if (!node.children.has(word)) node.children.set(word, { children: new Map() });
-      node = node.children.get(word)!;
-    }
-    node.command = c.config && isCustom(c.config) ? c.config.command : toolCommand(config, c, prepare, call, io, feedback);
+    Object.assign(at, node);
+    return at;
+  };
+  const table = commandTable(config, tools);
+  for (const c of table) place(c.words, { command: c.config && isCustom(c.config) ? c.config.command : toolCommand(config, c, prepare, call, io, feedback) });
+  const signing = signInRoutes(config, server, io);
+  for (const [key, words] of Object.entries(signInWords(config)) as Array<["login" | "logout", string]>) {
+    const at = place(words.split(" "), {});
+    if (at.command || at.children.size) throw new Error(`${config.name}: "${words}" is the CLI's ${key} command (signIn.${key}); name yours something else, or move ${key} with signIn.${key}.`);
+    Object.assign(at, { command: signing[key], own: true });
   }
+  for (const words of oldAuth(config, table.map((c) => c.words.join(" ")))) place(words.split(" "), { command: signing.old(words), own: true, hidden: true });
+  const all = (node: Node, test: (n: Node) => boolean): boolean => node.command ? test(node) : [...node.children.values()].every((n) => all(n, test));
+  const hidden = (node: Node) => all(node, (n) => Boolean(n.hidden));
+  const hide = (node: Node) => Object.fromEntries([...node.children].filter(([, n]) => hidden(n)).map(([word]) => [word, true]));
   const build = (node: Node, path: string[]): Record<string, Target> => {
     const out: Record<string, Target> = {};
     for (const [word, child] of node.children) {
@@ -595,29 +611,31 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
       else {
         const sub = build(child, here);
         const fallback = config.defaultCommands?.[here.join(" ")];
-        const brief = config.groups?.[here.join(" ")] ?? Object.keys(sub).join(", ");
+        const brief = config.groups?.[here.join(" ")] ?? [...child.children].filter(([, n]) => !hidden(n)).map(([w]) => w).join(", ");
         out[word] = fallback && sub[fallback]
-          ? buildRouteMap({ routes: sub, defaultCommand: fallback, docs: { brief, fullDescription: `${brief}\n\n\`${config.name} ${here.join(" ")}${defaultArgs(config, `${here.join(" ")} ${fallback}`)}\` runs \`${config.name} ${here.join(" ")} ${fallback}\`.` } })
-          : buildRouteMap({ routes: sub, docs: { brief } });
+          ? buildRouteMap({ routes: sub, defaultCommand: fallback, docs: { brief, hideRoute: hide(child), fullDescription: `${brief}\n\n\`${config.name} ${here.join(" ")}${defaultArgs(config, `${here.join(" ")} ${fallback}`)}\` runs \`${config.name} ${here.join(" ")} ${fallback}\`.` } })
+          : buildRouteMap({ routes: sub, docs: { brief, hideRoute: hide(child) } });
       }
     }
     return out;
   };
-  const top = build(root, []);
-  for (const word of BUILT_IN) if (top[word]) throw new Error(`${config.name}: "${word}" is the CLI's own command; name yours something else.`);
+  const built = build(root, []);
+  for (const word of BUILT_IN) if (built[word]) throw new Error(`${config.name}: "${word}" is the CLI's own command; name yours something else.`);
+  // A top-level word only the CLI's own commands use (login, or an auth group of login and logout) is listed with them.
+  const signInTop = Object.fromEntries(Object.entries(built).filter(([word]) => { const n = root.children.get(word)!; return all(n, (c) => Boolean(c.own)) && !hidden(n); }));
+  const top = Object.fromEntries(Object.entries(built).filter(([word]) => !(word in signInTop)));
   const notice = server ? `Server: ${server}` : noServer(config);
-  const paint = painter(io);
+  const paint = painter(colorsAt(config, io));
   // chat and help are the CLI's, unless the CLI file has its own.
-  const own: Record<string, Target> = {
-    tools: toolsCommand(tools, io), skill: skillCommand(config, tools, call, io, server ? refresh : undefined), auth: authRoutes(config, server, io, replaced.get("auth status")),
-  };
+  const own: Record<string, Target> = { tools: toolsCommand(tools, io), skill: skillCommand(config, tools, call, io, server ? refresh : undefined), ...signInTop };
   if (updatesItself(config)) own.update = updateCommand(config, io);
-  if (!top.help) own.help = helpCommand(config, tools, top, own, io);
-  const all = { chat: top.chat ?? buildCommand({ docs: { brief: CHAT_BRIEF }, parameters: {}, func() {} }), ...top, ...own };
-  const theirs = Object.keys(top).filter((word) => word !== "chat");
+  const signInLeaves = Object.fromEntries(Object.entries(signInWords(config)).map(([key, words]) => [words, signing[key as "login" | "logout"]]));
+  if (!top.help) own.help = helpCommand(config, tools, top, { ...own, ...signInLeaves }, io);
+  const everything = { chat: top.chat ?? buildCommand({ docs: { brief: CHAT_BRIEF }, parameters: {}, func() {} }), ...top, ...own };
+  const theirs = Object.keys(top).filter((word) => word !== "chat" && !hidden(root.children.get(word)!));
   return buildRouteMap({
-    routes: all,
-    docs: { brief: config.description ?? config.name, fullDescription: `${overview(config, all, theirs, Object.keys(own), paint)}${feedback ? `\n\n${paint("bold", "FEEDBACK")}\n  Something failed, missing or confusing? ${paint("cyan", feedback)}` : ""}\n\n${paint("dim", `${notice}\n--server <url>, --token <token> and --refresh-tools (bypass discovery cache) work on every command.`)}` },
+    routes: everything,
+    docs: { brief: config.description ?? config.name, hideRoute: hide(root), fullDescription: `${overview(config, everything, theirs, Object.keys(own), paint)}${feedback ? `\n\n${paint("bold", "FEEDBACK")}\n  Something failed, missing or confusing? ${paint("accent", feedback)}` : ""}\n\n${paint("muted", `${notice}\n--server <url>, --token <token> and --refresh-tools (bypass discovery cache) work on every command.`)}` },
   });
 }
 
@@ -636,13 +654,13 @@ function overview(config: CliConfig, all: Record<string, Target>, theirs: string
   const line = (word: string): [string, string] => [word, all[word]!.brief];
   const placed = new Set<string>();
   for (const [heading, entries] of Object.entries(config.sections ?? {})) {
-    const here = entries.filter((word) => theirs.includes(word) && !placed.has(word));
+    const here = entries.filter((word) => (theirs.includes(word) || own.includes(word)) && !placed.has(word));
     here.forEach((word) => placed.add(word));
     if (here.length) blocks.push([heading.toUpperCase(), here.map(line)]);
   }
   const rest = theirs.filter((word) => !placed.has(word));
   if (rest.length) blocks.push([placed.size ? "OTHER" : "COMMANDS", rest.map(line)]);
-  blocks.push(["THIS CLI", own.map((word) => (word === "help" ? [`help <words>`, all.help!.brief] : line(word)))]);
+  blocks.push(["THIS CLI", own.filter((word) => !placed.has(word)).map((word) => (word === "help" ? [`help <words>`, all.help!.brief] : line(word)))]);
   // chat's lines are long; the sections share their own column.
   const chat: Array<[string, string]> = all.chat!.brief === CHAT_BRIEF
     ? [[`${config.name} chat "<request>"`, CHAT_BRIEF], [`${config.name} chat`, "A conversation, until /exit (chat --help)"]]
@@ -655,21 +673,9 @@ function overview(config: CliConfig, all: Record<string, Target>, theirs: string
   const pad = (list: Array<[string, string]>) => list.map(([n, brief]): [string, string] => [n.padEnd(width), brief]);
   return [
     config.description ?? config.name,
-    [paint(["bold", "cyan"], "ASK ANYTHING"), ...rows(chat, (n) => paint(["bold", "cyan"], n))].join("\n"),
-    ...blocks.map(([heading, list]) => [paint("bold", heading), ...rows(pad(list), (n) => paint("cyan", n))].join("\n")),
+    [paint(["bold", "accent"], "ASK ANYTHING"), ...rows(chat, (n) => paint(["bold", "accent"], n))].join("\n"),
+    ...blocks.map(([heading, list]) => [paint("bold", heading), ...rows(pad(list), (n) => paint("accent", n))].join("\n")),
   ].join("\n\n");
-}
-
-type Paint = (format: Parameters<typeof styleText>[0], text: string) => string;
-
-/** Styles for a person at a terminal; none when piped, for NO_COLOR or TERM=dumb. */
-function painter(io: CliIO): Paint {
-  return atTerminal(io) ? (format, text) => styleText(format, text, { validateStream: false }) : (_format, text) => text;
-}
-
-function atTerminal(io: CliIO): boolean {
-  const env = io.env ?? process.env;
-  return io.interactive && !env.NO_COLOR && env.TERM !== "dumb";
 }
 
 /** `help <words>`: the commands whose words or descriptions have every one of them; without words, the overview. */
@@ -693,8 +699,8 @@ function helpCommand(config: CliConfig, tools: ToolInfo[], top: Record<string, T
       }
       if (!rows.length) return void io.write(`No command matches "${words.join(" ")}". ${config.name} --help lists them all.\n`);
       const width = Math.max(...rows.map(([name]) => name.length + config.name.length + 1));
-      const paint = painter(io);
-      io.write(`${rows.map(([name, brief]) => `  ${paint("cyan", `${config.name} ${name}`.padEnd(width))}  ${brief}`).join("\n")}\n`);
+      const paint = painter(colorsAt(config, io));
+      io.write(`${rows.map(([name, brief]) => `  ${paint("accent", `${config.name} ${name}`.padEnd(width))}  ${brief}`).join("\n")}\n`);
     },
   });
 }
@@ -870,11 +876,11 @@ async function updateNotice(config: CliConfig, argv: string[], io: CliIO, signal
     if (answer !== undefined) save(newest = answer);
   }
   if (!newest || !offered(newest, config.version)) return undefined;
-  const paint = painter(io);
+  const paint = painter(colorsAt(config, io));
   const line = newest.rolledBackFrom === config.version
     ? `${config.name} ${config.version} was rolled back; the version to use is ${newest.version}.`
     : `A new version of ${config.name} is out: ${newest.version} (you have ${config.version}).`;
-  return `\n${paint("dim", line)} Run ${paint("cyan", `${config.name} update`)} to get it.\n`;
+  return `\n${paint("muted", line)} Run ${paint("accent", `${config.name} update`)} to get it.\n`;
 }
 
 /** What update.latest answers: its version and, after a rollback (flow cli rollback), the version it replaced. */
@@ -1021,50 +1027,58 @@ function skillCommand(config: CliConfig, tools: ToolInfo[], call: ToolCall, io: 
 }
 
 /** An old sign-in (the CLI registered itself) hides the commands kept to the CLI until the next one. */
-const RENEW = (config: CliConfig) => `Some commands need a new sign-in: run \`${config.name} auth login\` to see them.`;
+const RENEW = (config: CliConfig) => `Some commands need a new sign-in: run \`${signInCommand(config)}\` to see them.`;
 
-function authRoutes(config: CliConfig, server: string | undefined, io: CliIO, status?: StricliCommand<CliContext>): RouteMap<CliContext> {
+/** Whether the words run a sign-in command (or its old auth words), which needs no tools. */
+function signingIn(config: CliConfig, words: string[]): boolean {
+  const paths = [...Object.values(signInWords(config)), ...oldAuth(config, commandEntries(config).map(([w]) => w))];
+  return paths.some((p) => p.split(" ").every((w, i) => words[i] === w));
+}
+
+/** The sign-in commands, and what the old auth words run: the same, after a line saying what replaces them. */
+function signInRoutes(config: CliConfig, server: string | undefined, io: CliIO) {
   const need = () => {
     if (!server) throw new CliExit(EXIT.usage, noServer(config));
     return server;
   };
-  return buildRouteMap({
-    docs: { brief: "Sign in, sign out, or see who is signed in" },
-    routes: {
-      login: buildCommand<{}, [], CliContext>({
-        docs: { brief: "Sign in on the organization's own login page" },
-        parameters: {},
-        async func() {
-          await signIn(config, need(), io.signal, (text) => io.writeError(text));
-          forgetChat(config, need());
-          io.writeError(`Signed in to ${need()}.\n`);
-        },
-      }),
-      logout: buildCommand<{}, [], CliContext>({
-        docs: { brief: "Forget this computer's sign-in" },
-        parameters: {},
-        func() {
-          signOut(config, need());
-          forgetChat(config, need());
-          io.writeError(`Signed out of ${need()}.\n`);
-        },
-      }),
-      // The CLI file's own "auth status" replaces this one.
-      status: status ?? buildCommand<{ json?: boolean }, [], CliContext>({
-        docs: { brief: "Whether you are signed in, and how" },
-        parameters: { flags: { json: { kind: "boolean", brief: "Print JSON", optional: true, withNegated: false } } },
-        async func(flags) {
-          const s = need();
-          const env = (io.env ?? process.env)[tokenEnvOf(config)];
-          const source = env ? "env" : isSignedIn(config, s) ? "login" : null;
-          const renew = source === "login" && await signedInAsOtherClient(config, s);
-          if (flags.json) return void io.write(`${JSON.stringify({ server: s, signedIn: source !== null, source, ...(source === "login" ? { renew } : {}) })}\n`);
-          io.write(`${s}: ${env ? `using ${tokenEnvOf(config)}` : source ? "signed in" : "not signed in"}\n`);
-          if (renew) io.writeError(`${RENEW(config)}\n`);
-        },
-      }),
+  const login = async () => {
+    await signIn(config, need(), io.signal, (text) => io.writeError(text));
+    forgetChat(config, need());
+    io.writeError(`Signed in to ${need()}.\n`);
+  };
+  const logout = async () => {
+    const s = need();
+    let warned = false;
+    if (config.signIn?.beforeLogout && isSignedIn(config, s)) {
+      try { await config.signIn.beforeLogout({ server: s, token: await storedAccessToken(config, s, false, io.signal) }); }
+      catch (error) { warned = true; io.writeError(`${painter(colorsAt(config, io))("warning", error instanceof Error ? error.message : String(error))}\n`); }
+    }
+    signOut(config, s);
+    forgetChat(config, s);
+    io.writeError(`Signed out of ${s}${warned ? " on this computer only" : ""}.\n`);
+  };
+  const status = async (flags: { json?: boolean }) => {
+    const s = need();
+    const env = (io.env ?? process.env)[tokenEnvOf(config)];
+    const source = env ? "env" : isSignedIn(config, s) ? "login" : null;
+    const renew = source === "login" && await signedInAsOtherClient(config, s);
+    if (flags.json) return void io.write(`${JSON.stringify({ server: s, signedIn: source !== null, source, ...(source === "login" ? { renew } : {}) })}\n`);
+    io.write(`${s}: ${env ? `using ${tokenEnvOf(config)}` : source ? "signed in" : "not signed in"}\n`);
+    if (renew) io.writeError(`${RENEW(config)}\n`);
+  };
+  const json = { json: { kind: "boolean", brief: "Print JSON", optional: true, withNegated: false } } as const;
+  const now = signInWords(config);
+  return {
+    login: buildCommand<{}, [], CliContext>({ docs: { brief: "Sign in on the organization's own login page" }, parameters: {}, func: login }),
+    logout: buildCommand<{}, [], CliContext>({ docs: { brief: "Forget this computer's sign-in" }, parameters: {}, func: logout }),
+    old(words: string) {
+      const replaced = words === "auth login" ? now.login : words === "auth logout" ? now.logout : undefined;
+      const say = () => io.writeError(`\`${config.name} ${words}\` ${replaced ? `is now \`${config.name} ${replaced}\`` : "is going away"}; the old words stop working in 0.15.\n`);
+      return replaced
+        ? buildCommand<{}, [], CliContext>({ docs: { brief: `Same as ${replaced}` }, parameters: {}, async func() { say(); await (words === "auth login" ? login : logout)(); } })
+        : buildCommand<{ json?: boolean }, [], CliContext>({ docs: { brief: "Whether you are signed in, and how" }, parameters: { flags: json }, async func(flags) { say(); await status(flags); } });
     },
-  });
+  };
 }
 
 type Block = { type: string; text?: string };

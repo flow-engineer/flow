@@ -142,10 +142,24 @@ export interface CliConfig {
   /**
    * Sign-in comes first: a person who is not signed in is offered Sign in or Exit before any
    * command, then the command they typed runs. Without a terminal (coding agents, CI) the command
-   * exits 3 with the sign-in command instead. `auth`, `help`, `update` and `--help` never ask; `except` adds
+   * exits 3 with the sign-in command instead. The sign-in commands, `help`, `update` and `--help` never ask; `except` adds
    * the team's own commands by their first words (["docs"]); `message` replaces the question.
    */
   signInFirst?: boolean | { message?: string; except?: string[] };
+  /**
+   * The sign-in commands, by their words: `login` and `logout` (the defaults) are top level, and
+   * "auth login" puts one in a group. Every message that says how to sign in uses them.
+   * `beforeLogout` runs the team's own step before this computer's sign-in is forgotten (revoking
+   * the server's session); if it throws, the person is still signed out here and told why.
+   */
+  signIn?: { login?: string; logout?: string; beforeLogout?: (signedIn: { server: string; token?: string }) => void | Promise<void> };
+  /**
+   * The CLI's colors at a terminal: the help, the welcome, the chat and the Markdown tools and the
+   * agent write. Each part takes a color's name ("green", "gray"), a six-digit hex color, or false
+   * for the terminal's own. Parts left out keep Flow's: the accent is brand.accent (else cyan) and
+   * links, inline code, keys and keywords follow it; red is kept for errors.
+   */
+  colors?: Partial<Record<ColorPart, string | false>>;
   /**
    * The browser page a sign-in ends on, as HTML, replacing Flow's branded page. It gets only what
    * the page shows, never the code, token or state; Flow sends it with no caching.
@@ -168,6 +182,20 @@ export interface CliConfig {
   files?: string[];
 }
 
+/**
+ * What `colors` sets. `accent`: the brand's color, on command names, the banner, the chat's names
+ * and what is selected. `muted`: hints and secondary lines. `success`, `warning` and `error`: what
+ * went right, what needs doing, and what failed. In Markdown: `heading`, `link`, `code` (inline),
+ * and in a code block that names its language, `key` (of JSON, YAML), `string`, `number` (and
+ * true, false, null), `keyword` and `comment`.
+ */
+export type ColorPart = "accent" | "muted" | "success" | "warning" | "error" | "heading" | "link" | "code" | "key" | "string" | "number" | "keyword" | "comment";
+
+export const COLOR_PARTS: readonly ColorPart[] = ["accent", "muted", "success", "warning", "error", "heading", "link", "code", "key", "string", "number", "keyword", "comment"];
+
+/** The color names `colors` takes, as the terminal draws them. */
+export const COLOR_NAMES = new Set(["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "gray", "grey", "blackBright", "redBright", "greenBright", "yellowBright", "blueBright", "magentaBright", "cyanBright", "whiteBright"]);
+
 export interface Brand {
   name?: string;
   logo?: string;
@@ -180,6 +208,8 @@ export interface SignInPage {
   brand: Brand & { name: string };
   /** The command's name ("olostep"), to say where to go back to. */
   cli: string;
+  /** How to sign in from the terminal ("olostep login"), to say how to try again. */
+  command: string;
   message: string;
 }
 
@@ -236,6 +266,8 @@ declare const __FLOW_CLI_RELEASE__: { version: string; update: { command: string
  * update's command and latest, where the file leaves them out, are the address it is served from.
  */
 export function defineCli(config: CliConfig): CliConfig {
+  const problems = signInProblems(config, commandEntries(config).flatMap(([w, c]) => [w, ...(!isCustom(c) && c.alias ? [c.alias] : [])]));
+  if (problems.length) throw new Error(`${config.name}: ${problems.join("; ")}`);
   if (typeof __FLOW_CLI_RELEASE__ === "undefined") return config;
   const release = __FLOW_CLI_RELEASE__;
   return { ...config, version: release.version, update: { command: config.update?.command ?? release.update.command, latest: config.update?.latest ?? release.update.latest } };
@@ -347,10 +379,51 @@ export function isCustom(config: ToolCommand | CustomCommand): config is CustomC
 const HOST_ONLY = new Set(["read_skill"]);
 
 /** Words the CLI keeps for itself. */
-export const BUILT_IN = new Set(["auth", "tools", "skill"]);
+export const BUILT_IN = new Set(["tools", "skill"]);
 
-/** The CLI's own commands a command of the team's own (buildCommand) may replace. */
-export const REPLACEABLE = new Set(["auth status"]);
+/** "  auth   login " → "auth login". */
+const joined = (text: string) => text.trim().split(/\s+/).join(" ");
+
+/** The sign-in commands' words: signIn's, else `login` and `logout`. */
+export function signInWords(config: CliConfig): { login: string; logout: string } {
+  return { login: joined(config.signIn?.login ?? "login"), logout: joined(config.signIn?.logout ?? "logout") };
+}
+
+/** How to sign in, as every message says it: "acme login". */
+export function signInCommand(config: CliConfig): string {
+  return `${config.name} ${signInWords(config).login}`;
+}
+
+/** The sign-in commands' words before 0.12, kept working (hidden, with a notice) for a release where nothing else uses them. */
+export const OLD_AUTH = ["auth login", "auth logout", "auth status"];
+
+/** The old auth words still kept: those no command, group or sign-in command of the CLI's uses. */
+export function oldAuth(config: CliConfig, paths: string[]): string[] {
+  const taken = [...paths.map(joined), ...Object.values(signInWords(config))];
+  return OLD_AUTH.filter((w) => !taken.some((p) => p === w || p === "auth" || p.startsWith(`${w} `)));
+}
+
+/** What is wrong with the sign-in commands' words, alone and against the commands' words, one sentence each. */
+export function signInProblems(config: CliConfig, commands: string[]): string[] {
+  const errors: string[] = [];
+  const own = signInWords(config);
+  for (const [key, w] of Object.entries(own)) {
+    const setting = `signIn.${key}`;
+    if (!/^[a-z][a-z0-9-]*( [a-z][a-z0-9-]*)*$/.test(w)) {
+      errors.push(`${setting} must be words of lowercase letters, digits and -, such as "${key}" or "auth ${key}"`);
+      continue;
+    }
+    const first = w.split(" ")[0]!;
+    if (BUILT_IN.has(first)) errors.push(`${setting}: ${first} is the CLI's own (${[...BUILT_IN].join(", ")})`);
+    for (const command of new Set(commands.map(joined))) {
+      if (command === w) errors.push(`command "${command}": it is the CLI's ${key} command (${setting}); name yours something else, or move ${key} with ${setting}`);
+      else if (command.startsWith(`${w} `)) errors.push(`command "${command}": ${w} is the CLI's ${key} command (${setting}), so it cannot be a group`);
+      else if (w.startsWith(`${command} `)) errors.push(`command "${command}": it is the group of the CLI's ${key} command (${setting} "${w}"), so it cannot be a command`);
+    }
+  }
+  if (own.login === own.logout || own.login.startsWith(`${own.logout} `) || own.logout.startsWith(`${own.login} `)) errors.push("signIn.login and signIn.logout must be two commands, neither the group of the other");
+  return errors;
+}
 
 /** Whether `update` is the CLI's own: update is set and the CLI file names no command of its own `update`. */
 export function updatesItself(config: CliConfig): boolean {
@@ -571,7 +644,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
     if (![...words.keys()].some((w) => w.startsWith(`${key} `))) errors.push(`defaultCommands: "${key}" is not a group`);
     else if (/\s/.test(sub.trim()) || !words.has(`${key} ${sub.trim()}`)) errors.push(`defaultCommands: "${key} ${sub}" is not a command of the group "${key}"`);
   }
-  const tops = new Set([...words.keys()].map((key) => key.split(" ")[0]!));
+  const tops = new Set([...words.keys(), ...Object.values(signInWords(config))].map((key) => key.split(" ")[0]!));
   const placed = new Map<string, string>();
   for (const [heading, entries] of Object.entries(config.sections ?? {})) {
     for (const entry of entries) {
@@ -580,11 +653,14 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
       else placed.set(entry, heading);
     }
   }
-  const own = new Set(commandEntries(config).filter(([, c]) => isCustom(c)).map(([w]) => w.trim().split(/\s+/).join(" ")));
+  errors.push(...signInProblems(config, [...words.keys()]));
+  for (const [part, value] of Object.entries(config.colors ?? {})) {
+    if (!COLOR_PARTS.includes(part as ColorPart)) errors.push(`colors.${part} is not a part Flow colors (${COLOR_PARTS.join(", ")})`);
+    else if (value !== false && !(typeof value === "string" && (HEX.test(value) || COLOR_NAMES.has(value)))) errors.push(`colors.${part} must be a color's name (green, gray, ...), a six-digit hex color, or false`);
+  }
   for (const [key, owner] of words) {
     const first = key.split(" ")[0]!;
-    if (REPLACEABLE.has(key) && !own.has(key)) errors.push(`command "${key}": only a command of your own (buildCommand) can replace the CLI's ${key}`);
-    else if (BUILT_IN.has(first) && !REPLACEABLE.has(key)) errors.push(`command "${key}": ${first} is the CLI's own (${[...BUILT_IN].join(", ")})`);
+    if (BUILT_IN.has(first)) errors.push(`command "${key}": ${first} is the CLI's own (${[...BUILT_IN].join(", ")})`);
     for (const other of words.keys()) {
       if (other !== key && other.startsWith(`${key} `)) errors.push(`command "${key}" (${owner}): it is also the group of "${other}"; a word is a command or a group, not both`);
     }
@@ -606,7 +682,7 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     "",
     `Run \`${name} <command> --json\` and read the JSON; never parse the human output. \`--fields a,b\` keeps only those fields.`,
     "Commands that change things accept `--dry-run` (shows the call, sends nothing) and, when they may delete or overwrite, need `--yes` without a terminal.",
-    `Sign in once with \`${name} auth login\`, or set ${tokenEnvOf(config)} in CI.`,
+    `Sign in once with \`${signInCommand(config)}\`, or set ${tokenEnvOf(config)} in CI.`,
     "Tool definitions may be cached; add `--refresh-tools` to fetch current commands and schemas.",
     `List workflow summaries with \`${name} skill list\`; read selected instructions with \`${name} skill get <name> [name...]\` before doing what they cover.`,
     `Find a command by what it does with \`${name} help <words>\` (every word must match its name or description).`,

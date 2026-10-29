@@ -1,4 +1,4 @@
-// covers: cli/src/chat-ui.ts cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/skills.ts src/agent.ts src/channels.ts
+// covers: cli/src/chat-ui.ts cli/src/colors.ts cli/src/welcome.ts cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/skills.ts src/agent.ts src/channels.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -15,7 +15,8 @@ import { after, test } from "node:test";
 import { z } from "zod";
 import { buildCommand } from "@stricli/core";
 import { cliProblems, command, commandTable, defineCli, runCli, skillFile, type CliConfig, type CliIO } from "../cli/src/index.ts";
-import { signOut, storedProvider } from "../cli/src/auth.ts";
+import { isSignedIn, signOut, storedProvider } from "../cli/src/auth.ts";
+import { palette } from "../cli/src/colors.ts";
 import { feedbackUsage } from "../cli/src/commands.ts";
 import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
 import { scriptedModel, respond, call } from "./helpers.ts";
@@ -284,6 +285,63 @@ test("a tool's format is what people see, rendered at a terminal; --json, --fiel
   assert.equal(await run(cli(["key.id", "manage_url"]), []), "key.id      key_1\nmanage_url  https://acme.test/keys\n");
 });
 
+// cli-highlight paints strings red: Flow gives code blocks its own theme, which a CLI file may replace.
+test("Markdown at a terminal uses no red, highlights only code blocks that name a language, and takes the CLI file's colors", async () => {
+  const markdown = '# Title\n\n```json\n{"a": "b", "n": 1}\n```\n\n```\nplain "text" if return 42\n```\n\nSee `x`.\n';
+  // marked-terminal highlights only when chalk, loaded once per process, sees a color terminal; tests write to pipes.
+  const run = (colors?: CliConfig["colors"]) => new Promise<string>((done, fail) => {
+    const script = `import { forTerminal } from ${JSON.stringify(pathToFileURL(join(import.meta.dirname, "../cli/src/terminal.ts")).href)};
+process.stdout.write(await forTerminal(${JSON.stringify(markdown)}, { interactive: true, env: { TERM: "xterm" } }, { name: "acme", colors: ${JSON.stringify(colors ?? {})} }));`;
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, FORCE_COLOR: "1" } });
+    let out = "";
+    child.stdout.on("data", (chunk) => (out += chunk));
+    child.on("error", fail).on("close", (code) => (code === 0 ? done(out) : fail(new Error(`exit ${code}`))));
+  });
+  const flow = await run();
+  assert.doesNotMatch(flow, /\u001b\[(31|91)m/);
+  assert.match(flow, /\u001b\[36m"a"\u001b\[39m: \u001b\[32m"b"\u001b\[39m, \u001b\[36m"n"\u001b\[39m: \u001b\[33m1\u001b\[39m/, "keys in the accent, strings green, numbers yellow");
+  assert.match(flow, /\n {4}plain "text" if return 42\n/, "a block that names no language is not guessed at");
+  assert.match(flow, /\u001b\[1mTitle\u001b\[22m/);
+  const theirs = await run({ string: "magenta", key: false, heading: "#645bff", code: "red" });
+  assert.match(theirs, /"a": \u001b\[35m"b"\u001b\[39m/);
+  assert.match(theirs, /\u001b\[1;94mTitle\u001b\[22;39m/);
+  assert.match(theirs, /\u001b\[31mx\u001b\[39m/, "red when the CLI file asks for it");
+  assert.deepEqual(cliProblems(defineCli({ name: "acme", colors: { string: "pink", links: "blue" } as never }), []).errors, ["colors.string must be a color's name (green, gray, ...), a six-digit hex color, or false", "colors.links is not a part Flow colors (accent, muted, success, warning, error, heading, link, code, key, string, number, keyword, comment)"]);
+});
+
+test("one color scheme reaches the help, the welcome and the full-screen chat, in colors.accent over the brand's", async () => {
+  const cli = defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-")), brand: { accent: "#645bff" }, colors: { accent: "#00ff00", muted: "magenta" } });
+  const run = async (argv: string[]) => {
+    const out = io(true); out.channel.env = { TERM: "xterm-256color" }; out.channel.columns = 100;
+    assert.equal(await runCli(cli, argv, out.channel), 0);
+    return out.out;
+  };
+  assert.match(await run(["--help"]), /\u001b\[38;5;46mtools/, "command names in the accent");
+  const welcome = await run([]);
+  assert.match(welcome, / {4}\u001b\[38;5;46macme chat/);
+  assert.match(welcome, /\u001b\[35mSee every command/);
+  const colors = palette(cli, { TERM: "xterm-256color" });
+  const tui = new TUI(fakeChatTerminal(90, 40).terminal);
+  const frame = new ChatView(tui, { name: "Acme", accent: "#645bff", colors, reset() {}, async send() {} }, () => {}).render(90).join("\n");
+  assert.match(frame, /38;5;46m/);
+  assert.doesNotMatch(frame, /38;5;63m/, "colors.accent replaces brand.accent everywhere");
+});
+
+test("a failure is printed in the error color and a sign-in needed in the warning color, at a terminal only", async () => {
+  const run = async (colors: CliConfig["colors"], interactive: boolean) => {
+    const out = io(interactive); out.channel.env = { TERM: "xterm" };
+    const code = await runCli(defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-")), server: "http://127.0.0.1:9/mcp", colors }), ["anything"], out.channel);
+    return [code, out.err] as const;
+  };
+  assert.deepEqual(await run(undefined, true), [5, "\u001b[31mCould not reach http://127.0.0.1:9/mcp: fetch failed\u001b[39m\n"]);
+  assert.match((await run({ error: "magenta" }, true))[1], /^\u001b\[35mCould not reach/);
+  assert.match((await run(undefined, false))[1], /^Could not reach [^\u001b]*$/, "piped, no escapes");
+  const out = io(true); out.channel.env = { TERM: "xterm" };
+  const { server } = await signInServers();
+  assert.equal(await runCli(defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-")), server }), ["my-orders"], out.channel), 3);
+  assert.match(out.err, /^\u001b\[33mSign in first: acme login/);
+});
+
 // cli-table3 paints headers red, and only in named colors: Flow paints them itself.
 test("a rendered table's headers are in the brand's accent, in as many colors as the terminal shows, else cyan", async () => {
   const report = tool({ name: "report", description: "A report.", input: z.object({}), output: z.object({ rows: z.number() }), signIn: "none", hints: { readOnly: true }, run: () => ({ rows: 1 }), format: () => "| Name | Size |\n|---|---|\n| a | 1 |\n" });
@@ -318,11 +376,11 @@ test("a group's help lists its subcommands, and the top level lists groups and c
   assert.match(top.out, /\n {2}order +list, view\n/, "the group, with its subcommands as its line");
   assert.match(top.out, /\n {2}cancel-order +Cancel order\n/, "a tool the file does not name keeps its own name");
   assert.doesNotMatch(top.out.slice(top.out.indexOf("COMMANDS")), /\n {2}(list|view) /, "subcommands are not listed at the top");
-  assert.match(top.out.slice(top.out.indexOf("THIS CLI")), /\n {2}tools .*\n {2}skill .*\n {2}auth .*\n {2}help <words> /);
+  assert.match(top.out.slice(top.out.indexOf("THIS CLI")), /\n {2}tools .*\n {2}skill .*\n {2}login .*\n {2}logout .*\n {2}help <words> /);
 
   const styled = io(true);
   assert.equal(await runCli(cli, ["--help"], { ...styled.channel, env: {} }), 0);
-  assert.match(styled.out, /\u001b\[1m\u001b\[36mASK ANYTHING/, "at a terminal, headings and chat stand out");
+  assert.match(styled.out, /\u001b\[1;36mASK ANYTHING/, "at a terminal, headings and chat stand out");
   assert.equal(styled.out.replace(/\u001b\[[0-9;]*m/g, ""), top.out, "styling adds no text");
 
   const sectioned = io();
@@ -340,7 +398,7 @@ test("help <words> finds commands by their words and descriptions, the CLI's own
   };
   assert.equal(await found("order"), "  acme order list    List orders\n  acme order view    Get order\n  acme cancel-order  Cancel order\n");
   assert.equal(await found("cancel", "order"), "  acme cancel-order  Cancel order\n", "every word must match");
-  assert.equal(await found("sign"), "  acme auth  Sign in, sign out, or see who is signed in\n");
+  assert.equal(await found("sign"), "  acme login   Sign in on the organization's own login page\n  acme logout  Forget this computer's sign-in\n");
   assert.equal(await found("refund"), `No command matches "refund". acme --help lists them all.\n`);
 });
 
@@ -817,22 +875,22 @@ async function signInServers(token: () => Promise<number> | number = () => 200) 
   return { server, openUrl, registrations: () => registrations, pages, answered };
 }
 
-test("auth login signs in on the organization's own login, and the token is kept at mode 600", async () => {
+test("login signs in on the organization's own login, and the token is kept at mode 600", async () => {
   const { server, openUrl, registrations } = await signInServers();
   const cli: CliConfig = { ...defineCli({ name: "acme", server }), openUrl };
 
   const before = io();
   assert.equal(await runCli(cli, ["my-orders"], before.channel), 3, "signed out, a signed-in tool asks for sign-in");
-  assert.match(before.err, /acme auth login/);
+  assert.match(before.err, /acme login/);
 
-  assert.equal(await runCli(cli, ["auth", "login"], io().channel), 0);
+  assert.equal(await runCli(cli, ["login"], io().channel), 0);
   assert.equal(statSync(join(process.env.XDG_CONFIG_HOME!, "acme", "auth.json")).mode & 0o777, 0o600);
   const after = io();
   assert.equal(await runCli(cli, ["my-orders", "--json"], after.channel), 0);
   assert.deepEqual(JSON.parse(after.out), { for: "user-7" });
   assert.equal(registrations(), 1);
   const registered = { ...cli, name: "registered-client", clientId: "known-client" };
-  assert.equal(await runCli(registered, ["auth", "login"], io().channel), 0);
+  assert.equal(await runCli(registered, ["login"], io().channel), 0);
   assert.equal(registrations(), 1, "an existing provider's registered client never requires DCR");
 });
 
@@ -843,7 +901,7 @@ test("the sign-in page shows the brand, and says signed in only once the code is
   const exchange = new Promise<void>((r) => (exchanging = r));
   const { server, openUrl, pages, answered } = await signInServers(async () => { exchanging(); await gate; return 200; });
   const brand = { name: "Acme <Coffee>", accent: "#645bff", logo: "https://acme.test/logo.svg" };
-  const login = runCli({ ...defineCli({ name: "acme", server, brand }), openUrl }, ["auth", "login"], io().channel);
+  const login = runCli({ ...defineCli({ name: "acme", server, brand }), openUrl }, ["login"], io().channel);
   await exchange;
   assert.equal(pages.length, 0, "the browser waits while the code is exchanged");
   release();
@@ -865,15 +923,15 @@ test("a failed code exchange shows the failure page; a team's own page gets only
   const seen: unknown[] = [];
   const cli: CliConfig = { ...defineCli({ name: "acme", server, chat: { accent: "#b85c00" }, signInPage: (page) => (seen.push(page), `<h1>${page.status}</h1>`) }), openUrl };
   const failed = io();
-  assert.notEqual(await runCli(cli, ["auth", "login"], failed.channel), 0);
+  assert.notEqual(await runCli(cli, ["login"], failed.channel), 0);
   const pages = await answered();
   assert.equal(await pages[0]!.text(), "<h1>failed</h1>");
-  assert.deepEqual(seen, [{ status: "failed", brand: { name: "acme", accent: "#b85c00" }, cli: "acme", message: "The sign-in came back but could not be completed. Your terminal says why." }], "chat.accent is the brand's accent; no code, token or state");
+  assert.deepEqual(seen, [{ status: "failed", brand: { name: "acme", accent: "#b85c00" }, cli: "acme", command: "acme login", message: "The sign-in came back but could not be completed. Your terminal says why." }], "chat.accent is the brand's accent; no code, token or state");
   assert.equal(pages[0]!.headers.get("cache-control"), "no-store");
 
   const plain: CliConfig = { ...cli, signInPage: undefined };
-  assert.notEqual(await runCli(plain, ["auth", "login"], io().channel), 0);
-  assert.match(await (await answered())[1]!.text(), /Sign-in didn't finish[\s\S]*acme auth login/);
+  assert.notEqual(await runCli(plain, ["login"], io().channel), 0);
+  assert.match(await (await answered())[1]!.text(), /Sign-in didn't finish[\s\S]*acme login/);
 });
 
 test("flow check refuses a brand color or logo a browser cannot use", () => {
@@ -885,21 +943,66 @@ test("flow check refuses a brand color or logo a browser cannot use", () => {
   assert.deepEqual(cliProblems(defineCli({ name: "acme", servers: { production: "http://cli.acme.test/mcp" } }), []).errors, ["servers.production must be an https URL, such as https://cli.acme.com/mcp"]);
 });
 
-// No test replaces one of the CLI's own commands; this is the one that may be.
-test("a command of the team's own replaces auth status; login and logout stay the CLI's", async () => {
-  const status = buildCommand({ docs: { brief: "Your Acme account" }, parameters: {}, func(this: import("../cli/src/commands.ts").CliContext) { this.cli.print({ plan: "pro" }, { json: true }); } });
-  const cli = defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "flow-cli-status-")), commands: { "auth status": { command: status } } });
-  assert.deepEqual(cliProblems(cli, []).errors, []);
-  const ran = io();
-  assert.equal(await runCli(cli, ["auth", "status"], ran.channel), 0);
-  assert.deepEqual(JSON.parse(ran.out), { plan: "pro" });
+test("the sign-in commands are where signIn puts them, beside the team's own, and every message names them", async () => {
+  const whoami = buildCommand({ docs: { brief: "Your Acme account" }, parameters: {}, func(this: import("../cli/src/commands.ts").CliContext) { this.cli.print({ plan: "pro" }, { json: true }); } });
+  const directory = mkdtempSync(join(testDirectory, "flow-cli-signin-"));
+  const cli = defineCli({ name: "acme", server: "http://127.0.0.1:9/mcp", directory, signIn: { login: "auth login", logout: "auth logout" }, signInFirst: true, commands: { "auth whoami": { command: whoami }, login: { command: whoami } } });
+  assert.deepEqual(cliProblems(cli, []).errors, [], "moved, login is free for the team's own");
   const help = io();
   assert.equal(await runCli(cli, ["auth", "--help"], help.channel), 0);
-  assert.match(help.out, /login[\s\S]*logout[\s\S]*status +Your Acme account/);
-  assert.deepEqual(cliProblems(defineCli({ name: "acme", commands: { "auth status": { tool: "whoami" }, "auth login": { command: status } } }), [{ name: "whoami", inputSchema: {} }]).errors, [
-    'command "auth status": only a command of your own (buildCommand) can replace the CLI\'s auth status',
-    'command "auth login": auth is the CLI\'s own (auth, tools, skill)',
-  ]);
+  assert.match(help.out, /login[\s\S]*logout[\s\S]*whoami +Your Acme account/);
+  const gated = io();
+  assert.equal(await runCli(cli, ["auth", "whoami"], gated.channel), 3, "a team's own command still waits for sign-in");
+  assert.match(gated.err, /Run `acme auth login`/);
+  assert.match(skillFile(cli, []), /Sign in once with `acme auth login`/);
+  const out = io();
+  assert.equal(await runCli(cli, ["auth", "logout"], out.channel), 0, "the sign-in commands never wait for sign-in");
+  assert.match(out.err, /^Signed out of /);
+
+  const login = buildCommand({ docs: { brief: "Mine" }, parameters: {}, func() {} });
+  assert.throws(() => defineCli({ name: "acme", commands: { login: { command: login } } }), /command "login": it is the CLI's login command \(signIn\.login\)/);
+  assert.throws(() => defineCli({ name: "acme", signIn: { login: "auth login" }, commands: { auth: { command: login } } }), /command "auth": it is the group of the CLI's login command/);
+  assert.deepEqual(cliProblems({ name: "acme" }, [{ name: "logout", inputSchema: {} }]).errors, ['command "logout": it is the CLI\'s logout command (signIn.logout); name yours something else, or move logout with signIn.logout']);
+  assert.deepEqual(cliProblems({ name: "acme", signIn: { login: "Sign In", logout: "login" } }, []).errors, ['signIn.login must be words of lowercase letters, digits and -, such as "login" or "auth login"']);
+});
+
+test("the old auth words keep working for a release, hidden from help, saying what replaces them", async () => {
+  const directory = mkdtempSync(join(testDirectory, "flow-cli-old-auth-"));
+  const cli = defineCli({ name: "acme", server: "http://127.0.0.1:9/mcp", directory });
+  await storedProvider(cli, cli.server!).saveTokens({ access_token: "kept", token_type: "Bearer" });
+  const status = io();
+  assert.equal(await runCli(cli, ["auth", "status", "--json"], status.channel), 0);
+  assert.deepEqual(JSON.parse(status.out), { server: cli.server, signedIn: true, source: "login", renew: false });
+  assert.match(status.err, /`acme auth status` is going away/);
+  const out = io();
+  assert.equal(await runCli(cli, ["auth", "logout"], out.channel), 0);
+  assert.match(out.err, /`acme auth logout` is now `acme logout`[\s\S]*Signed out of /);
+  const help = io();
+  assert.equal(await runCli(cli, ["--help"], help.channel), 0);
+  assert.doesNotMatch(help.out, /\bauth\b/);
+  const theirs = buildCommand({ docs: { brief: "Your Acme account" }, parameters: {}, func(this: import("../cli/src/commands.ts").CliContext) { this.cli.print({ plan: "pro" }, { json: true }); } });
+  const own = io();
+  assert.equal(await runCli({ ...cli, commands: { "auth status": { command: theirs } } }, ["auth", "status"], own.channel), 0, "a team's own auth status is an ordinary command");
+  assert.deepEqual([JSON.parse(own.out), own.err], [{ plan: "pro" }, ""]);
+});
+
+test("beforeLogout runs with the stored token before the sign-in is forgotten; failing, it still signs out here", async () => {
+  const directory = mkdtempSync(join(testDirectory, "flow-cli-logout-"));
+  const seen: unknown[] = [];
+  const server = "http://127.0.0.1:9/mcp";
+  const cli = (fail: boolean) => defineCli({ name: "acme", server, directory, signIn: { async beforeLogout(signedIn) { seen.push({ ...signedIn, kept: isSignedIn(cli(fail), server) }); if (fail) throw new Error("Could not end the Acme session."); } } });
+  await storedProvider(cli(false), server).saveTokens({ access_token: "tok-1", token_type: "Bearer" });
+  assert.equal(await runCli(cli(false), ["logout"], io().channel), 0);
+  assert.deepEqual(seen, [{ server, token: "tok-1", kept: true }]);
+  assert.equal(isSignedIn(cli(false), server), false);
+  assert.equal(await runCli(cli(false), ["logout"], io().channel), 0);
+  assert.equal(seen.length, 1, "nothing to revoke when no one is signed in");
+
+  await storedProvider(cli(true), server).saveTokens({ access_token: "tok-2", token_type: "Bearer" });
+  const failed = io();
+  assert.equal(await runCli(cli(true), ["logout"], failed.channel), 0);
+  assert.equal(failed.err, `Could not end the Acme session.\nSigned out of ${server} on this computer only.\n`);
+  assert.equal(isSignedIn(cli(true), server), false);
 });
 
 // Updating is the only command that runs a program on the person's computer; flow check holds its option.
@@ -974,7 +1077,7 @@ test("a bare run at a terminal welcomes a person; agents and pipes get the help,
   const person = io(true); person.channel.env = { NO_COLOR: "1" }; person.channel.columns = 100;
   assert.equal(await runCli(cli, [], person.channel), 0);
   assert.match(person.out, /██/, "the name in block letters");
-  assert.match(person.out, /acme v1\.2\.0\n\n {2}Welcome to acme\n {2}Order coffee\.\n\n {2}○ Not signed in\. Run acme auth login/);
+  assert.match(person.out, /acme v1\.2\.0\n\n {2}Welcome to acme\n {2}Order coffee\.\n\n {2}○ Not signed in\. Run acme login/);
   assert.match(person.out, /acme chat "<request>" +Ask for anything/);
   assert.doesNotMatch(person.out, /THIS CLI/, "the welcome replaces the help");
 
@@ -1034,7 +1137,7 @@ test("signInFirst offers sign-in before any command, then runs it; without a per
 
   const agent = io(true); agent.channel.env = { CODEX_CI: "1" };
   assert.equal(await runCli(cli, ["my-orders"], agent.channel), 3);
-  assert.match(agent.err, /Please sign in to acme to continue\. Run `acme auth login` \(or set ACME_TOKEN\)/);
+  assert.match(agent.err, /Please sign in to acme to continue\. Run `acme login` \(or set ACME_TOKEN\)/);
   const help = io();
   assert.equal(await runCli(cli, [], help.channel), 0, "a bare run without a person is the help");
   assert.equal(await runCli(cli, ["my-orders", "--help"], io().channel), 0);
@@ -1051,7 +1154,7 @@ test("signInFirst offers sign-in before any command, then runs it; without a per
   assert.equal(asked.length, 2);
   assert.equal(await runCli(cli, ["my-orders", "--json"], person(1).channel), 0);
   assert.equal(asked.length, 2, "signed in, nothing is asked");
-  assert.equal(await runCli(cli, ["auth", "logout"], io().channel), 0);
+  assert.equal(await runCli(cli, ["logout"], io().channel), 0);
   const except = person(1);
   assert.equal(await runCli({ ...cli, signInFirst: { except: ["my-orders"] } }, ["my-orders"], except.channel), 3, "an excepted command runs, and its tool asks for sign-in itself");
   assert.equal(asked.length, 2);
@@ -1147,7 +1250,7 @@ test("signed out, chat is a guest the agent keeps apart from accounts, unless th
   handler = required;
   const refused = io();
   assert.equal(await runCli(cli, ["chat", "hello", "--json"], refused.channel), 3);
-  assert.match(refused.err, /Sign in first: guest-test auth login/);
+  assert.match(refused.err, /Sign in first: guest-test login/);
 });
 
 // The test above keeps one account; only a switch of account sends a conversation the agent refuses as another person's.
@@ -1207,7 +1310,7 @@ test("chat after switching accounts starts the new account's conversation once, 
     assert.equal(saved(), conversationA, "nor forgets the conversation");
   }
   broken = null;
-  assert.equal(await runCli(cli, ["auth", "logout"], io().channel), 0);
+  assert.equal(await runCli(cli, ["logout"], io().channel), 0);
   assert.equal(saved(), undefined, "signing out forgets the account's conversation reference");
 });
 

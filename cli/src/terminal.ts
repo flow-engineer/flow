@@ -3,11 +3,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
-import { parseArgs, styleText, stripVTControlCharacters } from "node:util";
+import { parseArgs, stripVTControlCharacters } from "node:util";
 import { configDir, isSignedIn, storedAccessToken } from "./auth.ts";
-import { brandOf, HEX, tokenEnvOf, type CliConfig } from "./commands.ts";
+import { brandOf, HEX, signInCommand, tokenEnvOf, type CliConfig } from "./commands.ts";
+import { colorDepth, colorsAt, painter, severity, type Palette } from "./colors.ts";
 import type { CliIO } from "./run.ts";
-import { accentCode, codingAgent } from "./welcome.ts";
+import { codingAgent } from "./welcome.ts";
 
 export type ChatUpdate =
   | { type: "reply"; text: string }
@@ -19,6 +20,8 @@ export interface ChatSession {
   color?: boolean;
   /** Optional six-digit hex brand accent; body text and background inherit the terminal profile. */
   accent?: string;
+  /** The CLI's colors (colors.ts), in place of those made from `accent`. */
+  colors?: Palette;
   send(text: string, update: (event: ChatUpdate) => void, signal: AbortSignal): Promise<void>;
   /** Forgets only the saved terminal reference; shared person history stays with the agent. */
   reset(): void;
@@ -35,15 +38,15 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   // A coding agent's shell can be a terminal (Cursor's is), yet it cannot drive a full-screen view
   // and pays for every styled line: Claude Code, Cursor and Codex mark their commands' environment.
   if (flags.values.plain || codingAgent(env)) io = { ...io, interactive: false };
+  const colors = colorsAt(config, io);
+  const paint = painter(colors);
   const single = flags.positionals.length === 1;
   if (!single && !io.interactive) { io.writeError(`chat needs a terminal; for a single reply use ${config.name} chat "<message>".\n`); return 2; }
-  if (!server) { io.writeError("Pass --server <url> or configure the MCP server.\n"); return 5; }
+  if (!server) { io.writeError(`${paint("error", "Pass --server <url> or configure the MCP server.")}\n`); return 5; }
   const stored = !token && isSignedIn(config, server);
   try { if (stored) token = await storedAccessToken(config, server, false, io.signal); }
-  catch { io.writeError(`Sign in again: ${config.name} auth login.\n`); return 3; }
+  catch { io.writeError(`${paint("warning", `Sign in again: ${signInCommand(config)}.`)}\n`); return 3; }
   const humanChat = !single && !flags.values.json;
-  const styled = io.interactive && !env.NO_COLOR && env.FORCE_COLOR !== "0" && env.TERM !== "dumb";
-  const paint = (format: Parameters<typeof styleText>[0], text: string) => styled ? styleText(format, text, { validateStream: false }) : text;
   const safe = (text: string) => stripVTControlCharacters(text).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
   const endpoint = chatEndpoint(config, server);
   const file = join(configDir(config), "chat.json");
@@ -73,10 +76,10 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   async function send(text: string, update?: (event: ChatUpdate) => void, signal?: AbortSignal): Promise<number> {
     const fail = (message: string, code: number): number => {
       if (update) throw Object.assign(new Error(message), { exitCode: code });
-      io.writeError(`${message}\n`); return code;
+      io.writeError(`${paint(severity(code), message)}\n`); return code;
     };
     const clearStatus = humanChat && !fullScreen && Boolean(process.stderr.isTTY) && (io.env ?? process.env).TERM !== "dumb";
-    if (humanChat && !fullScreen) io.writeError(`${paint("dim", "  Waiting for reply…")}${clearStatus ? "" : "\n"}`);
+    if (humanChat && !fullScreen) io.writeError(`${paint("muted", "  Waiting for reply…")}${clearStatus ? "" : "\n"}`);
     const requestSignal = AbortSignal.any([AbortSignal.timeout(10 * 60_000), ...[io.signal, signal].filter((s): s is AbortSignal => Boolean(s))]);
     let result: { conversationId: string; replies: Array<{ type: string; text?: string }> } | undefined;
     // A conversation another account started (signed in as someone else since) is refused before
@@ -99,7 +102,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
       if (!response) return fail(`Could not reach the agent at ${endpoint}. Is it running?`, 5);
       // The server answered, so it is running; it has no chat route (a playground, an MCP server without the agent).
       if (response.status === 404 || response.status === 405 || (response.status === 403 && !token)) return fail(`This server does not serve terminal chat (${endpoint}).`, 5);
-      if (response.status === 401 || response.status === 403) return fail(`Sign in first: ${config.name} auth login${token ? "" : ` (or set ${tokenEnvOf(config)})`}.`, 3);
+      if (response.status === 401 || response.status === 403) return fail(`Sign in first: ${signInCommand(config)}${token ? "" : ` (or set ${tokenEnvOf(config)})`}.`, 3);
       if (response.status === 409 && conversationId && !retried && (await response.json().catch(() => null) as { error?: unknown } | null)?.error === "conversation_mismatch") { forget(); continue; }
       if (!response.ok) return fail(`The agent could not finish (${response.status}).`, 1);
       let mismatch = false;
@@ -142,7 +145,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
       const text = messages.join(humanChat ? "\n\n" : "\n");
       const rendered = await forTerminal(io.interactive ? safe(text) : text, io, config);
       const body = io.interactive ? rendered.trimEnd() : rendered;
-      if (humanChat && body) io.write(`\n${paint(["bold", "green"], config.name)}\n${body.split("\n").map(line => `  ${line}`).join("\n")}\n\n`);
+      if (humanChat && body) io.write(`\n${paint(["bold", "accent"], config.name)}\n${body.split("\n").map(line => `  ${line}`).join("\n")}\n\n`);
       else io.write(`${body}\n`);
     }
     return 0;
@@ -151,26 +154,26 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   if (fullScreen) {
     // The full-screen view clears its screen on leaving, so the last failure is printed again after it.
     let failed: { message: string; code: number } | undefined;
-    const session: ChatSession = { name: brandOf(config).name, signal: io.signal, color: styled, accent, reset, send: async (text, update, signal) => {
+    const session: ChatSession = { name: brandOf(config).name, signal: io.signal, color: colorDepth(env) !== 0, accent, colors, reset, send: async (text, update, signal) => {
       try { await send(text, update, signal); failed = undefined; }
       catch (error) { failed = signal?.aborted ? undefined : { message: error instanceof Error ? error.message : String(error), code: (error as { exitCode?: number }).exitCode ?? 1 }; throw error; }
     } };
     try {
       const code = await io.chat!(session);
-      if (failed) { io.writeError(`${failed.message}\n`); return failed.code; }
+      if (failed) { io.writeError(`${paint(severity(failed.code), failed.message)}\n`); return failed.code; }
       return code;
     }
     catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "ERR_MODULE_NOT_FOUND" && io.lines)) { io.writeError("Could not open the chat interface.\n"); return 1; }
-      io.writeError(paint("dim", "Install @mariozechner/pi-tui@0.73.1 beside this CLI for the full-screen chat.\n"));
+      if (!(error instanceof Error && "code" in error && error.code === "ERR_MODULE_NOT_FOUND" && io.lines)) { io.writeError(`${paint("error", "Could not open the chat interface.")}\n`); return 1; }
+      io.writeError(paint("muted", "Install @mariozechner/pi-tui@0.73.1 beside this CLI for the full-screen chat.\n"));
     }
   }
   if (!io.lines) { io.writeError("This CLI input does not support chat.\n"); return 2; }
   const help = "/help  shortcuts · /new  forget saved reference · /exit  leave";
   io.writeError(humanChat
-    ? `\n${paint("bold", `${config.name} chat`)}\n${paint("dim", "Type /help for commands · Ctrl-D leaves")}\n${paint("dim", "Basic line input in this terminal")}\n\n`
+    ? `\n${paint("bold", `${config.name} chat`)}\n${paint("muted", "Type /help for commands · Ctrl-D leaves")}\n${paint("muted", "Basic line input in this terminal")}\n\n`
     : "Type /exit or press Ctrl-D to leave.\n");
-  for await (const line of io.lines(humanChat ? `${paint(["bold", "cyan"], "You")} › ` : undefined)) {
+  for await (const line of io.lines(humanChat ? `${paint("bold", "You")} › ` : undefined)) {
     const text = line.trim();
     if (text === "/exit") break;
     if (humanChat && text === "/help") { io.writeError(`\n${help}\nThis terminal uses basic line input. Send one message per line; Ctrl-D leaves.\n\n`); continue; }
@@ -200,22 +203,31 @@ export function forgetChat(config: CliConfig, server: string): void {
   writeFileSync(file, `${JSON.stringify(saved)}\n`, { mode: 0o600 });
 }
 
-/** The same optional Markdown renderer for chat and tool output, table headers in the brand's accent. Pipes retain the source. */
+/** The same optional Markdown renderer for chat and tool output, in the CLI's colors (colors.ts). Pipes retain the source. */
 export async function forTerminal(markdown: string, io: CliIO, config: CliConfig): Promise<string> {
   const env = io.env ?? process.env;
   if (!io.interactive || env.NO_COLOR || env.TERM === "dumb") return markdown;
   try {
     const [{ Marked }, { markedTerminal }] = await Promise.all([import("marked"), import("marked-terminal")]);
-    // cli-table3 paints headers only in named colors (red by default): it paints none, and each
-    // header cell is painted here, in the accent at the terminal's depth (cyan without one).
-    const extension = markedTerminal({ showSectionPrefix: false, width: Math.max(20, (process.stdout.columns ?? 80) - 4), reflowText: true, tableOptions: { style: { head: [] } } }) as unknown as { renderer: Record<string, (this: unknown, ...args: unknown[]) => string> };
+    const paint = painter(colorsAt(config, io));
+    const [key, string, number, keyword, comment] = (["key", "string", "number", "keyword", "comment"] as const).map((part) => (text: string) => paint(part, text));
+    // A code block names its language to be highlighted; one that names none stays as written.
+    // The libraries' own colors are not used: they paint strings and table headers red.
+    const theme = { attr: key, attribute: key, string, regexp: string, addition: string, number, literal: number, keyword, built_in: keyword, type: keyword, comment, doctag: comment, meta: comment, quote: comment, deletion: comment };
+    const heading = (text: string) => paint(["bold", "heading"], text);
+    const extension = markedTerminal({
+      showSectionPrefix: false, width: Math.max(20, (process.stdout.columns ?? 80) - 4), reflowText: true, tableOptions: { style: { head: [] } },
+      heading, firstHeading: heading, link: (text: string) => paint("link", text), href: (text: string) => `\u001b[4m${paint("link", text)}\u001b[24m`,
+      codespan: (text: string) => paint("code", text), code: (text: string) => text,
+    // marked-terminal passes these to cli-highlight, though its types say cardinal.
+    }, { theme, languageSubset: [] } as never) as unknown as { renderer: Record<string, (this: unknown, ...args: unknown[]) => string> };
     const cell = extension.renderer.tablecell!;
-    const code = accentCode(config, env);
+    // cli-table3 lays the row out after each cell, so a header cell is painted before its split mark.
     extension.renderer.tablecell = function (content, flags) {
       const out = cell.call(this, content, flags);
       // marked 12 passes the cell's text and its flags; newer marked, one token.
       const header = ((typeof content === "object" ? content : flags) as { header?: boolean } | undefined)?.header;
-      return header ? `\u001b[${code}m${out.slice(0, -TABLE_CELL_SPLIT.length)}\u001b[39m${TABLE_CELL_SPLIT}` : out;
+      return header ? `${paint("accent", out.slice(0, -TABLE_CELL_SPLIT.length))}${TABLE_CELL_SPLIT}` : out;
     };
     return await new Marked(extension as never).parse(markdown);
   } catch { return markdown; }

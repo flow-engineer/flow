@@ -2,6 +2,59 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.14.0 (2026-10-29)
+
+### Changes
+
+- **`login` and `logout` are top-level commands** in every Flow CLI: `acme login`, `acme logout`.
+  `signIn: { login: "auth login", logout: "auth logout" }` in the CLI file moves them, into a group
+  of any name and beside the team's own commands in it. Every message that says how to sign in (the
+  sign-in-first question, "Sign in first" after a 401, "Some commands need a new sign-in", the
+  welcome, help, the generated skill, the sign-in page, the simulators' CLI runner) says the
+  command as set, and `signInFirst` never asks before the sign-in commands, wherever they are.
+  `defineCli` throws and `flow check` refuses a command, alias or tool on their words, and the
+  words are free again once moved. The sign-in page's `signInPage` gets `command`
+  (`"acme login"`).
+- **`signIn.beforeLogout({ server, token })`** runs the team's own step when a signed-in person
+  logs out, before this computer's sign-in is forgotten (revoke the server's session with the
+  stored access token). If it throws, its message is printed, the person is still signed out on
+  this computer, and the logout exits 0.
+- **No built-in `auth status`.** A CLI that wants a `whoami` or status writes its own and names it
+  freely; `auth` is no longer a word the CLI keeps.
+- **One color scheme for the whole CLI, from the brand, every part replaceable.** The help, the
+  welcome, the sign-in question, the line and full-screen chat, and the Markdown tools and the
+  agent write take their colors from one palette: the accent is `brand.accent` (else cyan) on
+  command names, the banner, the chat's names, links, inline code, JSON keys and keywords.
+  `colors: { accent, muted, success, warning, error, heading, link, code, key, string, number,
+  keyword, comment }` replaces any part with a color's name, a six-digit hex color, or `false` for
+  the terminal's own; `flow check` refuses others. `ChatSession` takes `colors` (`palette()`,
+  exported) for a full-screen chat run by code of its own.
+- **Red is for errors only.** A failure (a tool that failed, a server out of reach, wrong arguments,
+  a chat that could not finish, a failed tool in the full-screen chat) is printed in `colors.error`,
+  red by default; a sign-in or `--yes` needed is in `colors.warning`. Code blocks were highlighted
+  with cli-highlight's theme, which paints strings red, and a block naming no language had one
+  guessed, so page text came out red: Flow's theme has strings in green and numbers in yellow, and
+  a block naming no language is shown as written. Pipes, `NO_COLOR`, `FORCE_COLOR=0` and
+  `TERM=dumb` get no escapes.
+
+### Migration notes
+
+- `auth login` and `auth logout` are now `login` and `logout`. Scripts and people typing the old
+  words keep working for this release (removed in 0.15): the old words are hidden from help and print
+  one line on stderr naming the new command. To keep the old words for good, set `signIn: { login: "auth login",
+  logout: "auth logout" }`.
+- `auth status` is going away: it still answers for this release (with `--json`), with a notice,
+  and is removed in 0.15.
+  Write a command of your own for it. A CLI file's own `"auth status"` command keeps working as it
+  is, now as an ordinary command; nothing else is needed.
+- A CLI file with its own command, alias or tool named `login` or `logout` now fails `defineCli`
+  and `flow check`: rename it, or move the sign-in commands with `signIn`.
+- A CLI that parsed argv for `auth logout` before `runCli` to revoke its session can use
+  `signIn.beforeLogout` instead.
+- A `signInPage` that wrote `${cli} auth login` should write `${command}`.
+- Code blocks naming no language are no longer highlighted. Name the language (```` ```json ````)
+  for color.
+
 ## 0.13.0 (2026-10-29)
 
 ### Changes
