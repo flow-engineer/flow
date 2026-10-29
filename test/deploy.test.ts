@@ -22,7 +22,7 @@ interface Call {
 }
 
 /** A fake cloud: the routes `flow deploy` calls, a deploy that builds once then ends as `ending`. */
-async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean; neverDeployed?: boolean; framework?: string } = {}) {
+async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean; neverDeployed?: boolean; framework?: string; traceText?: { on: boolean; source: "flow" | "owner" } } = {}) {
   const calls: Call[] = [];
   let looks = 0;
   const server = createServer(async (req, res) => {
@@ -44,7 +44,8 @@ async function cloud(options: { ending?: "live" | "refused"; address?: boolean; 
     if (req.method === "GET" && path.startsWith("/v1/hosting/address")) return options.address ? send(200, { url: "https://agent-staging.example.com" }) : send(404, { error: { code: "not_found", message: "no such route" } });
     if (req.method === "GET" && path.startsWith("/v1/hosting/deploys?")) {
       if (!options.list) return res.writeHead(404, { "content-type": "text/plain" }).end("404 page not found");
-      return send(200, { deploys: [deploy("live", "hdp_1"), deploy("building", "hdp_2"), deploy("replaced", "hdp_0")] });
+      const live = options.traceText ? { ...deploy("live", "hdp_1"), trace_text: options.traceText } : deploy("live", "hdp_1");
+      return send(200, { deploys: [live, deploy("building", "hdp_2"), deploy("replaced", "hdp_0")] });
     }
     if (req.method === "GET" && path.startsWith("/v1/hosting/logs?")) {
       if (!options.logs) return res.writeHead(404, { "content-type": "text/plain" }).end("404 page not found");
@@ -228,6 +229,20 @@ test("deploy status lists each environment's live deploy, its version, when and 
   assert.match(printed, /URL: https:\/\/agent-staging\.example\.com/);
   assert.match(printed, /then hdp_2 \(abc123\): building…/);
   assert.match(printed, /Next: npx @flow-engineer\/flow logs/);
+  assert.doesNotMatch(printed, /trace text/, "an older Flow says nothing about trace text, so status prints nothing");
+});
+
+test("deploy status says per environment whether traces carry message text and who set it", async () => {
+  const fake = await cloud({ list: true, address: true, traceText: { on: false, source: "owner" } });
+  const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url };
+  const human = await run(["status", "--env", "production", "--dir", agentFolder()], env);
+  assert.equal(human.code, 0, human.printed);
+  assert.match(human.printed, /production: live[^\n]*\n {2}URL: [^\n]*\n {2}trace text: off \(set by you\)/);
+  const { stdout } = await run(["status", "--env", "production", "--json", "--dir", agentFolder()], env);
+  assert.deepEqual(JSON.parse(stdout).environments.production.deploy.trace_text, { on: false, source: "owner" });
+  const flows = await cloud({ list: true, address: true, traceText: { on: true, source: "flow" } });
+  const byFlow = await run(["status", "--env", "production", "--dir", agentFolder()], { ...env, FLOW_FRAMEWORK_CLOUD: flows.url });
+  assert.match(byFlow.printed, /trace text: on \(Flow's default\)/);
 });
 
 test("deploy status on a Flow that lists deploys to members only: the last deploy this folder made", async () => {
