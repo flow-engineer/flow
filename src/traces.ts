@@ -9,7 +9,8 @@
 //
 // Content (what the person and the agent wrote, tool inputs and results) is sent only with
 // `content: true` (FLOW_FRAMEWORK_TRACES_CONTENT=1); without it the spans hold ids, names, timing and counts,
-// and the endpoint has no messages to show or grade.
+// and the endpoint has no messages to show or grade. Under `flow test` content is on unless
+// FLOW_FRAMEWORK_TRACES_CONTENT=0: its --synthetic already says the test files hold no real data.
 // The one exception is the MCP server's built-in feedback tool: what a caller writes there is meant
 // for the team, so its call's span carries it (`flow.feedback.about`, `.message`, `.tool`) either way.
 //
@@ -32,7 +33,16 @@
 // The resource's `service.version` is the agent's version (agentVersion below), with no setting:
 // the same label `flow test` keeps with its session and `flow deploy` with the deploy, so a reply
 // can be matched to the code that wrote it.
+//
+// Every trace's root span says what started it, `flow.turn.trigger` (TurnTrigger below), and with
+// content on, `flow.turn.trigger_text`: the instruction or result the turn began with. A message
+// sent as written (no model call: a text or template nudge, a fixed scheduled text, a rule's answer)
+// is always a trace of its own, its send span marked `flow.message.as_written`. A message or nudge
+// that code queued while it ran in a turn (recordNudge from a tool, say, for another person) names
+// where: a span link to that span (`flow.link.kind` "queued_by") and, for ingest paths that drop
+// links, `flow.origin.*` on the root span.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -68,18 +78,49 @@ export { setting };
 /**
  * The traces options from the environment: on when FLOW_FRAMEWORK_TRACES_KEY is set, except under
  * `node --test` (NODE_TEST_CONTEXT), so an agent's own tests never send their turns. The address
- * is FLOW_FRAMEWORK_TRACES_URL, else {@link OBSERVE_URL}.
+ * is FLOW_FRAMEWORK_TRACES_URL, else {@link OBSERVE_URL}. Content with FLOW_FRAMEWORK_TRACES_CONTENT=1,
+ * and under `flow test` (FLOW_FRAMEWORK_RUN_KIND=test) unless it is 0.
  */
 export function tracesFromEnv(env: NodeJS.ProcessEnv = process.env): TracesOptions | undefined {
   const key = setting("TRACES_KEY", env)?.trim() ?? "";
   if (!key || env.NODE_TEST_CONTEXT) return undefined;
-  return { key, url: setting("TRACES_URL", env)?.trim() || OBSERVE_URL, content: setting("TRACES_CONTENT", env) === "1" };
+  const asked = setting("TRACES_CONTENT", env);
+  return { key, url: setting("TRACES_URL", env)?.trim() || OBSERVE_URL, content: asked === "1" || (setting("RUN_KIND", env) === "test" && asked !== "0") };
 }
 
 /** The endpoint's channel names: Flow Framework's custom UIs are web or app chats. */
 const CHANNEL_KIND: Record<string, string> = { sms: "sms", mms: "mms", whatsapp: "whatsapp", telegram: "telegram", imessage: "imessage", web: "web", voice: "voice", other: "other", custom: "web", cli: "cli" };
 
+/**
+ * What started a turn, or a trace with no turn (`flow.turn.trigger`):
+ * - person: their message (also one answered with no model call);
+ * - nudge: a prompt nudge (agent.nudge or recordNudge with `prompt`, or one with `at` when it comes due);
+ * - event: a business event (flowEvents) the agent tells them of, or sends as written;
+ * - wake_up: a time that was set came: the agent's wake-up, or a reminder the person asked for;
+ * - task: a background tool's result (or word that one was cut off by a restart);
+ * - queued_message: a message code queued as written (a nudge with `text` or `template`, also one with `at`);
+ * - direct: Flow Framework's own message, sent as written: a rule's or keyword's answer, the fallback template.
+ */
+export type TurnTrigger = "person" | "nudge" | "event" | "wake_up" | "task" | "queued_message" | "direct";
+
+/** Where code queued a message or nudge: the span active then (with traces on), its conversation and tool call. Kept with the nudge. */
+export interface QueuedBy {
+  traceId?: string;
+  spanId?: string;
+  conversationId: string;
+  toolCallId?: string;
+  toolName?: string;
+}
+
+/** The conversation, and the tool call, code is running in: what a nudge recorded now was queued by. */
+export const activeCall = new AsyncLocalStorage<{ conversationId: string; toolCallId?: string; toolName?: string }>();
+
 type Attr = { key: string; value: Record<string, unknown> };
+interface Link {
+  traceId: string;
+  spanId: string;
+  attributes: Attr[];
+}
 interface Span {
   traceId: string;
   spanId: string;
@@ -89,6 +130,7 @@ interface Span {
   startTimeUnixNano: string;
   endTimeUnixNano: string;
   attributes: Attr[];
+  links?: Link[];
   status?: { code: number };
 }
 
@@ -108,14 +150,19 @@ interface Turn {
   start: number;
   inbound: Inbound[];
   spans: Span[];
-  tools: Map<string, { at: number; input: unknown }>;
+  tools: Map<string, { at: number; input: unknown; spanId: string }>;
   replyChannel?: string;
+  trigger?: TurnTrigger;
+  triggerText?: string;
+  queuedBy?: QueuedBy[];
 }
 
 export interface Traces {
   sink: EventSink;
   /** Resolves once every finished turn queued so far has been sent (or dropped). */
   flush(): Promise<void>;
+  /** The span running now in a conversation: the tool call's, when given and known, else its turn's root. */
+  spanOf(conversationId: string, toolCallId?: string): { traceId: string; spanId: string } | undefined;
 }
 
 let warnedMetadataOnly = false;
@@ -147,6 +194,8 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
   }
   const open = new Map<string, Turn>();
   const calls = new Map<string, { at: number; input?: unknown }>();
+  /** Tools moved to the background, by conversation and call: their span, which code they run may still queue messages from. */
+  const detached = new Map<string, { traceId: string; spanId: string }>();
   /** Messages and background results that came while no turn was open: they join the next one. */
   const waiting = new Map<string, { inbound: Inbound[]; spans: Array<(turn: Turn) => Span> }>();
   const queue: Span[][] = [];
@@ -176,12 +225,12 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
     return span(turn.traceId, name, start, end, attributes, turn.rootId, failed);
   }
 
-  function begin(conversationId: string, at: number) {
+  function begin(conversationId: string, at: number, e: FlowEvent) {
     finish(conversationId, false, at);
     const w = waiting.get(conversationId);
     waiting.delete(conversationId);
     const inbound = w?.inbound ?? [];
-    const turn: Turn = { traceId: hex(16), rootId: hex(8), start: Math.min(at, ...inbound.map((m) => m.at)), inbound, spans: [], tools: new Map() };
+    const turn: Turn = { traceId: hex(16), rootId: hex(8), start: Math.min(at, ...inbound.map((m) => m.at)), inbound, spans: [], tools: new Map(), ...started(e) };
     for (const make of w?.spans ?? []) turn.spans.push(make(turn));
     open.set(conversationId, turn);
   }
@@ -208,22 +257,32 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
       if (turn.inbound[0].messageId) attributes.push(attr("chinwag.message_id", turn.inbound[0].messageId));
       if (content) attributes.push(attr("chinwag.user_message", clip(turn.inbound.map((m) => m.text).join("\n"))));
     }
-    const root: Span = { ...span(turn.traceId, `invoke_agent ${agent.service}`, turn.start, at, attributes, undefined, failed), spanId: turn.rootId };
+    if (turn.trigger) attributes.push(attr("flow.turn.trigger", turn.trigger));
+    if (content && turn.triggerText) attributes.push(attr("flow.turn.trigger_text", clip(turn.triggerText)));
+    const origin = turn.queuedBy?.[0];
+    if (origin) {
+      const plain = { "flow.origin.trace_id": origin.traceId, "flow.origin.span_id": origin.spanId, "flow.origin.conversation_id": origin.conversationId, "flow.origin.tool_call_id": origin.toolCallId, "flow.origin.tool_name": origin.toolName };
+      for (const [key, value] of Object.entries(plain)) if (typeof value === "string" && value) attributes.push(attr(key, value));
+    }
+    const links = (turn.queuedBy ?? []).flatMap((q) => (q.traceId && q.spanId ? [{ traceId: q.traceId, spanId: q.spanId, attributes: [attr("flow.link.kind", "queued_by")] }] : []));
+    const root: Span = { ...span(turn.traceId, `invoke_agent ${agent.service}`, turn.start, at, attributes, undefined, failed), spanId: turn.rootId, ...(links.length ? { links } : {}) };
     enqueue([root, ...turn.spans]);
   }
 
-  /** A message sent outside any turn (one the business wrote, or a rule's answer, sent as is): a trace of its own. */
-  function alone(conversationId: string, at: number, channel: string, text: unknown) {
-    const turn: Turn = { traceId: hex(16), rootId: hex(8), start: at, inbound: [], spans: [], tools: new Map(), replyChannel: channel };
-    turn.spans.push(reply(turn, at, channel, text));
-    record(conversationId, turn, false, at);
+  /** A message sent outside any turn, or sent as written (by the business, or a rule's answer): a trace of its own. */
+  function alone(conversationId: string, e: FlowEvent) {
+    const channel = String(e.channel);
+    const turn: Turn = { traceId: hex(16), rootId: hex(8), start: e.at, inbound: [], spans: [], tools: new Map(), replyChannel: channel, ...started(e) };
+    turn.spans.push(reply(turn, e.at, channel, e.text, e.direct === true));
+    record(conversationId, turn, false, e.at);
   }
 
-  function reply(turn: Turn, at: number, channel: string, text: unknown): Span {
+  function reply(turn: Turn, at: number, channel: string, text: unknown, asWritten = false): Span {
     turn.replyChannel ??= channel;
     // The platform, as on the root span; the span's name has the channel's own name.
     const kind = kindOf(channel);
     const attributes = kind ? [attr("chinwag.channel", kind)] : [];
+    if (asWritten) attributes.push(attr("flow.message.as_written", true));
     if (content && typeof text === "string") attributes.push(attr("chinwag.agent_reply", clip(text)));
     return child(turn, `send ${channel}`, at, at, attributes);
   }
@@ -301,18 +360,19 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
         const channel = String(e.channel ?? "");
         const m: Inbound = { at: e.at, text, channel, messageId: e.ownId ? String(e.messageId) : undefined, via: agent.viaOf?.(id, channel) };
         // Answered with no model call (intercept, a keyword): a trace of its own, never part of a turn.
-        if (e.answered) return record(id, { traceId: hex(16), rootId: hex(8), start: e.at, inbound: [m], spans: [], tools: new Map() }, false, e.at);
+        if (e.answered) return record(id, { traceId: hex(16), rootId: hex(8), start: e.at, inbound: [m], spans: [], tools: new Map(), trigger: "person" }, false, e.at);
         (turn ?? waitingFor(id)).inbound.push(m);
         return;
       }
       case "turn.start":
-        return begin(id, e.at);
+        return begin(id, e.at, e);
       case "turn.end":
         return finish(id, false, e.at);
       case "model.error":
         return finish(id, true, e.at);
       case "message.out":
-        if (!turn || e.answered) return alone(id, e.at, String(e.channel), e.text);
+        // Sent as written (no model call: a nudge's text, a rule's answer): never part of a turn open meanwhile.
+        if (!turn || e.answered || e.direct) return alone(id, e);
         turn.spans.push(reply(turn, e.at, String(e.channel), e.text));
         return;
       case "model.call": {
@@ -328,7 +388,7 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
         return;
       }
       case "tool.start":
-        turn?.tools.set(String(e.callId), { at: e.at, input: e.input });
+        turn?.tools.set(String(e.callId), { at: e.at, input: e.input, spanId: hex(8) });
         return;
       case "tool.end":
       case "tool.detached": {
@@ -337,10 +397,17 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
         turn.tools.delete(String(e.callId));
         const attributes = toolAttributes(e, started?.input);
         if (e.type === "tool.detached") attributes.push(attr("chinwag.tool.background", true));
-        turn.spans.push(child(turn, `execute_tool ${e.tool}`, started?.at ?? e.at - Number(e.ms ?? 0), e.at, attributes, e.ok === false));
+        const made = child(turn, `execute_tool ${e.tool}`, started?.at ?? e.at - Number(e.ms ?? 0), e.at, attributes, e.ok === false);
+        if (started) made.spanId = started.spanId;
+        turn.spans.push(made);
+        if (e.type === "tool.detached") {
+          detached.set(`${id}\u0000${e.callId}`, { traceId: turn.traceId, spanId: made.spanId });
+          if (detached.size > MAX_QUEUED) detached.delete(detached.keys().next().value!);
+        }
         return;
       }
       case "task.done": {
+        detached.delete(`${id}\u0000${e.callId}`);
         // A background tool finished: its result starts the next turn, which this span joins.
         const make = (t: Turn) => child(t, `execute_tool ${e.tool}`, e.at - Number(e.ms ?? 0), e.at, [...toolAttributes(e), attr("chinwag.tool.background", true)], e.ok === false);
         if (turn) turn.spans.push(make(turn));
@@ -366,7 +433,27 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
       }
     },
     flush: () => drain(),
+    spanOf: (conversationId, toolCallId) => {
+      const turn = open.get(conversationId);
+      if (toolCallId !== undefined) {
+        const running = turn?.tools.get(toolCallId);
+        if (running) return { traceId: turn!.traceId, spanId: running.spanId };
+        const background = detached.get(`${conversationId}\u0000${toolCallId}`);
+        if (background) return { ...background };
+      }
+      return turn ? { traceId: turn.traceId, spanId: turn.rootId } : undefined;
+    },
   };
+}
+
+const TRIGGERS = new Set<string>(["person", "nudge", "event", "wake_up", "task", "queued_message", "direct"]);
+
+/** What a turn.start or a sent-as-written message.out says started it. */
+function started(e: FlowEvent): Pick<Turn, "trigger" | "triggerText" | "queuedBy"> {
+  const trigger = typeof e.trigger === "string" && TRIGGERS.has(e.trigger) ? (e.trigger as TurnTrigger) : undefined;
+  const triggerText = typeof e.triggerText === "string" && e.triggerText ? e.triggerText : undefined;
+  const queuedBy = Array.isArray(e.queuedBy) ? (e.queuedBy as QueuedBy[]).filter((q) => q && typeof q.conversationId === "string") : [];
+  return { ...(trigger ? { trigger } : {}), ...(triggerText ? { triggerText } : {}), ...(queuedBy.length ? { queuedBy } : {}) };
 }
 
 /** The endpoint's ids: the conversation is the person (Flow Framework keeps one per person across channels). */

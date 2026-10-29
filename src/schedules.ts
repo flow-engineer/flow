@@ -14,6 +14,7 @@ import { z } from "zod";
 import type { NewSchedule, ScheduleRow, StoreApi } from "./store.ts";
 import { DAY_INDEX, clock, date, describe, endOfLocalDay, formatLocal, isBareUtc, localDate, localToUtc, nextRun, parts, validZone, type Rule } from "./time.ts";
 import { tool, type Tool } from "./tools.ts";
+import type { QueuedBy } from "./traces.ts";
 
 export const LIMITS = {
   /** Active schedules one person may have. */
@@ -191,7 +192,7 @@ function ruleOf(input: z.infer<typeof scheduleInput>, zone: string, now: number)
 }
 
 /** A scheduled message from the business (a nudge with a time): fixed text, or an instruction; `key`, the nudge's idempotency key, is what agent.cancelNudge finds it by. */
-export function businessSchedule(conversationId: string, channel: string, at: number, zone: string, body: { text?: string; prompt?: string }, quiet = true, key: string | null = null): NewSchedule {
+export function businessSchedule(conversationId: string, channel: string, at: number, zone: string, body: { text?: string; prompt?: string }, quiet = true, key: string | null = null, queuedBy?: QueuedBy): NewSchedule {
   return {
     id: `s_${randomUUID().slice(0, 8)}`,
     conversationId,
@@ -199,7 +200,8 @@ export function businessSchedule(conversationId: string, channel: string, at: nu
     instruction: body.text ?? body.prompt ?? "",
     fixedText: body.text !== undefined,
     mode: "message",
-    rule: quiet ? { repeat: "once", at, quiet: true } : { repeat: "once", at },
+    // Where code queued it rides with its rule, so its trace links there when it comes due.
+    rule: { repeat: "once", at, ...(quiet ? { quiet: true } : {}), ...(queuedBy ? { queuedBy } : {}) },
     timeZone: zone,
     nextRunAt: at,
     maxRuns: null,
@@ -217,6 +219,10 @@ export interface DueRun {
   mode: ScheduleRow["mode"];
   fixed: boolean;
   text: string;
+  /** Who set it, and what it said, for the trace of the turn it starts (src/traces.ts). */
+  origin?: ScheduleRow["origin"];
+  instruction?: string;
+  queuedBy?: QueuedBy;
 }
 
 /**
@@ -256,7 +262,8 @@ export async function claimDue(store: StoreApi, now: number, quietEnd: (s: Sched
       await store.claimRun(s, next, { id: runId, outcome: "skipped", reason, ranAt: now });
       continue;
     }
-    const run: DueRun = { run: runId, schedule: s.id, channel: s.channel, mode: s.mode, fixed: s.fixedText, text: s.fixedText ? s.instruction : noteFor(s, now) };
+    const queuedBy = (s.rule as { queuedBy?: QueuedBy }).queuedBy;
+    const run: DueRun = { run: runId, schedule: s.id, channel: s.channel, mode: s.mode, fixed: s.fixedText, text: s.fixedText ? s.instruction : noteFor(s, now), origin: s.origin, instruction: s.instruction, ...(queuedBy ? { queuedBy } : {}) };
     const inbox = await store.claimRun(s, next, { id: runId, outcome: "queued", ranAt: now }, { ...run });
     if (inbox) queued.push({ conversationId: s.conversationId, inbox, run });
   }

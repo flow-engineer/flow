@@ -8,8 +8,9 @@
 // A hosted cloud (any --cloud off this machine, the default included) needs the
 // agent's CI key in FLOW_FRAMEWORK_CLOUD_KEY and --synthetic, the attestation that the test files hold no real
 // customer or member data. --agent-version (else the agent's version, as its traces carry it:
-// src/traces.ts agentVersion), --ref (else GitHub's branch) and --environment (staging or
-// production) are kept with the session; the version also in --json and .flow/last-session.json.
+// src/traces.ts agentVersion), --ref (else the CI's branch, else the folder's git branch; with the
+// repository's default branch beside it) and --environment (staging or production) are kept with
+// the session; the version also in --json and .flow/last-session.json.
 // The agent's src/agent.ts exports buildAgent({ model, events, tools }) and its tools; its tests are
 // in tests/scenarios and tests/tools. An agent built on anything else is tested through its HTTP
 // endpoint instead, with --agent-url (testing/src/http-agent.ts): its own tools run for real.
@@ -33,7 +34,7 @@ import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 import { hasModelKey } from "../../src/model.ts";
 import { PLUGIN_LINE, pluginCli } from "./plugin.ts";
 import { agentVersion, OBSERVE_URL, setting, validVersion } from "../../src/traces.ts";
-import { cloudHeaders, runInCloud, SessionStopped, type ConnectOptions, type SendPathProblem } from "./client.ts";
+import { cloudHeaders, gitBranch, gitDefaultBranch, runInCloud, SessionStopped, type ConnectOptions, type SendPathProblem } from "./client.ts";
 import type { SessionLimits } from "./protocol.ts";
 import { runPrinter } from "./print-run.ts";
 import { checkEndpointCli } from "./check-endpoint.ts";
@@ -95,7 +96,8 @@ const TEST_OPTIONS = `Options for test:
   --agent-version <v>      Kept with the session and put on the agent's traces (default: the version
                            its traces carry: FLOW_AGENT_VERSION, the CI's commit, the folder's git
                            commit, or package.json's version)
-  --ref <ref>              Kept with the session (default: GitHub's branch)
+  --ref <ref>              Kept with the session (default: the CI's branch, else the folder's git
+                           branch), with the repository's default branch when git knows it
   --environment <name>     staging or production, kept with the session
   --agent-url <url>        Test an agent you already have, on any framework, through its HTTP
                            endpoint (it may be http://localhost): each message is a POST to it from
@@ -340,7 +342,8 @@ try {
     ciKey,
     synthetic: values.synthetic!,
     agentVersion: version,
-    ref: values.ref || process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME || undefined,
+    ref: values.ref || gitBranch(),
+    defaultBranch: gitDefaultBranch(),
     environment: values.environment,
   });
 } catch (error) {

@@ -1,9 +1,10 @@
-// covers: testing/src/client.ts testing/src/protocol.ts
+// covers: testing/src/client.ts testing/src/protocol.ts testing/src/cli.ts
 // The CLI against a hosted cloud: the open carries the CI key and the synthetic attestation, and the
 // session is played at the tunnel the open answers, which never sees the key; the agent's posts reach
 // the cloud while the stream is open, also over HTTPS with HTTP/2 as a hosted cloud speaks it, and a
 // tool call the cloud has not answered does not hold the later ones.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { generateKeyPairSync, sign, X509Certificate } from "node:crypto";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
@@ -14,7 +15,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { z } from "zod";
-import { cloudHeaders, runInCloud, tunnelBase } from "../testing/src/client.ts";
+import { cloudHeaders, gitBranch, gitDefaultBranch, runInCloud, tunnelBase } from "../testing/src/client.ts";
 import type { Agent, Incoming } from "../src/index.ts";
 import { unavailableRecords } from "../src/records.ts";
 
@@ -26,13 +27,36 @@ test("a hosted cloud needs the CI key and --synthetic; a local one needs neither
   assert.throws(() => cloudHeaders({ cloud: "http://localhost:8900", ciKey: "oci_x", synthetic: false }), /--synthetic/);
   assert.throws(() => cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: true, environment: "dev" }), /staging or production/);
   assert.throws(() => cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: true, ref: "x".repeat(101) }), /--ref/);
-  assert.deepEqual(cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: true, agentVersion: "a1f9c2e", ref: "main", environment: "staging" }), {
+  assert.deepEqual(cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: true, agentVersion: "a1f9c2e", ref: "feature/x", defaultBranch: "main", environment: "staging" }), {
     authorization: "Bearer oci_x",
     "x-chinwag-synthetic": "true",
     "x-chinwag-agent-version": "a1f9c2e",
-    "x-chinwag-ref": "main",
+    "x-chinwag-ref": "feature/x",
+    "x-chinwag-default-branch": "main",
     "x-chinwag-environment": "staging",
   });
+});
+
+test("the session's branch, with no --ref: GitHub's, GitLab's, Buildkite's, CircleCI's, else the folder's git branch (none when detached); the default branch from origin's HEAD", () => {
+  const dir = mkdtempSync(join(tmpdir(), "flow-branch-"));
+  const git = (...args: string[]) => execFileSync("git", ["-C", dir, ...args], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+  assert.equal(gitBranch({}, dir), undefined, "not a repository");
+  assert.equal(gitDefaultBranch(dir), undefined);
+  git("init", "-q", "-b", "feature/trace");
+  git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "--allow-empty", "-m", "init");
+  assert.equal(gitBranch({}, dir), "feature/trace");
+  const ci = { GITHUB_HEAD_REF: "gh-head", GITHUB_REF_NAME: "gh-ref", CI_COMMIT_REF_NAME: "gitlab", BUILDKITE_BRANCH: "buildkite", CIRCLE_BRANCH: "circle" };
+  const order = Object.keys(ci) as Array<keyof typeof ci>;
+  order.forEach((name, i) => {
+    const env = Object.fromEntries(order.slice(i).map((n) => [n, ci[n]]));
+    assert.equal(gitBranch({ ...env, GITHUB_HEAD_REF: i === 0 ? ci.GITHUB_HEAD_REF : "" }, dir), ci[name], name);
+  });
+  assert.equal(gitBranch({ CIRCLE_BRANCH: "x".repeat(101) }, dir), "feature/trace", "one no header can carry is skipped");
+  git("checkout", "-q", "--detach");
+  assert.equal(gitBranch({}, dir), undefined, "a detached HEAD is no branch");
+  git("update-ref", "refs/remotes/origin/trunk", "HEAD");
+  git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk");
+  assert.equal(gitDefaultBranch(dir), "trunk");
 });
 
 test("the session is played at Opened.tunnel, else at the open's address", () => {

@@ -56,6 +56,7 @@ import { addWakeUp, scheduleTools, wakeUpsOf, wakeUpsSection, wakeUpTools, type 
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
 import { EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput, contentRefusalText, pageLine, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal, shortLocal, zoneLabel } from "./time.ts";
+import { activeCall, type QueuedBy, type TurnTrigger } from "./traces.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
 import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
 
@@ -254,6 +255,11 @@ interface Note {
   wait?: boolean;
   /** A reset marker (agent.resetHistory): the model is sent only what comes after it. */
   reset?: boolean;
+  /** What it is, as the turn it starts says (traces: flow.turn.trigger), with its instruction or result. */
+  trigger?: TurnTrigger;
+  triggerText?: string;
+  /** Where code queued it (a prompt nudge recorded in a tool, say). */
+  queuedBy?: QueuedBy;
 }
 
 /** Typing kept up on one channel while a turn runs. */
@@ -280,6 +286,9 @@ interface Direct {
   /** The run's schedule, to read whether the run was settled. */
   schedule?: string;
   nudge?: string;
+  /** What queued it, as its trace says (queued_message, event, direct), and where code queued it. */
+  trigger: TurnTrigger;
+  queuedBy?: QueuedBy;
 }
 
 export class Conversation {
@@ -645,7 +654,7 @@ export class Conversation {
       } else if (result) {
         // What went is what the history keeps.
         if (result.sent.type === "message") answer.reply = result.sent.text;
-        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent), channel, direct: true, answered: true, ...idDetail(result.receipt) });
+        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent), channel, direct: true, answered: true, trigger: "direct", ...idDetail(result.receipt) });
       }
       if (!this.running && !this.timer) void this.run();
     };
@@ -716,21 +725,26 @@ export class Conversation {
         this.wakeTools?.();
       }
     } else if (row.kind === "note") {
-      this.notes.push({ text: p.text, inbox: row.id, wait: p.wait === true, ...(p.reset === true ? { reset: true } : {}) });
+      this.notes.push({ text: p.text, inbox: row.id, wait: p.wait === true, ...(p.reset === true ? { reset: true } : {}), ...noteTags(p) });
     } else if (row.kind === "schedule") {
       const link = p.mode === "wake" ? this.channels.get(p.channel) : undefined;
       const closed = !!link && windowClosed(link, this.settings.now());
-      if (p.fixed) this.direct.push({ inbox: row.id, channel: p.channel, text: p.text, run: p.run, schedule: p.schedule });
+      const queuedBy = queuedByOf(p.queuedBy);
+      // The business's nudge with `at`, come due; else a time the agent or the person set.
+      const tags = { trigger: (p.mode !== "wake" && p.origin === "api" ? "nudge" : "wake_up") as TurnTrigger, ...(typeof p.instruction === "string" ? { triggerText: p.instruction } : {}), ...(queuedBy ? { queuedBy } : {}) };
+      if (p.fixed) this.direct.push({ inbox: row.id, channel: p.channel, text: p.text, run: p.run, schedule: p.schedule, trigger: "queued_message", ...(queuedBy ? { queuedBy } : {}) });
       else if (closed) {
         // A wake-up past their WhatsApp window: the agent may still do its work, and only a template reaches them.
         const how = this.builtins.has("send_template") ? "If one of the business's templates says what you have to tell them, send it with send_template, its values filled in; otherwise send them nothing." : "So send them nothing.";
-        this.notes.push({ text: `${p.text} Their WhatsApp 24-hour window is closed: no ordinary message reaches them. ${how}`, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel, windowClosed: true } });
-      } else this.notes.push({ text: p.text, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel } });
+        this.notes.push({ text: `${p.text} Their WhatsApp 24-hour window is closed: no ordinary message reaches them. ${how}`, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel, windowClosed: true }, ...tags });
+      } else this.notes.push({ text: p.text, inbox: row.id, owed: { run: p.run, mode: p.mode, channel: p.channel }, ...tags });
     } else if (row.kind === "nudge") {
+      const queuedBy = queuedByOf(p.queuedBy);
+      const tags = { trigger: (p.trigger === "event" ? "event" : "nudge") as TurnTrigger, ...(typeof p.prompt === "string" ? { triggerText: p.prompt } : {}), ...(queuedBy ? { queuedBy } : {}) };
       if (p.prompt !== undefined) {
         if (p.windowClosed) {
           const text = `[Nudge from the business, not from the person: ${p.prompt}] Their WhatsApp 24-hour window is closed: no ordinary message reaches them. If one of the business's templates says this, send it with send_template, its values filled in. If none fits, send nothing: Flow Framework sends them a "you have a new message" template and gives you this again when they reply.`;
-          this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel, address: p.address, windowClosed: true } });
+          this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel, address: p.address, windowClosed: true }, ...tags });
           if (!this.running && this.hasWork()) this.schedule(0);
           return;
         }
@@ -738,8 +752,11 @@ export class Conversation {
         const text = held
           ? `[Nudge from the business, not from the person, ${held}${p.prompt}] Tell them now in your own words. Others held with it come in this turn too: cover them all in one short message, not a text each, and answer anything they just asked first.`
           : `[Nudge from the business, not from the person: ${p.prompt}] Write it to them now in your own words, or send nothing if it does not fit what they asked not to be messaged about.`;
-        this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel, address: p.address } });
-      } else this.direct.push({ inbox: row.id, channel: p.channel, address: p.address, text: p.text, ...(p.link ? { link: p.link } : {}), template: p.template, nudge: p.nudge, ...(p.theyWrote ? { theyWrote: true } : {}) });
+        this.notes.push({ text, inbox: row.id, owed: { nudge: p.nudge, mode: "prompt", channel: p.channel, address: p.address }, ...tags });
+      } else {
+        const trigger: TurnTrigger = p.trigger === "event" || p.trigger === "direct" ? p.trigger : "queued_message";
+        this.direct.push({ inbox: row.id, channel: p.channel, address: p.address, text: p.text, ...(p.link ? { link: p.link } : {}), template: p.template, nudge: p.nudge, ...(p.theyWrote ? { theyWrote: true } : {}), trigger, ...(queuedBy ? { queuedBy } : {}) });
+      }
     }
     if (!this.running && this.hasWork()) this.schedule(0);
   }
@@ -761,7 +778,7 @@ export class Conversation {
   /** The channel reports, now or later, that a message did not reach the person. */
   undelivered(text: string, reason: string): void {
     this.settings.emit(this.id, "message.undelivered", { text, reason });
-    this.note(`[Not delivered] "${text}": ${reason}`);
+    this.note(`[Not delivered] "${text}": ${reason}`, false, false, { trigger: "direct", triggerText: `Not delivered: ${reason}` });
   }
 
   /**
@@ -999,7 +1016,7 @@ export class Conversation {
       for (const c of lastCalls.toolCalls ?? []) if (!answered.has(c.id)) this.history.push({ role: "tool", toolCallId: c.id, content: INTERRUPTED });
     }
     for (const task of await store.tasks(this.id)) {
-      this.note(`[Chinwag] ${task.tool} (${task.taskId}) was still running in the background when the agent restarted. It may or may not have finished; check before telling them it is done.`);
+      this.note(`[Chinwag] ${task.tool} (${task.taskId}) was still running in the background when the agent restarted. It may or may not have finished; check before telling them it is done.`, false, false, { trigger: "task", triggerText: `${task.tool} (${task.taskId}) was cut off by a restart` });
       this.persist(() => store.removeTask(this.id, task.taskId));
     }
     for (const row of await store.openInbox(this.id)) {
@@ -1022,11 +1039,11 @@ export class Conversation {
     return this.pending.length > 0 || this.notes.some((n) => !n.wait) || this.direct.length > 0;
   }
 
-  private note(text: string, wait = false, reset = false): Promise<void> {
-    const item: Note = { text, wait, ...(reset ? { reset } : {}) };
+  private note(text: string, wait = false, reset = false, tags: Pick<Note, "trigger" | "triggerText"> = {}): Promise<void> {
+    const item: Note = { text, wait, ...(reset ? { reset } : {}), ...tags };
     this.notes.push(item);
     const stored = this.persist(async () => {
-      item.inbox = await this.settings.store.addInbox(this.id, "note", { text, wait, ...(reset ? { reset } : {}) });
+      item.inbox = await this.settings.store.addInbox(this.id, "note", { text, wait, ...(reset ? { reset } : {}), ...tags });
       this.knownInbox.add(item.inbox);
     });
     if (!wait && !this.running) this.schedule(0);
@@ -1042,7 +1059,12 @@ export class Conversation {
     }, delayMs);
   }
 
-  private async run(): Promise<void> {
+  private run(): Promise<void> {
+    // This conversation's own: never the tool call of another conversation whose nudge woke it.
+    return activeCall.run({ conversationId: this.id }, () => this.work());
+  }
+
+  private async work(): Promise<void> {
     if (this.running || this.gone) return;
     this.running = true;
     try {
@@ -1221,6 +1243,20 @@ export class Conversation {
     }
   }
 
+  /**
+   * What starts this turn, as its trace says (src/traces.ts, TurnTrigger): the person, when a
+   * message of theirs waits; else the first note that starts turns. A turn cut off by a restart,
+   * with nothing new, is the person's when its last entry is their message, else not known.
+   */
+  private triggerOf(resumed: boolean): { trigger?: TurnTrigger; triggerText?: string; queuedBy?: QueuedBy[] } {
+    const notes = this.notes.filter((n) => !n.wait);
+    const queuedBy = notes.flatMap((n) => (n.queuedBy ? [n.queuedBy] : []));
+    const first = notes.find((n) => n.trigger);
+    const last = resumed && !first ? this.history.findLast((e) => e.role === "user") : undefined;
+    const trigger = this.unread() || (last?.role === "user" && last.messages?.length) ? "person" : first?.trigger;
+    return { ...(trigger ? { trigger } : {}), ...(trigger !== "person" && first?.triggerText ? { triggerText: first.triggerText } : {}), ...(queuedBy.length ? { queuedBy } : {}) };
+  }
+
   private async turn(): Promise<void> {
     const started = Date.now();
     const { store } = this.settings;
@@ -1235,11 +1271,12 @@ export class Conversation {
     // A turn cut off by a restart keeps its number, so a tool called again in it gets the same key.
     if (!this.resumeTurn) this.turns++;
     const turns = this.turns;
+    const resumed = this.resumeTurn;
     this.resumeTurn = false;
     this.theirMessages = false;
     this.promptDestination = undefined;
     // `turn`: its number, the same when a turn cut off by a restart runs again (on this runner or another).
-    this.settings.emit(this.id, "turn.start", { turn: turns });
+    this.settings.emit(this.id, "turn.start", { turn: turns, ...this.triggerOf(resumed) });
     this.signInPrompts.clear();
     this.authBlocked.clear();
     this.authPromptsSent.clear();
@@ -1811,7 +1848,7 @@ export class Conversation {
       this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(d.channel), arguments: JSON.stringify(sentArgs(sent)) }] });
       this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel: d.channel, ...this.ownId(d.channel, result.receipt) }) });
     }
-    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel: d.channel, direct: true, ...idDetail(result.receipt) });
+    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel: d.channel, direct: true, trigger: d.trigger, ...(d.queuedBy ? { queuedBy: [d.queuedBy] } : {}), ...idDetail(result.receipt) });
     settle("sent", undefined, result.receipt?.messageId);
   }
 
@@ -2009,7 +2046,8 @@ export class Conversation {
               if (!verified) context = toolContext({ ...context, key: null, person: `${context.channel}:${identity.address}` }, credentials);
             }
             if (this.closed) return { error: "conversation_closed" };
-            return tool.run(parsed.data, context);
+            // What the tool's code queues (a nudge to anyone) names this call as where it came from.
+            return activeCall.run({ conversationId: this.id, toolCallId: call.id, toolName: call.name }, () => tool.run(parsed.data, context));
           } finally { r.startedAt = Date.now(); authorize(); }
         })
         .then(
@@ -2059,7 +2097,7 @@ export class Conversation {
       this.tasks.delete(task.id);
       this.persist(() => this.settings.store.removeTask(this.id, task.id));
       this.settings.emit(this.id, "task.done", { callId: call.id, tool: call.name, task: task.id, ms: Date.now() - startedAt, ok: result.ok, output: clipOutput(result.text) });
-      this.note(`[Background result: ${call.name} (${task.id})] ${this.capped(result.text)}\n[Chinwag] They have not seen this result: tell them with ${this.sendToolsNow()}.`);
+      this.note(`[Background result: ${call.name} (${task.id})] ${this.capped(result.text)}\n[Chinwag] They have not seen this result: tell them with ${this.sendToolsNow()}.`, false, false, { trigger: "task", triggerText: `${call.name} (${task.id}): ${this.capped(result.text)}` });
       this.checkIdle();
     });
     return (
@@ -2339,3 +2377,19 @@ export function profileTool(profile: Profile): Tool {
 
 /** createAgent's `profile`: what the business knows about the person, fetched only when the agent asks. */
 export type Profile = (who: { conversationId: string; person: string; channel: string }) => Promise<unknown> | unknown;
+
+/** A note's trigger and its text, as its inbox row keeps them. */
+function noteTags(p: Record<string, any>): Pick<Note, "trigger" | "triggerText"> {
+  const trigger = ["person", "nudge", "event", "wake_up", "task", "queued_message", "direct"].includes(p.trigger) ? (p.trigger as TurnTrigger) : undefined;
+  return { ...(trigger ? { trigger } : {}), ...(trigger && typeof p.triggerText === "string" ? { triggerText: p.triggerText } : {}) };
+}
+
+/** Where code queued a nudge, as its row keeps it; anything else is none. */
+export function queuedByOf(value: unknown): QueuedBy | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const v = value as Record<string, unknown>;
+  if (typeof v.conversationId !== "string") return undefined;
+  const out: QueuedBy = { conversationId: v.conversationId };
+  for (const key of ["traceId", "spanId", "toolCallId", "toolName"] as const) if (typeof v[key] === "string" && v[key]) out[key] = v[key] as string;
+  return out;
+}

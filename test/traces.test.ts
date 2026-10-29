@@ -1,4 +1,4 @@
-// covers: src/traces.ts src/agent.ts src/conversation.ts mcp/src/server.ts mcp/src/terminal.ts flow-messaging/src/index.ts
+// covers: src/traces.ts src/agent.ts src/conversation.ts src/schedules.ts src/store.ts mcp/src/server.ts mcp/src/terminal.ts flow-messaging/src/index.ts
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage } from "node:http";
 import { execFileSync } from "node:child_process";
@@ -6,13 +6,14 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, customUI, tool, z, type AgentOptions, type Channel, type Outbound } from "../src/index.ts";
+import { createAgent, customUI, sqlite, tool, z, type Agent, type AgentOptions, type Channel, type NudgeInput, type Outbound } from "../src/index.ts";
+import { NUDGE_TRIGGER } from "../src/business-events/engine.ts";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { flowMessaging } from "../flow-messaging/src/index.ts";
 import { mcpServer } from "../mcp/src/index.ts";
 import { terminalServer } from "../mcp/src/terminal.ts";
-import { agentVersion, tracesFromEnv } from "../src/traces.ts";
-import { SMS, call, respond, scriptedModel } from "./helpers.ts";
+import { agentVersion, traces, tracesFromEnv } from "../src/traces.ts";
+import { SMS, call, gate, respond, scriptedModel } from "./helpers.ts";
 
 const KEY = "trace_key_do-not-log-me";
 
@@ -59,6 +60,67 @@ async function playTurn(h: ReturnType<typeof agentFor>, from: string, offset = 0
 }
 
 const attrs = (span: any) => Object.fromEntries(span.attributes.map((a: any) => [a.key, Object.values(a.value)[0]]));
+
+/** Every trace the endpoint got, in the order they came: its spans, its root and the root's attributes. */
+function tracesOf(endpoint: { requests: Array<{ body: any }> }) {
+  const byId = new Map<string, any[]>();
+  for (const request of endpoint.requests) for (const span of request.body.resourceSpans[0].scopeSpans[0].spans) byId.set(span.traceId, [...(byId.get(span.traceId) ?? []), span]);
+  return [...byId.values()].map((spans) => {
+    const root = spans.find((s: any) => !s.parentSpanId);
+    return { spans, root, attrs: attrs(root), replies: spans.flatMap((s: any) => attrs(s)["chinwag.agent_reply"] ?? []) };
+  });
+}
+
+const BUYER = "+15550100123";
+const SELLER = "+15550100124";
+
+/**
+ * A marketplace agent tracing to `url`: its tool `answer_buyer`, called in the seller's
+ * conversation, queues the seller's answer for the buyer as written (`at` when given).
+ */
+function marketplace(url: string, options: { database?: AgentOptions["database"]; now?: () => number; at?: number } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "flow-"));
+  writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
+  const scripted = scriptedModel();
+  const sent: string[] = [];
+  const waiters: Array<() => void> = [];
+  const sms: Channel = { name: "sms", kind: "sms", info: SMS, phone: true, send: (_: string, o: Outbound) => void (o.type === "message" && sent.push(o.text), waiters.splice(0).forEach((w) => w())) };
+  let agent!: Agent;
+  const answer = tool({
+    name: "answer_buyer",
+    description: "Passes the seller's answer on to the buyer.",
+    input: z.object({ text: z.string() }),
+    run: async ({ text }) => (await agent.recordNudge({ to: { channel: "sms", address: BUYER }, text: `The seller answered your question: ${text}`, ...(options.at ? { at: options.at } : {}) })).status,
+  });
+  agent = createAgent({ dir, model: scripted.model, tools: [answer], channels: [sms], debounceMs: 0, scheduleCheckMs: 0, id: "market", traces: { url, key: KEY, content: true, version: "v7" }, ...(options.database ? { database: options.database } : {}), ...(options.now ? { now: options.now } : {}) });
+  async function sentText(text: string) {
+    while (!sent.includes(text)) await new Promise<void>((r) => waiters.push(r));
+  }
+  return { agent, sent, sentText, ...scripted };
+}
+
+/** The buyer asks, then the seller answers and the agent passes it on with answer_buyer: their conversations' ids. */
+async function sellerAnswers(h: ReturnType<typeof marketplace>, from = 0) {
+  const buyer = (await h.agent.message({ channel: "sms", from: BUYER, message: "Does it ship Monday?", messageId: `SM-${from}` }))!;
+  (await h.nextCall(from)).answer(respond(call("send_sms", { text: "I'll ask the seller." })));
+  await h.agent.conversation(buyer.conversationId)!.whenIdle();
+  const seller = (await h.agent.message({ channel: "sms", from: SELLER, message: "Yes, Monday.", messageId: `SM-${from + 1}` }))!;
+  (await h.nextCall(from + 1)).answer(respond(call("send_sms", { text: "Thanks!" }), call("answer_buyer", { text: "yes, it ships Monday." })));
+  (await h.nextCall(from + 2)).answer(respond(call("send_sms", { text: "Thanks, I told them." })));
+  await h.agent.conversation(seller.conversationId)!.whenIdle();
+  return { buyer: buyer.conversationId, seller: seller.conversationId };
+}
+
+/** The flow.origin.* attributes of a root, and what a trace that queued from `tool` in `conversation` should say. */
+const originOf = (a: Record<string, unknown>) => Object.fromEntries(Object.entries(a).filter(([k]) => k.startsWith("flow.origin.")));
+const queuedFrom = (tool: any, conversation: string) => ({
+  "flow.origin.trace_id": tool.traceId,
+  "flow.origin.span_id": tool.spanId,
+  "flow.origin.conversation_id": conversation,
+  "flow.origin.tool_call_id": attrs(tool)["gen_ai.tool.call.id"],
+  "flow.origin.tool_name": "answer_buyer",
+});
+const QUEUED_BY = (tool: any) => [{ traceId: tool.traceId, spanId: tool.spanId, attributes: [{ key: "flow.link.kind", value: { stringValue: "queued_by" } }] }];
 
 test("each turn is one trace: the person's ids and channel, its model calls, tools and replies", async () => {
   const endpoint = await fakeEndpoint();
@@ -169,13 +231,16 @@ test("the endpoint refusing traces never touches the conversation, is logged onc
   assert.doesNotMatch(warnings.join(""), /do-not-log-me/);
 });
 
-test("from the environment: a trace key goes to flow.engineer/observe unless a URL is set, content only with FLOW_FRAMEWORK_TRACES_CONTENT=1, never under node --test; the CHINWAG_ names still work", () => {
+test("from the environment: a trace key goes to flow.engineer/observe unless a URL is set, content only with FLOW_FRAMEWORK_TRACES_CONTENT=1 or under flow test (unless 0), never under node --test; the CHINWAG_ names still work", () => {
   assert.equal(tracesFromEnv({}), undefined);
   assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY }), { key: KEY, url: "https://flow.engineer/observe", content: false });
   assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "  " }), { key: KEY, url: "https://flow.engineer/observe", content: false });
   assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "https://example.test/traces" }), { key: KEY, url: "https://example.test/traces", content: false });
   assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "https://example.test/traces", FLOW_FRAMEWORK_TRACES_CONTENT: "1" }), { key: KEY, url: "https://example.test/traces", content: true });
   assert.equal(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, NODE_TEST_CONTEXT: "child-v8" }), undefined);
+  assert.equal(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_RUN_KIND: "test" })?.content, true, "flow test's files are synthetic");
+  assert.equal(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_RUN_KIND: "test", FLOW_FRAMEWORK_TRACES_CONTENT: "0" })?.content, false);
+  assert.equal(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_RUN_KIND: "production" })?.content, false);
   assert.deepEqual(tracesFromEnv({ CHINWAG_TRACES_KEY: KEY, CHINWAG_TRACES_URL: "https://example.test/traces", CHINWAG_TRACES_CONTENT: "1" }), { key: KEY, url: "https://example.test/traces", content: true });
   assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, CHINWAG_TRACES_KEY: "old", CHINWAG_TRACES_URL: "https://example.test/old" }), { key: KEY, url: "https://example.test/old", content: false });
 });
@@ -334,4 +399,129 @@ test("with no version option, traces carry the agent's version as service.versio
     request = await endpoint.next(1);
   } finally { endpoint.close(); }
   assert.equal(attrs(request.body.resourceSpans[0].resource)["service.version"], "build-42");
+});
+
+test("a message a tool queues for another person is a trace of its own, sent as written, linked to the tool call that queued it", async () => {
+  const endpoint = await fakeEndpoint();
+  const h = marketplace(endpoint.url);
+  const { buyer, seller } = await sellerAnswers(h);
+  await h.sentText("The seller answered your question: yes, it ships Monday.");
+  await h.agent.conversation(buyer)!.whenIdle();
+  await h.agent.flushTraces();
+  endpoint.close();
+
+  const all = tracesOf(endpoint);
+  const sellerTurn = all.find((t) => t.attrs["chinwag.conversation_id"] === seller)!;
+  const tool = sellerTurn.spans.find((s: any) => s.name === "execute_tool answer_buyer");
+  assert.equal(sellerTurn.attrs["flow.turn.trigger"], "person");
+  const queued = all.filter((t) => t.attrs["chinwag.conversation_id"] === buyer && t.attrs["flow.turn.trigger"] === "queued_message");
+  assert.equal(queued.length, 1);
+  const [trace] = queued;
+  assert.equal(trace.spans.length, 2, "its root and its send, nothing of a turn");
+  const send = trace.spans.find((s: any) => s.parentSpanId);
+  assert.deepEqual([attrs(send)["flow.message.as_written"], attrs(send)["chinwag.agent_reply"]], [true, "The seller answered your question: yes, it ships Monday."]);
+  assert.deepEqual(trace.root.links, QUEUED_BY(tool));
+  assert.deepEqual(originOf(trace.attrs), queuedFrom(tool, seller));
+  // The buyer's own turn is the person's, and holds only what the agent wrote them.
+  const own = all.find((t) => t.attrs["chinwag.conversation_id"] === buyer && t.attrs["flow.turn.trigger"] === "person")!;
+  assert.deepEqual([own.replies, own.root.links, originOf(own.attrs)], [["I'll ask the seller."], undefined, {}]);
+});
+
+test("a message sent as written is a trace of its own, also while a turn is open in its conversation", async () => {
+  const endpoint = await fakeEndpoint();
+  const t = traces({ url: endpoint.url, key: KEY, content: true, version: "v7" }, { service: "market", kindOf: () => "sms" });
+  const at = Date.now();
+  t.sink({ type: "message.in", conversationId: "c1", at, text: "Does it ship Monday?", channel: "sms" });
+  t.sink({ type: "turn.start", conversationId: "c1", at, turn: 1, trigger: "person" });
+  t.sink({ type: "message.out", conversationId: "c1", at: at + 1, text: "The seller answered your question: yes.", channel: "sms", direct: true, trigger: "queued_message" });
+  t.sink({ type: "message.out", conversationId: "c1", at: at + 2, text: "Let me check.", channel: "sms" });
+  t.sink({ type: "turn.end", conversationId: "c1", at: at + 3 });
+  await t.flush();
+  endpoint.close();
+  const shown = tracesOf(endpoint).map((x) => [x.attrs["flow.turn.trigger"], x.replies, x.spans.filter((s: any) => s.parentSpanId).map((s: any) => attrs(s)["flow.message.as_written"] ?? false)]);
+  assert.deepEqual(shown.sort((a, b) => String(a[0]).localeCompare(String(b[0]))), [
+    ["person", ["Let me check."], [false]],
+    ["queued_message", ["The seller answered your question: yes."], [true]],
+  ]);
+});
+
+test("each trace's root says what started it, with the instruction or result it began with", async () => {
+  const endpoint = await fakeEndpoint();
+  const clock = { now: Date.UTC(2026, 9, 12, 16) };
+  const dir = mkdtempSync(join(tmpdir(), "flow-"));
+  writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
+  const scripted = scriptedModel();
+  const released = gate<string>();
+  const slow = tool({ name: "refund", description: "Checks a refund.", input: z.object({}), deadlineMs: 1, run: () => released.promise });
+  const sms: Channel = { name: "sms", kind: "sms", info: SMS, phone: true, send: () => {} };
+  const agent = createAgent({ dir, model: scripted.model, tools: [slow], channels: [sms], debounceMs: 0, scheduleCheckMs: 0, id: "shop", now: () => clock.now, intercept: (_id, text) => (/chest pain/.test(text) ? "Call 911 now." : null), traces: { url: endpoint.url, key: KEY, content: true, version: "v7" } });
+  const to = { channel: "sms", address: BUYER };
+  const answer = async (n: number, text: string) => (await scripted.nextCall(n)).answer(respond(call("send_sms", { text })));
+
+  const { conversationId } = (await agent.message({ channel: "sms", from: BUYER, message: "Hi", messageId: "SM-1" }))!;
+  const conversation = () => agent.conversation(conversationId)!;
+  await answer(0, "Hello!");
+  await conversation().whenIdle();
+  const nudged = agent.nudge({ to, prompt: "Tell them their order shipped." });
+  await answer(1, "Your order shipped.");
+  await nudged;
+  const event = agent.nudge({ to, prompt: "Tell them the sale starts Friday.", [NUDGE_TRIGGER]: "event" } as NudgeInput);
+  await answer(2, "The sale starts Friday.");
+  await event;
+  await conversation().whenIdle();
+  await agent.wakeUp({ to, note: "Check whether they found a size.", inMs: 120_000, respectQuietHours: false });
+  clock.now += 120_000;
+  await agent.runDue();
+  await answer(3, "Did you find a size?");
+  await conversation().whenIdle();
+  await agent.nudge({ to, text: "Sale today: 20% off." });
+  await agent.message({ channel: "sms", from: BUYER, message: "Where is my refund?", messageId: "SM-2" });
+  (await scripted.nextCall(4)).answer(respond(call("send_sms", { text: "Checking, one moment." }), call("refund")));
+  (await scripted.nextCall(5)).answer(respond());
+  released.open("refund sent");
+  await answer(6, "Your refund went out.");
+  await conversation().whenIdle();
+  await agent.message({ channel: "sms", from: BUYER, message: "chest pain", messageId: "SM-3" });
+  await conversation().whenIdle();
+  await agent.flushTraces();
+  endpoint.close();
+
+  const shown = tracesOf(endpoint).map((t) => [t.attrs["flow.turn.trigger"], t.attrs["flow.turn.trigger_text"] ?? null, t.replies]);
+  const order = (rows: unknown[][]) => rows.map((r) => JSON.stringify(r)).sort();
+  assert.deepEqual(order(shown), order([
+    ["person", null, ["Hello!"]],
+    ["nudge", "Tell them their order shipped.", ["Your order shipped."]],
+    ["event", "Tell them the sale starts Friday.", ["The sale starts Friday."]],
+    ["wake_up", "Check whether they found a size.", ["Did you find a size?"]],
+    ["queued_message", null, ["Sale today: 20% off."]],
+    ["person", null, ["Checking, one moment."]],
+    ["task", "refund (task_1): refund sent", ["Your refund went out."]],
+    ["person", null, []],
+    ["direct", null, ["Call 911 now."]],
+  ]));
+});
+
+test("a queued message's origin is kept with it: queued for later, it is sent after a restart still linked to the tool call that queued it", async () => {
+  const endpoint = await fakeEndpoint();
+  const file = join(mkdtempSync(join(tmpdir(), "flow-")), "flow.db");
+  const clock = { now: Date.UTC(2026, 9, 12, 16) };
+  const first = marketplace(endpoint.url, { database: sqlite(file), now: () => clock.now, at: clock.now + 120_000 });
+  await first.agent.resume();
+  const { buyer, seller } = await sellerAnswers(first);
+  await first.agent.flushTraces();
+  assert.deepEqual(first.sent, ["I'll ask the seller.", "Thanks!", "Thanks, I told them."], "nothing for the buyer yet");
+  const tool = tracesOf(endpoint).find((t) => t.attrs["chinwag.conversation_id"] === seller)!.spans.find((s: any) => s.name === "execute_tool answer_buyer");
+
+  const second = marketplace(endpoint.url, { database: sqlite(file), now: () => clock.now });
+  await second.agent.resume();
+  clock.now += 120_000;
+  await second.agent.runDue();
+  await second.sentText("The seller answered your question: yes, it ships Monday.");
+  await second.agent.conversation(buyer)!.whenIdle();
+  await second.agent.flushTraces();
+  endpoint.close();
+  const queued = tracesOf(endpoint).find((t) => t.attrs["flow.turn.trigger"] === "queued_message")!;
+  assert.equal(queued.attrs["chinwag.conversation_id"], buyer);
+  assert.deepEqual(queued.root.links, QUEUED_BY(tool));
+  assert.deepEqual(originOf(queued.attrs), queuedFrom(tool, seller));
 });

@@ -28,10 +28,40 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   own code sent show as `your code`. Exit 0 printed, 1 otherwise, with the server's message
   and hint. The coding-agent skill tells agents to run `flow conversations --grade wrong`, then
   `show <id>`, to find and fix bad replies.
+- **Traces say what started each turn, and where a queued message came from.** Every trace's root
+  span has `flow.turn.trigger`: `person` (their message), `nudge` (a prompt nudge, also one with
+  `at` come due), `event` (a business event), `wake_up` (a wake-up, or a reminder the person asked
+  for), `task` (a background tool's result), `queued_message` (a nudge's `text` or `template`, as
+  written) or `direct` (Flow Framework's own message: a rule's or keyword's answer, the fallback
+  template, word that a message did not go). With content on, `flow.turn.trigger_text` is the
+  instruction or result it began with (the nudge's prompt, the wake-up's note, the background
+  result), capped like other text. A message sent as written is always a trace of its own (before,
+  it could join a turn open in its conversation), its send span marked `flow.message.as_written`.
+  A nudge recorded while code runs in a conversation (`recordNudge`/`nudge` in a tool, also for
+  another person) keeps where: its trace has a span link to that tool call's span (else the
+  turn's), with `flow.link.kind` = `queued_by`, and `flow.origin.trace_id`, `flow.origin.span_id`,
+  `flow.origin.conversation_id`, `flow.origin.tool_call_id`, `flow.origin.tool_name` on the root
+  span (each only when known). It is kept with the nudge in the store, so it holds across holds,
+  `at` and restarts.
+- **`flow test` sends message text in its traces by default.** Under `flow test`
+  (`FLOW_FRAMEWORK_RUN_KIND=test`) traces carry content unless `FLOW_FRAMEWORK_TRACES_CONTENT=0`,
+  since `--synthetic` already says the test files hold no real data, so test conversations show
+  their messages on the dashboard. Production stays opt-in (`FLOW_FRAMEWORK_TRACES_CONTENT=1`).
+- **`flow test`'s branch, with no `--ref`:** `GITHUB_HEAD_REF`, `GITHUB_REF_NAME`,
+  `CI_COMMIT_REF_NAME`, `BUILDKITE_BRANCH`, `CIRCLE_BRANCH`, else the folder's git branch (none on a
+  detached HEAD). The repository's default branch (origin's HEAD), when git knows it, goes beside
+  it on the session's open as `x-chinwag-default-branch`. A branch a header cannot carry (over 100
+  characters, not printable ASCII) is left out instead of stopping the run.
 
 ### Migration notes
 
-None: new commands only.
+- No code changes. The store needs no migration: a nudge's origin and trigger ride in its existing
+  JSON (the nudge's body, the inbox row, a scheduled nudge's rule), so running agents keep working
+  and nudges queued before the upgrade are traced without an origin.
+- A traces endpoint that reads turns should read `flow.turn.trigger` and treat
+  `flow.message.as_written` sends as written by code, not by the model.
+- Under `flow test`, traces now carry message text: set `FLOW_FRAMEWORK_TRACES_CONTENT=0` in the
+  test's environment to keep them metadata only.
 
 ## 0.12.0 (2026-10-28)
 

@@ -2,6 +2,7 @@
 // own model and key; its tools are replaced by calls the cloud simulates, its replies go to the
 // cloud's platform simulators, and the person's messages arrive over one stream.
 
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from "node:http";
@@ -195,6 +196,8 @@ export interface CloudAccess {
   synthetic: boolean;
   agentVersion?: string;
   ref?: string;
+  /** The repository's default branch, beside `ref` (gitDefaultBranch). */
+  defaultBranch?: string;
   environment?: string;
 }
 
@@ -215,6 +218,7 @@ export function cloudHeaders(access: CloudAccess): Record<string, string> {
   const optional: Array<[string, string, string | undefined]> = [
     ["x-chinwag-agent-version", "--agent-version", access.agentVersion],
     ["x-chinwag-ref", "--ref", access.ref],
+    ["x-chinwag-default-branch", "The default branch", access.defaultBranch],
     ["x-chinwag-environment", "--environment", access.environment],
   ];
   for (const [header, flag, value] of optional) {
@@ -223,6 +227,39 @@ export function cloudHeaders(access: CloudAccess): Record<string, string> {
     headers[header] = value;
   }
   return headers;
+}
+
+/** A label the open's headers carry: 1 to 100 printable ASCII characters. */
+const headerValue = (value: string | undefined) => (value && /^[\x20-\x7e]{1,100}$/.test(value) ? value : undefined);
+
+/** The CI's branch variables, in the order they are read: GitHub's (a pull request's head, else the ref), GitLab's, Buildkite's, CircleCI's. */
+const CI_BRANCHES = ["GITHUB_HEAD_REF", "GITHUB_REF_NAME", "CI_COMMIT_REF_NAME", "BUILDKITE_BRANCH", "CIRCLE_BRANCH"];
+
+function git(dir: string, ...args: string[]): string | undefined {
+  try {
+    return execFileSync("git", ["-C", dir, ...args], { stdio: ["ignore", "pipe", "ignore"], timeout: 5_000 }).toString().trim() || undefined;
+  } catch {
+    return undefined; // no git, or not a repository
+  }
+}
+
+/**
+ * The branch `flow test` keeps with the session when --ref is not given: the first CI variable set
+ * (CI_BRANCHES), else the folder's git branch (none on a detached HEAD). One a header cannot carry is skipped.
+ */
+export function gitBranch(env: NodeJS.ProcessEnv = process.env, dir = process.cwd()): string | undefined {
+  for (const name of CI_BRANCHES) {
+    const value = headerValue(env[name]?.trim());
+    if (value) return value;
+  }
+  const head = git(dir, "rev-parse", "--abbrev-ref", "HEAD");
+  return head === "HEAD" ? undefined : headerValue(head);
+}
+
+/** The repository's default branch, as its origin's HEAD names it (`git symbolic-ref refs/remotes/origin/HEAD`); none when that is not known. */
+export function gitDefaultBranch(dir = process.cwd()): string | undefined {
+  const ref = git(dir, "symbolic-ref", "refs/remotes/origin/HEAD");
+  return ref?.startsWith("refs/remotes/origin/") ? headerValue(ref.slice("refs/remotes/origin/".length)) : undefined;
 }
 
 /** Where the session is played: Opened.tunnel when the cloud answers one, else the open's own address. */

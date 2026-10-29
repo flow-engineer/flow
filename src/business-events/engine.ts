@@ -188,6 +188,13 @@ export type EventState<W extends Watch = Watch> = ReturnType<typeof createEventS
  */
 export const ATTACH_EVENTS: unique symbol = Symbol.for("flow.attachEvents");
 
+/**
+ * What a nudge's trace says started it, when not code's own nudge (src/traces.ts, TurnTrigger):
+ * "event" on the sends below, "direct" on the agent's fallback template. Symbol.for, as above.
+ */
+export const NUDGE_TRIGGER: unique symbol = Symbol.for("flow.nudgeTrigger");
+const fromEvent = <T extends NudgeInput>(input: T): T => ({ ...input, [NUDGE_TRIGGER]: "event" });
+
 /** What sends: the agent (its nudge, and reach for copies). */
 export interface EventSender {
   nudge(input: NudgeInput): Promise<NudgeResult>;
@@ -491,7 +498,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
 
   /** The template, as is (also outside the window). */
   async function sendTemplate(address: string, m: EventMessage, key: string) {
-    const r = await sender!.nudge({ to: to(address), template: m.template, idempotencyKey: `${key}:template`, respectQuietHours: false });
+    const r = await sender!.nudge(fromEvent({ to: to(address), template: m.template, idempotencyKey: `${key}:template`, respectQuietHours: false }));
     report({ event: key, via: "template", template: m.template.name, outcome: r.status, ...(r.reason ? { reason: r.reason } : {}) });
     return r;
   }
@@ -501,7 +508,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     const expectation = phrasing.expect(p.address, p.message.values, p.message.link.url);
     let result: NudgeResult;
     try {
-      result = await sender!.nudge({ to: to(p.address), prompt: prompt(p.message, { nudge }), idempotencyKey: `${p.eventId}:phrased`, respectQuietHours: false });
+      result = await sender!.nudge(fromEvent({ to: to(p.address), prompt: prompt(p.message, { nudge }), idempotencyKey: `${p.eventId}:phrased`, respectQuietHours: false }));
     } finally {
       phrasing.done(p.address);
     }
@@ -514,7 +521,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
     const m = p.message;
     const inText = options.wording?.linkInText === true;
     const text = [m.text, ...(inText ? [`${m.link.label}: ${m.link.url}`] : []), ...(nudge ? [stopLine] : [])].join("\n\n");
-    const r = await sender!.nudge({ to: to(p.address), text, ...(inText ? {} : { link: m.link }), idempotencyKey: `${p.eventId}:text`, respectQuietHours: false });
+    const r = await sender!.nudge(fromEvent({ to: to(p.address), text, ...(inText ? {} : { link: m.link }), idempotencyKey: `${p.eventId}:text`, respectQuietHours: false }));
     report({ event: p.eventId, via: "text", outcome: r.status, ...(r.reason ? { reason: r.reason } : {}) });
     return r.status;
   }
