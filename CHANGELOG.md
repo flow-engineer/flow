@@ -2,6 +2,20 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.14.1 (2026-10-29)
+
+### Changes
+
+- **`<name> --version` prints the CLI's version** (defineCli's `version`, which `flow cli pack`
+  sets) and exits 0, with no server reached and no sign-in asked, also under `signInFirst`. Before,
+  it went to the server and, signed out under `signInFirst`, exited 3 asking to sign in. Only
+  `--version` on its own is the CLI's: after a command it is that command's flag. Without a
+  version set it says so and exits 2.
+
+### Migration notes
+
+None.
+
 ## 0.14.0 (2026-10-29)
 
 ### Changes

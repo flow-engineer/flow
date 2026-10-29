@@ -171,6 +171,12 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
   const env = io.env ?? process.env;
   const paint = painter(colorsAt(config, io));
   const { rest, server: given, token: givenToken, refresh } = connectionFlags(config, argv);
+  // The version is the CLI's own: it needs no server and no sign-in. Only on its own, so a
+  // command's --version (a tool input) still reaches the command.
+  if (rest.length === 1 && rest[0] === "--version") {
+    if (config.version) { io.write(`${config.version}\n`); return EXIT.ok; }
+    io.writeError(`${paint("error", `${config.name} has no version set (version in defineCli).`)}\n`); return EXIT.usage;
+  }
   // A group with a default subcommand, alone, shows its help rather than running the default.
   if (rest.length && config.defaultCommands?.[rest.join(" ")] !== undefined) rest.push("--help");
   const server = given ?? config.server ?? env[envName(config, "SERVER")];
@@ -635,7 +641,7 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
   const theirs = Object.keys(top).filter((word) => word !== "chat" && !hidden(root.children.get(word)!));
   return buildRouteMap({
     routes: everything,
-    docs: { brief: config.description ?? config.name, hideRoute: hide(root), fullDescription: `${overview(config, everything, theirs, Object.keys(own), paint)}${feedback ? `\n\n${paint("bold", "FEEDBACK")}\n  Something failed, missing or confusing? ${paint("accent", feedback)}` : ""}\n\n${paint("muted", `${notice}\n--server <url>, --token <token> and --refresh-tools (bypass discovery cache) work on every command.`)}` },
+    docs: { brief: config.description ?? config.name, hideRoute: hide(root), fullDescription: `${overview(config, everything, theirs, Object.keys(own), paint)}${feedback ? `\n\n${paint("bold", "FEEDBACK")}\n  Something failed, missing or confusing? ${paint("accent", feedback)}` : ""}\n\n${paint("muted", `${notice}\n--server <url>, --token <token> and --refresh-tools (bypass discovery cache) work on every command; ${config.name} --version prints the version.`)}` },
   });
 }
 

@@ -274,7 +274,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
   that may delete or overwrite asks first in a terminal and needs `--yes` without one. Exit codes: 0
   done, 1 the tool failed, 2 wrong command or arguments (with the help to read), 3 sign-in needed, 4
   needs `--yes`, 5 the server could not be reached. `--server <url>` and `--token <token>` work on
-  every command. `acme login` signs in on the organization's own login (tokens in
+  every command; `acme --version` prints the version, with no server or sign-in. `acme login` signs in on the organization's own login (tokens in
   `~/.config/acme/`, mode 600), `ACME_TOKEN` is for CI, `acme tools` lists every tool and schema, and
   `acme skill list` (or bare `skill`) lists the generated `acme-cli` guide and workflow skill names
   and descriptions. `acme skill get booking refunds` reads only those skills; `--json` returns an
