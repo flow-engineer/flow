@@ -473,6 +473,7 @@ both answer every message.
 
 To find and fix the agent's bad replies yourself: `flow conversations --grade wrong` lists the
 hosted agent's conversations with a reply graded wrong (`--grade unhelpful` for the weaker ones),
+latest message first, each with the agent version behind its latest reply,
 and `flow conversations show <id>` prints one, message by message, with each graded reply's rule,
 the reason and the words it was graded on. Fix the instructions, skill or tool that rule points
 at, add a scenario that plays that conversation, run `flow test`, and deploy. `flow issues` groups

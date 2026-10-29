@@ -25,9 +25,10 @@ async function flow(args: string[], dir: string) {
   return { code, stdout, stderr };
 }
 
-const conversation = (id: string, wrong: number) => ({
+const conversation = (id: string, wrong: number, version: string | null = "5f056b6") => ({
   id, environment: "production", channel: "whatsapp", contact: "Contact 0100", started_at: "2026-10-29T09:00:00.123Z",
   last_message_at: "2026-10-29T09:05:00Z", messages: 4, grades: { good: 1, unhelpful: 0, wrong, not_graded: 1 },
+  version, version_source: version ? "trace" : null, version_changed: false,
 });
 const detail = {
   conversation: { ...conversation("cnv_1", 1), channels: ["whatsapp", "sms"] },
@@ -48,7 +49,7 @@ const issues = { issues: [
   { id: "iss_2", title: "Answers in English to Hindi", status: "open", conversations: 1, first_seen: "2026-10-28T10:00:00Z", last_seen: "2026-10-28T10:00:00Z", suggested_fix: null },
 ] };
 
-/** A fake flow.engineer: two pages of conversations, one conversation, the issues, and a refusal for cnv_bad. */
+/** A fake flow.engineer: pages of conversations (at most 100 asked, as Flow's), one conversation, the issues, and a refusal for cnv_bad. */
 async function server() {
   const asked: Array<{ url: string; authorization?: string }> = [];
   const http = createServer((req, res) => {
@@ -57,8 +58,12 @@ async function server() {
     const json = (status: number, body: unknown) => void res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
     if (req.headers.authorization !== `Bearer ${KEY}`) return json(401, { error: { code: "bad_key", message: "That key is not a Flow key.", hint: "Run flow setup --rotate key." } });
     if (url.pathname === "/v1/agent/conversations") {
-      return url.searchParams.get("cursor") === "c2"
-        ? json(200, { conversations: [{ ...conversation("cnv_3", 0), grades: null }], next_cursor: "c3" })
+      const limit = Number(url.searchParams.get("limit") ?? 20);
+      if (!(limit >= 1 && limit <= 100)) return json(400, { error: { code: "invalid_request", type: "invalid_request", message: "limit must be 1 to 100" } });
+      const cursor = url.searchParams.get("cursor");
+      if (cursor === "c3") return json(200, { conversations: [], next_cursor: null });
+      return cursor === "c2"
+        ? json(200, { conversations: [{ ...conversation("cnv_3", 0, null), grades: null }], next_cursor: "c3" })
         : json(200, { conversations: [conversation("cnv_1", 1), conversation("cnv_2", 2)], next_cursor: "c2" });
     }
     if (url.pathname === "/v1/agent/conversations/cnv_1") return json(200, detail);
@@ -90,10 +95,10 @@ test("flow conversations lists with the .env's FLOW_KEY, following next_cursor u
       { url: "/v1/agent/conversations?environment=production&grade=wrong&since=2026-10-28T00%3A00%3A00Z&limit=1&cursor=c2", authorization: `Bearer ${KEY}` },
     ]);
     assert.equal(listed.stdout, [
-      "ID     LAST MESSAGE          CHANNEL   CONTACT       MESSAGES  WRONG  UNHELPFUL",
-      "cnv_1  2026-10-29 09:05:00Z  whatsapp  Contact 0100  4         1      0",
-      "cnv_2  2026-10-29 09:05:00Z  whatsapp  Contact 0100  4         2      0",
-      "cnv_3  2026-10-29 09:05:00Z  whatsapp  Contact 0100  4         -      -",
+      "ID     LAST MESSAGE          CHANNEL   VERSION  CONTACT       MESSAGES  WRONG  UNHELPFUL",
+      "cnv_1  2026-10-29 09:05:00Z  whatsapp  5f056b6  Contact 0100  4         1      0",
+      "cnv_2  2026-10-29 09:05:00Z  whatsapp  5f056b6  Contact 0100  4         2      0",
+      "cnv_3  2026-10-29 09:05:00Z  whatsapp  -        Contact 0100  4         -      -",
       "",
       "3 conversations (more: raise --limit); - is grades unavailable. Read one: flow conversations show <id>",
       "",
@@ -103,7 +108,16 @@ test("flow conversations lists with the .env's FLOW_KEY, following next_cursor u
     // No --environment: none is sent, and the server picks it from the key.
     assert.equal(fake.asked[2]!.url, "/v1/agent/conversations?limit=2");
     assert.deepEqual(JSON.parse(json.stdout), { conversations: [conversation("cnv_1", 1), conversation("cnv_2", 2)], next_cursor: "c2" });
-    assert.ok(![listed, json].some((r) => (r.stdout + r.stderr).includes(KEY)));
+    // Over 100: 100 a page (the server's most), following next_cursor until --limit or the last page.
+    const many = await flow(["conversations", "--limit", "200", "--json", "--cloud", fake.url], dir);
+    assert.equal(many.code, 0, many.stderr);
+    assert.deepEqual(fake.asked.slice(3).map((a) => a.url), [
+      "/v1/agent/conversations?limit=100",
+      "/v1/agent/conversations?limit=100&cursor=c2",
+      "/v1/agent/conversations?limit=100&cursor=c3",
+    ]);
+    assert.deepEqual(JSON.parse(many.stdout).conversations.map((c: { id: string }) => c.id), ["cnv_1", "cnv_2", "cnv_3"]);
+    assert.ok(![listed, json, many].some((r) => (r.stdout + r.stderr).includes(KEY)));
   } finally { fake.close(); }
 });
 
@@ -116,6 +130,7 @@ test("flow conversations show prints the transcript with each graded reply's lab
     assert.equal(shown.stdout, [
       "Conversation cnv_1: production, whatsapp,sms, Contact 0100",
       "  started 2026-10-29 09:00:00Z, last message 2026-10-29 09:05:00Z, 4 messages",
+      "  version 5f056b6 (from its traces)",
       "  replies: 1 wrong, 0 unhelpful, 1 good, 1 not graded",
       "",
       "2026-10-29 09:00:00Z  person: Can I get a refund?",

@@ -35,8 +35,8 @@ const CONVERSATIONS_USAGE = `Usage:
   flow conversations [options]
   flow conversations show <id> [--json]
 
-Lists the hosted agent's conversations, newest first: id, last message, channel, contact, messages,
-and how many replies were graded wrong and unhelpful. show prints one conversation, one line per
+Lists the hosted agent's conversations, newest first: id, last message, channel, the agent version
+behind its latest reply, contact, messages, and how many replies were graded wrong and unhelpful. show prints one conversation, one line per
 message, and under each graded agent reply its label, the rule it was graded on, why, and the quoted
 words. To fix bad replies: flow conversations --grade wrong, then flow conversations show <id>.
 
@@ -45,7 +45,8 @@ Options:
   --grade <label>          Only conversations with a reply graded wrong, unhelpful or good
   --since <when>           Only conversations with a message since then: 30m, 24h, 7d, or a time
                            such as 2026-10-29T09:00:00Z
-  --limit <n>              At most this many conversations (default: 20), over as many pages as it takes
+  --limit <n>              At most this many conversations (default: 20, at most 1000), asked for 100 a
+                           page over as many pages as it takes
 ${COMMON}`;
 
 const ISSUES_USAGE = `Usage:
@@ -72,6 +73,11 @@ interface Conversation {
   messages?: number;
   /** null when the grades cannot be read now. */
   grades?: Grades | null;
+  /** The agent version behind its latest reply, and where Flow got it (trace, run or deploy); null when none is known. */
+  version?: string | null;
+  version_source?: string | null;
+  /** Its replies came from more than one version. */
+  version_changed?: boolean;
 }
 /** rule, reason and quote are null when the account's data keeps them back. */
 interface Grade { label?: string; verdict?: string | null; rule?: string | null; reason?: string | null; quote?: string | null; graded_at?: string }
@@ -116,6 +122,9 @@ function access(name: string, values: { cloud?: string; dotenv?: string }): { cl
 }
 
 class Failed extends Error {}
+
+/** The most conversations the server answers in one page. */
+const PAGE_LIMIT = 100;
 
 /** GET path; the body's text and its JSON, or Failed with what to print. */
 async function get(name: string, cloud: string, key: string, path: string): Promise<{ text: string; body: Record<string, unknown> }> {
@@ -199,7 +208,7 @@ export async function conversationsCli(args: string[]): Promise<number> {
     let cursor: string | null = null;
     do {
       const page = new URLSearchParams(query);
-      page.set("limit", String(limit - all.length));
+      page.set("limit", String(Math.min(PAGE_LIMIT, limit - all.length)));
       if (cursor) page.set("cursor", cursor);
       last = (await get(name, where.cloud, where.key, `/v1/agent/conversations?${page}`)).body;
       all.push(...((last.conversations as Conversation[] | undefined) ?? []));
@@ -263,12 +272,20 @@ function table(header: string[], rows: string[][]): string[] {
 
 function list(conversations: Conversation[], more: boolean): string[] {
   if (!conversations.length) return ["No conversations."];
-  const rows = conversations.map((c) => [c.id, when(c.last_message_at ?? c.started_at), channels(c), c.contact ?? "", String(c.messages ?? ""), c.grades ? String(c.grades.wrong ?? 0) : "-", c.grades ? String(c.grades.unhelpful ?? 0) : "-"]);
+  const rows = conversations.map((c) => [c.id, when(c.last_message_at ?? c.started_at), channels(c), c.version || "-", c.contact ?? "", String(c.messages ?? ""), c.grades ? String(c.grades.wrong ?? 0) : "-", c.grades ? String(c.grades.unhelpful ?? 0) : "-"]);
   return [
-    ...table(["ID", "LAST MESSAGE", "CHANNEL", "CONTACT", "MESSAGES", "WRONG", "UNHELPFUL"], rows),
+    ...table(["ID", "LAST MESSAGE", "CHANNEL", "VERSION", "CONTACT", "MESSAGES", "WRONG", "UNHELPFUL"], rows),
     "",
     `${conversations.length} conversation${conversations.length === 1 ? "" : "s"}${more ? " (more: raise --limit)" : ""}${conversations.some((c) => !c.grades) ? "; - is grades unavailable" : ""}. Read one: flow conversations show <id>`,
   ];
+}
+
+/** The version behind a conversation's latest reply, with where it came from: "5f056b6 (from its traces)". */
+function version(c: Conversation): string {
+  if (!c.version) return "unknown";
+  const from = { trace: "from its traces", run: "from its flow test run", deploy: "matched by deploy time" }[c.version_source ?? ""];
+  const notes = [from, c.version_changed ? "its replies came from more than one version" : undefined].filter(Boolean);
+  return notes.length ? `${c.version} (${notes.join("; ")})` : c.version;
 }
 
 /** The channels a conversation used: channels when sent, else channel. */
@@ -296,6 +313,7 @@ function transcript(body: Record<string, unknown>): string[] {
   const out = [
     `Conversation ${c.id ?? "?"}: ${[c.environment, channels(c), c.contact].filter(Boolean).join(", ")}`,
     `  started ${when(c.started_at)}, last message ${when(c.last_message_at)}, ${c.messages ?? "?"} messages`,
+    `  version ${version(c)}`,
     g ? `  replies: ${g.wrong ?? 0} wrong, ${g.unhelpful ?? 0} unhelpful, ${g.good ?? 0} good, ${g.not_graded ?? 0} not graded` : "  replies: grades unavailable",
     "",
   ];

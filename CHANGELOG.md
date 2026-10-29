@@ -2,6 +2,25 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.14.3 (2026-10-29)
+
+### Changes
+
+- **`flow conversations --limit` over 100 works**: the CLI asks for at most 100 conversations a
+  page (the server's most) and follows `next_cursor` until `--limit`. Before, `--limit 200` sent
+  `limit=200` and the server refused it with `limit must be 1 to 100 (invalid_request, 400)`.
+- **`flow conversations` prints the agent version behind each conversation's latest reply**, a
+  VERSION column (`-` when Flow knows none), and `flow conversations show <id>` prints it in the
+  header with where Flow got it: `version 5f056b6 (from its traces)`. On a hosted agent it is the
+  deploy's version (`AGENT_VERSION`). `--json` passes the server's `version`, `version_source`
+  and `version_changed` through.
+- The list's order is the server's: the latest message first, so a long conversation that went on
+  today is listed before conversations that ended earlier (a `flow test` run starts many).
+
+### Migration notes
+
+None. A script reading the table's columns by position sees VERSION as the fourth.
+
 ## 0.14.2 (2026-10-29)
 
 ### Changes
