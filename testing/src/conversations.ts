@@ -5,6 +5,7 @@
 //   GET {cloud}/v1/agent/conversations?environment=&grade=&since=&limit=&cursor=
 //   GET {cloud}/v1/agent/conversations/{id}
 //   GET {cloud}/v1/agent/issues?status=
+//   GET {cloud}/v1/agent/feedback?days=30 (the team's feedback, printed under the issues)
 // Errors are { error: { code, message, hint } }. Exit status: 0 printed, 1 anything else.
 
 import { parseArgs } from "node:util";
@@ -54,6 +55,8 @@ const ISSUES_USAGE = `Usage:
 
 The problems the grades of the agent's replies add up to: id, status, conversations, last seen,
 title, and the suggested fix. flow conversations show <id> reads one of the conversations.
+Then your team's feedback: checks marked out of date (change them in the scenario file) and reply
+grades marked wrong.
 
 Options:
   --status <status>        open (the default), resolved, ignored or all
@@ -91,6 +94,12 @@ const TEXT_STATES: Record<string, string> = {
   not_sent: "(not sent)",
   none: "(no text recorded)",
 };
+/** check and note are null when the account's data keeps the words back. */
+interface Feedback {
+  id?: string; kind?: string; reason?: string; todo?: string | null; note?: string | null; at?: string;
+  scenario?: string | null; channel?: string | null; check?: string | null; check_index?: number | null;
+  conversation?: string | null; message?: string | null; rules?: string[] | null;
+}
 interface Issue { id: string; title?: string; status?: string; conversations?: number; first_seen?: string; last_seen?: string; suggested_fix?: string | null }
 
 const COMMON_OPTIONS = {
@@ -240,16 +249,37 @@ export async function issuesCli(args: string[]): Promise<number> {
     const { text, body } = await get(name, where.cloud, where.key, `/v1/agent/issues?status=${status}`);
     if (values.json) return process.stdout.write(text), 0;
     const issues = (body.issues as Issue[] | undefined) ?? [];
-    if (!issues.length) return console.log(`No ${status === "all" ? "" : `${status} `}issues.`), 0;
-    const rows = issues.map((i) => [i.id, i.status ?? "", String(i.conversations ?? ""), when(i.last_seen), i.title ?? ""]);
-    const [header, ...lines] = table(["ID", "STATUS", "CONVERSATIONS", "LAST SEEN", "TITLE"], rows);
-    const fix = (i: Issue) => (i.suggested_fix ? indent(i.suggested_fix, "    fix: ", "         ") : []);
-    console.log([header, ...lines.flatMap((line, n) => [line, ...fix(issues[n]!)])].join("\n"));
+    if (!issues.length) console.log(`No ${status === "all" ? "" : `${status} `}issues.`);
+    else {
+      const rows = issues.map((i) => [i.id, i.status ?? "", String(i.conversations ?? ""), when(i.last_seen), i.title ?? ""]);
+      const [header, ...lines] = table(["ID", "STATUS", "CONVERSATIONS", "LAST SEEN", "TITLE"], rows);
+      const fix = (i: Issue) => (i.suggested_fix ? indent(i.suggested_fix, "    fix: ", "         ") : []);
+      console.log([header, ...lines.flatMap((line, n) => [line, ...fix(issues[n]!)])].join("\n"));
+    }
+    let feedback: Feedback[] = [];
+    try {
+      feedback = ((await get(name, where.cloud, where.key, "/v1/agent/feedback?days=30")).body.feedback as Feedback[] | undefined) ?? [];
+    } catch (error) {
+      if (!(error instanceof Failed)) throw error; // an older Flow without the route: nothing more to print
+    }
+    if (feedback.length) console.log(["", `Feedback from your team (last 30 days): ${feedback.length}`, ...feedback.flatMap(feedbackLines)].join("\n"));
     return 0;
   } catch (error) {
     if (error instanceof Failed) return console.error(error.message), 1;
     throw error;
   }
+}
+
+/** One piece of the team's feedback: a test check marked out of date, or a reply's grade marked wrong. */
+function feedbackLines(f: Feedback): string[] {
+  const what = f.kind === "test_check"
+    ? `  check out of date  ${f.scenario ?? "?"}${f.channel ? ` (${f.channel})` : ""}, check ${(f.check_index ?? 0) + 1}${f.check ? `: ${f.check}` : ""}`
+    : `  grade marked wrong  conversation ${f.conversation ?? "?"}, reply ${f.message ?? "?"}, rules ${f.rules?.length ? f.rules.join(", ") : "-"}`;
+  return [
+    what,
+    ...(f.note ? indent(f.note, "    note: ", "          ") : []),
+    ...(f.todo ? indent(f.todo, "    todo: ", "          ") : []),
+  ];
 }
 
 /** --since as an RFC 3339 time: a duration back from now, or a time given as one. */

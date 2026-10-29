@@ -478,6 +478,7 @@ and `flow conversations show <id>` prints one, message by message, with each gra
 the reason and the words it was graded on. Fix the instructions, skill or tool that rule points
 at, add a scenario that plays that conversation, run `flow test`, and deploy. `flow issues` groups
 the same grades into problems with a suggested fix. They read with `FLOW_KEY` from `.env`.
+After `flow issues`, act on its team feedback: "check out of date" means update that scenario check; "grade marked wrong" means do not change the agent for it.
 
 On the owner's own servers: one instance, kept warm, CPU always on, a durable `database`
 (`postgres(pool)`), `await agent.resume()` at start, the secrets from the platform's secret store
