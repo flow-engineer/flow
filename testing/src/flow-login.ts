@@ -26,8 +26,13 @@
 //   GET  <model URL>/credit (bearer FLOW_KEY) -> {limit_usd, spent_usd, left_usd, default_model, models};
 //        the model URL is src/model.ts's flowModelURL (flow.engineer/llm/framework/v1); 401 invalid_api_key,
 //        403 insufficient_scope (the key lacks model), 402 trial_credit_used or trial_credit_unavailable
+//   GET  /cli/projects[?workspace=<acc_id>] (bearer) -> {projects: [{id, name, workspace: {id, name}, created_at, owner}]};
+//        every project in the account's workspaces (or that one), owner: whether this account may delete it
+//   DELETE /cli/projects/<id> (bearer)        -> {project: {id, name, deleted_at, restore_until}};
+//        401 signed_out, 403 owner_only (only the organization's owner deletes), 404 not_found, 502 observe_unavailable
 // Every error is flat: {"error": "<code>", "error_description": "<sentence>", "next": "<command, URL or sentence>"}
-// (the model API's are OpenAI's shape, {"error": {message, type, code, next}}).
+// (the model API's are OpenAI's shape, {"error": {message, type, code, next}}; the projects routes'
+// {"error": {code, message, hint}}, read as the flat one with hint as next).
 // The token is opaque (fcli_...), good only for /cli/*, and sent only to the server that issued it,
 // over https (http only to this machine). Every request gives up after REQUEST_TIMEOUT_MS at most.
 
@@ -292,7 +297,10 @@ async function call(url: string, path: string, options: { token?: string; body?:
   return { status: response.status, body, retryAfter: retryAfterSeconds(response.headers.get("retry-after")) };
 }
 
-function refused(path: string, answer: Answer, url: string): LoginRefused {
+function refused(path: string, given: Answer, url: string): LoginRefused {
+  // The nested shape, {"error": {code, message, hint}}, read as the flat one.
+  const inner = given.body.error && typeof given.body.error === "object" ? (given.body.error as Record<string, unknown>) : undefined;
+  const answer = inner ? { ...given, body: { ...given.body, error: inner.code, error_description: inner.message, next: inner.hint } } : given;
   // A bare 404: this server has no CLI sign-in (an older one, or not flow.engineer at all).
   if (answer.status === 404 && typeof answer.body.error !== "string") {
     return new LoginRefused(404, "server_unsupported", `${url} has no ${path}, so it cannot sign in the Flow CLI: it is an older server, or not flow.engineer.`,
@@ -382,4 +390,35 @@ export const SETUP_ENV = {
 /** The phone link for a join code, built as the server builds its try_url, for a .env from before setup kept it. */
 export function tryLink(url: string, joinCode: string, channel: string): string {
   return `${url}/try/${encodeURIComponent(joinCode)}?c=${encodeURIComponent(channel)}`;
+}
+
+/** One project as GET /cli/projects lists it; `owner`: this account may delete it. */
+export interface Project {
+  id: string;
+  name: string;
+  workspace: { id: string; name: string };
+  created_at: string;
+  owner: boolean;
+}
+
+/** What DELETE /cli/projects/<id> answers: the Flow team can restore it until restore_until. */
+export interface DeletedProject {
+  id: string;
+  name: string;
+  deleted_at: string;
+  restore_until: string;
+}
+
+/** The account's projects, in every workspace it is in or only `workspace` (an acc_ id). */
+export async function listProjects(url: string, token: string, workspace?: string): Promise<Project[]> {
+  const path = `/cli/projects${workspace ? `?workspace=${encodeURIComponent(workspace)}` : ""}`;
+  const answer = await call(url, path, { token, method: "GET" });
+  if (answer.status !== 200 || !Array.isArray(answer.body.projects)) throw refused("/cli/projects", answer, url);
+  return answer.body.projects as Project[];
+}
+
+export async function deleteProject(url: string, token: string, id: string): Promise<DeletedProject> {
+  const answer = await call(url, `/cli/projects/${encodeURIComponent(id)}`, { token, method: "DELETE" });
+  if (answer.status !== 200 || !answer.body.project || typeof answer.body.project !== "object") throw refused("/cli/projects", answer, url);
+  return answer.body.project as DeletedProject;
 }

@@ -378,7 +378,7 @@ an empty one, named `flatx-agent` after it unless `--name` says otherwise: first
 people should call their agent, such as "FlatX agent" (see "Names"); the
 phone's first message is `Join FlatX agent (ref <code>)` (the agent reads `Join FlatX agent`), and `package.json`'s `displayName` keeps it;
 `link --display-name "<name>"` renames it later, in `package.json` and `agent/AGENTS.md`).
-Only `chat` reads stdin; `init` asks for the name only in a terminal, and nothing else asks for input.
+Only `chat` reads stdin; `init` asks for the name and `projects delete` for the project's name only in a terminal, and nothing else asks for input. Pass `projects delete --yes` only when the owner has said to delete that project.
 
 ```sh
 npx @flow-engineer/flow link --channel telegram --json   # or whatsapp, imessage: signs in and runs setup when needed (Flow's trial model key too), then the channel's own link (t.me, wa.me, sms:); give its say_to_person to the owner, and run its next

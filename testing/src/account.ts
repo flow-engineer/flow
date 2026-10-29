@@ -73,9 +73,10 @@ const NEXT = { login: `${RUN} login`, wait: `${RUN} login --wait`, setup: `${RUN
 const CHANNELS = ["telegram", "whatsapp", "imessage"];
 /** After link and status: the step that keeps the agent answering once this machine sleeps. */
 const DEPLOY_HINT = `To keep it answering while this machine sleeps: ${RUN} deploy (Flow's hosting, staging first).`;
-const EXIT = { ok: 0, usage: 1, network: 2, refused: 3, pending: 4 } as const;
+export const EXIT = { ok: 0, usage: 1, network: 2, refused: 3, pending: 4 } as const;
 
-class Stop extends Error {
+/** A command's end: what to print, its next step and the exit status (projects.ts too). */
+export class Stop extends Error {
   readonly code: string;
   readonly next: string | undefined;
   readonly exit: number;
@@ -201,7 +202,7 @@ function printWarnings(warnings: string[]): void {
 }
 
 /** Writes all of the text to the descriptor before going on. */
-function writeAll(fd: number, text: string): void {
+export function writeAll(fd: number, text: string): void {
   let bytes = Buffer.from(text);
   while (bytes.length) bytes = bytes.subarray(writeSync(fd, bytes));
 }
@@ -209,7 +210,7 @@ function writeAll(fd: number, text: string): void {
 type Out = (report: unknown) => void;
 type Say = (line: string) => void;
 
-function asStop(error: unknown): Stop {
+export function asStop(error: unknown): Stop {
   if (error instanceof Stop) return error;
   if (error instanceof LoginRefused) {
     let stop: Stop;
@@ -234,7 +235,7 @@ function asStop(error: unknown): Stop {
  * The token to send and the server to send it to. A saved token goes only to the server that issued
  * it: with FLOW_FRAMEWORK_LOGIN_URL now naming another one, it is not sent at all.
  */
-function signedIn(): { token: string; url: string } {
+export function signedIn(): { token: string; url: string } {
   const url = loginUrl();
   const current = currentToken();
   if (!current) throw new Stop("not_signed_in", "Not signed in to flow.engineer.", NEXT.login, EXIT.usage);
