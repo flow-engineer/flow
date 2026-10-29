@@ -2,7 +2,7 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## Unreleased
+## 0.13.0 (2026-10-29)
 
 ### Changes
 
@@ -54,6 +54,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   characters, not printable ASCII) is left out instead of stopping the run.
 
 ### Migration notes
+
+Nothing breaks; the notes below are what to know.
 
 - No code changes. The store needs no migration: a nudge's origin and trigger ride in its existing
   JSON (the nudge's body, the inbox row, a scheduled nudge's rule), so running agents keep working
