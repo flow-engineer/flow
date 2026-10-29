@@ -18,7 +18,7 @@ export const CONVERSATIONS_LINES = `  flow conversations [--environment staging|
   flow conversations show <id> [--json]
                             One conversation, message by message, with each graded reply's label,
                             rule, reason and the words it was graded on
-  flow issues [--status open|resolved|all] [--json]
+  flow issues [--status open|resolved|ignored|all] [--json]
                             The problems the grades add up to, each with its conversations and a
                             suggested fix`;
 
@@ -41,7 +41,7 @@ message, and under each graded agent reply its label, the rule it was graded on,
 words. To fix bad replies: flow conversations --grade wrong, then flow conversations show <id>.
 
 Options:
-  --environment <name>     staging or production (default: both)
+  --environment <name>     staging or production (default: production for a live key, else staging)
   --grade <label>          Only conversations with a reply graded wrong, unhelpful or good
   --since <when>           Only conversations with a message since then: 30m, 24h, 7d, or a time
                            such as 2026-10-29T09:00:00Z
@@ -49,29 +49,42 @@ Options:
 ${COMMON}`;
 
 const ISSUES_USAGE = `Usage:
-  flow issues [--status open|resolved|all] [--json]
+  flow issues [--status open|resolved|ignored|all] [--json]
 
 The problems the grades of the agent's replies add up to: id, status, conversations, last seen,
 title, and the suggested fix. flow conversations show <id> reads one of the conversations.
 
 Options:
-  --status <status>        open (the default), resolved or all
+  --status <status>        open (the default), resolved, ignored or all
 ${COMMON}`;
 
-interface ApiError { code?: string; message?: string; hint?: string }
+interface ApiError { code?: string; type?: string; message?: string; hint?: string }
 interface Grades { good?: number; unhelpful?: number; wrong?: number; not_graded?: number }
 interface Conversation {
   id: string;
   environment?: string;
   channel?: string;
+  /** Every channel the conversation used, when the server sends them. */
+  channels?: string[];
   contact?: string;
   started_at?: string;
   last_message_at?: string;
   messages?: number;
-  grades?: Grades;
+  /** null when the grades cannot be read now. */
+  grades?: Grades | null;
 }
-interface Grade { label?: string; rule?: string; reason?: string; quote?: string; graded_at?: string }
-interface Message { id?: string; role?: string; at?: string; text?: string; tools?: unknown[]; grade?: Grade | null }
+/** rule, reason and quote are null when the account's data keeps them back. */
+interface Grade { label?: string; verdict?: string | null; rule?: string | null; reason?: string | null; quote?: string | null; graded_at?: string }
+/** text is null unless text_state is shown; role your_code is a message the agent's own code sent, never graded. */
+interface Message { id?: string; role?: string; at?: string; text?: string | null; text_state?: string; tools?: unknown[]; grade?: Grade | null }
+
+/** What prints in place of a message's text the server does not send. */
+const TEXT_STATES: Record<string, string> = {
+  deleted: "(deleted by retention)",
+  withheld: "(text withheld)",
+  not_sent: "(not sent)",
+  none: "(no text recorded)",
+};
 interface Issue { id: string; title?: string; status?: string; conversations?: number; first_seen?: string; last_seen?: string; suggested_fix?: string | null }
 
 const COMMON_OPTIONS = {
@@ -108,9 +121,11 @@ class Failed extends Error {}
 async function get(name: string, cloud: string, key: string, path: string): Promise<{ text: string; body: Record<string, unknown> }> {
   let status: number;
   let text: string;
+  let retryAfter: string | null;
   try {
     const response = await fetch(`${cloud}${path}`, { headers: { authorization: `Bearer ${key}`, accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
     status = response.status;
+    retryAfter = response.headers.get("retry-after");
     text = await response.text();
   } catch (error) {
     const cause = (error as Error).cause as NodeJS.ErrnoException | undefined;
@@ -121,8 +136,9 @@ async function get(name: string, cloud: string, key: string, path: string): Prom
   try { body = JSON.parse(text); } catch { /* not JSON: said below */ }
   if (status < 200 || status >= 300) {
     const error = (body as { error?: ApiError } | undefined)?.error;
+    const again = retryAfter && /^\d+$/.test(retryAfter) ? ` Try again in ${retryAfter} s.` : "";
     if (error && typeof error === "object" && error.message) {
-      throw new Failed(`${name}: ${error.message}${error.code ? ` (${error.code}, ${status})` : ` (${status})`}${error.hint ? `\n${error.hint}` : ""}`);
+      throw new Failed(`${name}: ${error.message}${error.code ? ` (${error.code}, ${status})` : ` (${status})`}${again}${error.hint ? `\n${error.hint}` : ""}`);
     }
     const said = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
     throw new Failed(`${name}: ${cloud} answered ${status}${said ? `: ${said}` : ""}${status === 404 ? " (this Flow may not have this command's route yet)" : ""}.`);
@@ -208,7 +224,7 @@ export async function issuesCli(args: string[]): Promise<number> {
   if (values.help) return console.log(ISSUES_USAGE), 0;
   if (positionals.length) return console.error(`${name} takes no arguments.\n\n${ISSUES_USAGE}`), 1;
   const status = values.status ?? "open";
-  if (!["open", "resolved", "all"].includes(status)) return console.error(`--status is open, resolved or all (got "${status}").`), 1;
+  if (!["open", "resolved", "ignored", "all"].includes(status)) return console.error(`--status is open, resolved, ignored or all (got "${status}").`), 1;
   const where = access(name, values);
   if (typeof where === "string") return console.error(where), 1;
   try {
@@ -247,12 +263,17 @@ function table(header: string[], rows: string[][]): string[] {
 
 function list(conversations: Conversation[], more: boolean): string[] {
   if (!conversations.length) return ["No conversations."];
-  const rows = conversations.map((c) => [c.id, when(c.last_message_at ?? c.started_at), c.channel ?? "", c.contact ?? "", String(c.messages ?? ""), String(c.grades?.wrong ?? 0), String(c.grades?.unhelpful ?? 0)]);
+  const rows = conversations.map((c) => [c.id, when(c.last_message_at ?? c.started_at), channels(c), c.contact ?? "", String(c.messages ?? ""), c.grades ? String(c.grades.wrong ?? 0) : "-", c.grades ? String(c.grades.unhelpful ?? 0) : "-"]);
   return [
     ...table(["ID", "LAST MESSAGE", "CHANNEL", "CONTACT", "MESSAGES", "WRONG", "UNHELPFUL"], rows),
     "",
-    `${conversations.length} conversation${conversations.length === 1 ? "" : "s"}${more ? " (more: raise --limit)" : ""}. Read one: flow conversations show <id>`,
+    `${conversations.length} conversation${conversations.length === 1 ? "" : "s"}${more ? " (more: raise --limit)" : ""}${conversations.some((c) => !c.grades) ? "; - is grades unavailable" : ""}. Read one: flow conversations show <id>`,
   ];
+}
+
+/** The channels a conversation used: channels when sent, else channel. */
+function channels(c: Conversation): string {
+  return c.channels?.length ? c.channels.join(",") : c.channel ?? "";
 }
 
 /** A grade's label, coloured only in a terminal that takes colour. */
@@ -271,23 +292,26 @@ function toolName(tool: unknown): string {
 
 function transcript(body: Record<string, unknown>): string[] {
   const c = (body.conversation ?? {}) as Conversation;
-  const g = c.grades ?? {};
+  const g = c.grades;
   const out = [
-    `Conversation ${c.id ?? "?"}: ${[c.environment, c.channel, c.contact].filter(Boolean).join(", ")}`,
+    `Conversation ${c.id ?? "?"}: ${[c.environment, channels(c), c.contact].filter(Boolean).join(", ")}`,
     `  started ${when(c.started_at)}, last message ${when(c.last_message_at)}, ${c.messages ?? "?"} messages`,
-    `  replies: ${g.wrong ?? 0} wrong, ${g.unhelpful ?? 0} unhelpful, ${g.good ?? 0} good, ${g.not_graded ?? 0} not graded`,
+    g ? `  replies: ${g.wrong ?? 0} wrong, ${g.unhelpful ?? 0} unhelpful, ${g.good ?? 0} good, ${g.not_graded ?? 0} not graded` : "  replies: grades unavailable",
     "",
   ];
   for (const m of (body.messages as Message[] | undefined) ?? []) {
-    const head = `${when(m.at)}  ${m.role ?? "?"}: `;
+    const head = `${when(m.at)}  ${m.role === "your_code" ? "your code" : m.role ?? "?"}: `;
     const pad = " ".repeat(head.length);
-    out.push(...indent(m.text ?? "", head, pad));
+    const text = typeof m.text === "string" && (m.text_state ?? "shown") === "shown" ? m.text : TEXT_STATES[m.text_state ?? "none"] ?? `(text ${m.text_state})`;
+    out.push(...indent(text, head, pad));
     if (m.tools?.length) out.push(`${pad}[tools: ${m.tools.map(toolName).join(", ")}]`);
     const grade = m.grade;
     if (!grade) continue;
-    out.push(`${pad}${label((grade.label ?? "graded").toUpperCase())}${grade.rule ? `  rule: ${grade.rule}` : ""}`);
+    const verdict = grade.verdict && grade.verdict !== grade.label ? `  verdict: ${grade.verdict}` : "";
+    out.push(`${pad}${label((grade.label ?? "graded").toUpperCase())}${verdict}${grade.rule ? `  rule: ${grade.rule}` : ""}`);
     if (grade.reason) out.push(...indent(grade.reason, `${pad}  why: `, `${pad}       `));
     if (grade.quote) out.push(...indent(`"${grade.quote}"`, `${pad}  quote: `, `${pad}         `));
+    if (grade.label !== "good" && !grade.rule && !grade.reason && !grade.quote) out.push(`${pad}  (rule, reason and quote withheld)`);
   }
   const issues = (body.issues as Issue[] | undefined) ?? [];
   if (issues.length) out.push("", "Issues:", ...issues.map((i) => `  ${i.id}  ${i.title ?? ""}`.trimEnd()));

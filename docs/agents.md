@@ -406,7 +406,7 @@ npx @flow-engineer/flow deploy status [--env staging|production] [--json]
 npx @flow-engineer/flow logs [--env staging|production] [--since 1h] [--follow] [--json]
 npx @flow-engineer/flow conversations [--environment staging|production] [--grade wrong|unhelpful|good] [--since 24h] [--limit n] [--json]
 npx @flow-engineer/flow conversations show <id> [--json]
-npx @flow-engineer/flow issues [--status open|resolved|all] [--json]
+npx @flow-engineer/flow issues [--status open|resolved|ignored|all] [--json]
 npx @flow-engineer/flow deploy secret NAME [--env staging|production] < value.txt
 npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|production] [--json]
 ```

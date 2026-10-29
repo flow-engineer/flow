@@ -26,17 +26,20 @@ async function flow(args: string[], dir: string) {
 }
 
 const conversation = (id: string, wrong: number) => ({
-  id, environment: "production", channel: "whatsapp", contact: "+15550100", started_at: "2026-10-29T09:00:00.123Z",
+  id, environment: "production", channel: "whatsapp", contact: "Contact 0100", started_at: "2026-10-29T09:00:00.123Z",
   last_message_at: "2026-10-29T09:05:00Z", messages: 4, grades: { good: 1, unhelpful: 0, wrong, not_graded: 1 },
 });
 const detail = {
-  conversation: conversation("cnv_1", 1),
+  conversation: { ...conversation("cnv_1", 1), channels: ["whatsapp", "sms"] },
   messages: [
     { id: "m1", role: "person", at: "2026-10-29T09:00:00Z", text: "Can I get a refund?", tools: [], grade: null },
     { id: "m2", role: "agent", at: "2026-10-29T09:00:04Z", text: "Yes, I've refunded you.\nAnything else?", tools: [{ name: "find_order" }],
       grade: { label: "wrong", rule: "no-made-up-actions", reason: "It says it refunded, but no refund tool ran.", quote: "I've refunded you", graded_at: "2026-10-29T09:10:00Z" } },
     { id: "m3", role: "person", at: "2026-10-29T09:01:00Z", text: "thanks", tools: [], grade: null },
-    { id: "m4", role: "agent", at: "2026-10-29T09:01:02Z", text: "Any time!", tools: [], grade: { label: "good", rule: null, reason: null, quote: null, graded_at: "2026-10-29T09:10:00Z" } },
+    { id: "m4", role: "agent", at: "2026-10-29T09:01:02Z", text: "Any time!", tools: [], grade: { label: "good", verdict: "good", rule: null, reason: null, quote: null, graded_at: "2026-10-29T09:10:00Z" } },
+    { id: "m5", role: "your_code", at: "2026-10-29T09:02:00Z", text: "Your order has shipped.", text_state: "shown", tools: [], grade: null },
+    { id: "m6", role: "person", at: "2026-10-29T09:03:00Z", text: null, text_state: "withheld", tools: [], grade: null },
+    { id: "m7", role: "agent", at: "2026-10-29T09:03:05Z", text: null, text_state: "deleted", tools: [], grade: { label: "unhelpful", verdict: "unhelpful", rule: null, reason: null, quote: null, graded_at: "2026-10-29T09:10:00Z" } },
   ],
   issues: [{ id: "iss_1", title: "Claims actions it did not take" }],
 };
@@ -55,11 +58,15 @@ async function server() {
     if (req.headers.authorization !== `Bearer ${KEY}`) return json(401, { error: { code: "bad_key", message: "That key is not a Flow key.", hint: "Run flow setup --rotate key." } });
     if (url.pathname === "/v1/agent/conversations") {
       return url.searchParams.get("cursor") === "c2"
-        ? json(200, { conversations: [conversation("cnv_3", 0)], next_cursor: "c3" })
+        ? json(200, { conversations: [{ ...conversation("cnv_3", 0), grades: null }], next_cursor: "c3" })
         : json(200, { conversations: [conversation("cnv_1", 1), conversation("cnv_2", 2)], next_cursor: "c2" });
     }
     if (url.pathname === "/v1/agent/conversations/cnv_1") return json(200, detail);
     if (url.pathname === "/v1/agent/issues") return json(200, issues);
+    if (url.pathname === "/v1/agent/conversations/cnv_busy") {
+      res.setHeader("retry-after", "30");
+      return json(503, { error: { code: "insights_unavailable", type: "unavailable", message: "Grades cannot be read right now.", hint: "Try again shortly." } });
+    }
     json(404, { error: { code: "not_found", message: "No conversation cnv_bad for this agent.", hint: "List them with flow conversations." } });
   });
   const url = await new Promise<string>((done) => http.listen(0, "127.0.0.1", () => done(`http://127.0.0.1:${(http.address() as AddressInfo).port}`)));
@@ -83,16 +90,18 @@ test("flow conversations lists with the .env's FLOW_KEY, following next_cursor u
       { url: "/v1/agent/conversations?environment=production&grade=wrong&since=2026-10-28T00%3A00%3A00Z&limit=1&cursor=c2", authorization: `Bearer ${KEY}` },
     ]);
     assert.equal(listed.stdout, [
-      "ID     LAST MESSAGE          CHANNEL   CONTACT    MESSAGES  WRONG  UNHELPFUL",
-      "cnv_1  2026-10-29 09:05:00Z  whatsapp  +15550100  4         1      0",
-      "cnv_2  2026-10-29 09:05:00Z  whatsapp  +15550100  4         2      0",
-      "cnv_3  2026-10-29 09:05:00Z  whatsapp  +15550100  4         0      0",
+      "ID     LAST MESSAGE          CHANNEL   CONTACT       MESSAGES  WRONG  UNHELPFUL",
+      "cnv_1  2026-10-29 09:05:00Z  whatsapp  Contact 0100  4         1      0",
+      "cnv_2  2026-10-29 09:05:00Z  whatsapp  Contact 0100  4         2      0",
+      "cnv_3  2026-10-29 09:05:00Z  whatsapp  Contact 0100  4         -      -",
       "",
-      "3 conversations (more: raise --limit). Read one: flow conversations show <id>",
+      "3 conversations (more: raise --limit); - is grades unavailable. Read one: flow conversations show <id>",
       "",
     ].join("\n"));
     const json = await flow(["conversations", "--limit", "2", "--json", "--cloud", fake.url], dir);
     assert.equal(json.code, 0, json.stderr);
+    // No --environment: none is sent, and the server picks it from the key.
+    assert.equal(fake.asked[2]!.url, "/v1/agent/conversations?limit=2");
     assert.deepEqual(JSON.parse(json.stdout), { conversations: [conversation("cnv_1", 1), conversation("cnv_2", 2)], next_cursor: "c2" });
     assert.ok(![listed, json].some((r) => (r.stdout + r.stderr).includes(KEY)));
   } finally { fake.close(); }
@@ -105,7 +114,7 @@ test("flow conversations show prints the transcript with each graded reply's lab
     const shown = await flow(["conversations", "show", "cnv_1", "--cloud", fake.url], dir);
     assert.equal(shown.code, 0, shown.stderr);
     assert.equal(shown.stdout, [
-      "Conversation cnv_1: production, whatsapp, +15550100",
+      "Conversation cnv_1: production, whatsapp,sms, Contact 0100",
       "  started 2026-10-29 09:00:00Z, last message 2026-10-29 09:05:00Z, 4 messages",
       "  replies: 1 wrong, 0 unhelpful, 1 good, 1 not graded",
       "",
@@ -119,6 +128,11 @@ test("flow conversations show prints the transcript with each graded reply's lab
       "2026-10-29 09:01:00Z  person: thanks",
       "2026-10-29 09:01:02Z  agent: Any time!",
       "                             GOOD",
+      "2026-10-29 09:02:00Z  your code: Your order has shipped.",
+      "2026-10-29 09:03:00Z  person: (text withheld)",
+      "2026-10-29 09:03:05Z  agent: (deleted by retention)",
+      "                             UNHELPFUL",
+      "                               (rule, reason and quote withheld)",
       "",
       "Issues:",
       "  iss_1  Claims actions it did not take",
@@ -145,11 +159,13 @@ test("flow issues lists each issue with its suggested fix", { timeout: 15_000 },
   } finally { fake.close(); }
 });
 
-test("a refusal prints the server's message and hint and exits 1; no FLOW_KEY says how to get one", { timeout: 15_000 }, async () => {
+test("a refusal prints the server's message, Retry-After and hint and exits 1; no FLOW_KEY says how to get one", { timeout: 15_000 }, async () => {
   const fake = await server();
   try {
     const missing = await flow(["conversations", "show", "cnv_bad", "--cloud", fake.url], agentDir());
     assert.deepEqual(missing, { code: 1, stdout: "", stderr: "flow conversations: No conversation cnv_bad for this agent. (not_found, 404)\nList them with flow conversations.\n" });
+    const busy = await flow(["conversations", "show", "cnv_busy", "--cloud", fake.url], agentDir());
+    assert.deepEqual(busy, { code: 1, stdout: "", stderr: "flow conversations: Grades cannot be read right now. (insights_unavailable, 503) Try again in 30 s.\nTry again shortly.\n" });
     const badKey = await flow(["issues", "--cloud", fake.url], agentDir("flow_test_wrong"));
     assert.deepEqual(badKey, { code: 1, stdout: "", stderr: "flow issues: That key is not a Flow key. (bad_key, 401)\nRun flow setup --rotate key.\n" });
     const noKey = await flow(["conversations", "--cloud", fake.url], mkdtempSync(join(tmpdir(), "flow-conversations-")));
