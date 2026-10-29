@@ -986,6 +986,19 @@ test("the old auth words keep working for a release, hidden from help, saying wh
   assert.deepEqual([JSON.parse(own.out), own.err], [{ plan: "pro" }, ""]);
 });
 
+test("--version prints the version with no server and before signInFirst; after a command it is that command's", async () => {
+  const cli = defineCli({ name: "acme", version: "1.2.3", directory: mkdtempSync(join(testDirectory, "flow-cli-version-")), server: "http://127.0.0.1:9/mcp", signInFirst: true });
+  for (const interactive of [false, true]) {
+    const out = io(interactive);
+    assert.equal(await runCli(cli, ["--version"], out.channel), 0);
+    assert.deepEqual([out.out, out.err], ["1.2.3\n", ""]);
+  }
+  assert.equal(await runCli({ ...cli, signInFirst: false }, ["deploy", "--version", "2"], io().channel), 5, "it goes on to the server");
+  const unset = io();
+  assert.equal(await runCli({ name: "acme" }, ["--version"], unset.channel), 2);
+  assert.equal(unset.err, "acme has no version set (version in defineCli).\n");
+});
+
 test("beforeLogout runs with the stored token before the sign-in is forgotten; failing, it still signs out here", async () => {
   const directory = mkdtempSync(join(testDirectory, "flow-cli-logout-"));
   const seen: unknown[] = [];
