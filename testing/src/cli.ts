@@ -19,7 +19,8 @@
 // scenarios that did not pass. --json prints one report (testing/src/report.ts) on stdout at every exit,
 // and `flow show <run>` prints one run's record from the cloud (testing/src/show.ts).
 // `flow login`, `logout`, `whoami`, `setup` and `link` sign in to flow.engineer and get the agent's
-// keys and its phone link (testing/src/account.ts). `flow deploy` puts the agent on Flow's hosting
+// keys and its phone link (testing/src/account.ts); `flow projects list | delete` lists and deletes
+// that account's projects (testing/src/projects.ts). `flow deploy` puts the agent on Flow's hosting
 // (testing/src/deploy.ts). `flow conversations` and `flow issues` read the hosted agent's
 // conversations and the grades of its replies (testing/src/conversations.ts).
 
@@ -38,6 +39,7 @@ import { runPrinter } from "./print-run.ts";
 import { checkEndpointCli } from "./check-endpoint.ts";
 import { CHECK_LINE as TOOLS_CHECK_LINE, checkCli, mcpUpdateCli } from "./check.ts";
 import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
+import { PROJECTS_LINE, projectsCli } from "./projects.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
 import { RECORDS_LINE, recordsCli } from "./records.ts";
 import { CONVERSATIONS_LINES, conversationsCli, issuesCli } from "./conversations.ts";
@@ -154,7 +156,7 @@ the CHINWAG_ names from before the rename still work):
                            (the agent's Flow key, on its trial credit; flow setup writes it)`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
 const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${RECORDS_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${CLI_RELEASE_LINE}\n${INSPECT_LINE}
-${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${DEPLOY_LINE}\n${CONVERSATIONS_LINES}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
+${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${PROJECTS_LINE}\n${DEPLOY_LINE}\n${CONVERSATIONS_LINES}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
 
 /** What to do after new or init, from step 2; a model key comes first when none is set here. */
 function nextSteps(): string {
@@ -203,6 +205,7 @@ if (process.argv[2] === "deploy") process.exit(await deployCli(process.argv.slic
 if (process.argv[2] === "logs") process.exit(await logsCli(process.argv.slice(3)));
 if (process.argv[2] === "chat") process.exit(await chatCli(process.argv.slice(3)));
 if (process.argv[2] === "records") process.exit(await recordsCli(process.argv.slice(3)));
+if (process.argv[2] === "projects") process.exit(await projectsCli(process.argv.slice(3)));
 if (process.argv[2] === "conversations") process.exit(await conversationsCli(process.argv.slice(3)));
 if (process.argv[2] === "issues") process.exit(await issuesCli(process.argv.slice(3)));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) process.exit(await accountCli(process.argv[2]!, process.argv.slice(3)));

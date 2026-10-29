@@ -6,6 +6,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **`flow projects list` and `flow projects delete <name|id>`.** `list` shows the projects in the
+  workspaces you are signed in to (`flow login`): name, workspace, id, when made, and whether you
+  can delete it; `--workspace <acc_id>` keeps to one, `--json` gives `{"projects": [...]}`.
+  `delete` takes an exact name (case-sensitive) or an id, refuses a name two projects share and
+  prints both ids, asks you to type the name in a terminal (`--yes` without one), and prints until
+  when the Flow team can bring the project back (30 days); its keys stop working at once. Only the
+  organization's owner can delete a project. docs/agents.md, "Projects".
 - **`flow conversations` and `flow issues`: read the hosted agent's conversations and the grades
   of its replies from the terminal.** `flow conversations [--environment staging|production]
   [--grade wrong|unhelpful|good] [--since 24h|7d|<time>] [--limit n]` lists them (id, last message,

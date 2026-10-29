@@ -6,7 +6,8 @@ You are building or changing a Flow project for a person (the owner): tools and 
 through an MCP server (Claude, ChatGPT, Cursor, Codex), plugins, a CLI or a messaging agent on
 WhatsApp, iMessage, Telegram, SMS or their own app. Start with the interfaces the owner needs.
 Every command here runs without a terminal and never reads stdin, except `chat`, which reads the
-messages you pipe to it.
+messages you pipe to it, and `projects delete`, which asks for the project's name in a terminal
+(without one it needs `--yes`).
 
 Always name the package: `npx @flow-engineer/flow ...`. `npx flow` on its own fetches another npm
 package.
@@ -238,6 +239,25 @@ the hint and the plans link rather than retrying. Test keys keep working meanwhi
 - The sign-in token goes only to the server that issued it, over https (http only to localhost):
   with `FLOW_FRAMEWORK_LOGIN_URL` naming another server, commands stop with `signed_in_elsewhere`.
 - CI never signs in: `npx @flow-engineer/flow setup --ci` says how to give it the test cloud key.
+
+## Projects
+
+```sh
+npx @flow-engineer/flow projects list --json                       # every project in your workspaces: id, name, workspace, created_at, owner
+npx @flow-engineer/flow projects delete <name|id> --yes --json     # only when the owner has said to delete that project
+```
+
+`list` takes `--workspace <acc_id>` to keep to one workspace; `owner` says whether this account
+may delete the project (only the organization's owner can). `delete` matches a name exactly
+(case-sensitive) and refuses a name two projects share (`ambiguous_name`, with each one's id and
+workspace in `matches`: pass the id). A deleted project's keys stop working at once; the Flow team can bring it back until
+`restore_until` (30 days). In a terminal it asks for the name to be typed; without one it needs
+`--yes`. Never pass `--yes` without the owner's word for that project.
+
+Exit codes: 0 done; 1 usage, not signed in (`not_signed_in`: run `next`), no such project
+(`not_found`), `ambiguous_name`, or not confirmed (`confirm_needed`, `not_confirmed`); 2
+flow.engineer could not be reached or could not reach its projects (try again); 3 refused:
+`owner_only`, or the sign-in ended (`signed_out`: run `next`).
 
 ## Messages the business starts
 
