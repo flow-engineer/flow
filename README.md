@@ -93,7 +93,10 @@ Check tools, skills and CLI configuration with `npx @flow-engineer/flow check`. 
 agent with simulated conversations, inspect traces, and deploy on your own infrastructure or
 Flow Cloud. The playground simulators follow each app’s behavior, including channel-specific
 controls, media and voice notes; Debug mode shows the underlying platform payloads. Flow Messaging
-provides channels through one API; you can also bring your own providers.
+provides channels through one API; you can also bring your own providers. Once it is live,
+`npx @flow-engineer/flow conversations --grade wrong` lists the conversations whose replies were
+graded wrong, `flow conversations show <id>` prints one with each grade's rule and reason, and
+`flow issues` the problems they add up to, so a coding agent can fix them.
 
 [Deployment](https://flow.engineer/docs/hosting) · [Self-hosting](https://flow.engineer/docs/self-hosting) · [Testing](https://flow.engineer/docs/testing) · [Traces](https://flow.engineer/docs/traces)
 

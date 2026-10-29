@@ -1,0 +1,159 @@
+// covers: testing/src/conversations.ts testing/src/cli.ts
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+
+const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
+const KEY = "flow_test_k1_secretvalue";
+
+/** The flow command in dir, with no FLOW_KEY or cloud from this machine; its exit and both streams. */
+async function flow(args: string[], dir: string) {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of ["FLOW_KEY", "FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD", "NO_COLOR"]) delete env[name];
+  const child = spawn(process.execPath, [cli, ...args], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const code = await new Promise<number | null>((resolve) => child.on("close", resolve));
+  return { code, stdout, stderr };
+}
+
+const conversation = (id: string, wrong: number) => ({
+  id, environment: "production", channel: "whatsapp", contact: "+15550100", started_at: "2026-10-29T09:00:00.123Z",
+  last_message_at: "2026-10-29T09:05:00Z", messages: 4, grades: { good: 1, unhelpful: 0, wrong, not_graded: 1 },
+});
+const detail = {
+  conversation: conversation("cnv_1", 1),
+  messages: [
+    { id: "m1", role: "person", at: "2026-10-29T09:00:00Z", text: "Can I get a refund?", tools: [], grade: null },
+    { id: "m2", role: "agent", at: "2026-10-29T09:00:04Z", text: "Yes, I've refunded you.\nAnything else?", tools: [{ name: "find_order" }],
+      grade: { label: "wrong", rule: "no-made-up-actions", reason: "It says it refunded, but no refund tool ran.", quote: "I've refunded you", graded_at: "2026-10-29T09:10:00Z" } },
+    { id: "m3", role: "person", at: "2026-10-29T09:01:00Z", text: "thanks", tools: [], grade: null },
+    { id: "m4", role: "agent", at: "2026-10-29T09:01:02Z", text: "Any time!", tools: [], grade: { label: "good", rule: null, reason: null, quote: null, graded_at: "2026-10-29T09:10:00Z" } },
+  ],
+  issues: [{ id: "iss_1", title: "Claims actions it did not take" }],
+};
+const issues = { issues: [
+  { id: "iss_1", title: "Claims actions it did not take", status: "open", conversations: 3, first_seen: "2026-10-27T10:00:00Z", last_seen: "2026-10-29T09:00:04Z", suggested_fix: "Only say a refund is done after refund_order returns ok." },
+  { id: "iss_2", title: "Answers in English to Hindi", status: "open", conversations: 1, first_seen: "2026-10-28T10:00:00Z", last_seen: "2026-10-28T10:00:00Z", suggested_fix: null },
+] };
+
+/** A fake flow.engineer: two pages of conversations, one conversation, the issues, and a refusal for cnv_bad. */
+async function server() {
+  const asked: Array<{ url: string; authorization?: string }> = [];
+  const http = createServer((req, res) => {
+    asked.push({ url: req.url!, authorization: req.headers.authorization });
+    const url = new URL(req.url!, "http://x");
+    const json = (status: number, body: unknown) => void res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+    if (req.headers.authorization !== `Bearer ${KEY}`) return json(401, { error: { code: "bad_key", message: "That key is not a Flow key.", hint: "Run flow setup --rotate key." } });
+    if (url.pathname === "/v1/agent/conversations") {
+      return url.searchParams.get("cursor") === "c2"
+        ? json(200, { conversations: [conversation("cnv_3", 0)], next_cursor: "c3" })
+        : json(200, { conversations: [conversation("cnv_1", 1), conversation("cnv_2", 2)], next_cursor: "c2" });
+    }
+    if (url.pathname === "/v1/agent/conversations/cnv_1") return json(200, detail);
+    if (url.pathname === "/v1/agent/issues") return json(200, issues);
+    json(404, { error: { code: "not_found", message: "No conversation cnv_bad for this agent.", hint: "List them with flow conversations." } });
+  });
+  const url = await new Promise<string>((done) => http.listen(0, "127.0.0.1", () => done(`http://127.0.0.1:${(http.address() as AddressInfo).port}`)));
+  return { url, asked, close: () => { http.closeAllConnections(); http.close(); } };
+}
+
+function agentDir(key = KEY): string {
+  const dir = mkdtempSync(join(tmpdir(), "flow-conversations-"));
+  writeFileSync(join(dir, ".env"), `FLOW_KEY=${key}\n`);
+  return dir;
+}
+
+test("flow conversations lists with the .env's FLOW_KEY, following next_cursor up to --limit, as a table or the server's JSON", { timeout: 15_000 }, async () => {
+  const fake = await server();
+  try {
+    const dir = agentDir();
+    const listed = await flow(["conversations", "--grade", "wrong", "--environment", "production", "--since", "2026-10-28T00:00:00Z", "--limit", "3", "--cloud", fake.url], dir);
+    assert.equal(listed.code, 0, listed.stderr);
+    assert.deepEqual(fake.asked, [
+      { url: "/v1/agent/conversations?environment=production&grade=wrong&since=2026-10-28T00%3A00%3A00Z&limit=3", authorization: `Bearer ${KEY}` },
+      { url: "/v1/agent/conversations?environment=production&grade=wrong&since=2026-10-28T00%3A00%3A00Z&limit=1&cursor=c2", authorization: `Bearer ${KEY}` },
+    ]);
+    assert.equal(listed.stdout, [
+      "ID     LAST MESSAGE          CHANNEL   CONTACT    MESSAGES  WRONG  UNHELPFUL",
+      "cnv_1  2026-10-29 09:05:00Z  whatsapp  +15550100  4         1      0",
+      "cnv_2  2026-10-29 09:05:00Z  whatsapp  +15550100  4         2      0",
+      "cnv_3  2026-10-29 09:05:00Z  whatsapp  +15550100  4         0      0",
+      "",
+      "3 conversations (more: raise --limit). Read one: flow conversations show <id>",
+      "",
+    ].join("\n"));
+    const json = await flow(["conversations", "--limit", "2", "--json", "--cloud", fake.url], dir);
+    assert.equal(json.code, 0, json.stderr);
+    assert.deepEqual(JSON.parse(json.stdout), { conversations: [conversation("cnv_1", 1), conversation("cnv_2", 2)], next_cursor: "c2" });
+    assert.ok(![listed, json].some((r) => (r.stdout + r.stderr).includes(KEY)));
+  } finally { fake.close(); }
+});
+
+test("flow conversations show prints the transcript with each graded reply's label, rule, reason and quote; --json is the server's", { timeout: 15_000 }, async () => {
+  const fake = await server();
+  try {
+    const dir = agentDir();
+    const shown = await flow(["conversations", "show", "cnv_1", "--cloud", fake.url], dir);
+    assert.equal(shown.code, 0, shown.stderr);
+    assert.equal(shown.stdout, [
+      "Conversation cnv_1: production, whatsapp, +15550100",
+      "  started 2026-10-29 09:00:00Z, last message 2026-10-29 09:05:00Z, 4 messages",
+      "  replies: 1 wrong, 0 unhelpful, 1 good, 1 not graded",
+      "",
+      "2026-10-29 09:00:00Z  person: Can I get a refund?",
+      "2026-10-29 09:00:04Z  agent: Yes, I've refunded you.",
+      "                             Anything else?",
+      "                             [tools: find_order]",
+      "                             WRONG  rule: no-made-up-actions",
+      "                               why: It says it refunded, but no refund tool ran.",
+      "                               quote: \"I've refunded you\"",
+      "2026-10-29 09:01:00Z  person: thanks",
+      "2026-10-29 09:01:02Z  agent: Any time!",
+      "                             GOOD",
+      "",
+      "Issues:",
+      "  iss_1  Claims actions it did not take",
+      "",
+    ].join("\n"));
+    const json = await flow(["conversations", "show", "cnv_1", "--json", "--cloud", fake.url], dir);
+    assert.equal(json.stdout, JSON.stringify(detail));
+  } finally { fake.close(); }
+});
+
+test("flow issues lists each issue with its suggested fix", { timeout: 15_000 }, async () => {
+  const fake = await server();
+  try {
+    const listed = await flow(["issues", "--status", "all", "--cloud", fake.url], agentDir());
+    assert.equal(listed.code, 0, listed.stderr);
+    assert.equal(fake.asked[0]!.url, "/v1/agent/issues?status=all");
+    assert.equal(listed.stdout, [
+      "ID     STATUS  CONVERSATIONS  LAST SEEN             TITLE",
+      "iss_1  open    3              2026-10-29 09:00:04Z  Claims actions it did not take",
+      "    fix: Only say a refund is done after refund_order returns ok.",
+      "iss_2  open    1              2026-10-28 10:00:00Z  Answers in English to Hindi",
+      "",
+    ].join("\n"));
+  } finally { fake.close(); }
+});
+
+test("a refusal prints the server's message and hint and exits 1; no FLOW_KEY says how to get one", { timeout: 15_000 }, async () => {
+  const fake = await server();
+  try {
+    const missing = await flow(["conversations", "show", "cnv_bad", "--cloud", fake.url], agentDir());
+    assert.deepEqual(missing, { code: 1, stdout: "", stderr: "flow conversations: No conversation cnv_bad for this agent. (not_found, 404)\nList them with flow conversations.\n" });
+    const badKey = await flow(["issues", "--cloud", fake.url], agentDir("flow_test_wrong"));
+    assert.deepEqual(badKey, { code: 1, stdout: "", stderr: "flow issues: That key is not a Flow key. (bad_key, 401)\nRun flow setup --rotate key.\n" });
+    const noKey = await flow(["conversations", "--cloud", fake.url], mkdtempSync(join(tmpdir(), "flow-conversations-")));
+    assert.equal(noKey.code, 1);
+    assert.match(noKey.stderr, /set FLOW_KEY \(flow setup writes it into \.env\)/);
+  } finally { fake.close(); }
+});

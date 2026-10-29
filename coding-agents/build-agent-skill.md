@@ -451,6 +451,9 @@ npx @flow-engineer/flow deploy --json                           # staging, the f
 npx @flow-engineer/flow deploy promote --json                   # staging's live version to production, once the owner has tried it
 npx @flow-engineer/flow deploy status --json                    # what is live in each environment: version, when, URL
 npx @flow-engineer/flow logs --since 15m                        # the hosted agent's log lines (--follow for new ones)
+npx @flow-engineer/flow conversations --grade wrong --since 7d  # its conversations with a reply graded wrong
+npx @flow-engineer/flow conversations show <id>                 # one of them: each reply's grade, rule, reason and quote
+npx @flow-engineer/flow issues                                  # the problems the grades add up to, with a suggested fix
 printf '%s' "$VALUE" | npx @flow-engineer/flow deploy secret NAME --env production   # one secret by hand, from stdin
 ```
 
@@ -461,6 +464,13 @@ newer Flow Framework release line than hosting runs is refused before anything i
 separate secrets step (it sends only new or changed `.env` values each time; promote sends them to
 production). Commit first, or the version reads `<sha>+dirty`. Stop the laptop's `npm start` once the deployed one is live: two copies on one key
 both answer every message.
+
+To find and fix the agent's bad replies yourself: `flow conversations --grade wrong` lists the
+hosted agent's conversations with a reply graded wrong (`--grade unhelpful` for the weaker ones),
+and `flow conversations show <id>` prints one, message by message, with each graded reply's rule,
+the reason and the words it was graded on. Fix the instructions, skill or tool that rule points
+at, add a scenario that plays that conversation, run `flow test`, and deploy. `flow issues` groups
+the same grades into problems with a suggested fix. They read with `FLOW_KEY` from `.env`.
 
 On the owner's own servers: one instance, kept warm, CPU always on, a durable `database`
 (`postgres(pool)`), `await agent.resume()` at start, the secrets from the platform's secret store

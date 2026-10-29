@@ -2,6 +2,27 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **`flow conversations` and `flow issues`: read the hosted agent's conversations and the grades
+  of its replies from the terminal.** `flow conversations [--environment staging|production]
+  [--grade wrong|unhelpful|good] [--since 24h|7d|<time>] [--limit n]` lists them (id, last message,
+  channel, contact, messages, replies graded wrong and unhelpful), following the server's pages up
+  to `--limit` (default 20); `flow conversations show <id>` prints one, one line per message, with
+  each graded reply's label, rule, reason and quoted words under it; `flow issues [--status
+  open|resolved|all]` lists the problems the grades add up to, with a suggested fix. Each reads with
+  the agent's `FLOW_KEY` (from `.env`, or `--dotenv`; never printed) at `--cloud`, else
+  `FLOW_FRAMEWORK_CLOUD`, else https://flow.engineer/observe. `--json` prints the server's JSON
+  (pages of conversations merged into one). Exit 0 printed, 1 otherwise, with the server's message
+  and hint. The coding-agent skill tells agents to run `flow conversations --grade wrong`, then
+  `show <id>`, to find and fix bad replies.
+
+### Migration notes
+
+None: new commands only.
+
 ## 0.12.0 (2026-10-28)
 
 ### Changes
