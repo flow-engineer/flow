@@ -604,6 +604,7 @@ function saveSession(ended: Ended, received: RunSummary[], link: string, print: 
     only: picked ? [...picked] : null,
     runs: mergedRuns(received).map((m) => ({
       scenario: m.scenario,
+      id: m.id,
       channel: m.channel,
       run: m.run,
       runId: m.summary?.runId ?? null,

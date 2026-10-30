@@ -35,6 +35,8 @@ export interface LastSession {
   runs: Array<{
     /** The scenario's file name without .yaml, as --only takes it. */
     scenario: string;
+    /** The scenario's id (its `id:`, else the file name). Absent in a file from an older client. */
+    id?: string;
     channel: string;
     run: number;
     /** The cloud's id for the run, for `flow show`; null when it was not played. */
@@ -54,7 +56,7 @@ export interface LastSession {
   sessionInvalid?: SessionInvalid;
 }
 
-export const SHOW_LINE = `  flow show <run-id|last> [--json]
+export const SHOW_LINE = `  flow show <run-id|last> [--scenario <id>] [--json]
                             Print one run's record from the test cloud: its checks with the
                             judge's reasons, the transcript and the tool calls (flow show --help)`;
 
@@ -63,10 +65,13 @@ const SHOW_USAGE = `Usage:
 
 Prints one run of the last \`flow test\` (or any run of this agent, by the id on its PASS or
 FAIL line): verdict, every check with the judge's reason, then the conversation in time order with
-each tool call the simulator played and what it changed. \`last\` is the first run that did not
-pass in .flow/last-session.json (its first run when all passed).
+each tool call the simulator played, which response of the tool file it played and what it
+changed. \`last\` is the first run that did not pass in .flow/last-session.json (its first run
+when all passed).
 
 Options:
+  --scenario <id>          With last: that scenario's run instead (its first run that did not
+                           pass, else its first run); the scenario's id or file name without .yaml
   --json                   The record exactly as the cloud answered it, on stdout
   --cloud <url>            The test cloud (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)
   --dotenv <path>          Read the environment from this file instead of the folder's .env
@@ -89,6 +94,7 @@ interface RunRecord {
   channel?: string;
   startedAt?: number;
   transcript?: Line[];
+  /** kind: the `when` of the tool file's response the simulator played, or "custom" when none fit. */
   toolCalls?: Array<{ tool?: string; input?: unknown; ok?: boolean; output?: unknown; error?: unknown; latencyMs?: number; changes?: string[]; kind?: string; at?: number }>;
   checks?: Array<{ kind?: string; text?: string; pass?: boolean; reason?: string }>;
   error?: unknown;
@@ -109,6 +115,7 @@ export async function showCli(args: string[]): Promise<number> {
   try {
     parsed = parseArgs({ args, allowPositionals: true, strict: true, options: {
       json: { type: "boolean", default: false },
+      scenario: { type: "string" },
       cloud: { type: "string" },
       dotenv: { type: "string" },
       help: { type: "boolean", short: "h", default: false },
@@ -126,6 +133,10 @@ export async function showCli(args: string[]): Promise<number> {
   }
   if (positionals.length !== 1) {
     console.error(`flow show takes one run id, or last.\n\n${SHOW_USAGE}`);
+    return 1;
+  }
+  if (values.scenario !== undefined && positionals[0] !== "last") {
+    console.error(`--scenario picks a run of the last session: flow show last --scenario ${values.scenario || "<id>"}.`);
     return 1;
   }
   const envProblem = loadEnv(values.dotenv);
@@ -146,9 +157,20 @@ export async function showCli(args: string[]): Promise<number> {
   }
   let runId = positionals[0]!;
   if (runId === "last") {
-    const pickedRun = pickLast(last);
+    let runs = last.runs;
+    if (values.scenario !== undefined) {
+      const wanted = values.scenario;
+      runs = runs.filter((r) => r.scenario === wanted || r.id === wanted);
+      if (!runs.length) {
+        console.error(`The last session played no scenario ${JSON.stringify(wanted)}. Its scenarios: ${scenarioNames(last).join(", ") || "none"}.`);
+        return 1;
+      }
+    }
+    const pickedRun = pickLast(runs);
     if (!pickedRun) {
-      console.error(`${LAST_SESSION} has no run ids: run flow test again, then flow show last.`);
+      console.error(values.scenario !== undefined
+        ? `${values.scenario} has no run in ${LAST_SESSION} that the cloud played: run flow test --only ${runs[0]!.scenario}.`
+        : `${LAST_SESSION} has no run ids: run flow test again, then flow show last.`);
       return 1;
     }
     runId = pickedRun;
@@ -204,9 +226,15 @@ function readLast(): LastSession | string {
   return last;
 }
 
+/** The last session's scenarios, by file name, with the id after it where that differs. */
+function scenarioNames(last: LastSession): string[] {
+  const names = last.runs.map((r) => (r.id && r.id !== r.scenario ? `${r.scenario} (${r.id})` : r.scenario));
+  return [...new Set(names)];
+}
+
 /** The first run that did not pass, else the first run; says which on stderr and names the others that did not pass. */
-function pickLast(last: LastSession): string | undefined {
-  const withId = last.runs.filter((r) => r.runId);
+function pickLast(runs: LastSession["runs"]): string | undefined {
+  const withId = runs.filter((r) => r.runId);
   const notPassed = withId.filter((r) => r.verdict === "failed" || r.verdict === "flaky" || r.verdict === "errored");
   const chosen = notPassed[0] ?? withId[0];
   if (!chosen) return undefined;
@@ -300,7 +328,9 @@ function render(record: RunRecord, runId: string): string[] {
   for (const call of record.toolCalls ?? []) {
     const t = when(call.at);
     const result = call.ok === false ? `error: ${typeof call.error === "string" ? call.error : brief(call.error)}` : brief(call.output);
-    const notes = [call.kind, "simulated", call.latencyMs === undefined ? undefined : `${call.latencyMs} ms`].filter(Boolean).join(", ");
+    // Which response of the tool file the simulator played (its `when`), or custom when none fit: a simulator's slip shows here.
+    const response = !call.kind ? undefined : call.kind === "custom" ? "response: custom" : `response: ${JSON.stringify(call.kind)}`;
+    const notes = [response, "simulated", call.latencyMs === undefined ? undefined : `${call.latencyMs} ms`].filter(Boolean).join(", ");
     const lines = [`${t} tool ${call.tool ?? "?"}(${brief(call.input)}) → ${result} [${notes}]`];
     for (const change of call.changes ?? []) lines.push(`${" ".repeat(t.length)}   changes: ${change}`);
     items.push({ at: call.at ?? Infinity, order: items.length, lines });

@@ -274,15 +274,17 @@ Work in this loop, and never finish on a partial run:
 
 1. `npx @flow-engineer/flow test --synthetic --json > report.json`, and read the runs whose `verdict` is not
    `passed` (`jq '.runs[] | select(.verdict != "passed")' report.json`).
-2. `npx @flow-engineer/flow show last` (the first run that did not pass; it names the others) or
+2. `npx @flow-engineer/flow show last` (the first run that did not pass; it names the others),
+   `npx @flow-engineer/flow show last --scenario <id>` (that scenario's run; its id or file name) or
    `npx @flow-engineer/flow show <runId>`: the checks with the judge's reasons, then the conversation in time
-   order with every tool call the simulator played, its input, output and what it changed.
+   order with every tool call the simulator played, its input, output and what it changed, and
+   `response: "<when>"`, the tool file's response it played (`response: custom` when none fit).
    `--json` gives the whole record.
 3. Decide which is wrong, and say which:
    - the agent: it said or did the wrong thing; fix its prompt, tools or code;
    - the test: a check asks for the wrong thing, or the scenario cannot reach its goal; fix the YAML;
-   - the simulator: a tool output that could not happen, or a person who left the scenario; fix
-     `tests/tools/*.yaml` or the scenario's `world` and `person`.
+   - the simulator: a tool output that could not happen (a `response:` that does not fit the call is
+     a sign), or a person who left the scenario; fix `tests/tools/*.yaml` or the scenario's `world` and `person`.
 4. `npx @flow-engineer/flow test --synthetic --failed` until it passes with nothing flaky. With the
    cloud's replays and second plays, `--runs 3 --only <scenario>` is rarely needed; `--fresh` plays every
    simulator anew when you want a run with no stored answers.

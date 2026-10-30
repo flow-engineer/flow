@@ -33,6 +33,11 @@
 // When Opened says reopen, a tunnel call or the stream may answer 410 { error: "session_gone" }: the
 // cloud lost the session (its tunnel restarted). The client opens one new session with `only`, the
 // runs that have no result yet, and merges the two reports. Never more than once.
+// Such a cloud may also answer a tunnel call or the stream 503 { error: "session_elsewhere" }: it reached a
+// server of the cloud's that does not hold the session (the tunnel moved), so it never reached the session
+// and is safe to send again, an outbound included (with its same Idempotency-Key). The client sends it again
+// with backoff for up to 45s, since the cloud takes a silent holder as gone after 30s and then answers
+// session_gone; still session_elsewhere after that, the client takes the session as gone, as above.
 //
 // When both sides said history, a run whose scenario starts from an earlier conversation carries it
 // as `history` on its first `message` command (a business run: on `open`). The client writes those
