@@ -23,7 +23,9 @@
 // keys and its phone link (testing/src/account.ts); `flow projects list | delete` lists and deletes
 // that account's projects (testing/src/projects.ts). `flow deploy` puts the agent on Flow's hosting
 // (testing/src/deploy.ts). `flow conversations` and `flow issues` read the hosted agent's
-// conversations and the grades of its replies (testing/src/conversations.ts).
+// conversations and the grades of its replies (testing/src/conversations.ts); `flow templates` the
+// project's approved WhatsApp templates (testing/src/templates.ts), which `flow test` compares with
+// the declared ones.
 
 import { mkdirSync, existsSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -44,6 +46,8 @@ import { PROJECTS_LINE, projectsCli } from "./projects.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
 import { RECORDS_LINE, recordsCli } from "./records.ts";
 import { CONVERSATIONS_LINES, conversationsCli, issuesCli } from "./conversations.ts";
+import { TEMPLATES_LINE, templatesCli, templateWarnings } from "./templates.ts";
+import type { TemplateDefinition } from "../../src/types.ts";
 import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
@@ -158,7 +162,7 @@ the CHINWAG_ names from before the rename still work):
                            (the agent's Flow key, on its trial credit; flow setup writes it)`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
 const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${RECORDS_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${CLI_RELEASE_LINE}\n${INSPECT_LINE}
-${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${PROJECTS_LINE}\n${DEPLOY_LINE}\n${CONVERSATIONS_LINES}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
+${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${PROJECTS_LINE}\n${DEPLOY_LINE}\n${CONVERSATIONS_LINES}\n${TEMPLATES_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
 
 /** What to do after new or init, from step 2; a model key comes first when none is set here. */
 function nextSteps(): string {
@@ -210,6 +214,7 @@ if (process.argv[2] === "records") process.exit(await recordsCli(process.argv.sl
 if (process.argv[2] === "projects") process.exit(await projectsCli(process.argv.slice(3)));
 if (process.argv[2] === "conversations") process.exit(await conversationsCli(process.argv.slice(3)));
 if (process.argv[2] === "issues") process.exit(await issuesCli(process.argv.slice(3)));
+if (process.argv[2] === "templates") process.exit(await templatesCli(process.argv.slice(3)));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) process.exit(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
 const TEST_FLAGS = {
@@ -362,6 +367,8 @@ const prompt = join(dir, "agent/AGENTS.md");
 const title = existsSync(prompt) ? /^#\s+(.+)$/m.exec(readFileSync(prompt, "utf8"))?.[1]?.trim() : undefined;
 
 let agent: Pick<ConnectOptions, "tools" | "build">;
+/** The WhatsApp templates the agent declares, from the first agent the session builds; compared with the dashboard's once it ends. */
+let declaredTemplates: TemplateDefinition[] = [];
 if (agentUrl) {
   const timeout = Number(values["agent-timeout"]);
   if (!/^https?:\/\/[^/]/.test(agentUrl) || !URL.canParse(agentUrl)) invalid("--agent-url must be an http:// or https:// URL, such as http://localhost:3000/flow.");
@@ -379,7 +386,14 @@ if (agentUrl) {
     invalid("src/agent.ts must export buildAgent({ model, events, tools }) and tools, or pass --agent-url to test an agent by its HTTP endpoint.");
   }
   // A business run's agent also gets its channels and clock (testing/src/business.ts); buildAgent passes them on to createAgent.
-  agent = { tools: module.tools, build: ({ tools, events, channels, testing }) => module.buildAgent({ tools, events, ...(channels ? { channels, testing } : {}) }) };
+  agent = {
+    tools: module.tools,
+    build: ({ tools, events, channels, testing }) => {
+      const built = module.buildAgent({ tools, events, ...(channels ? { channels, testing } : {}) });
+      if (!declaredTemplates.length && typeof built?.templates === "function") declaredTemplates = built.templates();
+      return built;
+    },
+  };
 }
 
 /** With --agent-url the agent's own tools run for real: the suite's tool simulators do not apply. */
@@ -508,6 +522,8 @@ if (sendPath.length) {
   say(`${sendPath.length} ${sendPath.length === 1 ? "conversation" : "conversations"} sent messages by a second path: every message must go through the agent's send (its channels), so the session failed:`);
   for (const p of sendPath) say(`  ${p.conversationId}: ${p.delivered} reached the cloud through the agent's channels, ${p.announced} the agent says it sent (message.out)`);
 }
+// Warned, never failed: a declared template that is not the approved one fails only when it is sent.
+for (const line of await templateWarnings(declaredTemplates, cloud, process.env.FLOW_KEY?.trim() || ciKey)) say(line);
 sessionId = summary.sessionId || sessionId;
 dashboard = summary.dashboard || dashboard;
 saveSession("finished", summary.runs, dashboard, say);

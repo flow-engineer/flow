@@ -110,7 +110,7 @@ const COMMON_OPTIONS = {
 } as const;
 
 /** Arguments, or the line that says what is wrong with them. */
-function parse<T extends Record<string, { type: "string" | "boolean" }>>(name: string, args: string[], options: T, usage: string) {
+export function parse<T extends Record<string, { type: "string" | "boolean" }>>(name: string, args: string[], options: T, usage: string) {
   try {
     return parseArgs({ args, allowPositionals: true, strict: true, options: { ...COMMON_OPTIONS, ...options } });
   } catch (error) {
@@ -122,7 +122,7 @@ function parse<T extends Record<string, { type: "string" | "boolean" }>>(name: s
 }
 
 /** The address and the key, after .env (or --dotenv) is read; a string says what is missing. */
-function access(name: string, values: { cloud?: string; dotenv?: string }): { cloud: string; key: string } | string {
+export function access(name: string, values: { cloud?: string; dotenv?: string }): { cloud: string; key: string } | string {
   const envProblem = loadEnv(values.dotenv);
   if (envProblem) return envProblem;
   const key = process.env.FLOW_KEY?.trim();
@@ -130,13 +130,16 @@ function access(name: string, values: { cloud?: string; dotenv?: string }): { cl
   return { cloud: (values.cloud || setting("CLOUD") || OBSERVE_URL).replace(/\/+$/, ""), key };
 }
 
-class Failed extends Error {}
+/** What to print when a read did not work; status is the server's, when it answered. */
+export class Failed extends Error {
+  status?: number;
+}
 
 /** The most conversations the server answers in one page. */
 const PAGE_LIMIT = 100;
 
 /** GET path; the body's text and its JSON, or Failed with what to print. */
-async function get(name: string, cloud: string, key: string, path: string): Promise<{ text: string; body: Record<string, unknown> }> {
+export async function get(name: string, cloud: string, key: string, path: string): Promise<{ text: string; body: Record<string, unknown> }> {
   let status: number;
   let text: string;
   let retryAfter: string | null;
@@ -155,11 +158,12 @@ async function get(name: string, cloud: string, key: string, path: string): Prom
   if (status < 200 || status >= 300) {
     const error = (body as { error?: ApiError } | undefined)?.error;
     const again = retryAfter && /^\d+$/.test(retryAfter) ? ` Try again in ${retryAfter} s.` : "";
-    if (error && typeof error === "object" && error.message) {
-      throw new Failed(`${name}: ${error.message}${error.code ? ` (${error.code}, ${status})` : ` (${status})`}${again}${error.hint ? `\n${error.hint}` : ""}`);
-    }
     const said = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
-    throw new Failed(`${name}: ${cloud} answered ${status}${said ? `: ${said}` : ""}${status === 404 ? " (this Flow may not have this command's route yet)" : ""}.`);
+    const failed = error && typeof error === "object" && error.message
+      ? new Failed(`${name}: ${error.message}${error.code ? ` (${error.code}, ${status})` : ` (${status})`}${again}${error.hint ? `\n${error.hint}` : ""}`)
+      : new Failed(`${name}: ${cloud} answered ${status}${said ? `: ${said}` : ""}${status === 404 ? " (this Flow may not have this command's route yet)" : ""}.`);
+    failed.status = status;
+    throw failed;
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Failed(`${name}: ${cloud} answered ${status} with something that is not JSON.`);
   return { text, body: body as Record<string, unknown> };
@@ -295,7 +299,7 @@ function when(at: string | undefined): string {
 }
 
 /** Rows under a header, each column as wide as its widest cell. */
-function table(header: string[], rows: string[][]): string[] {
+export function table(header: string[], rows: string[][]): string[] {
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)));
   return [header, ...rows].map((r) => r.map((cell, i) => (i === r.length - 1 ? cell : cell.padEnd(widths[i]!))).join("  ").trimEnd());
 }
