@@ -277,7 +277,10 @@ never a module variable; make the `flowEvents` inside `buildAgent`, one per agen
 package (`../docs/events.md` from this file).
 
 Templates are WhatsApp only. Declare the ones the owner set up with Meta beside `testPeople`, so
-Flow Framework checks each send against them and the playground shows them as WhatsApp does:
+Flow Framework checks each send against them and the playground shows them as WhatsApp does.
+Before declaring WhatsApp templates, run `flow templates --declare` and paste its output: it prints
+the approved ones exactly as Meta has them, and the order each send gives its values in. `flow
+test` warns when a declared template is missing, not approved, or differs from the approved one.
 
 ```ts
 createAgent({
@@ -460,6 +463,7 @@ npx @flow-engineer/flow logs --since 15m                        # the hosted age
 npx @flow-engineer/flow conversations --grade wrong --since 7d  # its conversations with a reply graded wrong
 npx @flow-engineer/flow conversations show <id>                 # one of them: each reply's grade, rule, reason and quote
 npx @flow-engineer/flow issues                                  # the problems the grades add up to, with a suggested fix
+npx @flow-engineer/flow templates --declare                     # the approved WhatsApp templates, to paste into createAgent
 printf '%s' "$VALUE" | npx @flow-engineer/flow deploy secret NAME --env production   # one secret by hand, from stdin
 ```
 

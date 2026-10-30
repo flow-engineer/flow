@@ -2,6 +2,28 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.14.7 (2026-10-30)
+
+### Changes
+
+- **`flow templates`** lists the project's approved WhatsApp templates from Flow's dashboard
+  (`GET /v1/agent/templates`, read with `FLOW_KEY`): name, language, category, status and the order
+  a send gives its values in (`header = {{1}}, body[0] = {{1}}, body[1] = {{2}}, buttons[0] = {{1}}`).
+  `--all` lists every status, `--json` prints the server's answer.
+- **`flow templates --declare`** prints the approved templates as createAgent's `templates: [...]`,
+  exactly as Meta has them (header, body with its numbered or named variables, footer, buttons), and
+  one commented `agent.nudge` per template with its values in order. Before declaring WhatsApp
+  templates, run `flow templates --declare` and paste its output.
+- **`flow test` warns** when a declared template is missing from the dashboard, not approved, or
+  differs from the approved one, naming each part (category, header, body, footer, buttons). It
+  never fails the run.
+- A dashboard without the route (404): `flow templates` says it does not serve templates yet, and
+  `flow test` says nothing.
+
+### Migration notes
+
+None.
+
 ## 0.14.6 (2026-10-30)
 
 ### Changes

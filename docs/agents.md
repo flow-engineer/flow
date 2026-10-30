@@ -476,6 +476,27 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
 
 Run each answer's `next`. Promote, or deploy to production, only when the owner says so.
 
+## WhatsApp templates
+
+Before declaring WhatsApp templates, run `flow templates --declare` and paste its output.
+
+```sh
+npx @flow-engineer/flow templates [--all] [--json]   # name, language, category, status, send order
+npx @flow-engineer/flow templates --declare          # the approved ones as createAgent's templates: [...]
+```
+
+- It reads the project's templates from Flow's dashboard (`GET /v1/agent/templates`) with the
+  agent's `FLOW_KEY`, at `--cloud`, else `FLOW_FRAMEWORK_CLOUD`, else `https://flow.engineer/observe`.
+- The list shows approved templates; `--all` every status; `--json` the server's answer.
+- `--declare` prints each approved template exactly as Meta has it (header, body with its numbered
+  or named variables, footer, buttons), then one commented `agent.nudge` per template with the
+  order its values go in, such as `body[0] = {{listing}}, body[1] = {{answer}}`.
+- `flow test` compares the templates the agent declares with the approved ones and warns, never
+  fails, for each one missing, not approved, or differing in its category, header, body, footer or
+  buttons.
+- A dashboard without the route answers 404: `flow templates` says it does not serve templates yet
+  (exit 1), and `flow test` says nothing.
+
 ## Send Flow feedback
 
 When Flow gets in your way, tell the Flow team directly: a command that failed or printed the
