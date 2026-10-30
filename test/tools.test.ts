@@ -251,3 +251,17 @@ test("a call identical to one still running in the background is not run again",
   await h.agent.conversation("c9")!.whenIdle();
   assert.ok(h.events.some((e) => e.type === "tool.repeated"));
 });
+
+// The test cloud judges real tools' calls from tool.end; no other test reads a long output on the event.
+test("a tool's output on its tool.end event is whole up to 64,000 characters, else cut with a [cut: N ...] line", async () => {
+  const whole = "a".repeat(64_000);
+  const long = `a${"😀".repeat(40_000)}`; // 80,001 UTF-16 units: the cut at 64,000 would split a pair
+  const list = tool({ name: "list", description: "List.", input: z.object({ long: z.boolean() }), run: ({ long: l }) => (l ? long : whole) });
+  const h = multi({ channels: { web: { info: WEB_APP } }, tools: [list] });
+  const taken = await h.message("web", "visitor-1", "list them");
+  (await h.nextCall(0)).answer(respond(call("send_web", { text: "Checking." }), call("list", { long: false }), call("list", { long: true })));
+  (await h.nextCall(1)).answer(respond(call("send_web", { text: "Done." })));
+  await h.agent.conversation(taken!.conversationId)!.whenIdle();
+  const outputs = h.events.filter((e) => e.type === "tool.end" && e.tool === "list").map((e) => e.output);
+  assert.deepEqual(outputs, [whole, `${long.slice(0, 63_999)}\n[cut: 16002 more characters not shown]`]);
+});

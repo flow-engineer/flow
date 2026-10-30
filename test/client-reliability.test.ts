@@ -854,6 +854,98 @@ test("a lost session is opened again at most once, only on a cloud that says reo
   }
 });
 
+// session_gone above ends the session at once; session_elsewhere (the call reached a server of the cloud's
+// that does not hold the session) is sent again first, and only a lasting one ends it the same way.
+test("a call or stream answered session_elsewhere is sent again, with the same key, and the session plays on", { timeout: 10_000 }, async () => {
+  const logs: string[] = [];
+  const keys: string[] = [];
+  const asked: Array<string | undefined> = [];
+  let first: ServerResponse | undefined;
+  let resumes = 0;
+  const elsewhere = (res: ServerResponse) => void res.writeHead(503, { "content-type": "application/json" }).end('{"error":"session_elsewhere"}');
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      const url = req.url ?? "";
+      if (url === "/api/sessions") return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ sessionId: "s1", token: "t", missing: [], dashboard: "http://dash/s1", reopen: true, resume: true, idempotency: true }));
+      if (url.endsWith("/stream")) {
+        asked.push(req.headers["last-event-id"] as string | undefined);
+        if (!first) {
+          first = res;
+          return void res.writeHead(200, { "content-type": "text/event-stream" }).write(`id: 1\n${frame(message("m1"))}`);
+        }
+        if (resumes++ === 0) return elsewhere(res);
+        return void res.writeHead(200, { "content-type": "text/event-stream" }).end(`id: 2\n${frame(run("r1"))}id: 3\n${frame(summaryOf("s1", [run("r1")]))}`);
+      }
+      if (url.endsWith("/outbound")) {
+        keys.push(req.headers["idempotency-key"] as string);
+        if (keys.length <= 2) return elsewhere(res);
+      }
+      // The intercepted message's receipt follows its outbound: then the stream drops, and its resume meets session_elsewhere once.
+      if (url.endsWith("/receipts")) first?.end();
+      res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
+    });
+  });
+  const url = await new Promise<string>((done) => server.listen(0, "127.0.0.1", () => done(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)));
+  try {
+    const summary = await runInCloud({
+      cloud: url, name: "test", tools: [], files: [hello], log: (line) => logs.push(line),
+      build: () => ({ channels: () => [], reacted: () => {}, receive: (_id, _incoming, deliver) => { void deliver({ type: "message", text: "Hi!" }); return null; } }),
+    });
+    assert.equal(summary.sessionId, "s1");
+    assert.equal(summary.lost, undefined);
+    assert.equal(keys.length, 3);
+    assert.equal(new Set(keys).size, 1, "every try of the outbound carries its one key");
+    assert.deepEqual(asked, [undefined, "1", "1"]);
+    assert.match(logs.join("\n"), /outbound delivery: the session is on another of the cloud's servers \(session_elsewhere\); trying again for up to 45s/);
+  } finally { server.closeAllConnections(); server.close(); }
+});
+
+test("a session_elsewhere that outlasts its window ends the session as lost: one new session plays only the runs with no result", { timeout: 10_000 }, async () => {
+  for (const reopen of [true, false]) {
+    const opens: Array<Record<string, unknown>> = [];
+    let outbound = 0;
+    let skew = 0;
+    const cloud = await listen(({ url, body }, res) => {
+      const reply = (status: number, value: unknown) => void res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(value));
+      if (url === "/api/sessions") {
+        opens.push(JSON.parse(body));
+        const id = `s${opens.length}`;
+        return reply(200, { sessionId: id, token: id, missing: [], dashboard: `http://dash/${id}`, idempotency: true, ...(reopen ? { reopen: true } : {}) });
+      }
+      if (url.endsWith("/stream")) {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        if (url.includes("/s1/")) return void res.write(frame(run("r1", 1)) + frame(message("m1")));
+        return void res.end(frame(run("r2", 2)) + frame(summaryOf("s2", [run("r2", 2)])));
+      }
+      if (url.endsWith("/outbound")) {
+        // The second answer comes past the 45s window on the client's clock.
+        if (++outbound === 2) skew = 60_000;
+        return reply(503, { error: "session_elsewhere" });
+      }
+      reply(200, {});
+    });
+    try {
+      const played = runInCloud({
+        cloud: cloud.url, name: "test", tools: [], files: [hello], runs: 2, log: () => {}, now: () => Date.now() + skew,
+        build: () => ({ channels: () => [], reacted: () => {}, receive: (_id, _incoming, deliver) => { void deliver({ type: "message", text: "Hi!" }); return null; } }),
+      });
+      if (reopen) {
+        const summary = await played;
+        assert.deepEqual(summary.runs.map((r) => [r.runId, r.run]), [["r1", 1], ["r2", 2]]);
+        assert.deepEqual(summary.lost, { sessionId: "s1", dashboard: "http://dash/s1" });
+        assert.deepEqual(opens[1]?.only, [{ scenario: "hello", channel: "sms", run: 2 }]);
+        assert.equal(outbound, 2);
+      } else {
+        // An older cloud: as before, the answer is a refusal, never sent again, and the session ends with it.
+        await assert.rejects(played, /session_elsewhere/);
+        assert.equal(outbound, 1);
+        assert.equal(opens.length, 1);
+      }
+    } finally { cloud.close(); }
+  }
+});
+
 test("a slow event upload is logged only when verbose", { timeout: 10_000 }, async () => {
   const cloud = await listen(({ url }, res) => {
     if (url === "/api/sessions") return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ sessionId: "s", token: "t", missing: [], dashboard: "d" }));

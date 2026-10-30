@@ -2,6 +2,34 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.14.5 (2026-10-30)
+
+### Changes
+
+- **`flow test` outlasts a session that moved inside the test cloud.** On a cloud that re-opens lost
+  sessions, a tunnel call or the stream answered `503 {"error":"session_elsewhere"}` (it reached a
+  server of the cloud's that does not hold the session) is sent again with backoff, with its same
+  Idempotency-Key, for up to 45 s, and the session plays on. Still `session_elsewhere` after that,
+  the session is taken as lost, as with `session_gone`: one new session plays only the runs with no
+  result, and the two reports merge. Before, the CLI ended early (`N of M runs finished before the
+  session ended early`, exit 2). An older cloud is unchanged.
+- **`flow show last --scenario <id>`** shows the last session's run of that scenario (its id, or
+  its file name without .yaml, as `--only` takes): its first run that did not pass, else its first
+  run. A scenario the session did not play is an error that lists the ones it did (exit 1).
+  `.flow/last-session.json` keeps each run's scenario `id` beside its file name.
+- **`flow show` names which response of the tool file the simulator played** for each tool call:
+  `[response: "<when>", simulated, 800 ms]`, or `response: custom` when none fit, so a simulator's
+  slip is told from the agent's.
+- **A tool's output on its `tool.end` and `task.done` events is whole up to 64,000 characters**
+  (was 4,000). A longer one is cut there and ends with the line `[cut: N more characters not
+  shown]`, in place of a bare `…`. The test cloud judges real tools' calls from these events and
+  does not fail a check on what was cut. Traces keep their own 32 KB cap per attribute.
+
+### Migration notes
+
+None. A sink or script that read a tool's output from events and looked for a trailing `…` should
+look for the `[cut: N more characters not shown]` line instead.
+
 ## 0.14.4 (2026-10-29)
 
 ### Changes

@@ -50,7 +50,7 @@ export interface ConnectOptions {
   retryBudgetMs?: number;
   /** How long a lost stream keeps trying to resume, on a cloud that resumes (Opened.resume). Default 2 minutes, as long as the cloud holds its commands. */
   resumeWindowMs?: number;
-  /** The clock the resume window is measured on. Default Date.now; a test passes one it moves itself. */
+  /** The clock the resume and session_elsewhere windows are measured on. Default Date.now; a test passes one it moves itself. */
   now?: () => number;
   /** How often a resumable stream is replaced, before the tunnel's one-hour request cap. Default 50 minutes. */
   streamRefreshMs?: number;
@@ -155,6 +155,9 @@ const RESUME_WINDOW_MS = 120_000;
 const STREAM_REFRESH_MS = 50 * 60_000;
 /** How long one call keeps trying after its first failure. The first try's own wait does not count, so a timed-out try is still sent again. */
 export const RETRY_BUDGET_MS = 30_000;
+/** How long a call the cloud answers session_elsewhere keeps being sent again: the cloud declares a silent holder
+ * of the session gone after 30s and then answers session_gone, so 45s outlasts that. */
+const ELSEWHERE_WINDOW_MS = 45_000;
 /** The cloud abandons one model attempt at 90s and tries a timeout once more, then this POST has its 30s. */
 export const CLOUD_MODEL_BUDGET_MS = 90_000 * 2 + POST_TIMEOUT_MS;
 
@@ -365,6 +368,12 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     pending.add(handled);
     void handled.then(() => pending.delete(handled));
   };
+  // On a cloud that re-opens, a call answered session_elsewhere never reached the session: it is sent
+  // again until the session answers, or the window passes and the session is taken as gone.
+  const outlast = <T>(what: string, attempt: () => Promise<T>): Promise<T> =>
+    reopenable ? outlastElsewhere(attempt, { windowMs: ELSEWHERE_WINDOW_MS, now, signal: controller.signal, log, what }) : attempt();
+  const tunnelPost = <T>(url: string, body: unknown, timeoutMs: number, options: PostOptions): Promise<T> =>
+    outlast(options.what, () => postRetry<T>(url, body, auth, controller.signal, log, timeoutMs, options));
 
   // Tools: same name, description and input; running one asks the cloud, which holds the request
   // until its simulator has answered and the chosen latency has passed.
@@ -381,7 +390,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     run: (input: unknown, context: { conversationId: string }) => {
       const call = (async () => {
         const request: ToolCallRequest = { conversationId: context.conversationId, tool: t.name, input };
-        const result = await postRetry<ToolCallResult>(`${session}/tool-calls`, request, auth, controller.signal, log, toolWait.get(t.name) ?? postTimeoutMs, {
+        const result = await tunnelPost<ToolCallResult>(`${session}/tool-calls`, request, toolWait.get(t.name) ?? postTimeoutMs, {
           mode: idempotent ? "idempotent" : "never", key: `tool:${randomUUID()}`, budgetMs: retryBudgetMs, what: "tool call",
         });
         if (!result.ok) throw new ToolFailed(result.error);
@@ -421,7 +430,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       const wait = started - batch[0].at;
       let failed = false;
       try {
-        await postRetry(`${session}/events`, undefined, auth, controller.signal, log, postTimeoutMs, {
+        await tunnelPost(`${session}/events`, undefined, postTimeoutMs, {
           mode: idempotent ? "idempotent" : "never",
           key: `events:${seq}`,
           serialized: `{"seq":${seq},"events":[${batch.map((e) => e.json).join(",")}]}`,
@@ -496,7 +505,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   const missing = new Set(opened.missing);
   const uploads = options.files.filter((f) => missing.has(f.hash));
   if (uploads.length) {
-    await postRetry(`${tunnel}/api/files`, { files: uploads }, auth, controller.signal, log, postTimeoutMs, {
+    await tunnelPost(`${tunnel}/api/files`, { files: uploads }, postTimeoutMs, {
       mode: idempotent ? "idempotent" : "never",
       key: `files:${createHash("sha256").update(uploads.map((file) => file.hash).join("\n")).digest("hex")}`,
       budgetMs: retryBudgetMs,
@@ -523,7 +532,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       tunnelTools: tools,
       realTools: options.tools,
       events,
-      post: (path, body, key, what) => postRetry(`${session}/${path}`, body, auth, controller.signal, log, postTimeoutMs, {
+      post: (path, body, key, what) => tunnelPost(`${session}/${path}`, body, postTimeoutMs, {
         mode: idempotent ? "idempotent" : path === "outbound" ? "outbound" : "never", key, budgetMs: retryBudgetMs, what,
       }),
       watch,
@@ -535,7 +544,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   if (failure) throw failure;
   startFlush();
   const streamUrl = `${session}/stream`;
-  stream = await openStream(streamUrl, auth, controller.signal);
+  stream = await outlast("the stream", () => openStream(streamUrl, auth, controller.signal));
   if (failure) throw failure;
   // A cloud that resumes numbers its commands: a lost stream is opened again after the last one
   // handled, and a command the cloud sends again is skipped.
@@ -590,7 +599,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       let outboundIndex = 0;
       const deliver = (outbound: Outbound): Promise<SendReceipt | undefined> => {
         const index = outboundIndex++;
-        const delivery = postRetry(`${session}/outbound`, { conversationId: command.conversationId, outbound }, auth, controller.signal, log, postTimeoutMs, {
+        const delivery = tunnelPost(`${session}/outbound`, { conversationId: command.conversationId, outbound }, postTimeoutMs, {
           mode: idempotent ? "idempotent" : "outbound",
           key: `outbound:${command.conversationId}:${command.messageId}:${index}`,
           budgetMs: retryBudgetMs,
@@ -633,7 +642,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       }
       receiveFails = 0;
       const receipt: Receipt = { conversationId: command.conversationId, messageId: command.messageId, status: taken === null ? "intercepted" : "taken" };
-      const sendReceipt = () => postRetry(`${session}/receipts`, receipt, auth, controller.signal, log, postTimeoutMs, {
+      const sendReceipt = () => tunnelPost(`${session}/receipts`, receipt, postTimeoutMs, {
         mode: idempotent ? "idempotent" : "never",
         key: `receipt:${receipt.conversationId}:${receipt.messageId}`,
         budgetMs: retryBudgetMs,
@@ -656,7 +665,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       draining = true;
       pauseIdle();
       await drainWork();
-      await postRetry(`${session}/drained`, {}, auth, controller.signal, log, postTimeoutMs, {
+      await tunnelPost(`${session}/drained`, {}, postTimeoutMs, {
         mode: idempotent ? "idempotent" : "never",
         key: `drained:${opened.sessionId}`,
         budgetMs: retryBudgetMs,
@@ -679,6 +688,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     log(`stream ${why}; resuming after command ${lastId}`);
     const deadline = now() + resumeWindowMs;
     let last: unknown;
+    let elsewhereSince: number | undefined;
     for (let attempt = 0; ; attempt++) {
       const backoff = attempt === 0 ? 0 : Math.min(10_000, 250 * 2 ** attempt) * (0.8 + Math.random() * 0.4);
       const refused = last instanceof Error && last.cause instanceof PostError ? last.cause : undefined;
@@ -695,6 +705,13 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
         if (failure) throw failure;
         const cause = error instanceof Error && error.cause instanceof PostError ? error.cause : error;
         const code = cause instanceof PostError && cause.code ? ` ${cause.code}` : "";
+        if (reopenable && lostSession(cause, "session_elsewhere")) {
+          // Tried again like a POST answered session_elsewhere (outlastElsewhere), within the resume window.
+          elsewhereSince ??= now();
+          if (now() - elsewhereSince >= ELSEWHERE_WINDOW_MS) throw new StreamLost(`the stream could not resume: the cloud answered session_elsewhere for ${ELSEWHERE_WINDOW_MS / 1000}s`, { cause: error });
+          last = error;
+          continue;
+        }
         if (!retryable(cause, "idempotent")) throw new StreamLost(`the stream could not resume: ${error instanceof Error ? error.message : String(error)}${code}`, { cause: error });
         last = error;
       }
@@ -756,10 +773,9 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     const reason = failure ?? (error instanceof Error ? error : new Error(String(error)));
     // Exit 2 is a transport failure after the session exists. A refusal, or anything
     // before the open answers, is the error itself (the CLI prints it alone and exits by its kind, report.ts).
-    if (dashboard && isTransportFailure(reason)) {
-      if (reopenable && saysGone(reason)) throw new SessionGone(reason.message, runs, dashboard, openedId);
-      throw new SessionStopped(reason.message, runs, dashboard);
-    }
+    // A cloud that re-opens and lost the session: session_gone, or session_elsewhere past its window.
+    if (dashboard && reopenable && lostSession(reason)) throw new SessionGone(reason.message, runs, dashboard, openedId);
+    if (dashboard && isTransportFailure(reason)) throw new SessionStopped(reason.message, runs, dashboard);
     throw reason;
   } finally {
     stopped = true;
@@ -859,14 +875,39 @@ export function isTransportFailure(error: unknown): boolean {
   return false;
 }
 
-/** The cloud no longer has the session: a tunnel call or the stream answered session_gone. */
-function saysGone(error: unknown): boolean {
+/** The cloud does not have the session for this call: a tunnel call or the stream answered session_gone, or
+ * session_elsewhere (a server of the cloud's that does not hold it; outlastElsewhere has run out by the time the session ends on it).
+ * `only` narrows it to one of the two. */
+function lostSession(error: unknown, only?: "session_gone" | "session_elsewhere"): boolean {
   let current: unknown = error;
   for (let guard = 0; current instanceof Error && guard < 6; guard++) {
-    if (current instanceof PostError && current.code === "session_gone") return true;
+    if (current instanceof PostError && (current.code === "session_gone" || current.code === "session_elsewhere")) return !only || current.code === only;
     current = current.cause;
   }
   return false;
+}
+
+/** `attempt` sent again, with backoff, while the cloud answers session_elsewhere (protocol.ts), until `windowMs`
+ * has passed since the first such answer; then that answer is thrown, and the session ends as lost (lostSession).
+ * Safe for every call, an outbound included: the cloud refused it before it reached the session. */
+async function outlastElsewhere<T>(attempt: () => Promise<T>, o: { windowMs: number; now: () => number; signal: AbortSignal; log: (line: string) => void; what: string }): Promise<T> {
+  let since: number | undefined;
+  for (let tries = 0; ; tries++) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!lostSession(error, "session_elsewhere")) throw error;
+      since ??= o.now();
+      const retryAfter = error instanceof PostError ? error.retryAfterMs : undefined;
+      const wait = retryAfter ?? Math.min(5_000, 250 * 2 ** tries) * (0.8 + Math.random() * 0.4);
+      if (o.now() - since + wait > o.windowMs) {
+        o.log(`${o.what}: the cloud still answers session_elsewhere after ${Math.round((o.now() - since) / 1000)}s; taking the session as lost`);
+        throw error;
+      }
+      if (tries === 0) o.log(`${o.what}: the session is on another of the cloud's servers (session_elsewhere); trying again for up to ${o.windowMs / 1000}s`);
+      await pause(wait, o.signal);
+    }
+  }
 }
 
 /** Safe to send again, until the cloud stores an idempotency key. A 502/503/504 with no JSON
@@ -894,6 +935,7 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 type RetryMode = "never" | "outbound" | "idempotent";
+type PostOptions = { mode: RetryMode; key: string; budgetMs: number; what: string; serialized?: string };
 
 /** Whether this failure may be sent again. A JSON refusal never is. An older cloud retries an
  * outbound only when the body cannot have arrived. A cloud that stores keys also retries a
@@ -927,7 +969,7 @@ function retryWaitMs(attempt: number, error: unknown): number {
 
 /** One call, sent again when that is safe, until the budget has passed since its first failure.
  * The same Idempotency-Key goes on every try. */
-async function postRetry<T>(url: string, body: unknown, headers: Record<string, string>, signal: AbortSignal | undefined, log: (line: string) => void, timeoutMs: number, options: { mode: RetryMode; key: string; budgetMs: number; what: string; serialized?: string }): Promise<T> {
+async function postRetry<T>(url: string, body: unknown, headers: Record<string, string>, signal: AbortSignal | undefined, log: (line: string) => void, timeoutMs: number, options: PostOptions): Promise<T> {
   let firstFailure: number | undefined;
   let attempt = 0;
   const headersWithKey = { ...headers, "idempotency-key": options.key };

@@ -579,10 +579,10 @@ test("a finished session's results are kept, and --failed runs again only what d
   assert.deepEqual({ ...last, endedAt: undefined, suiteHash: undefined }, {
     sessionId: "s1", dashboard: "http://dash/s1", ended: "finished", only: null, endedAt: undefined, suiteHash: undefined,
     runs: [
-      { scenario: "b", channel: "sms", run: 1, runId: "r2", verdict: "failed", outcome: "failed", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }] },
-      { scenario: "c", channel: "sms", run: 1, runId: "r3", verdict: "errored", outcome: "infra", failedChecks: [] },
-      { scenario: "c", channel: "whatsapp", run: 1, runId: "r4", verdict: "passed", outcome: "passed", failedChecks: [] },
-      { scenario: "hello", channel: "sms", run: 1, runId: "r1", verdict: "passed", outcome: "passed", failedChecks: [] },
+      { scenario: "b", id: "bee", channel: "sms", run: 1, runId: "r2", verdict: "failed", outcome: "failed", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }] },
+      { scenario: "c", id: "c", channel: "sms", run: 1, runId: "r3", verdict: "errored", outcome: "infra", failedChecks: [] },
+      { scenario: "c", id: "c", channel: "whatsapp", run: 1, runId: "r4", verdict: "passed", outcome: "passed", failedChecks: [] },
+      { scenario: "hello", id: "hello", channel: "sms", run: 1, runId: "r1", verdict: "passed", outcome: "passed", failedChecks: [] },
     ],
   });
   assert.match(last.suiteHash, /^[0-9a-f]{64}$/);
@@ -694,7 +694,10 @@ const record = {
     { kind: "edit", messageId: "a1", text: "Placed a large latte! Anything else?", at: 6_000 },
     { kind: "unsend", messageId: "a1", at: 7_000 },
   ],
-  toolCalls: [{ tool: "place_order", input: { size: "large" }, ok: true, output: { order: 7 }, latencyMs: 800, changes: ["order 7 placed"], kind: "write", at: 2_000, overheadMs: 3 }],
+  toolCalls: [
+    { tool: "place_order", input: { size: "large" }, ok: true, output: { order: 7 }, latencyMs: 800, changes: ["order 7 placed"], kind: "the order is placed", at: 2_000, overheadMs: 3 },
+    { tool: "find_table", input: {}, ok: true, output: [], latencyMs: 100, changes: [], kind: "custom", at: 3_000, overheadMs: 2 },
+  ],
   checks: [
     { kind: "outcome", text: "One order is placed.", pass: true, reason: "Order 7." },
     { kind: "judge", text: "Asks to confirm before ordering.", pass: false, reason: "It placed the order without asking." },
@@ -702,7 +705,7 @@ const record = {
   summary: { passed: false, ended: "goal_met", turns: 2, watch: "http://watch/trn_2" },
 };
 
-test("flow show prints a run's record from the cloud with the CI key: checks with reasons, then messages and tool calls in time order", { timeout: 15_000 }, async () => {
+test("flow show prints a run's record from the cloud with the CI key: checks with reasons, then messages and tool calls in time order", { timeout: 30_000 }, async () => {
   const asked: Array<{ path: string; authorization?: string }> = [];
   const server = createServer((req, res) => {
     asked.push({ path: req.url!, authorization: req.headers.authorization });
@@ -718,6 +721,9 @@ test("flow show prints a run's record from the cloud with the CI key: checks wit
     { scenario: "hello", channel: "sms", run: 1, runId: "trn_1", verdict: "passed", failedChecks: [] },
     { scenario: "b", channel: "whatsapp", run: 1, runId: "trn_2", verdict: "failed", failedChecks: [] },
     { scenario: "c", channel: "sms", run: 1, runId: "trn_3", verdict: "errored", failedChecks: [] },
+    { scenario: "booking", id: "book-a-table", channel: "sms", run: 1, runId: "trn_6", verdict: "passed", failedChecks: [] },
+    { scenario: "booking", id: "book-a-table", channel: "sms", run: 2, runId: "trn_7", verdict: "flaky", failedChecks: [] },
+    { scenario: "hello", channel: "whatsapp", run: 1, runId: null, verdict: "not_played", failedChecks: [] },
   ];
   writeFileSync(join(dir, ".flow", "last-session.json"), JSON.stringify({ sessionId: "s1", agent: "agt_1", dashboard: "d", suiteHash: "h", endedAt: "t", ended: "finished", only: null, runs }));
   const key = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_test" };
@@ -739,8 +745,9 @@ test("flow show prints a run's record from the cloud with the CI key: checks wit
       "",
       "Conversation:",
       "   +0.0s person: a large latte please",
-      '   +1.0s tool place_order({"size":"large"}) → {"order":7} [write, simulated, 800 ms]',
+      '   +1.0s tool place_order({"size":"large"}) → {"order":7} [response: "the order is placed", simulated, 800 ms]',
       "           changes: order 7 placed",
+      "   +2.0s tool find_table({}) → [] [response: custom, simulated, 100 ms]",
       "   +3.0s agent: Placed! Anything else? [buttons: No thanks | Yes]",
       "   +4.0s person reacted 👍 to a1",
       "   +5.0s agent edited a1: Placed a large latte! Anything else?",
@@ -764,6 +771,21 @@ test("flow show prints a run's record from the cloud with the CI key: checks wit
     ]);
     const summaryOnly = await cliStreams(["show", "trn_5", "--cloud", url], dir, key);
     assert.match(summaryOnly.stdout, /^ERROR {2}scenarios\/b\.yaml\n.*\n {2}error: simulator_failed /);
+
+    // --scenario picks that scenario's first run that did not pass (by its id here, its file name for hello); else its first run.
+    asked.length = 0;
+    for (const [scenario, runId] of [["book-a-table", "trn_7"], ["hello", "trn_1"]]) {
+      const picked = await cliStreams(["show", "last", "--scenario", scenario!, "--cloud", url], dir, key);
+      assert.equal(picked.code, 1, picked.stderr); // the fake cloud has no trn_7 or trn_1 record: 404 after the pick
+      assert.match(picked.stderr, new RegExp(`^Showing .*: ${runId}$`, "m"));
+    }
+    assert.deepEqual(asked.map((a) => a.path), ["trn_7", "trn_1"].map((id) => `/v1/agents/agt_1/tests/runs/${id}`));
+    const unknown = await cliStreams(["show", "last", "--scenario", "refund", "--cloud", url], dir, key);
+    assert.equal(unknown.code, 1);
+    assert.match(unknown.stderr, /^The last session played no scenario "refund"\. Its scenarios: hello, b, c, booking \(book-a-table\)\.$/m);
+    const notWithId = await cliStreams(["show", "trn_2", "--scenario", "b", "--cloud", url], dir, key);
+    assert.equal(notWithId.code, 1);
+    assert.match(notWithId.stderr, /^--scenario picks a run of the last session: flow show last --scenario b\.$/m);
 
     const missing = await cliStreams(["show", "trn_9", "--cloud", url], dir, key);
     assert.equal(missing.code, 1);

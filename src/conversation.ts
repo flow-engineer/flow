@@ -2298,9 +2298,16 @@ function forModel(entry: ChatMessage): ChatMessage {
   return { role: "user", content: `${entry.content}\n${NOT_SHOWN}`, ...(shown.length ? { media: shown } : {}) };
 }
 
-/** A tool's output as events carry it: whole up to 4,000 characters (for debugging and observability). */
+/** The most of a tool's output a `tool.end` or `task.done` event carries. The test cloud's judge reads real tools'
+ * calls from these events; 64,000 characters is a long list whole, and far under the tunnel's 5 MB upload. */
+const EVENT_OUTPUT_CHARS = 64_000;
+
+/** A tool's output as events carry it: whole up to {@link EVENT_OUTPUT_CHARS}, else that much and a last line that
+ * says so, `[cut: N more characters not shown]` (testing/src/protocol.ts), never a pair of UTF-16 halves split. */
 function clipOutput(text: string): string {
-  return text.length > 4_000 ? `${text.slice(0, 4_000)}…` : text;
+  if (text.length <= EVENT_OUTPUT_CHARS) return text;
+  const end = /[\uD800-\uDBFF]/.test(text[EVENT_OUTPUT_CHARS - 1]!) ? EVENT_OUTPUT_CHARS - 1 : EVENT_OUTPUT_CHARS;
+  return `${text.slice(0, end)}\n[cut: ${text.length - end} more characters not shown]`;
 }
 
 /** A sent message or carousel as its `message.out` event tells it. */
