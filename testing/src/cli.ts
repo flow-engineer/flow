@@ -4,7 +4,7 @@
 // agent in this folder from the terminal (testing/src/chat.ts), and `flow records export` prints
 // its records (testing/src/records.ts). `flow test`, or `flow` with flags, runs an agent's tests in the cloud,
 // from the agent's folder:
-//   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--strict] [--fresh] [--json]
+//   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--strict] [--min-pass 98] [--fresh] [--json]
 // A hosted cloud (any --cloud off this machine, the default included) needs the
 // agent's CI key in FLOW_FRAMEWORK_CLOUD_KEY and --synthetic, the attestation that the test files hold no real
 // customer or member data. --agent-version (else the agent's version, as its traces carry it:
@@ -52,7 +52,7 @@ import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
-import { EXIT, finishedOutcome, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
+import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
 import type { RunOutcome, RunSummary } from "./protocol.ts";
@@ -89,7 +89,9 @@ const TEST_OPTIONS = `Options for test:
                            the last session (.flow/last-session.json), on every channel each plays.
                            Goes with --runs, not with --only
   --strict                 Count a flaky run (failed, then passed when the cloud played it again)
-                           as failed: exit 1
+                           as failed, also in the pass rate
+  --min-pass <percent>     The pass rate the session needs, 0 to 100 with at most one decimal
+                           (default: FLOW_TEST_MIN_PASS, else 98); 100 fails on any failed run
   --fresh                  Play every simulator anew: the cloud replays no stored person, tool or
                            judge answers
   --synthetic              Attest the test files hold no real customer data (a hosted cloud needs it)
@@ -120,7 +122,7 @@ A suite with more runs than that plays them in turn, so its time grows with the 
 
 Flaky runs: the cloud plays a run that failed once more. When the second play passes, the run is
 flaky ("FLAKY" on its line, and its own section in the summary with both watch links); when it fails
-too, the run failed. A flaky run does not fail the session unless --strict. The cloud also replays
+too, the run failed. A flaky run counts as passed unless --strict. The cloud also replays
 the person's, the tools' and the judge's stored answers for a scenario it has played unchanged, so
 runs vary less and --runs 3 is rarely needed; --fresh plays everything anew.
 
@@ -130,13 +132,20 @@ could not play or judge it: ERROR). Credit and infrastructure runs are counted a
 failures, and are left out of the pass rate. A message that reached the cloud without the agent's
 send (or one the agent says it sent that never arrived) is a second send path: the session fails.
 
+Pass rate: the runs that passed (flaky ones too, unless --strict) over those that passed, failed or
+were flaky, as the dashboard counts it; errored and unplayed runs are left out. Cut to one decimal,
+never rounded up, it has the dashboard's word: 100% Excellent, 98% Good, 95% Fair, 90% Needs work,
+else Poor.
+
 Exit status:
-  0    Every run passed, or was flaky (without --strict)
-  1    A run failed (with --strict, or was flaky), or a message took a second send path. Or nothing was sent: a wrong flag, a test file that does not parse,
-       no FLOW_FRAMEWORK_CLOUD_KEY. The message is printed on its own
+  0    The pass rate is at least --min-pass (default 98), and no run errored or went unplayed
+  1    The pass rate is under --min-pass (with 100: a run failed), or a message took a second send
+       path. Or nothing was sent: a wrong flag (--min-pass not 0 to 100), a test file that does not
+       parse, no FLOW_FRAMEWORK_CLOUD_KEY. The message is printed on its own
   2    The connection, the tunnel or the stream failed (before or after the session opened),
        the cloud answered 5xx or no JSON, the cloud ended the session for its own failure, or
-       runs errored (the cloud could not play or judge them) or were not played, and none failed.
+       runs errored (the cloud could not play or judge them) or were not played, and the pass
+       rate is not under --min-pass.
        After the open, when the session ended before every run played: the runs that had finished,
        then "N of M runs finished before the session ended early (K not played): <reason>" and the dashboard
   3    The cloud refused: the open (a bad or wrong key 401/403, an invalid request 400, busy
@@ -153,6 +162,7 @@ with the judge's reasons (and, for a scenario the cloud could not play, its file
 Environment (also read from the agent folder's .env, or --dotenv; variables already set win;
 the CHINWAG_ names from before the rename still work):
   FLOW_FRAMEWORK_CLOUD     The test cloud, when --cloud is not given
+  FLOW_TEST_MIN_PASS       The pass rate the session needs, when --min-pass is not given
   FLOW_FRAMEWORK_CLOUD_KEY The agent's CI key, for a hosted cloud (oci_...: flow setup
                            writes it, or make one at https://flow.engineer/observe, your agent, Developers)
   FLOW_FRAMEWORK_AGENT_TOKEN
@@ -226,6 +236,8 @@ const TEST_FLAGS = {
   failed: { type: "boolean", default: false },
   /** A flaky run counts as failed. */
   strict: { type: "boolean", default: false },
+  /** The pass rate the session needs, in percent; else FLOW_TEST_MIN_PASS, else 98. */
+  "min-pass": { type: "string" },
   /** The cloud replays no stored simulator answers. */
   fresh: { type: "boolean", default: false },
   synthetic: { type: "boolean", default: false },
@@ -326,6 +338,8 @@ const seen: RunSummary[] = [];
 let endedInvalid: SessionInvalid | null = null;
 /** Conversations whose messages did not all go through the agent's send (client.ts sendPathCheck). */
 let sendPath: SendPathProblem[] = [];
+/** The pass rate the session needs, in tenths of a percent (report.ts minPassTenths). */
+let minPass = DEFAULT_MIN_PASS * 10;
 
 if (command !== undefined && (command !== "test" || rest.length)) invalid(`flow: unknown command "${positionals.join(" ")}".\n\n${USAGE}`);
 
@@ -333,6 +347,7 @@ const envProblem = loadEnv(values.dotenv);
 if (envProblem) invalid(envProblem);
 
 const runs = checkRuns(values.runs);
+minPass = checkMinPass();
 const cloud = values.cloud || setting("CLOUD") || OBSERVE_URL;
 const ciKey = setting("CLOUD_KEY") || undefined;
 
@@ -497,6 +512,8 @@ const creditLine = credit.length ? ` ${credit.length} stopped for credit (not th
 const infraLine = infra ? ` ${infra} hit an infrastructure error (the cloud could not play or judge ${infra === 1 ? "it" : "them"}; not counted as failed).` : "";
 const tokens = (n: number) => n.toLocaleString("en-US");
 say(`\n${passed} of ${played.length} runs passed.${failedLine}${creditLine}${infraLine} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
+const rate = passRate(mergedRuns(summary.runs), values.strict);
+if (rate.tenths !== null) say(rateSummary(rate));
 if (credit.length) say(`Credit: ${creditReason(credit[0]!)}`);
 for (const channel of [...new Set(played.map((r) => r.channel))]) {
   const runs = played.filter((r) => r.channel === channel);
@@ -527,7 +544,21 @@ for (const line of await templateWarnings(declaredTemplates, cloud, process.env.
 sessionId = summary.sessionId || sessionId;
 dashboard = summary.dashboard || dashboard;
 saveSession("finished", summary.runs, dashboard, say);
-end(sendPath.length ? "failed" : finishedOutcome(mergedRuns(summary.runs), values.strict), { received: summary.runs });
+end(sendPath.length ? "failed" : finishedOutcome(mergedRuns(summary.runs), values.strict, minPass), { received: summary.runs });
+
+/** A percent in tenths as it is printed: 98, 99.2. */
+function percent(tenths: number): number {
+  return tenths / 10;
+}
+
+/** "Pass rate 99.2% · Good: 141 of 142 counted runs passed. Passes at 98% or more (--min-pass)." */
+function rateSummary(rate: ReturnType<typeof passRate>): string {
+  const words = { excellent: "Excellent", good: "Good", fair: "Fair", needs_work: "Needs work", poor: "Poor" };
+  const flaky = rate.flaky ? ` (${rate.flaky} flaky counted as ${values.strict ? "failed: --strict" : "passed"})` : "";
+  const under = rate.passed * 1000 < minPass * rate.counted;
+  const rule = under ? `Under ${percent(minPass)}% (--min-pass): the session failed.` : `Passes at ${percent(minPass)}% or more (--min-pass).`;
+  return `Pass rate ${percent(rate.tenths!)}% · ${words[rate.level!]}: ${rate.passed} of ${rate.counted} counted runs passed${flaky}. ${rule}`;
+}
 
 /** "late-order (sms): 2/3 passed, flaky", with the runs that were not counted. */
 function rateLine(r: ReturnType<typeof scenarioRates>[number]): string {
@@ -666,6 +697,7 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       replayed: m.summary?.replayed ?? null,
     })) : [];
     const count = (verdict: Verdict) => runs.filter((r) => r.verdict === verdict).length;
+    const rate = passRate(runs, values.strict);
     const cost = (pick: (r: RunSummary) => number) => received.reduce((n, r) => n + pick(r), 0);
     const report: JsonReport = {
       version: 1,
@@ -684,6 +716,9 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       scenarios: sessionId ? scenarioRates(mergedRuns(received).map((m) => ({ ...m, scenario: m.id }))) : [],
       sendPath,
       strict: values.strict,
+      passRate: rate.tenths === null ? null : percent(rate.tenths),
+      level: rate.level,
+      minPass: percent(minPass),
       costUsd: { agent: cost((r) => r.agentUsage.costUsd), test: cost((r) => r.testUsage.costUsd) },
       runs,
       invalid: invalidScenarios(runs),
@@ -774,6 +809,17 @@ function parseCommandLine() {
     console.error(`flow: ${unknown ? `unknown option ${unknown}` : message.split(". ")[0]}\n\n${usage}`);
     process.exit(1);
   }
+}
+
+/** --min-pass, else FLOW_TEST_MIN_PASS, else 98, in tenths of a percent; exits 1 when it is not 0 to 100 with at most one decimal. */
+function checkMinPass(): number {
+  const flag = values["min-pass"];
+  const env = process.env.FLOW_TEST_MIN_PASS?.trim();
+  const text = flag ?? (env || undefined);
+  if (text === undefined) return DEFAULT_MIN_PASS * 10;
+  const tenths = minPassTenths(text);
+  if (tenths !== undefined) return tenths;
+  invalid(`${flag === undefined ? "FLOW_TEST_MIN_PASS" : "--min-pass"} must be a percent from 0 to 100 with at most one decimal, such as 98 or 97.5 (got "${text}").`);
 }
 
 /** --runs as a whole number above 0, or exits 1. */
