@@ -198,13 +198,19 @@ export interface Template {
   /** Its name as approved (or the provider's own id for it). */
   name: string;
   language?: string;
-  /** The header's value: the text for its {{1}}, or its photo, video or document by https URL or the provider's file id. */
+  /** The header's value: the text for its variable ({{1}} or a named one), or its photo, video or document by https URL or the provider's file id. */
   header?: { kind: "text"; text: string } | { kind: "image" | "video" | "document"; url?: string; fileId?: string };
-  /** Values for the body's {{1}}, {{2}}, ... in order. */
+  /**
+   * Values for the body's variables, by position: numbered ones {{1}}, {{2}}, ... in order; named ones
+   * ({{listing}}, {{answer}}) in the order the body first names each, a name used twice taking one value.
+   */
   body?: string[];
   /** Values for the buttons that take one, by the button's position from 0: a URL button's suffix, a quick reply's payload. */
   buttons?: Array<{ index: number; value: string }>;
-  /** The body's values by number ({ "1": "Maria" }), the older form of `body`: give one or the other. */
+  /**
+   * The body's values by number ({ "1": "Maria" }), the older form of `body`: give one or the other.
+   * Numbered templates only: a declared template with named variables takes `body`.
+   */
   variables?: Record<string, string>;
 }
 
@@ -217,9 +223,12 @@ export interface TemplateDefinition {
   /** Meta's language code: en, en_US, hi. */
   language: string;
   category: "utility" | "marketing" | "authentication";
-  /** Text (which may hold one {{1}}), or a photo, video or document sent with each message. */
+  /** Text (which may hold one variable, {{1}} or a named one such as {{order_id}}), or a photo, video or document sent with each message. */
   header?: { kind: "text"; text: string } | { kind: "image" | "video" | "document" };
-  /** The message, with {{1}}, {{2}}, ... where its values go. */
+  /**
+   * The message, with its variables where its values go: numbered ({{1}}, {{2}}, ...) or named
+   * ({{listing}}, Meta's parameter_format NAMED), never both in one template.
+   */
   body: string;
   footer?: string;
   /** Quick replies come back as the person's tap; a URL may end in {{1}}, its value given at each send. */

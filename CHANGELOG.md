@@ -2,6 +2,27 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.14.6 (2026-10-30)
+
+### Changes
+
+- **WhatsApp templates with named variables** (Meta's parameter_format NAMED), such as body
+  `"The seller answered about {{listing}}: {{answer}}."`, are declared as Meta has them and take
+  `body` by position, in the order the body first names each variable, a name used twice taking one
+  value: `body: ["Blue bike", "Yes"]` fills `{{listing}}`, then `{{answer}}`. The wire to Flow
+  Messaging is unchanged (`params.body` stays an array; Flow adds Meta's parameter names). A text
+  header takes one named variable (`{{order_id}}`) from `template.header`. A wrong count throws
+  with the order expected (`body[0] = {{listing}}, body[1] = {{answer}}`); before, such a template
+  was taken to have no variables and every send of it with values was refused. The playground and
+  the `send_template` tool fill them the same way.
+- `createAgent` refuses a declared template that mixes named and numbered variables, or whose text
+  header has more than one named variable. `variables` stays for numbered templates; a declared
+  template with named variables takes `body`.
+
+### Migration notes
+
+None. Numbered templates work as before.
+
 ## 0.14.5 (2026-10-30)
 
 ### Changes

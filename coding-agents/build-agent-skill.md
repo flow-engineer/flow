@@ -303,6 +303,12 @@ await agent.nudge({ to, template: {
 } });
 ```
 
+A template with named variables (Meta's parameter_format NAMED), such as body `"The seller
+answered about {{listing}}: {{answer}}."`, is declared as Meta has it and takes `body` by position:
+in the order the body first names each variable, a name used twice taking one value
+(`body: ["Blue bike", "Yes, it is"]` fills `{{listing}}`, then `{{answer}}`). One template uses one
+kind, never named and numbered both; `variables` is for numbered templates only.
+
 A declared template sent with the wrong values (a body value too few or many, a missing header or
 URL value) throws from `nudge` before anything is sent, in the playground and live alike. One not
 declared goes as it is (the provider checks it) and the playground shows its name and values. A

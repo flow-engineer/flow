@@ -1,7 +1,7 @@
 // covers: src/nudges.ts src/schedules.ts src/store.ts src/conversation.ts src/agent.ts src/channels.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SMS_KEYWORDS, sms, type TemplateDefinition } from "../src/index.ts";
+import { SMS_KEYWORDS, fillTemplate, sms, type TemplateDefinition } from "../src/index.ts";
 import { SMS, WEB_APP, WHATSAPP, call, last, multi, respond } from "./helpers.ts";
 
 const SAM = { channel: "sms", address: "+15550100100" };
@@ -139,6 +139,28 @@ test("a declared template is checked before it goes, and the agent is told what 
   assert.ok(next.request.messages.some((m) => m.role === "user" && m.content === '[Chinwag] The business sent them its template "order_ready" on whatsapp. It reads:\nHi Sam, your latte is ready.'));
   next.answer(respond(call("send_whatsapp", { text: "Logged." })));
   await h.conversation.whenIdle();
+});
+
+test("a template with named variables takes body values in the order the body first names them; mixing them with numbered ones is refused when declared", () => {
+  const answered: TemplateDefinition = {
+    name: "seller_answered",
+    language: "en",
+    category: "utility",
+    header: { kind: "text", text: "Order {{order_id}}" },
+    body: "The seller answered about {{listing}}: {{answer}}. Ask more about {{listing}} here.",
+  };
+  const header = { kind: "text" as const, text: "1042" };
+  const filled = fillTemplate(answered, { name: "seller_answered", header, body: ["Blue bike", "Yes, it is"] });
+  assert.equal(filled.body, "The seller answered about Blue bike: Yes, it is. Ask more about Blue bike here.");
+  assert.deepEqual(filled.header, { kind: "text", text: "Order 1042" });
+  const order = /body\[0\] = \{\{listing\}\}, body\[1\] = \{\{answer\}\}/;
+  assert.throws(() => fillTemplate(answered, { name: "seller_answered", header, body: ["Blue bike", "Yes", "Blue bike"] }), new RegExp(`template "seller_answered" \\(en\\) takes 2 body values, got 3: ${order.source}`));
+  assert.throws(() => fillTemplate(answered, { name: "seller_answered", header, variables: { listing: "Blue bike", answer: "Yes" } }), order, "variables is for numbered templates");
+  assert.throws(() => fillTemplate(answered, { name: "seller_answered", body: ["Blue bike", "Yes"] }), /takes a text value for its header \(\{\{order_id\}\}\)/);
+
+  const whatsapp = { whatsapp: { info: WHATSAPP, phone: true } };
+  assert.throws(() => multi({ channels: whatsapp, templates: [{ ...answered, body: "About {{listing}}: {{1}}" }] }), /template "seller_answered" \(en\) mixes named \(\{\{order_id\}\}\) and numbered \(\{\{1\}\}\) variables/);
+  assert.throws(() => multi({ channels: whatsapp, templates: [{ ...answered, header: { kind: "text", text: "{{order_id}} for {{listing}}" } }] }), /more than one variable in its header/);
 });
 
 test("a template to someone who never wrote makes them a person: their reply joins its conversation, and later nudges go where they wrote from", async () => {

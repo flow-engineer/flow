@@ -458,11 +458,11 @@ export class Conversation {
     const names = offered.map((t) => t.name) as [string, ...string[]];
     return tool({
       name: "send_template",
-      description: `Send one of the business's WhatsApp templates, only when Chinwag says their 24-hour window is closed. Templates: ${offered.map((t) => `${t.name}: "${t.body}"`).join("; ")}. body: the {{1}}, {{2}}... values in order.`,
+      description: `Send one of the business's WhatsApp templates, only when Chinwag says their 24-hour window is closed. Templates: ${offered.map((t) => `${t.name}: "${t.body}"`).join("; ")}. body: its variables' values in the order the body first names them, one per name.`,
       input: z.object({
         name: z.enum(names),
         body: z.array(z.string()).optional(),
-        header: z.string().optional().describe("The header's {{1}}, when its header is text with a value"),
+        header: z.string().optional().describe("The value of the header's variable, when its header is text with one"),
       }),
       run: async ({ name, body, header }, context) => {
         const blocked = this.blockedSend();
