@@ -1959,6 +1959,14 @@
     if (panel.nudge) {
       $("nudgeSec").hidden = false;
       for (const t of templates) { const o = document.createElement("option"); o.value = t.name; o.textContent = t.name; o.title = t.body; $("nTemplate").appendChild(o); }
+      // A template with named variables takes its values in the order its body first names them.
+      const valuesHint = () => {
+        const body = templates.find((t) => t.name === $("nTemplate").value)?.body ?? "";
+        const names = [...new Set([...body.matchAll(/\{\{\s*([A-Za-z_]\w*)\s*\}\}/g)].map((m) => `{{${m[1]}}}`))];
+        $("nValues").placeholder = names.length ? `values for ${names.join(", ")}, comma separated` : "values for {{1}}, {{2}}… comma separated";
+      };
+      $("nTemplate").addEventListener("change", valuesHint);
+      valuesHint();
       for (const b of document.querySelectorAll(".seg button")) {
         b.disabled = b.dataset.kind === "template" && !templates.length;
         if (b.disabled) b.title = "This agent declares no WhatsApp templates";

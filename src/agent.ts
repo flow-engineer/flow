@@ -18,7 +18,7 @@
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { ATTACH_EVENTS, NUDGE_TRIGGER, type FlowEvents } from "./business-events/engine.ts";
-import { declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
+import { checkTemplate, declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
 import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Elsewhere, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
 import { emitter, type EventSink } from "./events.ts";
@@ -435,6 +435,7 @@ export class Agent {
     for (const name of ["key", "phone"]) if (this.channelsByName.has(name)) throw new Error(`flow: "${name}" is reserved; give the channel another name`);
     this.now = options.now ?? Date.now;
     for (const path of Object.keys(options.routes ?? {})) if (!path.startsWith("/")) throw new Error(`flow: a route is a path starting with /, not "${path}"`);
+    for (const template of options.templates ?? []) checkTemplate(template);
     if (options.fallbackTemplate) {
       const declared = declaredTemplate(options.templates, options.fallbackTemplate);
       if (!declared) throw new Error(`flow: fallbackTemplate ${options.fallbackTemplate.name} is not one of the declared templates`);

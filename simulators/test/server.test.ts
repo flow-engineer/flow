@@ -495,7 +495,7 @@ test("a page the live stream can't reach gets the same events by polling, each o
   }
 });
 
-test("WhatsApp shows a declared template as WhatsApp would, and one not declared by its name and values, also after a reload", async () => {
+test("WhatsApp shows a declared template (numbered or named variables) as WhatsApp would, and one not declared by its name and values, also after a reload", async () => {
   const ready: TemplateDefinition = {
     name: "order_ready",
     language: "en",
@@ -505,7 +505,8 @@ test("WhatsApp shows a declared template as WhatsApp would, and one not declared
     footer: "Reply STOP to opt out",
     buttons: [{ type: "quick_reply", text: "On my way" }, { type: "url", text: "Track", url: "https://example.com/o/{{1}}" }, { type: "phone", text: "Call us", phone: "+15555550100" }],
   };
-  const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true, kind: "whatsapp" } }, testPeople: [SAM], database: sqlite(), templates: [ready] });
+  const answered: TemplateDefinition = { name: "seller_answered", language: "en", category: "utility", header: { kind: "text", text: "Order {{order_id}}" }, body: "About {{listing}}: {{answer}} ({{listing}})" };
+  const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true, kind: "whatsapp" } }, testPeople: [SAM], database: sqlite(), templates: [ready, answered] });
   await h.agent.resume();
   const server = await simulators().listen(h.agent, 0);
   const where = `channel=whatsapp&person=${encodeURIComponent(SAM.phone)}`;
@@ -519,8 +520,9 @@ test("WhatsApp shows a declared template as WhatsApp would, and one not declared
     const to = { channel: "whatsapp", address: SAM.phone };
     await h.agent.nudge({ to, template: { name: "order_ready", header: { kind: "text", text: "1042" }, body: ["Sam", "latte"], buttons: [{ index: 0, value: "omw_1042" }, { index: 1, value: "1042" }] } });
     await h.agent.nudge({ to, template: { name: "loyalty", body: ["Sam", "120"] } });
+    await h.agent.nudge({ to, template: { name: "seller_answered", header: { kind: "text", text: "1042" }, body: ["Blue bike", "Yes"] } });
     const polled = (await (await fetch(`${server.url}/api/poll?${where}&after=${seq}`)).json()) as { events: Array<{ line?: Line }> };
-    const [declared, other] = polled.events.flatMap((e) => (e.line?.kind === "out" ? [e.line] : []));
+    const [declared, other, named] = polled.events.flatMap((e) => (e.line?.kind === "out" ? [e.line] : []));
     assert.deepEqual([declared.text, declared.template], [
       "Hi Sam, your latte is ready.",
       {
@@ -531,10 +533,11 @@ test("WhatsApp shows a declared template as WhatsApp would, and one not declared
       },
     ]);
     assert.deepEqual([other.text, other.template], ["Sam\n120", { name: "loyalty" }]);
+    assert.deepEqual([named.text, named.template], ["About Blue bike: Yes (Blue bike)", { name: "seller_answered", header: { kind: "text", text: "Order 1042" }, buttons: [] }], "named variables filled in the order the body first names them");
 
     // From the store, after a reload: the body as it read, the rest as declared.
     const reloaded = (await transcript()).lines.flatMap((l) => (l.kind === "out" && l.template ? [[l.text, l.template.name, l.template.footer]] : []));
-    assert.deepEqual(reloaded, [["Hi Sam, your latte is ready.", "order_ready", "Reply STOP to opt out"], ["", "loyalty", undefined]]);
+    assert.deepEqual(reloaded, [["Hi Sam, your latte is ready.", "order_ready", "Reply STOP to opt out"], ["", "loyalty", undefined], ["About Blue bike: Yes (Blue bike)", "seller_answered", undefined]]);
   } finally {
     await server.close();
   }

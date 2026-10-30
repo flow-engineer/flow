@@ -1268,9 +1268,9 @@ function valuesOf(sent: Template): string {
   return [...(header ? [header] : []), ...body, ...(sent.buttons ?? []).map((b) => `button ${b.index}: ${b.value}`)].join("\n");
 }
 
-/** A declared template's header, footer and buttons without one send's values (a header's {{1}} as …). */
+/** A declared template's header, footer and buttons without one send's values (a header's variable as …). */
 function asDeclared(d: TemplateDefinition): Omit<FilledTemplate, "body"> {
-  const header = d.header?.kind === "text" ? { kind: "text" as const, text: d.header.text.replace("{{1}}", "…") } : d.header;
+  const header = d.header?.kind === "text" ? { kind: "text" as const, text: d.header.text.replace("{{1}}", "…").replace(/\{\{\s*[A-Za-z_]\w*\s*\}\}/, "…") } : d.header;
   const buttons = (d.buttons ?? []).map((b) => (b.type === "quick_reply" ? { ...b, payload: b.text } : b.type === "url" ? { ...b, url: b.url.replace(/\{\{1\}\}$/, "") } : b));
   return { ...(header ? { header } : {}), ...(d.footer ? { footer: d.footer } : {}), buttons };
 }

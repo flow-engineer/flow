@@ -236,7 +236,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Values for the body's {{1}}, {{2}}, ... in order."
+          "description": "Values for the body's variables by position: {{1}}, {{2}}, ... in order, or named ones ({{listing}}) in the order the body first names each."
         },
         "buttons": {
           "type": "array",

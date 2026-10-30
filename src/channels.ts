@@ -627,18 +627,31 @@ export function fillTemplate(definition: TemplateDefinition, template: Template)
   const fail = (problem: string): never => {
     throw new Error(`flow: template "${definition.name}" (${definition.language}) ${problem}`);
   };
+  checkTemplate(definition);
   if (template.body && template.variables) fail("got both body and variables: give one");
-  const values = template.body ?? numbered(template.variables);
-  const wanted = new Set([...definition.body.matchAll(/\{\{(\d+)\}\}/g)].map((m) => m[1])).size;
-  if (values.length !== wanted) fail(`takes ${wanted} body value${wanted === 1 ? "" : "s"}, got ${values.length}`);
-  const body = definition.body.replace(/\{\{(\d+)\}\}/g, (_m, n: string) => values[Number(n) - 1] ?? "");
+  const named = namedVariables(definition.body);
+  let body: string;
+  if (named.length) {
+    const order = named.map((name, i) => `body[${i}] = {{${name}}}`).join(", ");
+    if (template.variables) fail(`has named variables: give body, in this order: ${order} (variables is for numbered ones)`);
+    const values = template.body ?? [];
+    if (values.length !== named.length) fail(`takes ${named.length} body value${named.length === 1 ? "" : "s"}, got ${values.length}: ${order}`);
+    body = definition.body.replace(NAMED, (_m, name: string) => values[named.indexOf(name)]);
+  } else {
+    const values = template.body ?? numbered(template.variables);
+    const wanted = new Set([...definition.body.matchAll(/\{\{(\d+)\}\}/g)].map((m) => m[1])).size;
+    if (values.length !== wanted) fail(`takes ${wanted} body value${wanted === 1 ? "" : "s"}, got ${values.length}`);
+    body = definition.body.replace(/\{\{(\d+)\}\}/g, (_m, n: string) => values[Number(n) - 1] ?? "");
+  }
 
   const shape = definition.header;
   const given = template.header;
   let header: FilledTemplate["header"];
-  if (shape?.kind === "text" && shape.text.includes("{{1}}")) {
-    if (given?.kind !== "text") fail("takes a text value for its header");
-    header = { kind: "text", text: shape.text.replace("{{1}}", (given as { text: string }).text) };
+  const headerName = shape?.kind === "text" ? namedVariables(shape.text)[0] : undefined;
+  if (shape?.kind === "text" && (headerName || shape.text.includes("{{1}}"))) {
+    if (given?.kind !== "text") fail(`takes a text value for its header${headerName ? ` ({{${headerName}}})` : ""}`);
+    const value = (given as { text: string }).text;
+    header = { kind: "text", text: headerName ? shape.text.replace(NAMED, () => value) : shape.text.replace("{{1}}", value) };
   } else if (shape && shape.kind !== "text") {
     if (given?.kind !== shape.kind || !(given.url || given.fileId)) fail(`takes a ${shape.kind} for its header, by url or fileId`);
     header = given;
@@ -667,6 +680,29 @@ export function fillTemplate(definition: TemplateDefinition, template: Template)
 /** The declared template a send is of: by name, and by language when the send names one. */
 export function declaredTemplate(definitions: TemplateDefinition[] | undefined, template: Template): TemplateDefinition | undefined {
   return definitions?.find((d) => d.name === template.name && (!template.language || d.language === template.language));
+}
+
+/** A named template variable, {{listing}} (Meta's parameter_format NAMED). */
+const NAMED = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
+
+/** A text's named variables, each once, in the order the text first names them. */
+function namedVariables(text: string): string[] {
+  return [...new Set([...text.matchAll(NAMED)].map((m) => m[1]))];
+}
+
+/**
+ * Throws when a declared template's variables cannot be filled: its body and text header mix named
+ * ({{listing}}) and numbered ({{1}}) variables, or its text header has more than one named one.
+ */
+export function checkTemplate(definition: TemplateDefinition): void {
+  const fail = (problem: string): never => {
+    throw new Error(`flow: template "${definition.name}" (${definition.language}) ${problem}`);
+  };
+  const header = definition.header?.kind === "text" ? definition.header.text : "";
+  const named = namedVariables(`${header} ${definition.body}`);
+  const number = /\{\{\d+\}\}/.exec(`${header} ${definition.body}`)?.[0];
+  if (named.length && number) fail(`mixes named ({{${named[0]}}}) and numbered (${number}) variables: use one kind`);
+  if (namedVariables(header).length > 1) fail("has more than one variable in its header: a text header takes one");
 }
 
 /** The older `variables` as body values: by number when every key is one, else in the order given. */

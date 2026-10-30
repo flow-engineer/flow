@@ -174,7 +174,7 @@ adapter picks the kind each channel takes:
   as `message.failed` for a message of kind `edit` or `unsend`, told to the agent as Not delivered
   (`edit of msg_...: <text>`). WhatsApp and SMS have neither, so the agent is not offered them.
 - WhatsApp templates (`template`), by name or `tpl_` ID, with their header (text, or media by URL or
-  file ID), body values (`{{1}}`, `{{2}}`, ...) and button values (URL suffixes, quick-reply payloads).
+  file ID), body values (`{{1}}`, `{{2}}`, ..., or named variables by position, in the order the body first names them) and button values (URL suffixes, quick-reply payloads).
 - A message the business starts (a nudge, a scheduled text) goes with `link_preview: false`.
 - With no conversation known yet (a nudge, or after a restart) the first message starts one
   (`POST /v0/messages`), which takes text or a template only: a link then goes as its text with the
