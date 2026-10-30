@@ -706,8 +706,10 @@ const record = {
 };
 
 test("flow show prints a run's record from the cloud with the CI key: checks with reasons, then messages and tool calls in time order", { timeout: 30_000 }, async () => {
+  let health: { status: number; body: string } | undefined; // undefined: an older server, 404
   const asked: Array<{ path: string; authorization?: string }> = [];
   const server = createServer((req, res) => {
+    if (req.url === "/v1/agent/tests/health") return void (health === undefined ? res.writeHead(404).end() : res.writeHead(health.status, { "content-type": "application/json" }).end(health.body));
     asked.push({ path: req.url!, authorization: req.headers.authorization });
     if (req.url === "/v1/agents/agt_1/tests/runs/trn_2") return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(record));
     if (req.url === "/v1/agents/agt_1/tests/runs/trn_4") return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ...record, runId: "trn_4", error: "judge_failed" }));
@@ -756,6 +758,21 @@ test("flow show prints a run's record from the cloud with the CI key: checks wit
       "Watch: http://watch/trn_2",
       "",
     ].join("\n"));
+
+    // The agent's test health on main follows the run, from the same server with the same key; an
+    // error (the 404 above, a 503) prints nothing about it and never fails flow show.
+    const healthOf = async (status: number, body: string) => {
+      health = { status, body };
+      const out = await cliStreams(["show", "trn_2", "--cloud", url], dir, key);
+      assert.equal(out.code, 0, out.out);
+      return out.stdout.split("\n").slice(-3, -1);
+    };
+    const good = { score: 98.3, level: "good", label: "Good", passed: 121, scenarios: 123, flaky: 4, overridden: 0, runs: [{}, {}, {}], spark: [] };
+    assert.deepEqual(await healthOf(200, JSON.stringify({ health: good })), ["", "Test health on main: 98.3% Good · 121 of 123 scenarios passed · last 3 main runs · 4 flaky (passed on retry, counted as passed)"]);
+    assert.deepEqual(await healthOf(200, JSON.stringify({ health: { ...good, flaky: 0 } })), ["", "Test health on main: 98.3% Good · 121 of 123 scenarios passed · last 3 main runs"]);
+    assert.deepEqual(await healthOf(200, '{"health":null}'), ["", "Test health on main: no runs on main yet"]);
+    assert.deepEqual(await healthOf(503, '{"error":"tests_unavailable"}'), ["", "Watch: http://watch/trn_2"]);
+    health = undefined;
 
     const json = await cliStreams(["show", "trn_2", "--json", "--cloud", url], dir, key);
     assert.equal(json.code, 0);

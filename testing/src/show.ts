@@ -67,7 +67,7 @@ Prints one run of the last \`flow test\` (or any run of this agent, by the id on
 FAIL line): verdict, every check with the judge's reason, then the conversation in time order with
 each tool call the simulator played, which response of the tool file it played and what it
 changed. \`last\` is the first run that did not pass in .flow/last-session.json (its first run
-when all passed).
+when all passed). Under the run, the agent's test health on main, when Flow has it.
 
 Options:
   --scenario <id>          With last: that scenario's run instead (its first run that did not
@@ -185,6 +185,7 @@ export async function showCli(args: string[]): Promise<number> {
     return 1;
   }
   const url = `${cloud}/v1/agents/${last.agent}/tests/runs/${runId}`;
+  const health = values.json ? undefined : testHealth(cloud, key);
   let status: number;
   let text: string;
   try {
@@ -207,8 +208,31 @@ export async function showCli(args: string[]): Promise<number> {
     return 2;
   }
   if (values.json) process.stdout.write(text);
-  else console.log(render(record, runId).join("\n"));
+  else {
+    const line = await health;
+    console.log([...render(record, runId), ...(line ? ["", line] : [])].join("\n"));
+  }
   return 0;
+}
+
+/** The agent's test health on main, from Flow's GET /v1/agent/tests/health, as one line; undefined
+ * on any error (an older server without the route, 5xx, no answer), which never fails flow show. */
+async function testHealth(cloud: string, key: string): Promise<string | undefined> {
+  try {
+    const response = await fetch(`${cloud}/v1/agent/tests/health`, { headers: { authorization: `Bearer ${key}`, accept: "application/json" }, signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) return undefined;
+    const { health } = (await response.json()) as { health?: { score?: number; level?: string; label?: string; passed?: number; scenarios?: number; flaky?: number; runs?: unknown[] } | null };
+    if (health === null) return "Test health on main: no runs on main yet";
+    if (!health || typeof health.score !== "number") return undefined;
+    const parts = [`Test health on main: ${health.score}% ${health.label ?? health.level ?? ""}`.trimEnd()];
+    if (typeof health.passed === "number" && typeof health.scenarios === "number") parts.push(`${health.passed} of ${health.scenarios} scenarios passed`);
+    const runs = Array.isArray(health.runs) ? health.runs.length : 0;
+    if (runs) parts.push(runs === 1 ? "last main run" : `last ${runs} main runs`);
+    if (health.flaky) parts.push(`${health.flaky} flaky (passed on retry, counted as passed)`);
+    return parts.join(" · ");
+  } catch {
+    return undefined;
+  }
 }
 
 /** The last session's results, or what to do when there are none or they name no agent. */
