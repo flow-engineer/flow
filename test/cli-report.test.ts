@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadSuite, parseScenario, parseToolFile } from "../testing/src/suite.ts";
+import { finishedOutcome, passRate, type Verdict } from "../testing/src/report.ts";
 
 const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
 const run = {
@@ -289,6 +290,9 @@ test("with --json, every exit prints one report on stdout and every other line o
     ],
     sendPath: [],
     strict: false,
+    passRate: 50,
+    level: "poor",
+    minPass: 98,
     costUsd: { agent: 0.5, test: 0.5 },
     runs: [
       { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", outcome: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }], invalid: null, rerun: null, label: null, replayed: null },
@@ -428,6 +432,56 @@ test("a run that failed and passed when the cloud played it again is flaky: its 
     // Every open asks for flaky runs; only --fresh asks the cloud to replay nothing.
     assert.deepEqual(local.opens.map((o) => [o.flaky, o.fresh]), [[true, undefined], [true, true]]);
   } finally { local.close(); }
+});
+
+/** Runs with these verdicts, as many of each as given. */
+const verdicts = (counts: Partial<Record<Verdict, number>>) => Object.entries(counts).flatMap(([verdict, n]) => Array.from({ length: n }, () => ({ verdict: verdict as Verdict })));
+
+test("a finished session fails only when its pass rate is under --min-pass, compared exactly; errored and unplayed runs are not counted", () => {
+  // 98.0% passes at the default 98; 97.9% does not.
+  assert.equal(finishedOutcome(verdicts({ passed: 49, failed: 1 }), false, 980), "passed");
+  assert.equal(finishedOutcome(verdicts({ passed: 979, failed: 21 }), false, 980), "failed");
+  // --min-pass 100 is the old rule: one failed run fails the session.
+  assert.equal(finishedOutcome(verdicts({ passed: 99, failed: 1 }), false, 1000), "failed");
+  // A flaky run counts as passed, and as failed with --strict, in the rate too.
+  assert.equal(finishedOutcome(verdicts({ passed: 48, flaky: 2 }), false, 980), "passed");
+  assert.equal(finishedOutcome(verdicts({ passed: 48, flaky: 2 }), true, 980), "failed");
+  // Errored and unplayed runs are left out of the rate (49 of 50, not of 56), and still make it errored (exit 2).
+  assert.equal(finishedOutcome(verdicts({ passed: 49, failed: 1, errored: 5, not_played: 1 }), false, 980), "errored");
+  assert.equal(finishedOutcome(verdicts({ errored: 2 }), false, 1000), "errored");
+});
+
+test("the pass rate is cut to one decimal, never rounded up, for the dashboard's word", () => {
+  const level = (passed: number, failed: number) => { const r = passRate(verdicts({ passed, failed })); return [r.tenths, r.level]; };
+  assert.deepEqual(level(9999, 1), [999, "good"]);
+  assert.deepEqual(level(10, 0), [1000, "excellent"]);
+  assert.deepEqual(level(95, 5), [950, "fair"]);
+  assert.deepEqual(level(9499, 501), [949, "needs_work"]);
+  assert.deepEqual(level(899, 101), [899, "poor"]);
+  assert.deepEqual(passRate(verdicts({ errored: 1 })), { passed: 0, counted: 0, flaky: 0, tenths: null, level: null });
+});
+
+test("--min-pass, else FLOW_TEST_MIN_PASS (from .env too), else 98: the summary says the rate, its word and the threshold; --json keeps them; a value not 0 to 100 with one decimal exits 1", { timeout: 30_000 }, async () => {
+  const dir = agentDir({ b: scenarioYaml("bee", "sms") });
+  const runs = [runOf({ runId: "trn_1", passed: true }), runOf({ runId: "trn_2", scenario: "bee" })];
+  const local = await cloud(false, [{ type: "finished", summary: { sessionId: "s1", suiteHash: "h", testModel: "m", runs, dashboard: "http://dash/s1" } }], "s1");
+  try {
+    const flag = await cliStreams(["test", "--cloud", local.url, "--min-pass", "50", "--json"], dir);
+    assert.equal(flag.code, 0, flag.out);
+    assert.match(flag.stderr, /^1 of 2 runs passed\. 1 failed\. .*\nPass rate 50% · Poor: 1 of 2 counted runs passed\. Passes at 50% or more \(--min-pass\)\.$/m);
+    const report = JSON.parse(flag.stdout);
+    assert.deepEqual([report.outcome, report.exitCode, report.passRate, report.level, report.minPass], ["passed", 0, 50, "poor", 50]);
+    writeFileSync(join(dir, ".env"), "FLOW_TEST_MIN_PASS=50\n");
+    assert.equal((await cliStreams(["test", "--cloud", local.url], dir)).code, 0);
+    const wins = await cliStreams(["test", "--cloud", local.url, "--min-pass", "50.1"], dir);
+    assert.equal(wins.code, 1, wins.out);
+    assert.match(wins.stdout, /^Pass rate 50% · Poor: 1 of 2 counted runs passed\. Under 50\.1% \(--min-pass\): the session failed\.$/m);
+  } finally { local.close(); }
+  for (const bad of ["101", "100.5", "98.25", "abc", "-1", ""]) {
+    assert.deepEqual(await cliOutput(["test", "--cloud", "http://127.0.0.1:9", `--min-pass=${bad}`], dir), { code: 1, out: `--min-pass must be a percent from 0 to 100 with at most one decimal, such as 98 or 97.5 (got "${bad}").\n` });
+  }
+  writeFileSync(join(dir, ".env"), "FLOW_TEST_MIN_PASS=high\n");
+  assert.deepEqual(await cliOutput(["test", "--cloud", "http://127.0.0.1:9"], dir), { code: 1, out: 'FLOW_TEST_MIN_PASS must be a percent from 0 to 100 with at most one decimal, such as 98 or 97.5 (got "high").\n' });
 });
 
 test("with --runs, each scenario's pass rate on each channel: flaky when some runs passed and some failed, credit and infrastructure runs not counted; the same in --json", { timeout: 20_000 }, async () => {

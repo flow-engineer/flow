@@ -80,8 +80,15 @@ export interface JsonReport {
   scenarios: ScenarioSummary[];
   /** Messages that reached the cloud by another way than the agent's send, or that the agent said it sent and never did (testing/src/client.ts). */
   sendPath: SendPathProblem[];
-  /** --strict: a flaky run counts as failed (outcome failed, exit 1). */
+  /** --strict: a flaky run counts as failed, also in passRate. */
   strict: boolean;
+  /** The pass rate in percent, cut (never rounded up) to one decimal: passed and flaky runs (flaky as failed with
+   * --strict) over the runs that passed, failed or were flaky; null when none did. */
+  passRate: number | null;
+  /** The dashboard's word for passRate: 100 excellent, 98 or more good, 95 fair, 90 needs_work, else poor; null with it. */
+  level: Level | null;
+  /** --min-pass (else FLOW_TEST_MIN_PASS, else 98): outcome failed, exit 1, when passRate is under it. */
+  minPass: number;
   costUsd: { agent: number; test: number };
   runs: ReportRun[];
   /** Each scenario the cloud could not play; the other scenarios played. */
@@ -142,11 +149,50 @@ export function runVerdict(run: { passed: boolean; ended: string; error?: string
 
 export const EXIT: Record<Outcome, number> = { passed: 0, failed: 1, invalid: 1, errored: 2, transport: 2, refused: 3, interrupted: 130 };
 
-/** A session that ran to its summary: failed when a run failed (or, with `strict`, was flaky), errored when the
- * cloud could not play or judge a run (or never played it). A flaky run alone does not fail it. */
-export function finishedOutcome(runs: Array<{ verdict: Verdict }>, strict = false): Outcome {
-  if (runs.some((r) => r.verdict === "failed" || (strict && r.verdict === "flaky"))) return "failed";
-  if (runs.some((r) => r.verdict !== "passed" && r.verdict !== "flaky")) return "errored";
+/** --min-pass when neither it nor FLOW_TEST_MIN_PASS is given: the session passes at 98% or more. */
+export const DEFAULT_MIN_PASS = 98;
+
+/** --min-pass as tenths of a percent (98 is 980, 97.5 is 975), so a rate is compared in whole numbers;
+ * undefined when it is not a number from 0 to 100 with at most one decimal. */
+export function minPassTenths(text: string): number | undefined {
+  if (!/^\d{1,3}(?:\.\d)?$/.test(text)) return undefined;
+  const [whole, tenth = "0"] = text.split(".");
+  const tenths = Number(whole) * 10 + Number(tenth);
+  return tenths <= 1000 ? tenths : undefined;
+}
+
+/** The dashboard's words for a pass rate, by its percent cut to one decimal. */
+export type Level = "excellent" | "good" | "fair" | "needs_work" | "poor";
+
+/** The suite's pass rate, as Flow's dashboard counts it: passed and failed runs (a flaky run as passed, as
+ * failed with `strict`); errored and not played runs are not counted. `tenths` is the percent cut, never
+ * rounded up, to one decimal (99.99% is 999); null, as `level`, when nothing was counted. */
+export interface PassRate {
+  passed: number;
+  counted: number;
+  flaky: number;
+  tenths: number | null;
+  level: Level | null;
+}
+
+export function passRate(runs: Array<{ verdict: Verdict }>, strict = false): PassRate {
+  const count = (verdict: Verdict) => runs.filter((r) => r.verdict === verdict).length;
+  const flaky = count("flaky");
+  const passed = count("passed") + (strict ? 0 : flaky);
+  const counted = count("passed") + count("failed") + flaky;
+  if (!counted) return { passed, counted, flaky, tenths: null, level: null };
+  const tenths = Math.floor((passed * 1000) / counted);
+  const level: Level = tenths === 1000 ? "excellent" : tenths >= 980 ? "good" : tenths >= 950 ? "fair" : tenths >= 900 ? "needs_work" : "poor";
+  return { passed, counted, flaky, tenths, level };
+}
+
+/** A session that ran to its summary: failed when the pass rate (passRate) is under `minPass` tenths of a
+ * percent (1000: any failed run, or flaky one with `strict`); else errored when the cloud could not play or
+ * judge a run (or never played it). Failed runs within the threshold do not fail it, nor flaky ones without `strict`. */
+export function finishedOutcome(runs: Array<{ verdict: Verdict }>, strict: boolean, minPass: number): Outcome {
+  const rate = passRate(runs, strict);
+  if (rate.counted && rate.passed * 1000 < minPass * rate.counted) return "failed";
+  if (runs.some((r) => r.verdict !== "passed" && r.verdict !== "flaky" && r.verdict !== "failed")) return "errored";
   return "passed";
 }
 

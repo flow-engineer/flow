@@ -2,6 +2,33 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.14.8 (2026-10-30)
+
+### Changes
+
+- **`flow test` passes at a pass rate**, not only when no run failed: the session passes when the
+  runs that passed are at least `--min-pass` percent (default 98) of the runs counted, as Flow's
+  dashboard counts them: passed, failed and flaky runs (a cloud's second play never on its own),
+  a flaky run as passed (as failed with `--strict`); errored and unplayed runs are left out. Under it,
+  exit 1; at or over it, failed runs do not fail the session, and errored or unplayed runs still exit 2
+  as before. Every other exit is unchanged.
+- **`--min-pass <percent>`** and **`FLOW_TEST_MIN_PASS`** (also from the agent folder's `.env` or
+  `--dotenv`; the flag wins) set it: 0 to 100 with at most one decimal (`98`, `97.5`); anything else
+  exits 1 with a message.
+- The summary prints the rate after `N of M runs passed.`, cut to one decimal (never rounded up) with
+  the dashboard's word (100% Excellent, 98% Good, 95% Fair, 90% Needs work, else Poor):
+  `Pass rate 99.2% · Good: 141 of 142 counted runs passed. Passes at 98% or more (--min-pass).`, or
+  `Under 98% (--min-pass): the session failed.`
+- `--json` adds `passRate` (that percent; `null` when nothing was counted), `level` (`excellent`,
+  `good`, `fair`, `needs_work`, `poor` or `null`) and `minPass`. `counts`, `outcome` and `exitCode`
+  keep their meaning; `outcome` and `exitCode` follow the new rule.
+
+### Migration notes
+
+- **`flow test` no longer fails on any failed run.** CI that relied on one failed run failing the
+  job now passes when 98% or more of the counted runs pass. To move: keep the old rule with
+  `flow test --min-pass 100`, or `FLOW_TEST_MIN_PASS=100` in CI's environment or the agent's `.env`.
+
 ## 0.14.7 (2026-10-30)
 
 ### Changes

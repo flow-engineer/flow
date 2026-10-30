@@ -57,8 +57,8 @@ their defaults, and what `buildAgent` is passed by `flow test` and Flow's hostin
   `plugin`, `login`, `logout`, `whoami`, `setup`, `link`, `status`, `projects list`, `projects delete`, `deploy` (and `deploy promote`,
   `deploy status`), `logs`, `--version`; their flags as `--help` prints them.
 - `--json` fields, and the `next` lines ([agents.md](agents.md)).
-- Exit codes: `flow test` 0 passed, 1 failed or invalid, 2 errored or not reachable, 3 refused, 130
-  interrupted; `login`, `setup`, `link` as in [agents.md](agents.md#exit-codes-login-setup-link);
+- Exit codes: `flow test` 0 passed, 1 failed (the pass rate under `--min-pass`) or invalid, 2 errored
+  or not reachable, 3 refused, 130 interrupted; `login`, `setup`, `link` as in [agents.md](agents.md#exit-codes-login-setup-link);
   `deploy` as in [agents.md](agents.md#host-it); a `defineCli` command line `EXIT` (0 ok, 1 failed,
   2 usage, 3 sign-in, 4 approval, 5 unreachable).
 
@@ -66,7 +66,7 @@ their defaults, and what `buildAgent` is passed by `flow test` and Flow's hostin
 
 What an agent's `.env` or its host sets: `FLOW_KEY`, `MODEL`, the model providers' keys
 (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`), `FAKE_MODEL`,
-`FLOW_MODEL_URL`, `FLOW_FRAMEWORK_CLOUD`, `FLOW_FRAMEWORK_CLOUD_KEY`, `FLOW_FRAMEWORK_AGENT_TOKEN`,
+`FLOW_MODEL_URL`, `FLOW_FRAMEWORK_CLOUD`, `FLOW_FRAMEWORK_CLOUD_KEY`, `FLOW_FRAMEWORK_AGENT_TOKEN`, `FLOW_TEST_MIN_PASS`,
 `FLOW_FRAMEWORK_WORKSPACE`, `FLOW_FRAMEWORK_TRACES_URL`, `FLOW_FRAMEWORK_TRACES_KEY`,
 `FLOW_FRAMEWORK_TRACES_CONTENT`, `FLOW_FRAMEWORK_TRY_URL`, `FLOW_FRAMEWORK_JOIN_CODE`,
 `FLOW_FRAMEWORK_LOGIN_URL`, `FLOW_MESSAGING_KEY`, `FLOW_MESSAGING_WEBHOOK_SECRET`,

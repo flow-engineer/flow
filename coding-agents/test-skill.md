@@ -238,7 +238,7 @@ connects out to the cloud, which plays the person and the tools and judges.
    Flaky runs: the cloud plays a failed run once more. When that passes the run is `flaky` (its line
    reads `FLAKY` with `played again: passed <watch>`, and the summary lists it in its own section with
    both watch links); `label` is `flaky` or `failing` (failed twice) and `rerun` is the second play
-   (`runId`, `passed`, `watch`), never a run of its own. A flaky run does not fail the session unless
+   (`runId`, `passed`, `watch`), never a run of its own. A flaky run counts as passed unless
    `--strict`; `counts.flaky` counts them, and `counts.failed` leaves them out unless `--strict`. Read
    a flaky run like a failure that is not certain: look at it with `flow show`, and fix the agent or
    the test when the failed play shows a real problem. The cloud also replays the person's, the tools'
@@ -253,9 +253,18 @@ connects out to the cloud, which plays the person and the tools and judges.
    failed); a flaky scenario is a real problem that shows only sometimes. `sendPath` names a
    conversation whose messages did not all go through the agent's send (a channel wrapper or the app's
    own code sent one the agent never did): the session fails; send every message through the agent.
-   Exit status: 0 all passed (or flaky, without `--strict`); 1 a run failed, or nothing was sent (a wrong flag, a test file that does
+   Pass rate: the runs that passed (flaky ones too, unless `--strict`) over those that passed, failed
+   or were flaky, as the dashboard counts it; errored and unplayed runs are left out. The summary
+   prints it with the dashboard's word (`Pass rate 99.2% · Good: 141 of 142 counted runs passed.
+   Passes at 98% or more (--min-pass).`), and `--json` has `passRate` (cut to one decimal, never
+   rounded up; `null` when nothing counted), `level` (`excellent` 100, `good` 98+, `fair` 95+,
+   `needs_work` 90+, `poor`) and `minPass`. The session passes at `--min-pass` (else
+   `FLOW_TEST_MIN_PASS`, else 98); `--min-pass 100` fails it on any failed run. A pass under 100% still
+   has failed runs: read them as below.
+   Exit status: 0 the pass rate is at least `--min-pass` and no run errored or went unplayed; 1 the
+   pass rate is under it, or nothing was sent (a wrong flag, a test file that does
    not parse, no key); 2 the connection or the cloud failed, or runs errored or were not played (the
-   session ended early: one line says how many and why) and none failed; 3 the cloud refused (key,
+   session ended early: one line says how many and why) and the rate is not under it; 3 the cloud refused (key,
    busy, spend cap, capacity); 130 Ctrl-C. On 2 or 3 the agent is not at fault:
    say what the cloud said (`error` in the report), do not change the agent for it.
 5. `--only a,b` runs only those scenarios (file names without `.yaml`). `--failed` runs only the ones
