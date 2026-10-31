@@ -14,7 +14,8 @@
 //   its edits and unsends of what it sent, where the channel has them.
 // - Acknowledgement first: after the person writes, the agent's first response must reach them,
 //   on every channel they are waiting on. A first response that only calls tools is held, and the
-//   agent is asked to acknowledge in the same response as those calls.
+//   agent is asked to acknowledge in the same response as those calls. Not on a channel that shows
+//   each tool call as it runs (ChannelInfo.showsTools): there the tools run, and the answer comes once.
 // - Tools in one response run together, and the reply waits for all of them: one answer, not an
 //   acknowledgement and a result later. A tool moves to the background (the agent is told, the
 //   person is not) only when the person writes again meanwhile, when another tool of the response
@@ -1365,7 +1366,8 @@ export class Conversation {
       this.firstResponse = false;
 
       const reached = new Set(talk.flatMap((c) => this.targets(c)));
-      const waiting = [...this.unanswered].filter((c) => !reached.has(c));
+      // A channel that shows each tool call as it runs (ChannelInfo.showsTools) needs no acknowledgement first.
+      const waiting = [...this.unanswered].filter((c) => !reached.has(c) && !this.channelInfo(c)?.showsTools);
       if (first && waiting.length && work.length) {
         // Acknowledgement first: these calls do not run until the person has heard from the agent.
         this.settings.emit(this.id, "ack.required", { held: work.map((c) => c.name), channels: waiting });
@@ -1954,7 +1956,9 @@ export class Conversation {
         break;
       }
       const now = Date.now();
-      const all: Detach | null = this.unread() ? "message" : firstDoneAt !== null && now - firstDoneAt >= this.settings.partialAfterMs ? "partial" : null;
+      // Where the person sees each tool as it runs (ChannelInfo.showsTools), the answer waits for every result: no early partial one.
+      const partial = firstDoneAt !== null && now - firstDoneAt >= this.settings.partialAfterMs && !this.channelInfo(this.currentChannel())?.showsTools;
+      const all: Detach | null = this.unread() ? "message" : partial ? "partial" : null;
       if (all) {
         for (const { i, r } of open) results[i] = this.detach(r, all);
         break;
@@ -1962,7 +1966,7 @@ export class Conversation {
       const late = open.filter(({ r }) => now - r.startedAt >= r.limitMs);
       for (const { i, r } of late) results[i] = this.detach(r, "limit");
       if (late.length) continue;
-      const wakeAt = Math.min(...open.map(({ r }) => r.startedAt + r.limitMs), firstDoneAt === null ? Infinity : firstDoneAt + this.settings.partialAfterMs);
+      const wakeAt = Math.min(...open.map(({ r }) => r.startedAt + r.limitMs), firstDoneAt === null || this.channelInfo(this.currentChannel())?.showsTools ? Infinity : firstDoneAt + this.settings.partialAfterMs);
       await new Promise<void>((resolve) => {
         const timer = setTimeout(wake, Math.max(0, wakeAt - Date.now()));
         function wake() {

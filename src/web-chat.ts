@@ -21,7 +21,7 @@
 // process's memory; there is no agent-wide daily cap (the workspace's model credit limits still
 // apply). Logs carry ids and counts, never text, addresses or tokens.
 
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 import { replyButton, type Channel, type ChannelAgent } from "./channels.ts";
@@ -559,7 +559,7 @@ export function webChat(options: WebChatOptions = {}): WebChat {
           const handler = routes[path];
           if (handler) return handler(request);
           const file = path === "/widget.js" ? "loader" : /^\/widget\/([a-z0-9-]+)\.js$/.exec(path)?.[1];
-          if (file && (request.method === "GET" || request.method === "HEAD")) return widgetFile(file, /\bgzip\b/.test(request.headers.get("accept-encoding") ?? ""));
+          if (file && (request.method === "GET" || request.method === "HEAD")) return widgetFile(file, request);
           return problem(404, "not_found", "no such web chat route");
         },
       };
@@ -697,9 +697,13 @@ function turnSlots(most: number): () => Promise<() => void> {
     });
 }
 
-/** The chat box's files: built (dist/widget/src/<name>.js), or from source with their types stripped; gzipped once for browsers that take it. */
-const widgetFiles = new Map<string, Promise<{ text: string; gzip: Uint8Array<ArrayBuffer> } | null>>();
-async function widgetFile(name: string, gzip: boolean): Promise<Response> {
+/**
+ * The chat box's (and the MCP web app's) files: built (dist/widget/src/<name>.js), or from source with
+ * their types stripped; gzipped once for browsers that take it, and tagged so a browser that has the
+ * same file gets a 304. `cache` is how long a browser keeps it unasked (default five minutes).
+ */
+const widgetFiles = new Map<string, Promise<{ text: string; gzip: Uint8Array<ArrayBuffer>; etag: string } | null>>();
+export async function widgetFile(name: string, request: Request, cache = "public, max-age=300"): Promise<Response> {
   let file = widgetFiles.get(name);
   if (!file) {
     file = (async () => {
@@ -710,14 +714,15 @@ async function widgetFile(name: string, gzip: boolean): Promise<Response> {
         const { stripTypeScriptTypes } = (await import("node:module")) as { stripTypeScriptTypes?: (code: string) => string };
         text = source !== null && stripTypeScriptTypes ? stripTypeScriptTypes(source) : null;
       }
-      return text === null ? null : { text, gzip: new Uint8Array(gzipSync(text)) };
+      return text === null ? null : { text, gzip: new Uint8Array(gzipSync(text)), etag: `"${createHash("sha256").update(text).digest("base64url").slice(0, 16)}"` };
     })();
     widgetFiles.set(name, file);
   }
   const found = await file;
   if (!found) return problem(404, "not_found", "no such widget file");
-  const headers = { "content-type": "text/javascript; charset=utf-8", "cache-control": "public, max-age=300", "access-control-allow-origin": "*", vary: "accept-encoding" };
-  return gzip
+  const headers = { "content-type": "text/javascript; charset=utf-8", "cache-control": cache, etag: found.etag, "access-control-allow-origin": "*", vary: "accept-encoding" };
+  if (request.headers.get("if-none-match") === found.etag) return new Response(null, { status: 304, headers });
+  return /\bgzip\b/.test(request.headers.get("accept-encoding") ?? "")
     ? new Response(found.gzip, { status: 200, headers: { ...headers, "content-encoding": "gzip" } })
     : new Response(found.text, { status: 200, headers });
 }

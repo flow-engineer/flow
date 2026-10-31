@@ -502,6 +502,40 @@ export function feedbackUsage(config: CliConfig, tools: ToolInfo[]): string | un
   return `${config.name} ${c.words.join(" ")} ${about ? `${about} ` : ""}tooling|product ${message ? `${message} ` : ""}"<what happened>"`;
 }
 
+/**
+ * The line that calls `tool` with `input` in this CLI, as a person types it: the command's words, its
+ * positional arguments, then a flag for each other field (a list repeats its flag, an object is JSON;
+ * fields left at the CLI file's defaults are left out). Undefined when no command calls the tool, and
+ * when a positional argument is missing, since the line would not run.
+ */
+export function commandLine(config: CliConfig, tools: ToolInfo[], tool: string, input: Record<string, unknown>): string | undefined {
+  const c = commandTable(config, tools).find((x) => x.tool?.name === tool);
+  if (!c?.tool) return undefined;
+  const settings = c.config && !isCustom(c.config) ? c.config : undefined;
+  const props = c.tool.inputSchema.properties ?? {};
+  const required = new Set(c.tool.inputSchema.required ?? []);
+  const shell = (value: unknown) => {
+    const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+    return /^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`;
+  };
+  const words = [config.name, ...c.words];
+  for (const field of settings?.args ?? []) {
+    const value = input[field];
+    if (value === undefined || value === null) return undefined;
+    words.push(...[value].flat().map(shell));
+  }
+  for (const { field, flag } of flagsOf(c.tool, settings)) {
+    const value = input[field];
+    if (value === undefined || value === null || JSON.stringify(value) === JSON.stringify(settings?.defaults?.[field])) continue;
+    const kind = flagKind(props[field] ?? {});
+    // An optional boolean flag has no negation: false is its absence.
+    if (kind === "boolean") words.push(...(required.has(field) ? [`--${flag}`, String(value)] : value === true ? [`--${flag}`] : []));
+    else if (kind === "list" && Array.isArray(value)) for (const item of value) words.push(`--${flag}`, shell(item));
+    else words.push(`--${flag}`, shell(value));
+  }
+  return words.join(" ");
+}
+
 /** The command the words start with, the longest match first, and the words left after it. */
 export function findCommand(commands: Command[], words: string[]): { command: Command; rest: string[] } | null {
   let best: Command | null = null;

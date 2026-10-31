@@ -267,6 +267,13 @@ export interface ChannelInfo {
   reactions: boolean;
   /** A live status line in the loading indicator (web and app UIs). */
   status: boolean;
+  /**
+   * The person sees each tool call as it runs (a web app that draws its steps). The agent then sends nothing
+   * before or while tools run (no acknowledgement, no progress, no early partial answer) and answers once,
+   * with the outcome. Default off: on chat apps the person sees nothing while tools run, so a short
+   * acknowledgement comes first. Only a channel that really shows the tool calls should set it.
+   */
+  showsTools?: boolean;
   /** How text is formatted: none (SMS shows markdown raw), WhatsApp's own marks, or Markdown. */
   formatting?: "plain" | "whatsapp" | "markdown";
   /** The most characters one message can carry. */

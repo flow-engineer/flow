@@ -13,11 +13,17 @@ export interface TerminalServerOptions {
   guests?: boolean;
   path?: string;
   channel?: string;
+  /** Guidance for the agent while the person is on this channel. */
+  instructions?: string;
+  /** The channel's name in traces. Default "cli". */
+  traceChannel?: string;
+  /** The client draws each tool call as it runs (ChannelInfo.showsTools): the agent then answers once, with no acknowledgement first. Default off. */
+  showsTools?: boolean;
 }
 
 export function terminalServer(options: TerminalServerOptions) {
   const path = options.path ?? "/agent/terminal";
-  const channel = { ...customUI(options.channel ?? "terminal", { sendMessage: async () => { throw new Error("No terminal request is listening"); } }), traceChannel: "cli" };
+  const channel = { ...customUI(options.channel ?? "terminal", { sendMessage: async () => { throw new Error("No terminal request is listening"); }, ...(options.instructions ? { instructions: options.instructions } : {}), ...(options.showsTools ? { info: { showsTools: true } } : {}) }), traceChannel: options.traceChannel ?? "cli" };
   let inFlight = 0;
   const pending = new Map<string, Promise<unknown>>();
   return {

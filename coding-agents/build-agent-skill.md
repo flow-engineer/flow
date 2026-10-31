@@ -58,7 +58,8 @@ the message and the reply are kept in the history, so the next turn knows, and i
 and are `message.in`/`message.out` events marked `answered: true`);
 `deadlineMs` (default 60,000) is the longest a reply waits for a tool before it moves to the
 background (set a tool's own `deadlineMs` for a known-slow one); `partialAfterMs` (default 5,000)
-is how long a finished tool's result waits for the others of its response; `shareUpdates` turns live status lines on web and app UIs off, or replaces their
+is how long a finished tool's result waits for the others of its response (not on a channel with
+`showsTools`, below, where the answer waits for every result); `shareUpdates` turns live status lines on web and app UIs off, or replaces their
 guidance with a string; `writing` replaces Flow Framework's guidance on how messages read (buttons
 only for a pick, catalogue titles in plain words, one idea per message) with a string, or `false`
 leaves it out (a channel's `instructions` add to it for that channel); `routes` (`{ "/v1/events": (request) => Response }`) are HTTP routes the
@@ -180,6 +181,18 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   `agent.resetHistory({ to, note })`: the model then sees only what comes after, with your note.
   Nothing is deleted. A long chat is also cut to `history.maxTokens` (default 24,000, or 60% of the
   model's `contextTokens` when less).
+- **Acknowledging first, or not (`showsTools`).** By default, after the person writes, the agent's
+  first message reaches them at once: the answer, or a short "checking that now" sent with its tool
+  calls, plus `share_updates` while tools run. That is right wherever the person sees only messages
+  (WhatsApp, SMS, iMessage, Telegram, `webChat`, a UI that shows only messages): without it they see
+  nothing while tools run. A UI that draws every tool call as it runs does not need it, so its
+  channel says so: `customUI("app", { ..., info: { showsTools: true } })`. On that channel the agent
+  sends nothing before or while tools run (no acknowledgement, no `share_updates`, no early partial
+  answer at `partialAfterMs`) and answers once, with the outcome. Set it only when your UI really
+  shows the tool calls (the activity stream of `agent.request`'s `onActivity`, or the terminal
+  endpoint's `activity` records); never on a messaging channel. It is off by default, and a channel
+  without it gets exactly the prompt it always had. A person on a channel with it and one without
+  gets each channel's own rule. The web app's own chat sets it for you (mcp-skill.md, "The web app").
 - `instructions` (on `customUI`, and in `whatsapp()`'s and `sms()`'s options) is your guidance for
   the agent on that channel, in its prompt only while the person uses it. Data a param carries,
   such as a link, comes from your tools' results: a tool that has a screen returns its link

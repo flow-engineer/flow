@@ -32,6 +32,7 @@ import { serveNode } from "../../src/http.ts";
 import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
 import { FORMATTED, render, toolContext, type CredentialProvider, type McpClientKind, type Tool, type ToolContext } from "../../src/tools.ts";
 import { terminalServer } from "./terminal.ts";
+import { appServer, appViewsOn, type McpAppOptions } from "./app.ts";
 import { describe, FULL_CATALOG_META, MCP_CLIENT_KINDS, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
 
 export interface McpAuth {
@@ -103,6 +104,12 @@ export interface McpServerOptions {
    * false turns it off. An object serves it with `agent` even without `auth` (everyone a guest).
    */
   terminal?: false | { path?: string; channel?: string; guests?: boolean };
+  /**
+   * The web app at /app: these tools, terminal chat and how to add them elsewhere, in the brand's own
+   * site (`<script src="<origin>/app/embed.js">`). With the OAuth bridge's `app`, people signed in on
+   * the site are signed in here too.
+   */
+  app?: McpAppOptions;
   /** Traces from FLOW_FRAMEWORK_TRACES_* (or legacy CHINWAG_TRACES_*) by default; false disables them. */
   traces?: TracesOptions | false;
   /**
@@ -228,6 +235,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   const pluginHandler = pluginPath ? endpointHandler(true) : undefined;
   const terminal = terminalOf(options);
   if (terminal && [path, pluginPath, ...(options.auth?.routes?.paths ?? [])].includes(terminal.path)) throw new Error(`@flow-engineer/flow/mcp: the terminal path ${terminal.path} is already served`);
+  const app = options.app ? appServer(options.app, { name: options.name, mcpPath: path, resource: options.auth?.resource, terminalPath: terminal?.path, tools: (audiences.get("cli") ?? audiences.get(undefined)!).standalone.full, chat: appChatOf(options, terminal), verify: options.auth && (async (token, request) => options.auth!.verify(token, request)) }) : undefined;
 
   async function serve(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -237,6 +245,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     const routes = options.auth?.routes;
     if (routes?.paths.some((p) => url.pathname === p || url.pathname.startsWith(`${p}/`))) return routes.fetch(request);
     if (terminal && url.pathname === terminal.path) return terminal.fetch(request);
+    if (app?.paths.some((p) => url.pathname === p || url.pathname.startsWith(`${p}/`))) return app.fetch(request);
     if (request.method === "GET" && (url.pathname === metadataPrefix || url.pathname === `${metadataPrefix}${servedPath}`)) {
       if (!options.auth) return new Response("Not found", { status: 404 });
       return Response.json({
@@ -328,8 +337,33 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     descriptors,
     flushTraces: () => trace?.flush() ?? Promise.resolve(),
     ...(pluginPath ? { plugin: { path: pluginPath, descriptors: pluginDescriptors } } : {}),
-    ...(options.auth?.routes || terminal ? { paths: [...new Set([path, ...(pluginPath ? [pluginPath] : []), "/.well-known/oauth-protected-resource", ...(options.auth?.routes?.paths ?? []), ...(terminal ? [terminal.path] : [])])] } : {}),
+    ...(options.auth?.routes || terminal || app ? { paths: [...new Set([path, ...(pluginPath ? [pluginPath] : []), "/.well-known/oauth-protected-resource", ...(options.auth?.routes?.paths ?? []), ...(terminal ? [terminal.path] : []), ...(app?.paths ?? [])])] } : {}),
   };
+}
+
+/**
+ * The web app's own chat (its channel "app"), beside terminal chat and checked the same way. On Flow's
+ * hosting its answers are drawn as views, so the agent is told to keep its words short.
+ */
+function appChatOf(options: McpServerOptions, terminal: ReturnType<typeof terminalOf>) {
+  if (!options.app || !terminal || !options.agent) return undefined;
+  const given = options.agent;
+  const views = appViewsOn();
+  const chat = terminalServer({
+    agent: () => { const built = typeof given === "function" ? given() : given; built.addChannel(chat.channel); return built; },
+    ...(options.auth ? { auth: { verify: (token: string, request: Request) => options.auth!.verify(token, request) } } : {}),
+    path: "/app/chat",
+    channel: "app",
+    traceChannel: "web",
+    // The panel draws every tool call as it runs, so the agent answers once instead of acknowledging first.
+    showsTools: true,
+    ...(views ? { instructions: [
+      "This is the brand's own web app, which draws answers as views. The result of each tool you call is drawn for the person right under your reply: its numbers, lists and tables. So reply in one or two short sentences: what it means, or what to do next. Never repeat what a view shows, and never write tables. Link pages as Markdown links.",
+      "Never put a tool's result in a view block: the app already draws it, and it would show twice. An answer with structure that is not a tool's result (what you can do, options, steps, a comparison) is drawn too: put its content as data in a block, then one sentence. The block is ```view <kind>, then JSON, then ```. kind is a short name for this kind of answer (capabilities, options, steps, comparison); the same kind always has the same keys. Short values, no Markdown in them; a follow-up the person can send goes in a field named ask, a page in a field named href.",
+    ].join("\n") } : {}),
+  });
+  if (typeof given !== "function") given.addChannel(chat.channel);
+  return chat;
 }
 
 /** The terminal route mcpServer serves, with its auth; its channel is added to the agent before the first turn. */

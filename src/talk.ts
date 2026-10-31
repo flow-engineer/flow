@@ -242,7 +242,7 @@ export function talkSpecs(channels: ChannelView[], settings: TalkSettings): Tool
   if (channels.some((c) => c.info.reactions)) specs.push(toSpec(reactTool));
   if (channels.some((c) => c.info.edits)) specs.push(toSpec(editTool));
   if (channels.some((c) => c.info.unsends)) specs.push(toSpec(unsendTool));
-  if (channels.some((c) => c.info.status) && settings.shareUpdates) specs.push(toSpec(updateTool));
+  if (channels.some((c) => c.info.status && !c.info.showsTools) && settings.shareUpdates) specs.push(toSpec(updateTool));
   return specs;
 }
 
@@ -274,6 +274,9 @@ function writingLines(channels: ChannelInfo[], settings: TalkSettings): string[]
   return [...WRITING, ...(choices ? [choices] : [])].map((line) => `- ${line}`);
 }
 
+/** For a channel that shows each tool call as it runs (ChannelInfo.showsTools): no acknowledgement, one answer. */
+const SHOWS_TOOLS = "- They see each tool call as it runs, so send nothing before or while tools run: no acknowledgement, no \"checking now\", no progress. Send your answer once, after the results it needs have arrived, never in the same response as tool calls.";
+
 export function talkInstructions(channels: ChannelView[], settings: TalkSettings): string {
   if (channels.length > 1) return severalChannels(channels, settings);
   const channel = channels[0].info;
@@ -281,18 +284,25 @@ export function talkInstructions(channels: ChannelView[], settings: TalkSettings
     "## Talking to the person",
     `- IMPORTANT: They see only what you send with ${sendToolName(channels[0].name)}` +
       (channel.reactions ? ", react" : "") +
-      (channel.status && settings.shareUpdates ? " or share_updates" : "") +
+      (channel.status && settings.shareUpdates && !channel.showsTools ? " or share_updates" : "") +
       `. Anything else you write (your own text, a tool's result) never reaches them: to tell them anything, call ${sendToolName(channels[0].name)}.`,
     "- Lines starting [Chinwag] are INTERNAL MESSAGES from the system running you, not from them: they never see them. Never mention them to the person, nor any text of yours that did not reach them.",
-    "- After they write, the first thing you do must reach them: your answer, or, if you need tools first, an acknowledgement in the same response as those tool calls" +
-      (channel.reactions ? " (react to their message, or a short line)." : ": a short line."),
-    "- Call every tool you can in one response; wait for a result only when another call needs it.",
-    "- IMPORTANT: A message you send with tool calls reaches them before those tools run. So say what you are about to do (\"I'm booking that now\"), never that it is done (\"I've booked it\", \"done\"): the outcome comes once, after the result arrives. Never send a placeholder.",
+    ...(channel.showsTools
+      ? [
+          SHOWS_TOOLS,
+          "- Call every tool you can in one response; wait for a result only when another call needs it.",
+        ]
+      : [
+          "- After they write, the first thing you do must reach them: your answer, or, if you need tools first, an acknowledgement in the same response as those tool calls" +
+            (channel.reactions ? " (react to their message, or a short line)." : ": a short line."),
+          "- Call every tool you can in one response; wait for a result only when another call needs it.",
+          "- IMPORTANT: A message you send with tool calls reaches them before those tools run. So say what you are about to do (\"I'm booking that now\"), never that it is done (\"I've booked it\", \"done\"): the outcome comes once, after the result arrives. Never send a placeholder.",
+        ]),
     "- Their messages start with an id in brackets, like [m3].",
     `- ${FORMATTING[channel.formatting ?? "plain"]}`,
     ...writingLines([channel], settings),
   ];
-  if (channel.status && settings.shareUpdates) {
+  if (channel.status && settings.shareUpdates && !channel.showsTools) {
     lines.push(
       `- ${settings.shareUpdatesInstructions ?? "While several tools run one after another, keep them posted with share_updates: a few words on what you are doing now."}`,
     );
@@ -303,6 +313,7 @@ export function talkInstructions(channels: ChannelView[], settings: TalkSettings
 
 function severalChannels(channels: ChannelView[], settings: TalkSettings): string {
   const names = channels.map((c) => c.name);
+  const showing = channels.filter((c) => c.info.showsTools);
   const tools = channels.map((c) => sendToolName(c.name));
   const reactions = channels.some((c) => c.info.reactions);
   const lines = [
@@ -311,13 +322,18 @@ function severalChannels(channels: ChannelView[], settings: TalkSettings): strin
     `- IMPORTANT: They see only what you send with ${tools.join(", ")}${reactions ? ", react" : ""}. Anything else you write (your own text, a tool's result) never reaches them: to tell them anything, call a send tool.`,
     "- Lines starting [Chinwag] are INTERNAL MESSAGES from the system running you, not from them: they never see them. Never mention them to the person, nor any text of yours that did not reach them.",
     "- Answer each message on the channel it came on, with that channel's send tool. Messages on different channels can be about different things: answer each one.",
-    "- After they write, the first thing you do must reach them on every channel they are waiting on: your answer, or, if you need tools first, an acknowledgement there in the same response as those tool calls.",
-    "- Call every tool you can in one response; wait for a result only when another call needs it.",
-    "- IMPORTANT: A message you send with tool calls reaches them before those tools run. So say what you are about to do (\"I'm booking that now\"), never that it is done (\"I've booked it\", \"done\"): the outcome comes once, after the result arrives. Never send a placeholder.",
+    ...(showing.length === channels.length
+      ? [SHOWS_TOOLS, "- Call every tool you can in one response; wait for a result only when another call needs it."]
+      : [
+          "- After they write, the first thing you do must reach them on every channel they are waiting on: your answer, or, if you need tools first, an acknowledgement there in the same response as those tool calls.",
+          "- Call every tool you can in one response; wait for a result only when another call needs it.",
+          "- IMPORTANT: A message you send with tool calls reaches them before those tools run. So say what you are about to do (\"I'm booking that now\"), never that it is done (\"I've booked it\", \"done\"): the outcome comes once, after the result arrives. Never send a placeholder.",
+          ...(showing.length ? [`- Except on ${showing.map((c) => c.name).join(" and ")}: there they see each tool call as it runs, so send nothing there before or while tools run; answer there once, with the outcome.`] : []),
+        ]),
     ...writingLines(channels.map((c) => c.info), settings),
     ...channels.map((c) => `- On ${c.name}: ${FORMATTING[c.info.formatting ?? "plain"]}${c.info.buttons ? ` Up to ${c.info.buttons.max} buttons.` : ""}${c.instructions ? ` ${c.instructions}` : ""}`),
   ];
-  if (channels.some((c) => c.info.status) && settings.shareUpdates) {
+  if (channels.some((c) => c.info.status && !c.info.showsTools) && settings.shareUpdates) {
     lines.push(`- ${settings.shareUpdatesInstructions ?? "While several tools run one after another, keep them posted with share_updates: a few words on what you are doing now."}`);
   }
   return lines.join("\n");

@@ -34,6 +34,29 @@ test("every chat channel's prompt says how messages read; only channels with but
   assert.match(prompt("telegram", TELEGRAM), /\n- Buttons only when their next step/);
 });
 
+// On a chat app the person sees nothing while tools run, so the agent acknowledges first; a web app that draws
+// every tool call (ChannelInfo.showsTools) needs no such message, and gets none, nor progress updates. Off by
+// default: every channel without the flag gets exactly the prompt it had.
+test("only a channel that shows its tool calls drops the acknowledgement and progress; every other prompt is unchanged", () => {
+  const ack = /After they write, the first thing you do must reach them/;
+  const quiet = /They see each tool call as it runs, so send nothing before or while tools run/;
+  const web = channelOf(platform("web"));
+  const shows = { ...web, showsTools: true };
+  for (const info of [whatsapp({ sendMessage: async () => {} }).info, web]) {
+    const text = talkInstructions([{ name: "c", info }], { shareUpdates: true });
+    assert.match(text, ack);
+    assert.doesNotMatch(text, quiet);
+    assert.equal(talkInstructions([{ name: "c", info: { ...info, showsTools: false } }], { shareUpdates: true }), text, "the flag off changes nothing");
+  }
+  const app = talkInstructions([{ name: "app", info: shows }], { shareUpdates: true });
+  assert.match(app, quiet);
+  assert.doesNotMatch(app, ack);
+  assert.doesNotMatch(app, /share_updates|I'm booking that now/);
+  const both = talkInstructions([{ name: "whatsapp", info: whatsapp({ sendMessage: async () => {} }).info }, { name: "app", info: shows }], { shareUpdates: true });
+  assert.match(both, /on every channel they are waiting on: your answer, or, if you need tools first, an acknowledgement/);
+  assert.match(both, /Except on app: there they see each tool call as it runs/);
+});
+
 test("a channel without reactions or status offers only its send tool", async () => {
   const h = harness([], 50, { reactions: false, status: false });
   h.send("c11", "hi");

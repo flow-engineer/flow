@@ -468,6 +468,54 @@ With `auth.scopes`, only a token holding every named scope may chat (a turn can 
 off, and `terminal: { path, channel }` renames them. Do not also mount `terminalServer` for the same
 agent: two channels named terminal are refused.
 
+`terminalServer({ ..., showsTools: true })` (and `instructions`, `traceChannel`) is for a client that
+draws each tool call as it runs: the agent then answers once, with no acknowledgement first
+(build-agent-skill.md, `showsTools`). Terminal chat leaves it off.
+
+### The web app (the tools inside the brand's own site)
+
+For people who use the brand's website, not an assistant or a terminal: the same tools and agent as
+a chat panel docked at the side of the site (the page moves over; it never covers it), with each tool
+call shown as it runs, the CLI line that does the same, and how to add the tools to Claude, ChatGPT,
+Cursor, VS Code and the terminal. Flow hosts the panel; the brand styles it. Turn it on with `app`:
+
+```ts
+import { cli } from "./cli.ts";
+mcpServer({ ..., auth: bridge.auth, agent, app: {
+  origins: ["https://www.acme.com"],             // the sites that may embed it: exact origins
+  site: "https://www.acme.com",                  // its links to these pages open in the site itself
+  title: "Acme", subtitle: "Your orders", logo: "https://www.acme.com/icon.png",
+  greeting: "Hi! I can check and change your orders.", suggestions: ["Where is my order?"],
+  url: "https://mcp.acme.com/mcp",               // the MCP URL people add to their assistant
+  cli: { file: cli, install: "curl -fsSL https://cli.acme.com | sh" },   // each step's CLI line, from the CLI file
+  theme: { accent: "#645bff", font: "Geist, system-ui", fontUrl: "https://fonts.googleapis.com/css2?family=Geist", monoFont: "Geist Mono",
+           radius: 8, style: "soft", pattern: "dots", density: "compact", colors: { surface: "#F5F7FA" }, css: ".copy{background:#22221f}" },
+} });
+```
+
+The site adds `<script async src="https://<agent>/app/embed.js"></script>` (its CSP must allow the
+agent in `script-src`, `frame-src` and `connect-src`). The panel is an iframe on the agent's origin,
+so the person's token never reaches the site's page. Its chat is its own channel, `app` at
+`/app/chat`, with `showsTools` on.
+
+- **Signed in with the site's session, no page shown.** Give `oauthBridge` `app: true`
+  (oauth-bridge-skill.md, "The web app"). On the site, before the tag:
+  `window.FlowAppConfig = { account: <the signed-in person's id>, signIn: async (request) => <the code the login page would mint for request>, navigate: (path) => router.push(path), pageFailed: () => <why the page failed, or null> }`.
+  `account` changing signs the panel in afresh; `FlowApp.signOut()` when they sign out on the site.
+- **Links** to the site's own pages open in the site (`navigate`, else a page load) and are checked
+  once shown: an error status, a "not found" page, a redirect elsewhere or `pageFailed()`. A failed
+  one is recorded for the brand's insights. Give the agent a skill listing the site's real page URLs
+  (which results have a page, which are found from a list page, which have none), so it only links
+  pages that exist, and test that list against the live site.
+- **Generative views are Flow's hosted service only.** On Flow's hosting (`FLOW_APP_SERVICE_URL` and
+  the agent's `FLOW_KEY`), each tool's result, and an answer the agent gives as a ```view <kind>
+  block of JSON, is drawn as a view: a template made once per tool and data shape from the brand's
+  design kit, cached by Flow, and filled in the browser. Self-hosted, answers are Markdown and nothing
+  is sent anywhere; everything else works the same.
+- Every generated piece stays the team's: `theme.css` styles the panel's stable classes, and the
+  panel's routes (`/app`, `/app/embed.js`, `/app/chat`, `/app/view`, `/app/link`, `/app/command`) are
+  listed in `paths`.
+
 Without sign-in, or to serve chat from the agent's own port, mount the terminal handler as one of
 the agent's routes (no model or extra dependency in the CLI). Flow's hosting and the local
 playground (`npm start`) both serve an agent's `routes`:
