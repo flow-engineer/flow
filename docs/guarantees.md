@@ -32,6 +32,12 @@ the platform accepted the call (Flow Messaging's `200`) and rejects when it refu
 What follows from it:
 
 - A send tool's result tells the agent `delivered` only once the platform accepted the message.
+- Each send says what the agent does next: `next: "wait"` for the person's reply, or `"act"` when it
+  calls a tool next in the same turn (it said "getting your order"). A response of only messages
+  ends the turn unless one of them said `"act"`; that one gets one more step, and its result says so.
+  A second `"act"` with no tool call between ends the turn. A send that leaves `next` out (or gives
+  anything else) waits. So a message is never followed by a step the model did not ask for, which it
+  could fill by sending the same message again.
 - `message.out` is emitted, and the message kept in the history and the transcript, only then.
 - A rejected send comes back to the agent as a "Not delivered" note with the reason, once
   (`message.undelivered`). A failure Flow reports after the send resolved (a late

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { contentRefusal, SMS } from "../src/channels.ts";
 import { createAgent, type FlowEvent, type Outbound, type SendReceipt } from "../src/index.ts";
-import { gate, respond, say, scriptedModel, WEB } from "./helpers.ts";
+import { call, gate, respond, say, scriptedModel, WEB } from "./helpers.ts";
 
 /** An agent whose one channel answers each send with the promise `deliver` gives it. */
 function agentWith(deliver: (o: Outbound) => Promise<void | SendReceipt> | void) {
@@ -29,7 +29,7 @@ test("the agent's next message goes to the channel only once the last one's send
     return accepted.promise;
   });
   h.send("d1", "hi");
-  (await h.nextCall(0)).answer(respond(say("One"), say("Two")));
+  (await h.nextCall(0)).answer(respond(say("One"), call("send_chat", { text: "Two", next: "act" })));
   await next[0]!.promise;
   // Let everything that does not wait on the channel run: the second message must still wait.
   await new Promise((resolve) => setImmediate(resolve));

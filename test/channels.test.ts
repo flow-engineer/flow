@@ -51,7 +51,7 @@ test("SMS offers no buttons, replies, reactions or images, and asks for plain te
   h.send("w1", "hi");
   const first = await h.nextCall(0);
   const send = first.request.tools.find((t) => t.name === "send_chat")!;
-  assert.deepEqual(Object.keys((send.parameters as { properties: object }).properties), ["text", "link"]);
+  assert.deepEqual(Object.keys((send.parameters as { properties: object }).properties), ["text", "link", "next"]);
   assert.match(first.request.system, /Write plain text, not Markdown/);
   first.answer(respond(call("send_chat", { text: "Your order:", link: { label: "Track it", url: "https://example.com/o/42" } })));
   await h.agent.conversation("w1")!.whenIdle();
