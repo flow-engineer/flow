@@ -17,19 +17,50 @@ test("the person's messages carry ids the agent can react to", async () => {
   assert.deepEqual(h.out.filter((o) => o.type === "reaction"), [{ type: "reaction", emoji: "👍", messageId: "m1" }]);
 });
 
-test("after their message, a reply of only messages gets one more step, to act on what it said", async () => {
+test("a message that waits for their reply ends the turn: it goes once, with no extra step to send it again", async () => {
+  const h = harness([], 50, WHATSAPP, "manual");
+  h.send("w1", "hi");
+  const first = await h.nextCall(0);
+  const send = first.request.tools.find((t) => t.name === "send_chat")!.parameters as { required: string[] };
+  assert.ok(send.required.includes("next"), "the model is asked to say what it does next, every time");
+  first.answer(respond(call("send_chat", { text: "Hi! What can I do for you?", buttons: ["Order", "Track", "Help"], next: "wait" })));
+  await h.agent.conversation("w1")!.whenIdle();
+  assert.deepEqual(h.out.filter((o) => o.type === "message"), [{ type: "message", text: "Hi! What can I do for you?", buttons: ["Order", "Track", "Help"] }]);
+  assert.equal(h.calls.length, 1);
+});
+
+test("a send that does not say what comes next waits for their reply", async () => {
+  const h = harness([], 50, WEB, "manual");
+  h.send("c2", "hi");
+  (await h.nextCall(0)).answer(respond(say("Hi! What can I do for you?")));
+  await h.agent.conversation("c2")!.whenIdle();
+  assert.deepEqual(h.sent(), ["Hi! What can I do for you?"]);
+  assert.equal(h.calls.length, 1);
+});
+
+test("a message that says it acts next gets one more step: the tool runs and its result is sent", async () => {
   const plan = tool({ name: "get_plan", description: "", input: z.object({}), run: () => "DASH, sodium under 1,500 mg" });
   const h = harness([plan], 50, WEB, "manual");
   h.send("c4", "send me my plan");
-  (await h.nextCall(0)).answer(respond(say("Getting your plan."), say("One moment.")));
-  const followUp = await h.nextCall(1);
-  const results = followUp.request.messages.filter((m) => m.role === "tool").map((m) => (m as { content: string }).content);
-  assert.deepEqual(results, Array(2).fill(JSON.stringify({ delivered: true, channel: "chat" })), "it sees its messages were delivered");
-  followUp.answer(respond(call("get_plan")));
+  (await h.nextCall(0)).answer(respond(call("send_chat", { text: "Getting your plan.", next: "act" })));
+  const step = await h.nextCall(1);
+  const result = step.request.messages.findLast((m) => m.role === "tool") as { content: string };
+  assert.deepEqual(JSON.parse(result.content), { delivered: true, channel: "chat", next: "You said you act next: call that tool now." }, "it is told its message went and that it said it acts next");
+  step.answer(respond(call("get_plan")));
   (await h.nextCall(2)).answer(respond(say("Your plan: DASH, sodium under 1,500 mg.")));
   await h.agent.conversation("c4")!.whenIdle();
-  assert.deepEqual(h.sent(), ["Getting your plan.", "One moment.", "Your plan: DASH, sodium under 1,500 mg."]);
-  assert.equal(h.calls.length, 3, "one more step only: a second reply of only messages ends the turn");
+  assert.deepEqual(h.sent(), ["Getting your plan.", "Your plan: DASH, sodium under 1,500 mg."]);
+  assert.equal(h.calls.length, 3);
+});
+
+test("saying it acts next twice with no tool between ends the turn", async () => {
+  const h = harness([], 50, WEB, "manual");
+  h.send("c5", "send me my plan");
+  (await h.nextCall(0)).answer(respond(call("send_chat", { text: "Getting your plan.", next: "act" })));
+  (await h.nextCall(1)).answer(respond(call("send_chat", { text: "One moment.", next: "act" })));
+  await h.agent.conversation("c5")!.whenIdle();
+  assert.deepEqual(h.sent(), ["Getting your plan.", "One moment."]);
+  assert.equal(h.calls.length, 2);
 });
 
 test("a message that fails to arrive comes back to the agent", async () => {

@@ -7,9 +7,9 @@ import { createAgent, sqlite, tool, type AgentOptions, type Database, type Templ
 import type { ChannelInfo, ChannelKind, ChatMessage, Keywords, Model, ModelRequest, ModelResponse, Outbound, FlowEvent, ToolCall } from "../src/index.ts";
 
 /**
- * A model the test drives: each call waits for the test to answer it. The step Flow Framework adds after a
- * reply that was only delivered messages is answered with nothing, and counted in `followUps`,
- * unless `followUps: "manual"`: then it is a call like any other.
+ * A model the test drives: each call waits for the test to answer it. The step after a reply that was
+ * only delivered messages (one said next: "act", or something came in meanwhile) is answered with
+ * nothing, and counted in `followUps`, unless `followUps: "manual"`: then it is a call like any other.
  */
 export function scriptedModel(options: { followUps?: "auto" | "manual" } = {}) {
   const calls: Array<{ request: ModelRequest; answer(r: ModelResponse): void; fail(error: Error): void }> = [];

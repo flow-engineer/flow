@@ -93,12 +93,12 @@ test("a message hides typing; while the tools it went with run, typing shows aga
   assert.deepEqual(afterReaction(), [false, true, true, false]);
 });
 
-test("after a reply with no tools, typing stays hidden through a slow last model step", async (t) => {
+test("after a reply of only messages that says it acts next, typing stays hidden through a slow last model step", async (t) => {
   const h = typingHarness(t, () => {}, [], "manual");
   h.send("t6", "what time do you open?");
   await h.tick(0);
-  (await h.nextCall(0)).answer(respond(say("We open at 9.")));
-  // The step Flow Framework adds after a reply that used no tool: slower than the 800 ms interval.
+  (await h.nextCall(0)).answer(respond(call("send_chat", { text: "Let me check.", next: "act" })));
+  // The step Flow Framework adds after a message that said "act": slower than the 800 ms interval.
   const last = await h.nextCall(1);
   await h.tick(5_000);
   assert.deepEqual(h.typed(), [true, false], "hidden by the answer, and not shown again");

@@ -33,7 +33,7 @@ test("WhatsApp offers the agent only what its provider can do; a link it cannot 
   const bare = agentWith([whatsapp(r.provider)]);
   const a = await bare.agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" });
   const first = await bare.nextCall(0);
-  assert.deepEqual(props(first.request.tools.find((t) => t.name === "send_whatsapp")!), ["text", "reply_to", "list", "link", "image"]);
+  assert.deepEqual(props(first.request.tools.find((t) => t.name === "send_whatsapp")!), ["text", "reply_to", "list", "link", "image", "next"]);
   assert.ok(!first.request.tools.some((t) => t.name === "react"), "no react method, no react tool");
   first.answer(respond(call("send_whatsapp", { text: "Here it is", link: { label: "Open in app", url: "https://example.com/l/7" } })));
   await bare.agent.conversation(a!.conversationId)!.whenIdle();
@@ -43,7 +43,7 @@ test("WhatsApp offers the agent only what its provider can do; a link it cannot 
   const switchedOff = agentWith([whatsapp(full.provider, { disable: ["reactions", "lists", "images"] })]);
   await switchedOff.agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" });
   const second = await switchedOff.nextCall(0);
-  assert.deepEqual(props(second.request.tools.find((t) => t.name === "send_whatsapp")!), ["text", "reply_to", "buttons", "link"]);
+  assert.deepEqual(props(second.request.tools.find((t) => t.name === "send_whatsapp")!), ["text", "reply_to", "buttons", "link", "next"]);
   assert.ok(!second.request.tools.some((t) => t.name === "react"), "switched off though the provider has it");
 });
 
@@ -301,7 +301,7 @@ test("beforeSend's message is the one checked, sent and recorded: the provider, 
   });
   const a = await h.agent.message({ channel: "whatsapp", from: "+15550100100", message: "what rooms?" });
   const card = (text: string, label: string) => ({ image: { url: "https://example.com/r.jpg" }, text, buttons: [label] });
-  (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Two rooms", carousel: [card("Sea\nview\nfor two\nbreakfast", "Book sea"), card("Garden", "Book garden")] })));
+  (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Two rooms", carousel: [card("Sea\nview\nfor two\nbreakfast", "Book sea"), card("Garden", "Book garden")], next: "act" })));
   await h.agent.conversation(a!.conversationId)!.whenIdle();
   const sentCards = [card("Sea view for two breakfast", "Book sea"), card("Garden", "Book garden")];
   const result = h.followUps[0].messages.find((m) => m.role === "tool") as { content: string };

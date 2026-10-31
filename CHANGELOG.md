@@ -2,6 +2,30 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.15.2 (2026-10-31)
+
+### Changes
+
+- **Every send tool has a `next` field: `"wait"` or `"act"`.** The model says what it does after the
+  message: wait for the person's reply, or act in the same turn (it said "getting your order" and
+  calls the tool next). A response of only messages now ends the turn unless a send in it said
+  `"act"`: that gets one more step, and the send's result says the message went and that it said it
+  acts next. A second `"act"` with no tool call between ends the turn.
+- Until now, a reply of only messages to the person, in a turn that had used no tool, always got one
+  more step with nothing to say why, and a model could take that step to send its message again
+  (the same greeting with buttons twice). That guessed step is gone.
+- A send that leaves `next` out, or gives any other value, is taken as `"wait"`, never refused.
+- A channel the person wrote on that has heard nothing in the turn is still asked for once, as
+  before, also when the response was only messages on other channels.
+- `transcriptOf` leaves `next` out of a sent message's channel fields.
+
+### Migration notes
+
+- A channel whose own send params (`Channel.params`) include one named `next` must rename it: the
+  send tool's `next` is Flow Framework's.
+- A scripted model in an agent's own tests that relied on the step after a reply of only messages
+  (to read the send's result, or to call a tool next) adds `next: "act"` to that send.
+
 ## 0.15.1 (2026-10-31)
 
 ### Changes

@@ -48,6 +48,15 @@ const photo = z.union([z.object({ url: https }), z.object({ file_id: z.string().
 /** A reply button: its label, or an id its tap comes back with and a label. */
 const replyButton = (labelMax: number) => z.union([z.string().min(1).max(labelMax), z.object({ id: z.string().min(1).max(64), label: z.string().min(1).max(labelMax) })]);
 
+/**
+ * What the agent does after a message, on every send tool: wait for their reply (the turn ends), or
+ * act in this turn (it said "getting your order"): only then does it get another step. Asked for
+ * every time; a send without it, or with anything else, is taken as "wait".
+ */
+const nextInput = z.enum(["wait", "act"]).describe('After this message: "wait" for their reply, or "act" when you call a tool next in this turn (you said "getting your order").');
+/** A send's result when it said "act": the agent's next step is to call that tool. */
+export const ACT_NEXT = "You said you act next: call that tool now.";
+
 /** A send tool's input on this channel: only the features it has, with its limits, and its own params. */
 export function sendInput(channel: ChannelInfo, several = false, params: Record<string, z.ZodType> = {}) {
   const shape: Record<string, z.ZodType> = {
@@ -234,7 +243,7 @@ export function talkSpecs(channels: ChannelView[], settings: TalkSettings): Tool
       tool({
         name: sendToolName(c.name),
         description: `Send a message to the person on ${c.name}. Call it several times to send several messages; they go out in the order you call them.`,
-        input: sendInput(c.info, several, c.params),
+        input: sendInput(c.info, several, c.params).extend({ next: nextInput }),
         run: () => "",
       }),
     ),

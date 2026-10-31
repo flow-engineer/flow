@@ -22,10 +22,11 @@
 //   (deadlineMs). Its result comes back into this chat later; the same call with the same input
 //   while it runs is not run again. Messages go out in the order the agent wrote them, while tools run.
 // - A sent message's result says it was delivered, once the channel accepted it: the next message
-//   goes only after that (docs/guarantees.md). A reply to the person of only messages, in a turn
-//   where the agent used no tool, gets one more step (it may have said "getting your plan" and meant
-//   to act next); a second such response ends the turn. A message that fails to arrive comes back to the agent as
-//   a message.
+//   goes only after that (docs/guarantees.md). Each send says what the agent does next: "wait" for
+//   the person (also when it says nothing), or "act" (it said "getting your plan" and calls a tool
+//   next). A response of only messages ends the turn unless one said "act": that gets one more step,
+//   and a second "act" with no tool between ends the turn. A message that fails to arrive comes back
+//   to the agent as a message.
 // - A background result the agent says nothing about, with no other tool pending, is sent back
 //   once: it may have written the answer as plain text, which never reaches the person. A result
 //   returned to its response is sent back only when the agent answers it in new plain text: silence
@@ -54,7 +55,7 @@ import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { recordsUntil, type Records } from "./records.ts";
 import { addWakeUp, scheduleTools, wakeUpsOf, wakeUpsSection, wakeUpTools, type WakeUps } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
-import { EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput, contentRefusalText, pageLine, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
+import { ACT_NEXT, EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput, contentRefusalText, pageLine, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal, shortLocal, zoneLabel } from "./time.ts";
 import { activeCall, type QueuedBy, type TurnTrigger } from "./traces.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
@@ -1313,8 +1314,6 @@ export class Conversation {
     let restarts = 0;
     let reminded = false;
     let followedUp = false;
-    /** A tool other than talking has been called in this turn. */
-    let acted = false;
     this.sentThisTurn.clear();
     for (let step = 0; step < this.settings.maxSteps; step++) {
       if (this.closed) return;
@@ -1381,16 +1380,8 @@ export class Conversation {
 
       if (!response.toolCalls.length) {
         this.history.push({ role: "assistant", content: response.text });
-        const owes = [...new Set([...this.unanswered, ...this.owed.filter((o) => o.mode === "message").map((o) => o.channel)])];
-        if (owes.length && !reminded) {
+        if (!reminded && this.remind(response.text, several)) {
           reminded = true;
-          this.history.push({
-            role: "user",
-            content: several
-              ? `[Chinwag] INTERNAL MESSAGE, not from them: ${response.text ? "your text above never reached them" : "they have not heard from you"} on ${owes.join(" or ")}. Reply with ${owes.map((c) => sendToolName(c)).join(" or ")}, without mentioning this note${response.text ? ", that text" : ""} or any delay.`
-              : `[Chinwag] INTERNAL MESSAGE, not from them: ${response.text ? "your text above never reached them" : "they have not heard from you"}. Reply with ${sendToolName(owes[0])}, without mentioning this note${response.text ? ", that text" : ""} or any delay.`,
-          });
-          this.flush();
           continue;
         }
         // After a returned result, only new plain text is sent back: silence may be the answer, and
@@ -1411,9 +1402,8 @@ export class Conversation {
 
       this.history.push({ role: "assistant", content: response.text, toolCalls: response.toolCalls });
       this.flush();
-      if (work.length) acted = true;
       const working = this.runTools(work);
-      const said: Array<{ content: string; refused: boolean }> = [];
+      const said: Array<{ content: string; refused: boolean; act?: boolean }> = [];
       for (const call of talk) said.push(await this.talk(call));
       // Tools started: more is coming, so typing shows again where a message hid it.
       if (work.length) this.typingAgain();
@@ -1435,11 +1425,16 @@ export class Conversation {
       this.flush();
       if (work.length && work.every((call) => this.authBlocked.has(call.id)) && !this.absorb()) break;
       // Only messages: the turn is over unless one was refused or something new came in meanwhile, or
-      // this replies to their message without having used any tool: it gets one more step, in case it
-      // meant to act next (it said "getting your order" and has not asked for it yet). A tool
-      // used, or still running in the background, means it already acted.
+      // a message said it acts next (next: "act", it said "getting your order"): one more step, to
+      // call that tool. Saying it again with no tool between ends the turn.
+      // A channel they wrote on that has not heard from the agent yet is asked for once, as above.
+      if (work.length) followedUp = false;
       if (!work.length && !problems && !this.absorb()) {
-        if (!theirs || followedUp || acted || this.tasks.size) break;
+        if (!reminded && this.remind(response.text, several)) {
+          reminded = true;
+          continue;
+        }
+        if (followedUp || !said.some((s) => s.act)) break;
         followedUp = true;
       }
       this.absorb();
@@ -1457,6 +1452,23 @@ export class Conversation {
     this.resultUnsent = false;
     this.persist(() => store.updateConversation(this.id, { turnOpen: false }));
     this.settings.emit(this.id, "turn.end", { ms: Date.now() - started, turn: turns });
+  }
+
+  /**
+   * They wrote on a channel, or the business asked for a message, and nothing has reached them there
+   * in this turn: the note asking for it goes in the history (true), else nothing (false).
+   */
+  private remind(text: string | null, several: boolean): boolean {
+    const owes = [...new Set([...this.unanswered, ...this.owed.filter((o) => o.mode === "message").map((o) => o.channel)])];
+    if (!owes.length) return false;
+    this.history.push({
+      role: "user",
+      content: several
+        ? `[Chinwag] INTERNAL MESSAGE, not from them: ${text ? "your text above never reached them" : "they have not heard from you"} on ${owes.join(" or ")}. Reply with ${owes.map((c) => sendToolName(c)).join(" or ")}, without mentioning this note${text ? ", that text" : ""} or any delay.`
+        : `[Chinwag] INTERNAL MESSAGE, not from them: ${text ? "your text above never reached them" : "they have not heard from you"}. Reply with ${sendToolName(owes[0])}, without mentioning this note${text ? ", that text" : ""} or any delay.`,
+    });
+    this.flush();
+    return true;
   }
 
   private isTalk(name: string): boolean {
@@ -1482,7 +1494,7 @@ export class Conversation {
    * delivered; one that failed on the way is told as a message of its own. `refused` is a call
    * that did nothing because of its input: the agent gets another step to fix it.
    */
-  private async talk(call: ToolCall): Promise<{ content: string; refused: boolean }> {
+  private async talk(call: ToolCall): Promise<{ content: string; refused: boolean; act?: boolean }> {
     const refused = (content: string) => ({ content, refused: true });
     const done = (content = "") => ({ content, refused: false });
     const blocked = this.blockedSend();
@@ -1500,6 +1512,9 @@ export class Conversation {
       // Some models fill every optional field, with "" or null when they have nothing: that is not sent.
       const given = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
       for (const k of Object.keys(link.params ?? {})) if (given[k] === "" || given[k] === null) delete given[k];
+      // What it does next is never refused: anything but "act" (left out, by an older prompt or a model that ignores it) is "wait".
+      const act = given.next === "act";
+      delete given.next;
       const parsed = sendInput(link.info, several, link.params).safeParse(raw);
       if (!parsed.success) return refused(`Not sent, fix and send again: ${parsed.error.message}`);
       const input = parsed.data as SendInput;
@@ -1547,7 +1562,8 @@ export class Conversation {
       this.sentThisTurn.add(input.text.trim());
       this.sentThisTurn.add(sent.text.trim());
       await this.acknowledged(channel);
-      return done(JSON.stringify({ delivered: true, channel, ...this.ownId(channel, result.receipt), ...(changed ? { sent: sentArgs(sent) } : {}) }));
+      const content = JSON.stringify({ delivered: true, channel, ...this.ownId(channel, result.receipt), ...(changed ? { sent: sentArgs(sent) } : {}), ...(act ? { next: ACT_NEXT } : {}) });
+      return { ...done(content), act };
     }
     if (call.name === EDIT || call.name === UNSEND) {
       const edit = call.name === EDIT;
@@ -2146,7 +2162,7 @@ export type TranscriptEntry =
   | { kind: "unsend"; channel: string; messageId: string; at: number }
   | { kind: "tool"; callId: string; tool: string; input: unknown; output: string; ok: boolean; at: number };
 
-const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "carousel", "confirm"]);
+const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "carousel", "confirm", "next"]);
 
 /**
  * The history as the person saw it: their messages (with their ids and channels), what the agent
