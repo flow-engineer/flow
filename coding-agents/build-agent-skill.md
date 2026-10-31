@@ -194,7 +194,10 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   without it gets exactly the prompt it always had. A person on a channel with it and one without
   gets each channel's own rule. The web app's own chat sets it for you (mcp-skill.md, "The web app").
 - `instructions` (on `customUI`, and in `whatsapp()`'s and `sms()`'s options) is your guidance for
-  the agent on that channel, in its prompt only while the person uses it. Data a param carries,
+  the agent on that channel, in its prompt only while the person uses it.
+- `tools` (on `customUI`, or `Channel.tools`) is a function returning tools of that UI's own, offered
+  only while the person is on that channel and read again every turn, so the list can change (the web
+  app's UI tools). Another channel never sees them, and one named like the agent's own tool is left out. Data a param carries,
   such as a link, comes from your tools' results: a tool that has a screen returns its link
   (`{ ..., app_link }`), and the agent only passes it on.
 - One person is one conversation across every channel they use. Channels are joined only by what

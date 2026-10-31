@@ -12,13 +12,59 @@
 
 import { commandLine, type CliConfig, type ToolInfo } from "../../cli/src/commands.ts";
 import { widgetFile } from "../../src/web-chat.ts";
-import { shapeOf } from "../../widget/src/app-fill.ts";
+import { tool, z, type Tool } from "../../src/index.ts";
 import type { McpIdentity } from "./server.ts";
 
 /**
  * Generative views are Flow's hosted service: on with its address (FLOW_APP_SERVICE_URL, which Flow's
  * hosting sets) and the agent's Flow key. Self-hosted, answers are Markdown and nothing is sent anywhere.
  */
+/** What the agent is told on the web app's channel when its answers are shown with UI tools. */
+export const UI_INSTRUCTIONS = [
+  "This is the brand's own web app. The person sees each tool call as it runs; you show the answer with a UI tool (ui_…).",
+  "First work out what they actually asked, then gather what you need. Then call exactly ONE ui_ tool with only the data that answers them, never every result you looked at. Fill its input from what you learned, in their words. Then reply in one short sentence; never repeat what the view shows, and never write tables.",
+  "When no ui_ tool fits, call ui_create with what to show (intent) and exactly that data. For a simple answer (a yes or no, one fact, a question back) show nothing: just reply.",
+].join("\n");
+
+/** The brand's UI tools from Flow's service, read again at most every 30 s, and ui_create. */
+const catalogs = new Map<string, { at: number; tools: Promise<Array<{ name: string; description: string; input: JsonSchema; template: string }>> }>();
+export function catalogOf(service: { url: string; key: string }, agent: string) {
+  let known = catalogs.get(agent);
+  if (!known || Date.now() - known.at > 30_000) {
+    // The service unreachable: keep the catalog read before (this request's own promise would wait on itself).
+    const before = known?.tools ?? Promise.resolve([]);
+    const tools = fetch(`${service.url}/v1/ui/catalog?${new URLSearchParams({ agent })}`, { headers: { authorization: `Bearer ${service.key}` }, signal: AbortSignal.timeout(10_000) })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`catalog ${r.status}`)))).then((b: { tools?: [] }) => b.tools ?? []).catch(() => before);
+    known = { at: Date.now(), tools: tools as never };
+    catalogs.set(agent, known);
+  }
+  return known.tools;
+}
+let latest: Array<{ name: string; description: string; input: JsonSchema; template: string }> = [];
+export function uiTools(service: { url: string; key: string }, agent: string): Tool[] {
+  void catalogOf(service, agent).then((tools) => { latest = tools; }, () => undefined);
+  const shown = { run: () => ({ shown: true }), signIn: "none" as const, hints: { readOnly: true, destructive: false, openWorld: false } };
+  return [
+    ...latest.slice(0, 24).map((t) => tool({ name: `ui_${t.name}`, description: t.description, input: zodOf(t.input) as z.ZodObject<Record<string, z.ZodType>>, ...shown })),
+    tool({ name: "ui_create", description: "Show the answer in a view made now, when no other ui_ tool fits: what to show, and exactly the data to show.", input: z.object({ intent: z.string().describe("What the view shows, in a few words"), data: z.record(z.string(), z.unknown()).describe("The data to show, and nothing else") }), ...shown }),
+  ];
+}
+
+type JsonSchema = { type?: string | string[]; enum?: unknown[]; description?: string; items?: JsonSchema; properties?: Record<string, JsonSchema>; required?: string[] };
+/** A UI tool's compact input (JSON Schema, from the curator) as a schema the agent validates against; loose where it is unsure. */
+function zodOf(schema: JsonSchema = {}): z.ZodType {
+  const type = [schema.type].flat().find((t) => t !== "null");
+  let value: z.ZodType;
+  if (schema.enum?.length && schema.enum.every((v) => typeof v === "string")) value = z.enum(schema.enum as [string, ...string[]]);
+  else if (type === "string") value = z.string();
+  else if (type === "number" || type === "integer") value = z.number();
+  else if (type === "boolean") value = z.boolean();
+  else if (type === "array") value = z.array(zodOf(schema.items));
+  else if (type === "object" || schema.properties) value = z.object(Object.fromEntries(Object.entries(schema.properties ?? {}).map(([k, v]) => [k, (schema.required ?? []).includes(k) ? zodOf(v) : zodOf(v).optional()]))).passthrough();
+  else value = z.unknown();
+  return schema.description ? value.describe(schema.description) : value;
+}
+
 export function appViewsOn(env: NodeJS.ProcessEnv = process.env): { url: string; key: string } | undefined {
   const url = env.FLOW_APP_SERVICE_URL?.trim(), key = env.FLOW_KEY?.trim();
   return url && key ? { url: url.replace(/\/$/, ""), key } : undefined;
@@ -150,9 +196,17 @@ export function appServer(options: McpAppOptions, server: { name: string; mcpPat
         const body = await request.json().catch(() => null) as Record<string, unknown> | null;
         if (!body) return Response.json({ error: "invalid_request" }, { status: 400 });
         if (url.pathname.endsWith("/view")) {
-          if (typeof body.tool !== "string" || body.data === undefined) return Response.json({ error: "invalid_request" }, { status: 400 });
-          const answer = await service("/v1/genui/template", { agent: server.name, tool: body.tool, shape: shapeOf(body.data), sample: body.data }).catch(() => null);
-          return answer?.ok ? Response.json(await answer.json()) : Response.json({ error: "no_view" }, { status: 502 });
+          // A UI tool the agent called: ui_create is made now by Flow's service; another is a catalog template the panel fills.
+          if (typeof body.ui !== "string" || !body.data || typeof body.data !== "object") return Response.json({ error: "invalid_request" }, { status: 400 });
+          if (body.ui === "ui_create") {
+            const { intent, data } = body.data as { intent?: unknown; data?: unknown };
+            const answer = await service("/v1/ui/create", { agent: server.name, intent, data, question: body.question }).catch(() => null);
+            return answer?.ok ? Response.json(await answer.json()) : Response.json({ error: "no_view" }, { status: 502 });
+          }
+          const found = (await catalogOf(views, server.name)).find((t) => `ui_${t.name}` === body.ui);
+          if (!found) return Response.json({ error: "no_view" }, { status: 404 });
+          void service("/v1/ui/used", { agent: server.name, name: found.name }).catch(() => null);
+          return Response.json({ template: found.template });
         }
         // Where a link the assistant gave led, for the brand's insights.
         if (typeof body.url !== "string") return Response.json({ error: "invalid_request" }, { status: 400 });

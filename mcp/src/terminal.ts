@@ -2,6 +2,7 @@
 // makes the person whoever auth.verify says; without one, a guest chats under the id its CLI keeps.
 import { customUI } from "../../src/channels.ts";
 import type { Agent } from "../../src/agent.ts";
+import type { Tool } from "../../src/tools.ts";
 import type { McpAuth } from "./server.ts";
 
 export interface TerminalServerOptions {
@@ -19,11 +20,13 @@ export interface TerminalServerOptions {
   traceChannel?: string;
   /** The client draws each tool call as it runs (ChannelInfo.showsTools): the agent then answers once, with no acknowledgement first. Default off. */
   showsTools?: boolean;
+  /** Tools of this client's own, offered only on its channel and read every turn (Channel.tools). */
+  tools?: () => Tool[];
 }
 
 export function terminalServer(options: TerminalServerOptions) {
   const path = options.path ?? "/agent/terminal";
-  const channel = { ...customUI(options.channel ?? "terminal", { sendMessage: async () => { throw new Error("No terminal request is listening"); }, ...(options.instructions ? { instructions: options.instructions } : {}), ...(options.showsTools ? { info: { showsTools: true } } : {}) }), traceChannel: options.traceChannel ?? "cli" };
+  const channel = { ...customUI(options.channel ?? "terminal", { sendMessage: async () => { throw new Error("No terminal request is listening"); }, ...(options.instructions ? { instructions: options.instructions } : {}), ...(options.showsTools ? { info: { showsTools: true } } : {}), ...(options.tools ? { tools: options.tools } : {}) }), traceChannel: options.traceChannel ?? "cli" };
   let inFlight = 0;
   const pending = new Map<string, Promise<unknown>>();
   return {

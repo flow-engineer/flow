@@ -32,7 +32,7 @@ import { serveNode } from "../../src/http.ts";
 import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
 import { FORMATTED, render, toolContext, type CredentialProvider, type McpClientKind, type Tool, type ToolContext } from "../../src/tools.ts";
 import { terminalServer } from "./terminal.ts";
-import { appServer, appViewsOn, type McpAppOptions } from "./app.ts";
+import { appServer, appViewsOn, uiTools, UI_INSTRUCTIONS, type McpAppOptions } from "./app.ts";
 import { describe, FULL_CATALOG_META, MCP_CLIENT_KINDS, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
 
 export interface McpAuth {
@@ -357,10 +357,8 @@ function appChatOf(options: McpServerOptions, terminal: ReturnType<typeof termin
     traceChannel: "web",
     // The panel draws every tool call as it runs, so the agent answers once instead of acknowledging first.
     showsTools: true,
-    ...(views ? { instructions: [
-      "This is the brand's own web app, which draws answers as views. The result of each tool you call is drawn for the person right under your reply: its numbers, lists and tables. So reply in one or two short sentences: what it means, or what to do next. Never repeat what a view shows, and never write tables. Link pages as Markdown links.",
-      "Never put a tool's result in a view block: the app already draws it, and it would show twice. An answer with structure that is not a tool's result (what you can do, options, steps, a comparison) is drawn too: put its content as data in a block, then one sentence. The block is ```view <kind>, then JSON, then ```. kind is a short name for this kind of answer (capabilities, options, steps, comparison); the same kind always has the same keys. Short values, no Markdown in them; a follow-up the person can send goes in a field named ask, a page in a field named href.",
-    ].join("\n") } : {}),
+    // On Flow's hosting the answer is shown with the brand's UI tools (uiTools), picked by the agent.
+    ...(views ? { instructions: UI_INSTRUCTIONS, tools: () => uiTools(views, options.name) } : {}),
   });
   if (typeof given !== "function") given.addChannel(chat.channel);
   return chat;

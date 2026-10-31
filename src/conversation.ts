@@ -143,6 +143,8 @@ export interface ChannelLink {
   params?: Record<string, z.ZodType>;
   /** The agent author's guidance for this channel, in the system prompt while it is in use. */
   instructions?: string;
+  /** The channel's own tools (Channel.tools), offered while it is in use. */
+  tools?: () => Tool[];
   address: string;
   deliver: Deliver;
   lastMessageAt: number | null;
@@ -298,6 +300,8 @@ export class Conversation {
   readonly history: ChatMessage[] = [];
   private readonly settings: ConversationSettings;
   private readonly channels = new Map<string, ChannelLink>();
+  /** The tools the channels in use offered this turn (ChannelLink.tools). */
+  private channelTools = new Map<string, Tool>();
   private pending: Pending[] = [];
   private notes: Note[] = [];
   /** A tool's result is in the history and no message has gone out since: from the background, or returned to a response. */
@@ -1333,7 +1337,9 @@ export class Conversation {
       const page = this.pageNow();
       const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, wakeUps, elsewhere, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), page ? pageLine(page) : "", context].filter(Boolean).join("\n\n");
       const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
-      const specs = [...ownSpecs, ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk)];
+      // The channels' own tools, read this turn (a UI's catalog can grow); never one named like the agent's.
+      this.channelTools = new Map([...this.channels.values()].flatMap((c) => c.tools?.() ?? []).filter((t) => !this.settings.tools.has(t.name) && !this.builtins.has(t.name)).map((t) => [t.name, t]));
+      const specs = [...ownSpecs, ...[...this.channelTools.values()].map(toSpec), ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk)];
       const abort = new AbortController();
       if (restarts < this.settings.maxRestarts) this.stepAbort = abort;
       const callStarted = Date.now();
@@ -1983,7 +1989,7 @@ export class Conversation {
 
   /** Start one tool call; the model's input is checked first (a refusal is the call's result). */
   private start(call: ToolCall): Running | string {
-    const tool = this.builtins.get(call.name) ?? this.settings.tools.get(call.name);
+    const tool = this.builtins.get(call.name) ?? this.settings.tools.get(call.name) ?? this.channelTools.get(call.name);
     if (!tool) return `There is no tool named ${call.name}.`;
     let raw: unknown;
     try {

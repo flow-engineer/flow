@@ -22,7 +22,7 @@ type Tokens = { access_token: string; refresh_token?: string; expires_in: number
 type SignInRequest = { nonce: string; returnTo: string; clientId: string; resource: string };
 /** One tool the agent ran: ok once it ended; `later` when it went on in the background. */
 type Step = { tool: string; ok?: boolean; later?: boolean; input?: unknown; command?: string };
-type Item = { role: "me"; text: string } | { role: "agent"; text: string } | { role: "error"; text: string } | { role: "steps"; steps: Step[] } | { role: "view"; tool: string; template: string; data: unknown };
+type Item = { role: "me"; text: string } | { role: "agent"; text: string } | { role: "error"; text: string } | { role: "steps"; steps: Step[] } | { role: "view"; tool: string; data: unknown; template?: string; html?: string };
 
 const settings = JSON.parse(document.getElementById("flow-app")!.textContent!) as Settings;
 /** Tools that are the agent's own housekeeping, not the person's work. */
@@ -262,25 +262,22 @@ function drawItem(item: Item): HTMLElement {
   return drawSteps(item.steps);
 }
 /**
- * A view for data (a tool's result, or an answer's view block): its template from Flow's service, drawn
- * where `place` puts it, kept after `after` in the thread so it comes back with it.
+ * The view a UI tool shows: a catalog tool's template from the app, filled here with the agent's input,
+ * or for ui_create a view Flow's service made now for this answer. Kept in the thread with the chat.
  */
-async function drawViewFor(tool: string, output: unknown, place: (node: HTMLElement) => void, moved: (node: HTMLElement, old: HTMLElement) => void, after: Item | undefined) {
-  let data: unknown;
-  try { data = typeof output === "string" ? JSON.parse(output) : output; } catch { return; }
-  if (!data || typeof data !== "object") return;
-  const placeholder = h("div", { class: "view loading" }, h("span", { class: "spinner small" }), h("span", { textContent: `Drawing ${tool.startsWith("view:") ? tool.slice(5) : titleOf(tool)}…` }));
+async function drawViewFor(ui: string, input: unknown, question: string, place: (node: HTMLElement) => void) {
+  if (!input || typeof input !== "object") return;
+  const placeholder = h("div", { class: "view loading" }, h("span", { class: "spinner small" }), h("span", { textContent: ui === "ui_create" ? "Designing a view…" : "Drawing…" }));
   place(placeholder);
   thread.scrollTop = thread.scrollHeight;
   try {
-    const response = await authed(`${location.origin}/app/view`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ tool, data }) });
+    const response = await authed(`${location.origin}/app/view`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ui, data: input, question }) });
     if (!response.ok) throw new Error();
-    const { template } = await response.json() as { template: string };
-    const item: Item = { role: "view", tool, template, data };
-    items.splice(after ? items.indexOf(after) + 1 : items.length, 0, item);
+    const { template, html } = await response.json() as { template?: string; html?: string };
+    const item: Item = { role: "view", tool: ui, data: input, ...(template ? { template } : {}), ...(html ? { html } : {}) };
+    items.push(item);
     const node = drawView(item);
     placeholder.replaceWith(node);
-    moved(node, placeholder);
     thread.scrollTop = thread.scrollHeight;
     save();
   } catch { placeholder.remove(); }
@@ -292,7 +289,7 @@ function drawView(item: Item & { role: "view" }): HTMLElement {
   frame.setAttribute("sandbox", "allow-same-origin");
   const font = settings.theme.fontUrl ? `<link rel="stylesheet" href="${settings.theme.fontUrl.replace(/"/g, "&quot;")}">` : "";
   let body: string;
-  try { body = fill(item.template, item.data); } catch { body = ""; }
+  try { body = item.html ?? fill(item.template ?? "", item.data); } catch { body = ""; }
   frame.srcdoc = `<!doctype html><html><head><meta charset="utf-8">${font}<style>html,body{margin:0;background:transparent;font-family:${(settings.font ?? "system-ui").replace(/[;{}<>]/g, "")};color:#111827;-webkit-font-smoothing:antialiased}a{cursor:pointer}</style></head><body>${body}</body></html>`;
   frame.onload = () => {
     const doc = frame.contentDocument;
@@ -389,9 +386,6 @@ async function ask(text: string, again = false) {
   const calls = new Map<string, { step: Step; group: Group }>();
   const redraw = (group: Group) => { const node = drawSteps(group.item.steps); group.node.replaceWith(node); group.node = node; };
   /** The tool's result drawn under its steps, by its view template from Flow's service. */
-  /** A tool's result is drawn in this turn: then the agent's own view blocks would only draw it again. */
-  let drewTool = false;
-  const viewFor = (tool: string, output: unknown, group: Group) => (drewTool = true, drawViewFor(tool, output, (node) => { (group.tail ?? group.node).after(node); group.tail = node; }, (node, old) => { if (group.tail === old) group.tail = node; }, group.item));
   try {
     const response = await authed(settings.terminal, { method: "POST", headers: { "content-type": "application/json", accept: "application/x-ndjson" }, body: JSON.stringify({ text, ...(conversationId ? { conversationId } : {}) }) });
     if (response.status === 401) throw new Error(`Sign in to ${settings.title} on this site to chat.`);
@@ -408,6 +402,13 @@ async function ask(text: string, again = false) {
       for (const line of lines.filter(Boolean)) {
         const event = JSON.parse(line) as { type: string; text?: string; message?: string; event?: { type: string; callId?: string; tool?: string; ok?: boolean; input?: unknown }; result?: { conversationId: string } };
         const activity = event.event;
+        // A UI tool is the agent showing its answer: drawn as a view where it is, never a step.
+        if (event.type === "activity" && activity?.type === "tool.start" && activity.tool?.startsWith("ui_") && settings.views) {
+          open = null;
+          void drawViewFor(activity.tool, activity.input, text, (node) => thread.insertBefore(node, typing));
+          continue;
+        }
+        if (event.type === "activity" && activity?.tool?.startsWith("ui_")) continue;
         if (event.type === "activity" && activity?.tool && activity.callId && !QUIET.has(activity.tool)) {
           if (activity.type === "tool.start") {
             const step: Step = { tool: activity.tool, input: activity.input };
@@ -427,30 +428,14 @@ async function ask(text: string, again = false) {
           if (call && (activity.type === "tool.end" || activity.type === "task.done")) {
             call.step.ok = activity.ok !== false;
             redraw(call.group);
-            if (settings.views && call.step.ok) void viewFor(call.step.tool, (activity as { output?: unknown }).output, call.group);
           }
           if (call && activity.type === "tool.detached") { call.step.later = true; redraw(call.group); }
         }
         if (event.type === "reply" && event.text) {
           open = null; // Tools that start after a reply are a new group.
-          // A ```view <kind> block is an answer's data, drawn as a view; the rest is the reply's words.
-          const blocks: Array<{ kind: string; data: unknown }> = [];
-          const words = event.text.replace(/```view[ \t]+([\w-]+)[ \t]*\n([\s\S]*?)```/g, (_all, kind: string, json: string) => {
-            try { blocks.push({ kind, data: JSON.parse(json) }); return ""; } catch { return _all; }
-          }).trim();
-          let anchor: HTMLElement = typing;
-          if (words) {
-            const item: Item = { role: "agent", text: words };
-            items.push(item);
-            const node = drawItem(item);
-            thread.insertBefore(node, typing);
-            anchor = node;
-          }
-          for (const block of blocks) {
-            if (!settings.views || drewTool) continue;
-            const after = anchor;
-            void drawViewFor(`view:${block.kind}`, block.data, (node) => { after === typing ? thread.insertBefore(node, typing) : after.after(node); anchor = node; }, () => undefined, items[items.length - 1]);
-          }
+          const item: Item = { role: "agent", text: event.text };
+          items.push(item);
+          thread.insertBefore(drawItem(item), typing);
         }
         if (event.type === "done" && event.result) conversationId = event.result.conversationId;
         if (event.type === "error") throw new Error(event.message ?? "The assistant could not finish.");

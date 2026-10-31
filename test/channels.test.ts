@@ -3,10 +3,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { SMS_KEYWORDS, US_CARRIER_KEYWORDS, customUI, keywordOf, sms, whatsapp } from "../src/channels.ts";
 import { talkInstructions } from "../src/talk.ts";
+import { createAgent, tool, type Tool } from "../src/index.ts";
+import { z } from "zod";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ChannelInfo } from "../src/types.ts";
 import { IMESSAGE, TELEGRAM } from "../flow-messaging/src/index.ts";
 import { channelOf, platform } from "../simulators/src/platforms.ts";
-import { SMS, WHATSAPP, call, harness, respond, say, users } from "./helpers.ts";
+import { SMS, WHATSAPP, call, harness, respond, say, scriptedModel, users } from "./helpers.ts";
 
 test("every chat channel's prompt says how messages read; only channels with buttons or lists say when to offer them", () => {
   const prompt = (name: string, info: ChannelInfo) => talkInstructions([{ name, info }], { shareUpdates: true });
@@ -55,6 +60,32 @@ test("only a channel that shows its tool calls drops the acknowledgement and pro
   const both = talkInstructions([{ name: "whatsapp", info: whatsapp({ sendMessage: async () => {} }).info }, { name: "app", info: shows }], { shareUpdates: true });
   assert.match(both, /on every channel they are waiting on: your answer, or, if you need tools first, an acknowledgement/);
   assert.match(both, /Except on app: there they see each tool call as it runs/);
+});
+
+// A UI's own tools (the web app's views) belong to that UI: offered only while the person is on its
+// channel, read every turn so the list can grow, and run there; another channel never sees them.
+test("a channel's own tools are offered only on that channel, read every turn, and run there", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "flow-"));
+  writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
+  const scripted = scriptedModel();
+  let ran = 0;
+  const catalog: Tool[] = [tool({ name: "ui_one", description: "Shows one thing.", input: z.object({ title: z.string() }), signIn: "none", run: () => (ran++, { shown: true }) })];
+  const app = customUI("app", { sendMessage: async () => {}, info: { showsTools: true }, tools: () => catalog });
+  const other = customUI("other", { sendMessage: async () => {} });
+  const agent = createAgent({ dir, model: scripted.model, channels: [app, other], debounceMs: 0 });
+  const names = (n: number) => scripted.nextCall(n).then((c) => c.request.tools.map((t) => t.name));
+  void agent.request({ channel: "app", guest: "guest-app-0000000000", text: "show it" });
+  assert.ok((await names(0)).includes("ui_one"));
+  (await scripted.nextCall(0)).answer(respond(call("ui_one", { title: "x" })));
+  (await scripted.nextCall(1)).answer(respond(call("send_app", { text: "Here it is." })));
+  assert.equal(ran, 1, "the channel's tool ran");
+  catalog.push(tool({ name: "ui_two", description: "Shows another.", input: z.object({}), signIn: "none", run: () => ({}) }));
+  void agent.request({ channel: "other", guest: "guest-other-00000000", text: "show it" });
+  const otherTools = await names(2);
+  assert.ok(!otherTools.includes("ui_one") && !otherTools.includes("ui_two"), "another channel never sees them");
+  (await scripted.nextCall(2)).answer(respond(call("send_other", { text: "Hi." })));
+  void agent.request({ channel: "app", guest: "guest-app-0000000000", text: "and the other" });
+  assert.ok((await names(3)).includes("ui_two"), "read afresh every turn");
 });
 
 test("a channel without reactions or status offers only its send tool", async () => {

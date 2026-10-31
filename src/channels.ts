@@ -10,6 +10,7 @@
 //   sms(new MySms(keys))
 //   customUI("app", new MyApp())                         your own web or mobile UI, with your params
 
+import type { Tool } from "./tools.ts";
 import type { z } from "zod";
 import type { TranscriptEntry } from "./conversation.ts";
 import type { StoreApi } from "./store.ts";
@@ -31,6 +32,12 @@ export interface Channel {
   params?: Record<string, z.ZodType>;
   /** Your own guidance for the agent on this channel, added to its prompt while the person uses it. */
   instructions?: string;
+  /**
+   * Tools offered only while the person is on this channel, read afresh every turn so the list can
+   * change: a UI's own tools (the web app's views), never offered on other channels. A name the
+   * agent's own tools use is left out.
+   */
+  tools?: () => Tool[];
   /** Opt-out keywords this channel honours (SMS and WhatsApp have them by default). */
   keywords?: Keywords;
   /** Resolves once the channel has the outbound (the platform accepted it), optionally with a receipt; see Deliver. */
@@ -170,6 +177,8 @@ export interface CustomUIProvider {
   params?: Record<string, z.ZodType>;
   /** Your own guidance for the agent on this channel, such as how to use your params. */
   instructions?: string;
+  /** Tools of this UI's own, offered only on this channel and read every turn (Channel.tools). */
+  tools?: () => Tool[];
   /** Resolves once your UI has the message (stored or shown); rejects when it could not take it. */
   sendMessage(to: string, message: Message & Record<string, unknown>): Promise<void | SendReceipt>;
   /** A carousel, on a UI whose info declares carousels; without it the cards go one by one through sendMessage. */
@@ -304,6 +313,7 @@ export function customUI(name: string, provider: CustomUIProvider): Channel {
     info,
     params: provider.params,
     instructions: provider.instructions,
+    ...(provider.tools ? { tools: provider.tools } : {}),
     send: (to, outbound) => {
       switch (outbound.type) {
         case "message":

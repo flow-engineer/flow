@@ -507,11 +507,16 @@ so the person's token never reaches the site's page. Its chat is its own channel
   one is recorded for the brand's insights. Give the agent a skill listing the site's real page URLs
   (which results have a page, which are found from a list page, which have none), so it only links
   pages that exist, and test that list against the live site.
-- **Generative views are Flow's hosted service only.** On Flow's hosting (`FLOW_APP_SERVICE_URL` and
-  the agent's `FLOW_KEY`), each tool's result, and an answer the agent gives as a ```view <kind>
-  block of JSON, is drawn as a view: a template made once per tool and data shape from the brand's
-  design kit, cached by Flow, and filled in the browser. Self-hosted, answers are Markdown and nothing
-  is sent anywhere; everything else works the same.
+- **Generative UI is Flow's hosted service only.** On Flow's hosting (`FLOW_APP_SERVICE_URL` and the
+  agent's `FLOW_KEY`) the agent shows its answers with **UI tools**, offered only on the web app's
+  channel (`Channel.tools`): at most 25 `ui_<name>` tools from the brand's catalog, each with a short
+  description of what it shows and when, and a compact input the agent fills in its own words (never a
+  copy of a tool's response), plus `ui_create({ intent, data })` for a view made on the spot. The agent
+  picks one view for what the person asked; nothing is drawn on its own. After each made view, Flow's
+  curator decides whether it was a one-off, an existing UI tool would have done, or a new general UI
+  tool is worth having; a new one is designed as a template, tested with real and edge-case data at
+  several widths from screenshots, and added to the catalog. Self-hosted, there are no UI tools: the
+  agent answers in Markdown and nothing is sent anywhere; everything else works the same.
 - Every generated piece stays the team's: `theme.css` styles the panel's stable classes, and the
   panel's routes (`/app`, `/app/embed.js`, `/app/chat`, `/app/view`, `/app/link`, `/app/command`) are
   listed in `paths`.

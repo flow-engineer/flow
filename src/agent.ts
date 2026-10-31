@@ -654,7 +654,7 @@ export class Agent {
       this.via.set(lock, via);
       if (via === "playground") this.playgroundVisitors.set(lock, { key: input.key });
       this.rows.set(row.id, row);
-      this.open(row.id).link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: input.address, deliver: this.deliverer(adapter, input.address, row.id), lastMessageAt: identity.lastMessageAt });
+      this.open(row.id).link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, tools: adapter.tools, address: input.address, deliver: this.deliverer(adapter, input.address, row.id), lastMessageAt: identity.lastMessageAt });
       return { conversationId: row.id };
     });
     this.arriving.set(lock, work.catch(() => undefined));
@@ -868,7 +868,7 @@ export class Agent {
     this.via.set(viaKey(input.channel, input.from), input.via);
     const conversation = this.open(conversationId);
     const deliver = this.deliverer(adapter, input.from, conversationId);
-    conversation.link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: input.from, deliver, lastMessageAt: null });
+    conversation.link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, tools: adapter.tools, address: input.from, deliver, lastMessageAt: null });
     const text = typeof input.message === "string" ? input.message : input.message.text;
     const kind = keywordIn(adapter.keywords, input.message);
     const fixed = this.intercepted(conversationId, text, { keyword: kind, channel: input.channel });
@@ -1278,7 +1278,7 @@ export class Agent {
     const adapter = this.channelOf(to.channel);
     const identity = await this.conversationFor(adapter, to.channel, to.address);
     const conversation = this.open(identity.conversationId);
-    conversation.link({ name: to.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: to.address, deliver: this.deliverer(adapter, to.address, identity.conversationId), lastMessageAt: identity.lastMessageAt });
+    conversation.link({ name: to.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, tools: adapter.tools, address: to.address, deliver: this.deliverer(adapter, to.address, identity.conversationId), lastMessageAt: identity.lastMessageAt });
     return { conversationId: identity.conversationId };
   }
 
@@ -1644,7 +1644,7 @@ export class Agent {
       const adapter = this.channelsByName.get(i.channel);
       if (!adapter) return [];
       this.via.set(viaKey(i.channel, i.address), i.via);
-      return [{ name: i.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: i.address, deliver: this.deliverer(adapter, i.address, conversationId), lastMessageAt: i.lastMessageAt }];
+      return [{ name: i.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, tools: adapter.tools, address: i.address, deliver: this.deliverer(adapter, i.address, conversationId), lastMessageAt: i.lastMessageAt }];
     });
   }
 
