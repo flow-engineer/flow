@@ -89,7 +89,7 @@ Exit status:
 /** A run's record as the cloud answers it; only what the text view reads. */
 interface RunRecord {
   runId?: string;
-  scenario?: { id?: string; path?: string; title?: string };
+  scenario?: { id?: string; path?: string; title?: string; about?: string };
   run?: number;
   channel?: string;
   startedAt?: number;
@@ -285,6 +285,7 @@ function render(record: RunRecord, runId: string): string[] {
   const verdict = error || s.ended === "run_failed" ? "ERROR" : passed ? "PASS" : s.label === "flaky" ? "FLAKY" : "FAIL";
   const where = record.scenario?.path ?? record.scenario?.id ?? "?";
   out.push(`${verdict}  ${where}${record.scenario?.title ? ` (${record.scenario.title})` : ""}`);
+  if (record.scenario?.about) out.push(...indent(record.scenario.about, "  "));
   out.push(`  channel ${record.channel ?? "?"}, run ${record.run ?? "?"}, ${record.runId ?? runId}; ended: ${s.ended ?? "?"}${s.turns === undefined ? "" : `, ${s.turns} turn${s.turns === 1 ? "" : "s"}`}`);
   if (error) out.push(`  error: ${typeof error === "string" ? error : brief(error)} (the cloud could not play or judge this run; it says nothing about the agent)`);
   if (checks.length) {

@@ -2,6 +2,29 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.15.0 (2026-10-31)
+
+### Changes
+
+- **A scenario's `title` is a name of at most 45 characters** (counted in characters, not bytes),
+  shown on one line in Flow's dashboard and in `flow show`. A longer title fails the check before
+  anything is sent, at its line: `tests/scenarios/x.yaml:2: title: 98 characters, at most 45: a title
+  is a name, not the test. Move the detail to about:`.
+- **`about:`**, a new optional string in a scenario: what it tests, in a sentence or two. The test
+  cloud passes it on: the dashboard shows it under the title and `flow show` under the run's heading.
+- The café examples, the HTTP agent examples and the test skill use short titles with `about`; the
+  skill says how to name a scenario, with examples.
+
+### Migration notes
+
+- **Scenario titles over 45 characters are refused.** `flow test` exits 1 with `title: N characters,
+  at most 45` for each such file, and nothing is sent. To move: shorten each title to a name and put
+  the rest in `about:`. Before:
+  `title: Orders a latte, corrects the milk mid-thought, confirms`; after:
+  `title: Milk corrected to oat` and
+  `about: Orders a latte, corrects the milk mid-thought, confirms.` An `about:` line is safe on
+  0.14.x too: those versions accept it and leave it out.
+
 ## 0.14.8 (2026-10-30)
 
 ### Changes

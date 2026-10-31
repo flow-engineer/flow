@@ -2,7 +2,8 @@
 # its HTTP endpoint: its tools run for real, so there is no world for simulated tools, and what the
 # outcome check said is a judge item.
 id: latte-correction
-title: Orders a latte, corrects the milk mid-thought, confirms
+title: Milk corrected to oat
+about: Orders a large latte, corrects the milk mid-thought, then confirms.
 channels: [whatsapp]
 
 person:

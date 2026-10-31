@@ -18,7 +18,8 @@ model acting as the person, with the agent's tools played by a model from `tests
 
 ```yaml
 id: latte-correction
-title: Orders a latte, corrects the milk mid-thought, confirms
+title: Milk corrected to oat
+about: Orders a large latte, corrects the milk mid-thought, then confirms.
 channels: [whatsapp, sms]   # runs once on each, with a result for each
 
 person:
@@ -48,6 +49,19 @@ expect:
 ```
 
 ## The parts
+
+- `title`: a short name for the scenario, at most 45 characters, shown on one line in lists and
+  reports. **A title is a name, not the test**: the situation, the steps and what must happen go in
+  `about` (a sentence or two, shown under the title), `opening`, `world` and `expect`. A longer
+  title fails the check before anything is sent, naming the file, the title's length and the fix.
+
+  | Bad (the whole test) | Good (a name) |
+  |---|---|
+  | Orders a latte, corrects the milk mid-thought, then confirms the order | Milk corrected to oat |
+  | Asks for a table for four at 8pm when the restaurant is fully booked | Table when fully booked |
+  | Says the order never arrived, gets a refund offered only after the order is looked up | Missing order refund |
+  | Writes in Spanish, asks for opening hours, the answer comes back in Spanish | Spanish opening hours |
+  | Replies "2" to a numbered list of three sizes, and gets the medium | Size picked by number |
 
 - `channels`: one or more of sms, whatsapp, imessage, telegram and web; each is a run of its own.
   The run uses that simulator's real rules (SMS has no buttons or reactions; WhatsApp has both).

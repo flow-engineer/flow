@@ -206,9 +206,21 @@ const historyItem = z.union(
   { error: "{ person: <what they said> } or { agent: <what it said> }" },
 );
 
+/** A title's most characters (code points, not bytes): a name a list shows on one line. */
+export const TITLE_MAX = 45;
+
 const scenarioSchema = z.object({
   id: z.string().min(1),
-  title: z.string().optional(),
+  /** A short name for the scenario, such as "Milk corrected to oat"; the test itself is in `about` and the rest. */
+  title: z
+    .string()
+    .superRefine((title, ctx) => {
+      const length = [...title].length;
+      if (length > TITLE_MAX) ctx.addIssue({ code: "custom", message: `${length} characters, at most ${TITLE_MAX}: a title is a name, not the test. Move the detail to about:` });
+    })
+    .optional(),
+  /** What the scenario tests, in a sentence or two: shown under the title. */
+  about: z.string().optional(),
   /** Every platform it runs on; each is a run of its own, with its own result. */
   channels: z.array(z.enum(["sms", "whatsapp", "imessage", "telegram", "web"])).min(1),
   /** The IANA time zone of the test's clock; UTC when left out. */

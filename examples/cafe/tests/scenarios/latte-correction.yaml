@@ -1,6 +1,7 @@
 # A spec: one situation to put the agent in, and what has to be true at the end.
 id: latte-correction
-title: Orders a latte, corrects the milk mid-thought, confirms
+title: Milk corrected to oat   # a short name, at most 45 characters
+about: Orders a large latte, corrects the milk mid-thought, then confirms.   # what it tests
 channels: [whatsapp]         # each platform it runs on, with that simulator's rules
 
 person:                      # played by a model that sees only what a person would see
