@@ -2,6 +2,17 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.15.1 (2026-10-31)
+
+### Changes
+
+- The MCP and CLI skill's `brand.name` example and the sign-in page's doc comments use a generic
+  Acme example.
+
+### Migration notes
+
+None.
+
 ## 0.15.0 (2026-10-31)
 
 ### Changes
@@ -596,7 +607,7 @@ None.
   question. `CliIO` gains optional `choose` (the menu; omitted asks with `confirm`) and `columns`.
 - **One brand for the whole CLI: `defineCli({ brand: { name, logo, accent } })`.** Set once, read
   by the chat, the welcome banner and the sign-in page. `name` is how people see it written
-  (default the command's name): "Welcome to Olostep", the chat's title, "Olostep is ready" on the
+  (default the command's name): "Welcome to Acme", the chat's title, "Acme is ready" on the
   sign-in page and the client name a sign-in screen shows, while commands keep the command's name; `logo` an https or `data:image` URL, `accent` a six-digit hex color.
   `chat.accent` keeps working as the older name for `brand.accent`. `flow check` refuses an accent
   that is not a six-digit hex color and a logo that is not https or `data:image`.
