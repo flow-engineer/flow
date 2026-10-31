@@ -206,9 +206,9 @@ export interface Brand {
 export interface SignInPage {
   status: "signed-in" | "failed";
   brand: Brand & { name: string };
-  /** The command's name ("olostep"), to say where to go back to. */
+  /** The command's name ("acme"), to say where to go back to. */
   cli: string;
-  /** How to sign in from the terminal ("olostep login"), to say how to try again. */
+  /** How to sign in from the terminal ("acme login"), to say how to try again. */
   command: string;
   message: string;
 }

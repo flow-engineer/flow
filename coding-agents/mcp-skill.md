@@ -234,7 +234,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
   so `this.cli.call` still reaches them; `flow check` refuses a name the server has no tool for.
 - `brand: { name, logo, accent }` is set once and read everywhere the CLI shows the brand: the chat,
   the welcome banner and the browser page a sign-in ends on. `name` is how people see it written
-  (default the command's name): "Welcome to Olostep", the chat's title, "Olostep is ready" on the
+  (default the command's name): "Welcome to Acme", the chat's title, "Acme is ready" on the
   sign-in page and the client name a sign-in screen shows, while commands keep the command's name; `logo` an https or `data:image` URL, `accent` a six-digit hex color
   (`chat.accent` is its older name and still works); `flow check` refuses a bad color or logo.
 - `acme login` ends on a branded page in the browser: the logo (else the name's initial), the
