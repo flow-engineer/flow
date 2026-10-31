@@ -20,6 +20,7 @@ model acting as the person, with the agent's tools played by a model from `tests
 id: latte-correction
 title: Milk corrected to oat
 about: Orders a large latte, corrects the milk mid-thought, then confirms.
+theme: Ordering
 channels: [whatsapp, sms]   # runs once on each, with a result for each
 
 person:
@@ -62,6 +63,10 @@ expect:
   | Says the order never arrived, gets a refund offered only after the order is looked up | Missing order refund |
   | Writes in Spanish, asks for opening hours, the answer comes back in Spanish | Spanish opening hours |
   | Replies "2" to a numbered list of three sizes, and gets the medium | Size picked by number |
+
+- `theme`: the area of the agent the scenario tests, in a word or two (at most 30 characters):
+  Ordering, Bookings, Refunds, Menu questions. Group scenarios by theme: 3 to 10 themes per agent,
+  each scenario in one, the same spelling every time. Flow's dashboard groups scenarios by it.
 
 - `channels`: one or more of sms, whatsapp, imessage, telegram and web; each is a run of its own.
   The run uses that simulator's real rules (SMS has no buttons or reactions; WhatsApp has both).

@@ -1,6 +1,7 @@
 id: order-fails
 title: Point of sale down
 about: The point of sale is down when the order is placed.
+theme: Ordering
 channels: [sms]
 
 person:

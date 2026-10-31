@@ -3,6 +3,7 @@
 id: reads-like-a-text
 title: Three questions in one message
 about: Asks three things at once, about a menu kept under point-of-sale titles.
+theme: Menu questions
 channels: [whatsapp]
 
 person:
