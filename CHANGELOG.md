@@ -2,6 +2,17 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.15.1 (2026-10-31)
+
+### Changes
+
+- The MCP and CLI skill's `brand.name` example and the sign-in page's doc comments use a generic
+  Acme example.
+
+### Migration notes
+
+None.
+
 ## 0.15.0 (2026-10-31)
 
 ### Changes
