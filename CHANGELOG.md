@@ -2,6 +2,33 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.15.0 (2026-10-31)
+
+### Changes
+
+- **A scenario's `title` is a name of at most 45 characters** (counted in characters, not bytes),
+  shown on one line in Flow's dashboard and in `flow show`. A longer title fails the check before
+  anything is sent, at its line: `tests/scenarios/x.yaml:2: title: 98 characters, at most 45: a title
+  is a name, not the test. Move the detail to about:`.
+- **`about:`**, a new optional string in a scenario: what it tests, in a sentence or two. The test
+  cloud passes it on: the dashboard shows it under the title and `flow show` under the run's heading.
+- **`theme:`**, a new optional string in a scenario: the area of the agent it tests, in a word or two
+  (`theme: Ordering`), at most 30 characters, refused the same way as a long title. The test cloud
+  passes it on for the dashboard to group scenarios by, and `flow show` prints it after the title.
+- The café examples, the HTTP agent examples and the test skill use short titles with `about` (and
+  the café's a `theme`); the skill says how to name a scenario, with examples, and to group scenarios
+  by theme, 3 to 10 themes per agent.
+
+### Migration notes
+
+- **Scenario titles over 45 characters are refused.** `flow test` exits 1 with `title: N characters,
+  at most 45` for each such file, and nothing is sent. To move: shorten each title to a name and put
+  the rest in `about:`. Before:
+  `title: Orders a latte, corrects the milk mid-thought, confirms`; after:
+  `title: Milk corrected to oat` and
+  `about: Orders a latte, corrects the milk mid-thought, confirms.` `about:` and `theme:` lines are
+  safe on 0.14.x too: those versions accept them and leave them out.
+
 ## 0.14.8 (2026-10-30)
 
 ### Changes

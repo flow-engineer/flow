@@ -691,11 +691,17 @@ test("test files: old ones parse as before, the clock, calls and never parse, an
   for (const now of ["2026-10-16T09:00:30Z", "2026-10-16T09:00-04:00"]) assert.equal(parseScenario(scenario(`now: ${now}\n`)).now, now);
   // A run that starts from an earlier conversation: what each side said, oldest first.
   assert.deepEqual(parseScenario(scenario("history:\n  - person: Book Friday\n  - agent: Done, {{now + 1d | weekday}}.\n")).history, [{ person: "Book Friday" }, { agent: "Done, {{now + 1d | weekday}}." }]);
+  // A title is a short name, counted in characters, not bytes; the test's detail goes in about.
+  // A theme groups scenarios by the area they test: a word or two, at most 30 characters.
+  const named = parseScenario(scenario(`title: Café order, milk to oat ${"é".repeat(21)}\nabout: Orders a latte, corrects the milk mid-thought, confirms.\ntheme: Ordering\n`));
+  assert.deepEqual([[...named.title!].length, named.about, named.theme], [45, "Orders a latte, corrects the milk mid-thought, confirms.", "Ordering"]);
   // The café example, as shipped, is valid.
   for (const file of loadSuite(fileURLToPath(new URL("../examples/cafe/tests", import.meta.url)))) (file.path.startsWith("scenarios/") ? parseScenario : parseToolFile)(file);
 
   const placeholder = (text: string) => `unknown placeholder ${text}: write it like {{now + 3d}}, {{now - 2h | time}} or {{now + 1w @ 10:00 | date}}`;
   const mistakes: Array<[string, string]> = [
+    ["title: Orders a latte, corrects the milk mid-thought, confirms", "scenarios/x.yaml:9: title: 55 characters, at most 45: a title is a name, not the test. Move the detail to about:"],
+    ["theme: Ordering, milk changes and confirmations", "scenarios/x.yaml:9: theme: 40 characters, at most 30: a theme is the area of the agent the scenario tests, in a word or two, such as Ordering."],
     ["timezone: Mars/Base", "scenarios/x.yaml:9: timezone: not a time zone: use an IANA name such as America/New_York or UTC"],
     ["now: 2026-02-30T09:00", "scenarios/x.yaml:9: now: not a date and time: write YYYY-MM-DDTHH:MM, with :SS, Z or an offset such as -04:00 if needed"],
     ["now: 2026-10-16 09:00", "scenarios/x.yaml:9: now: not a date and time: write YYYY-MM-DDTHH:MM, with :SS, Z or an offset such as -04:00 if needed"],
@@ -737,9 +743,9 @@ test("--dotenv is read in place of the folder's .env, and variables already set 
   assert.deepEqual(await cliOutput(["test", "--dotenv", "none.env"], dir), { code: 1, out: "--dotenv none.env: no such file.\n" });
 });
 
-/** A run's record as the cloud keeps it: a judge check failed, one tool call between the messages, the agent's message edited and then unsent. */
+/** A run's record as the cloud keeps it: a scenario with its title, about and theme, a judge check failed, one tool call between the messages, the agent's message edited and then unsent. */
 const record = {
-  runId: "trn_2", sessionId: "s1", agent: "agt_1", scenario: { id: "bee", path: "scenarios/b.yaml", hash: "h" }, run: 1, channel: "whatsapp",
+  runId: "trn_2", sessionId: "s1", agent: "agt_1", scenario: { id: "bee", path: "scenarios/b.yaml", hash: "h", title: "Latte order", about: "Orders a large latte; must be asked to confirm.", theme: "Ordering" }, run: 1, channel: "whatsapp",
   startedAt: 1_000, finishedAt: 9_000,
   transcript: [
     { kind: "in", id: "m1", text: "a large latte please", at: 1_000 },
@@ -788,7 +794,8 @@ test("flow show prints a run's record from the cloud with the CI key: checks wit
     assert.match(shown.stderr, /also did not pass: flow show trn_3/);
     assert.deepEqual(asked, [{ path: "/v1/agents/agt_1/tests/runs/trn_2", authorization: "Bearer oci_test" }]);
     assert.equal(shown.stdout, [
-      "FAIL  scenarios/b.yaml",
+      "FAIL  scenarios/b.yaml (Latte order) [Ordering]",
+      "  Orders a large latte; must be asked to confirm.",
       "  channel whatsapp, run 1, trn_2; ended: goal_met, 2 turns",
       "",
       "Checks:",
@@ -818,13 +825,14 @@ test("flow show prints a run's record from the cloud with the CI key: checks wit
     // A run the cloud could not judge reads ERROR, though it ended goal_met, with its code.
     const errored = await cliStreams(["show", "trn_4", "--cloud", url], dir, key);
     assert.equal(errored.code, 0, errored.out);
-    assert.deepEqual(errored.stdout.split("\n").slice(0, 3), [
-      "ERROR  scenarios/b.yaml",
+    assert.deepEqual(errored.stdout.split("\n").slice(0, 4), [
+      "ERROR  scenarios/b.yaml (Latte order) [Ordering]",
+      "  Orders a large latte; must be asked to confirm.",
       "  channel whatsapp, run 1, trn_4; ended: goal_met, 2 turns",
       "  error: judge_failed (the cloud could not play or judge this run; it says nothing about the agent)",
     ]);
     const summaryOnly = await cliStreams(["show", "trn_5", "--cloud", url], dir, key);
-    assert.match(summaryOnly.stdout, /^ERROR {2}scenarios\/b\.yaml\n.*\n {2}error: simulator_failed /);
+    assert.match(summaryOnly.stdout, /^ERROR {2}scenarios\/b\.yaml \(Latte order\) \[Ordering\]\n.*\n.*\n {2}error: simulator_failed /);
 
     // --scenario picks that scenario's first run that did not pass (by its id here, its file name for hello); else its first run.
     asked.length = 0;
