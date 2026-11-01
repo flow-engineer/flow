@@ -2,6 +2,26 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.15.3 (2026-11-02)
+
+### Changes
+
+- **A WhatsApp template's trace says what the person read.** Until now every template send (the
+  agent's `send_template`, a `nudge({ template })`, the fallback template) was traced as its name
+  alone, so a dashboard showed `order_shipped` where the person read "Hi Sam, your order 1042 has
+  shipped." With traces content on, a declared template's send span now carries that text as
+  `chinwag.agent_reply` (its text header's line, then its body, filled in) and its parts as
+  `flow.template.*`: `name`, `language`, `header_kind`, `header`, `body` (placeholders kept),
+  `buttons` and `values` (JSON). Without content none of it is sent; a template that is not
+  declared in `createAgent({ templates })` is still traced as its name.
+- A template send's `message.out` event keeps `text` (its name) and `template: true`, and a declared
+  one adds `reads` (the text the person read) and `sentTemplate` (the declared parts and the values
+  the send filled in).
+
+### Migration notes
+
+None.
+
 ## 0.15.2 (2026-10-31)
 
 ### Changes
