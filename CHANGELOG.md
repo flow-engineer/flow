@@ -2,6 +2,29 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.15.4 (2026-11-02)
+
+### Changes
+
+- **iMessage typing is not sent when Flow Messaging would surely refuse it.** iMessage shows typing
+  only within 5 minutes of the line's own last message to the person (the person's message alone
+  does not open it), and Flow Messaging refuses it outside with `409 outside_window`. Until now the
+  `flow-messaging` iMessage channel called typing at the start of every turn, so a person writing
+  after a quiet spell cost one refused call per message. The channel now remembers, per conversation,
+  when this process last had a message of the line's accepted and whether Flow refused typing since,
+  and rejects with `outside_window` without calling Flow when the window is known to be closed: Flow
+  refused typing after the line's last known message, or that message went 5 minutes ago or more.
+  The conversation handles that as before (typing waits for the agent's next message). With nothing
+  known (a new process, or more than an hour since it learned anything of that conversation) the
+  call is made, and a refusal is handled as before.
+- What a process knows is its own sends only: when several processes serve the same line, another
+  one may have messaged the person since, and a typing indicator that would have shown is skipped.
+- WhatsApp, Telegram, SMS and every other channel send typing exactly as before.
+
+### Migration notes
+
+None.
+
 ## 0.15.3 (2026-11-02)
 
 ### Changes
