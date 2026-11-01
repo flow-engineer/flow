@@ -445,6 +445,34 @@ test("a message sent as written is a trace of its own, also while a turn is open
   ]);
 });
 
+test("a declared template's send span holds what the person read and the template's parts, with content on only; an undeclared one its name", async () => {
+  const sentTemplate = { name: "order_shipped", language: "en", header: { kind: "text", text: "Order {{1}}" }, body: "Hi {{1}}, your order {{2}} has shipped.", buttons: [{ type: "quick_reply", text: "Thanks" }], values: { header: "1042", body: ["Sam", "1042"] } };
+  const sends = async (content: boolean) => {
+    const endpoint = await fakeEndpoint();
+    const t = traces({ url: endpoint.url, key: KEY, content, version: "v7" }, { service: "market", kindOf: () => "whatsapp" });
+    const at = Date.now();
+    t.sink({ type: "message.out", conversationId: "c1", at, text: "order_shipped", template: true, reads: "Order 1042\nHi Sam, your order 1042 has shipped.", sentTemplate, channel: "whatsapp", direct: true, trigger: "queued_message" });
+    t.sink({ type: "message.out", conversationId: "c2", at, text: "not_declared", template: true, channel: "whatsapp", direct: true, trigger: "queued_message" });
+    await t.flush();
+    endpoint.close();
+    return tracesOf(endpoint).map((x) => Object.fromEntries(Object.entries(attrs(x.spans.find((s: any) => s.parentSpanId))).filter(([k]) => k.startsWith("flow.template.") || k === "chinwag.agent_reply")));
+  };
+  assert.deepEqual(await sends(true), [
+    {
+      "chinwag.agent_reply": "Order 1042\nHi Sam, your order 1042 has shipped.",
+      "flow.template.name": "order_shipped",
+      "flow.template.language": "en",
+      "flow.template.header_kind": "text",
+      "flow.template.header": "Order {{1}}",
+      "flow.template.body": "Hi {{1}}, your order {{2}} has shipped.",
+      "flow.template.buttons": JSON.stringify([{ type: "quick_reply", text: "Thanks" }]),
+      "flow.template.values": JSON.stringify({ header: "1042", body: ["Sam", "1042"] }),
+    },
+    { "chinwag.agent_reply": "not_declared" },
+  ]);
+  assert.deepEqual(await sends(false), [{}, {}]);
+});
+
 test("each trace's root says what started it, with the instruction or result it began with", async () => {
   const endpoint = await fakeEndpoint();
   const clock = { now: Date.UTC(2026, 9, 12, 16) };

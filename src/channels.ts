@@ -706,7 +706,7 @@ export function checkTemplate(definition: TemplateDefinition): void {
 }
 
 /** The older `variables` as body values: by number when every key is one, else in the order given. */
-function numbered(variables: Record<string, string> | undefined): string[] {
+export function numbered(variables: Record<string, string> | undefined): string[] {
   const entries = Object.entries(variables ?? {});
   if (entries.every(([k]) => /^\d+$/.test(k))) entries.sort(([a], [b]) => Number(a) - Number(b));
   return entries.map(([, v]) => v);

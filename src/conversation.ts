@@ -48,7 +48,7 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type ContentRefusal } from "./channels.ts";
+import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, numbered, type ContentRefusal } from "./channels.ts";
 import type { FlowEvents } from "./business-events/engine.ts";
 import type { FlowEvent, Emit, EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
@@ -487,7 +487,7 @@ export class Conversation {
             reads = shown ? fillTemplate(shown, sent).body : "";
           } catch {}
         }
-        this.settings.emit(this.id, "message.out", { text: sent.name, channel, template: true, ...idDetail(result.receipt) });
+        this.settings.emit(this.id, "message.out", { ...templateDetail(this.settings.templates, sent), channel, ...idDetail(result.receipt) });
         this.history.push({ role: "user", content: `[Chinwag] You sent them the template "${sent.name}" on ${channel}. It reads:\n${reads}` });
         this.sent();
         return { delivered: true, channel };
@@ -655,7 +655,7 @@ export class Conversation {
       } else if (result) {
         // What went is what the history keeps.
         if (result.sent.type === "message") answer.reply = result.sent.text;
-        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent), channel, direct: true, answered: true, trigger: "direct", ...idDetail(result.receipt) });
+        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent, this.settings.templates), channel, direct: true, answered: true, trigger: "direct", ...idDetail(result.receipt) });
       }
       if (!this.running && !this.timer) void this.run();
     };
@@ -1557,7 +1557,7 @@ export class Conversation {
       // What went, after beforeSend, is what the events, the history and the transcript keep.
       const sent = result.sent as Extract<Outbound, { type: "message" | "carousel" }>;
       const changed = JSON.stringify(sent) !== JSON.stringify(outbound);
-      this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, ...(changed ? { rewritten: true } : {}), ...idDetail(result.receipt) });
+      this.settings.emit(this.id, "message.out", { ...outDetail(sent, this.settings.templates), channel, ...(changed ? { rewritten: true } : {}), ...idDetail(result.receipt) });
       this.sent(result.receipt);
       this.sentThisTurn.add(input.text.trim());
       this.sentThisTurn.add(sent.text.trim());
@@ -1864,7 +1864,7 @@ export class Conversation {
       this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(d.channel), arguments: JSON.stringify(sentArgs(sent)) }] });
       this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel: d.channel, ...this.ownId(d.channel, result.receipt) }) });
     }
-    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel: d.channel, direct: true, trigger: d.trigger, ...(d.queuedBy ? { queuedBy: [d.queuedBy] } : {}), ...idDetail(result.receipt) });
+    this.settings.emit(this.id, "message.out", { ...outDetail(sent, this.settings.templates), channel: d.channel, direct: true, trigger: d.trigger, ...(d.queuedBy ? { queuedBy: [d.queuedBy] } : {}), ...idDetail(result.receipt) });
     settle("sent", undefined, result.receipt?.messageId);
   }
 
@@ -2096,7 +2096,7 @@ export class Conversation {
     const callId = `auth_${randomUUID()}`;
     this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(channel), arguments: JSON.stringify(sentArgs(sent)) }] });
     this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel, authentication: true }) });
-    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, authentication: true, ...idDetail(result.receipt) });
+    this.settings.emit(this.id, "message.out", { ...outDetail(sent, this.settings.templates), channel, authentication: true, ...idDetail(result.receipt) });
     this.sent();
     this.sentThisTurn.add(prompt.message.trim());
     await this.acknowledged(channel);
@@ -2326,16 +2326,46 @@ function clipOutput(text: string): string {
   return `${text.slice(0, end)}\n[cut: ${text.length - end} more characters not shown]`;
 }
 
-/** A sent message or carousel as its `message.out` event tells it. */
 /** The platform's id for a sent message, on its message.out event, when the channel gave one. */
 function idDetail(receipt?: SendReceipt): { messageId?: string } {
   return receipt?.messageId ? { messageId: receipt.messageId } : {};
 }
 
-function outDetail(sent: OutboundMessage): Record<string, unknown> {
-  if (sent.type === "template") return { text: sent.name, template: true };
+/** A sent message, carousel or template as its `message.out` event tells it. */
+function outDetail(sent: OutboundMessage, templates: TemplateDefinition[]): Record<string, unknown> {
+  if (sent.type === "template") return templateDetail(templates, sent);
   if (sent.type === "carousel") return { text: sent.text, carousel: sent.cards, replyTo: sent.replyTo };
   return { text: sent.text, buttons: sent.buttons, list: sent.list, link: sent.link, image: sent.image, replyTo: sent.replyTo, ...(sent.fields ? { fields: sent.fields } : {}), ...(sent.authentication ? { authentication: true } : {}) };
+}
+
+/**
+ * A sent template as its `message.out` event tells it: `text` is its name. A declared one also says what
+ * the person read (`reads`: its text header's line, then its body, filled in) and `sentTemplate`, its
+ * declared parts (placeholders kept) with the values this send filled in, so a traces endpoint can show
+ * it as they saw it. An undeclared one is only its name: its words are not known here.
+ */
+function templateDetail(templates: TemplateDefinition[], sent: Template): Record<string, unknown> {
+  const detail = { text: sent.name, template: true };
+  const declared = declaredTemplate(templates, sent);
+  if (!declared) return detail;
+  let filled: ReturnType<typeof fillTemplate>;
+  try {
+    filled = fillTemplate(declared, sent);
+  } catch {
+    return detail;
+  }
+  const shape = declared.header;
+  const header = filled.header?.kind === "text" ? filled.header.text : undefined;
+  const values = { ...(shape?.kind === "text" && sent.header?.kind === "text" ? { header: sent.header.text } : {}), body: sent.body ?? numbered(sent.variables) };
+  const sentTemplate = {
+    name: declared.name,
+    language: declared.language,
+    ...(shape ? { header: shape.kind === "text" ? { kind: "text", text: shape.text } : { kind: shape.kind } } : {}),
+    body: declared.body,
+    buttons: (declared.buttons ?? []).map((b) => ({ type: b.type, text: b.text })),
+    values,
+  };
+  return { ...detail, reads: header ? `${header}\n${filled.body}` : filled.body, sentTemplate };
 }
 
 function errorText(error: unknown): string {

@@ -693,6 +693,9 @@ test("past the window, the agent sends a template that says the nudge, filled in
   (await h.nextCall(2)).answer(respond());
   assert.equal((await nudge).status, "sent");
   assert.deepEqual(templatesSent(h), ["order_shipped"]);
+  // Its event says what they read, and the declared template with the values it was sent with.
+  const out = h.events.find((e) => e.type === "message.out" && e.template)!;
+  assert.deepEqual([out.text, out.reads, out.sentTemplate], ["order_shipped", "Hi Sam, your order 1042 has shipped.", { name: "order_shipped", language: "en", body: SHIPPED.body, buttons: [], values: { body: ["Sam", "1042"] } }]);
 });
 
 test("past the window with no template that fits, the fallback goes, the nudge waits for their reply, and template.missing says what", async () => {
@@ -710,6 +713,9 @@ test("past the window with no template that fits, the fallback goes, the nudge w
   reply.answer(respond(call("send_whatsapp", { text: "Your refund was approved." })));
   await h.conversation.whenIdle();
   assert.equal((await h.agent.nudgeState(result.id))?.status, "sent");
+  // The fallback, sent as written, says what they read too.
+  const fallback = h.events.find((e) => e.type === "message.out" && e.template)!;
+  assert.deepEqual([fallback.direct, fallback.reads, (fallback.sentTemplate as { body: string }).body], [true, WAITING.body, WAITING.body]);
 });
 
 test("a scheduled prompt nudge due past the window goes as one sent now would: a template the agent picks, else the fallback until they reply; a scheduled text is skipped", async () => {

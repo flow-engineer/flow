@@ -30,6 +30,13 @@
 // `chinwag.channel` is the platform (whatsapp, sms, telegram, imessage, web, cli, voice, other),
 // the same on the root span and on every send span of the trace.
 //
+// A WhatsApp template's send span, with content on, holds what the person read when the template
+// is declared (createAgent's templates): `chinwag.agent_reply` is its text header's line and its
+// body with the send's values filled in, and `flow.template.*` its parts: `name`, `language`,
+// `header_kind` and `header` (a text header's words), `body` (placeholders kept), `buttons` (JSON:
+// each button's type and text) and `values` (JSON: `header` and `body`, the values in send order),
+// so an endpoint can draw it as the template it was. An undeclared template's reply is its name.
+//
 // The resource's `service.version` is the agent's version (agentVersion below), with no setting:
 // the same label `flow test` keeps with its session and `flow deploy` with the deploy, so a reply
 // can be matched to the code that wrote it.
@@ -273,18 +280,22 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
   function alone(conversationId: string, e: FlowEvent) {
     const channel = String(e.channel);
     const turn: Turn = { traceId: hex(16), rootId: hex(8), start: e.at, inbound: [], spans: [], tools: new Map(), replyChannel: channel, ...started(e) };
-    turn.spans.push(reply(turn, e.at, channel, e.text, e.direct === true));
+    turn.spans.push(reply(turn, e, e.direct === true));
     record(conversationId, turn, false, e.at);
   }
 
-  function reply(turn: Turn, at: number, channel: string, text: unknown, asWritten = false): Span {
+  /** A message.out's send span. A declared template's is what the person read, and its parts (templateAttributes). */
+  function reply(turn: Turn, e: FlowEvent, asWritten = false): Span {
+    const channel = String(e.channel);
     turn.replyChannel ??= channel;
     // The platform, as on the root span; the span's name has the channel's own name.
     const kind = kindOf(channel);
     const attributes = kind ? [attr("chinwag.channel", kind)] : [];
     if (asWritten) attributes.push(attr("flow.message.as_written", true));
+    const text = typeof e.reads === "string" ? e.reads : e.text;
     if (content && typeof text === "string") attributes.push(attr("chinwag.agent_reply", clip(text)));
-    return child(turn, `send ${channel}`, at, at, attributes);
+    if (content && e.sentTemplate) attributes.push(...templateAttributes(e.sentTemplate as SentTemplate));
+    return child(turn, `send ${channel}`, e.at, e.at, attributes);
   }
 
   function enqueue(spans: Span[]) {
@@ -373,7 +384,7 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
       case "message.out":
         // Sent as written (no model call: a nudge's text, a rule's answer): never part of a turn open meanwhile.
         if (!turn || e.answered || e.direct) return alone(id, e);
-        turn.spans.push(reply(turn, e.at, String(e.channel), e.text));
+        turn.spans.push(reply(turn, e));
         return;
       case "model.call": {
         if (!turn) return;
@@ -459,6 +470,28 @@ function started(e: FlowEvent): Pick<Turn, "trigger" | "triggerText" | "queuedBy
 /** The endpoint's ids: the conversation is the person (Flow Framework keeps one per person across channels). */
 function ids(conversationId: string): Attr[] {
   return [attr("chinwag.conversation_id", conversationId), attr("chinwag.contact_id", conversationId)];
+}
+
+/** A declared template's parts, as a template send's message.out carries them (`sentTemplate`, conversation.ts). */
+interface SentTemplate {
+  name: string;
+  language?: string;
+  header?: { kind: string; text?: string };
+  body: string;
+  buttons?: Array<{ type: string; text: string }>;
+  values?: { header?: string; body?: string[] };
+}
+
+/** A template send's `flow.template.*` attributes (content only), from its declared parts and the values it filled in. */
+function templateAttributes(t: SentTemplate): Attr[] {
+  const out = [attr("flow.template.name", t.name)];
+  if (t.language) out.push(attr("flow.template.language", t.language));
+  if (t.header) out.push(attr("flow.template.header_kind", t.header.kind));
+  if (t.header?.text) out.push(attr("flow.template.header", clip(t.header.text)));
+  out.push(attr("flow.template.body", clip(t.body)));
+  if (t.buttons?.length) out.push(attr("flow.template.buttons", clip(JSON.stringify(t.buttons))));
+  out.push(attr("flow.template.values", clip(JSON.stringify(t.values ?? {}))));
+  return out;
 }
 
 function span(traceId: string, name: string, start: number, end: number, attributes: Attr[], parentSpanId?: string, failed = false): Span {
