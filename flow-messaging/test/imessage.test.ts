@@ -161,33 +161,29 @@ test("a start to a phone number on iMessage names the phone; a link goes as its 
   assert.deepEqual((await flow.request((r) => post("/v0/messages")(r) && r.body.text === "Or here")).body, { sender: "snd_IM", to: { phone: "+15550100100" }, kind: "basic", text: "Or here" });
 });
 
-test("a read receipt refused outside the window is not logged; typing's refusals reject for the conversation (outside_window, else Flow's type); typing off sends nothing", async (t) => {
+test("a read receipt's failure is logged; typing's refusals reject for the conversation (outside_window, else Flow's type); typing off sends nothing", async (t) => {
   const flow = await fakeFlow();
   t.after(() => flow.close());
   flow.messages.msg_1 = { id: "msg_1", conversation: IM.id, direction: "in", content: { kind: "basic", text: "hi" } };
   const channel = flowMessaging({ apiKey: "fk_test_key", baseUrl: flow.url }).imessage({ sender: IM.sender });
   const warn = t.mock.method(console, "warn", () => {});
   const outside = { error: { type: "outside_window", message: "Outside the conversation window.", hint: "", doc_url: "" } };
-  flow.queued.push({ match: post("/v0/conversations/conv_im/read"), status: 409, body: outside });
+  flow.queued.push({ match: post("/v0/conversations/conv_im/read"), status: 400, body: { error: { type: "invalid_request", message: "Bad request.", hint: "", doc_url: "" } } });
   await channel.send("+15550100100", { type: "read", messageIds: ["msg_1"] });
-  assert.equal(flow.sends("/v0/conversations/conv_im/read").length, 1);
+  assert.deepEqual(warn.mock.calls.map((c) => c.arguments[0]), ["@flow-engineer/flow/flow-messaging: read on imessage failed (invalid_request)"]);
   flow.queued.push({ match: post("/v0/conversations/conv_im/typing"), status: 400, body: { error: { type: "invalid_request", message: "Bad request.", hint: "", doc_url: "" } } });
   await assert.rejects(async () => channel.send("+15550100100", { type: "typing", on: true }), { message: "invalid_request" });
   flow.queued.push({ match: post("/v0/conversations/conv_im/typing"), status: 409, body: outside });
   await assert.rejects(async () => channel.send("+15550100100", { type: "typing", on: true }), { message: "outside_window" });
   assert.equal(flow.sends("/v0/conversations/conv_im/typing").length, 2);
-  assert.equal(warn.mock.callCount(), 0, "the conversation logs typing's refusals, the adapter none");
+  assert.equal(warn.mock.callCount(), 1, "the conversation logs typing's refusals, the adapter none (its one warning is the read receipt's)");
 
   // No channel clears the indicator on request: it goes when the next message does.
   await channel.send("+15550100100", { type: "typing", on: false });
   assert.equal(flow.sends("/v0/conversations/conv_im/typing").length, 2);
-
-  flow.queued.push({ match: post("/v0/conversations/conv_im/read"), status: 400, body: { error: { type: "invalid_request", message: "Bad request.", hint: "", doc_url: "" } } });
-  await channel.send("+15550100100", { type: "read", messageIds: ["msg_1"] });
-  assert.deepEqual(warn.mock.calls.map((c) => c.arguments[0]), ["@flow-engineer/flow/flow-messaging: read on imessage failed (invalid_request)"]);
 });
 
-test("iMessage typing is not sent while this process knows its window is closed: Flow refused it since the line's last message, or that message went 5 minutes ago; with nothing known it is tried, and WhatsApp's always is", async (t) => {
+test("iMessage typing and read receipts are not sent while this process knows the line's window is closed: Flow refused either since the line's last message, or that message went 5 minutes ago; with nothing known they are tried, and WhatsApp's always are", async (t) => {
   const flow = await fakeFlow();
   t.after(() => flow.close());
   t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
@@ -195,35 +191,48 @@ test("iMessage typing is not sent while this process knows its window is closed:
   flow.messages.msg_w = { id: "msg_w", conversation: "conv_wa", direction: "in", content: { kind: "basic", text: "hi" } };
   const fm = flowMessaging({ apiKey: "fk_test_key", baseUrl: flow.url });
   const channel = fm.imessage({ sender: IM.sender });
+  const warn = t.mock.method(console, "warn", () => {});
   const typings = () => flow.sends("/v0/conversations/conv_im/typing").length;
-  const typing = () => channel.send("+15550100100", { type: "typing", on: true });
+  const reads = () => flow.sends("/v0/conversations/conv_im/read").length;
+  const typing = async () => channel.send("+15550100100", { type: "typing", on: true });
+  const read = async () => channel.send("+15550100100", { type: "read", messageIds: ["msg_1"] });
   const outside = { error: { type: "outside_window", message: "Outside the conversation window.", hint: "", doc_url: "" } };
-  await channel.send("+15550100100", { type: "read", messageIds: ["msg_1"] });
+  await read();
+  assert.equal(reads(), 1, "nothing known of the window: the read receipt is sent");
 
   await typing();
   assert.equal(typings(), 1, "nothing known of the window: the call is made");
   flow.queued.push({ match: post("/v0/conversations/conv_im/typing"), status: 409, body: outside });
   await assert.rejects(typing, { message: "outside_window" });
   await assert.rejects(typing, { message: "outside_window" });
-  assert.equal(typings(), 2, "refused since the line's last message: not called again");
+  await read();
+  assert.deepEqual([typings(), reads()], [2, 1], "typing refused since the line's last message: neither is called again");
 
   await channel.send("+15550100100", { type: "message", text: "Here you go" });
   await typing();
-  assert.equal(typings(), 3, "the line's message opened it");
+  await read();
+  assert.deepEqual([typings(), reads()], [3, 2], "the line's message opened it");
   t.mock.timers.tick(5 * 60_000);
   await assert.rejects(typing, { message: "outside_window" });
-  assert.equal(typings(), 3, "5 minutes after the line's last message: not called");
+  await read();
+  assert.deepEqual([typings(), reads()], [3, 2], "5 minutes after the line's last message: neither is called");
   t.mock.timers.tick(60 * 60_000);
-  await typing();
-  assert.equal(typings(), 4, "forgotten an hour on: tried again");
+  flow.queued.push({ match: post("/v0/conversations/conv_im/read"), status: 409, body: outside });
+  await read();
+  assert.equal(reads(), 3, "forgotten an hour on: tried again");
+  await assert.rejects(typing, { message: "outside_window" });
+  await read();
+  assert.deepEqual([typings(), reads()], [3, 3], "a read receipt refused since the line's last message closes it for both");
+  assert.equal(warn.mock.callCount(), 0, "a read receipt refused outside the window is not logged");
 
   const whatsapp = fm.whatsapp({ sender: "snd_WA" });
-  await whatsapp.send("+15550100100", { type: "read", messageIds: ["msg_w"] });
   for (let i = 0; i < 2; i++) {
+    flow.queued.push({ match: post("/v0/conversations/conv_wa/read"), status: 409, body: outside });
+    await whatsapp.send("+15550100100", { type: "read", messageIds: ["msg_w"] });
     flow.queued.push({ match: post("/v0/conversations/conv_wa/typing"), status: 409, body: outside });
     await assert.rejects(async () => whatsapp.send("+15550100100", { type: "typing", on: true }), { message: "outside_window" });
   }
-  assert.equal(flow.sends("/v0/conversations/conv_wa/typing").length, 2, "WhatsApp's typing is called every time, as before");
+  assert.deepEqual([flow.sends("/v0/conversations/conv_wa/read").length, flow.sends("/v0/conversations/conv_wa/typing").length], [2, 2], "WhatsApp's are called every time, as before");
 });
 
 test("an iMessage group conversation is passed over, with one warning: nothing reaches the agent, and no typing or read receipt goes to it", async (t) => {
