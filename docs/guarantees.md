@@ -41,7 +41,12 @@ What follows from it:
 - `message.out` is emitted, and the message kept in the history and the transcript, only then.
 - A rejected send comes back to the agent as a "Not delivered" note with the reason, once
   (`message.undelivered`). A failure Flow reports after the send resolved (a late
-  `message.failed`) comes back the same way.
+  `message.failed`) comes back the same way, also to someone the process has not heard from, is
+  logged at error level, and its `message.undelivered` carries `channel`, `messageId` (the
+  platform's id), `errorType` and `channelCode`. With traces on, its send span carries
+  `flow.send.message_id` and the failure is a `delivery <channel>` span under it (error status,
+  `flow.delivery.message_id`, `flow.delivery.status` `failed`, `flow.delivery.error_type`,
+  `flow.delivery.channel_code`; never content), or a trace of its own when another process sent it.
 - A carousel the channel sends card by card resolves once the platform accepted its last card.
 - Typing indicators, read receipts and status lines are courtesies: their failures never fail a
   turn, and a channel whose info says `typing: false` is never sent one. Typing is kept up while the

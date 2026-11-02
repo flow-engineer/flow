@@ -2,6 +2,44 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.15.6 (2026-11-02)
+
+### Changes
+
+- **A message Flow Messaging accepted that the channel fails later is no longer silent.** A send
+  Flow takes (`202`) can still fail at the channel seconds later (`message.failed`), such as a
+  WhatsApp template refused because the business account has no payment method (`permission`,
+  channel code `131042`). Until now, when the send had already resolved (`waitFor: "queued"`, or a
+  failure after `message.sent`) and this process had not heard from the person (a nudge or template
+  to someone new, or after a restart), the `flow-messaging` adapter dropped the failure: nothing was
+  logged, the agent was not told, and traces showed the message as sent. A template's failure was
+  also dropped for someone it had heard from, as it has no text.
+- Every `message.failed` is now logged once at error level, with the channel, the Flow conversation
+  and message ids, the error's type and channel code, and Flow's message, hint and doc URL (never the
+  message's content or the person's address):
+  `@flow-engineer/flow/flow-messaging: message msg_... on whatsapp (conversation conv_...) was not delivered (type permission, channel_code 131042): ...`.
+  It replaces the warning that only a failure with a hint got.
+- The agent is told Not delivered also for someone this process has not heard from: the adapter
+  asks the agent's store (`agent.conversationOf`) for their conversation. A template is told as
+  `template <name>`.
+- `agent.undelivered(conversationId, text, reason, detail?)` takes an optional `detail`
+  (`UndeliveredDetail`: `channel`, `messageId`, `errorType`, `channelCode`), which the adapter
+  fills, and the `message.undelivered` event carries those fields.
+- **Traces show the failure.** Every send span carries the platform's message id,
+  `flow.send.message_id` (Flow Messaging's `msg_...`; content on or off). A late failure is
+  exported as a `delivery <channel>` span with error status, under its send span when this process
+  sent it, else in a trace of its own: `flow.delivery.message_id`, `flow.delivery.status`
+  (`failed`), `flow.delivery.error_type`, `flow.delivery.channel_code` (when the channel gave one),
+  `chinwag.channel` and the conversation ids, never content.
+- A failure a send already reported (it read the message back) is no longer told again when its
+  `message.failed` arrives.
+
+### Migration notes
+
+None. A hand-written `WebhookAgent` (an object passed to `webhook()` or `stream()` instead of the
+agent) keeps working; give it `conversationOf` too for late failures to reach people it has not
+heard from.
+
 ## 0.15.5 (2026-11-02)
 
 ### Changes

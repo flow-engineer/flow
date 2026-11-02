@@ -473,6 +473,31 @@ test("a declared template's send span holds what the person read and the templat
   assert.deepEqual(await sends(false), [{}, {}]);
 });
 
+test("a send span names the platform's message id; a failure the channel reports later is a delivery span under it, or a trace of its own when this process did not send it, with no content", async () => {
+  const endpoint = await fakeEndpoint();
+  const t = traces({ url: endpoint.url, key: KEY, content: true, version: "v7" }, { service: "market", kindOf: () => "whatsapp" });
+  const at = Date.now();
+  t.sink({ type: "message.out", conversationId: "c1", at, text: "order_update", template: true, channel: "whatsapp", direct: true, trigger: "queued_message", messageId: "msg_1" });
+  await t.flush();
+  t.sink({ type: "message.undelivered", conversationId: "c1", at: at + 5000, text: "template order_update", reason: "permission (131042): no payment method", channel: "whatsapp", messageId: "msg_1", errorType: "permission", channelCode: "131042" });
+  t.sink({ type: "message.undelivered", conversationId: "c2", at: at + 6000, text: "Hello Sam", reason: "channel_error: failed", channel: "whatsapp", messageId: "msg_other", errorType: "channel_error" });
+  // A send that failed while it waited names no message: its failure is the send's, with no delivery span.
+  t.sink({ type: "message.undelivered", conversationId: "c1", at: at + 7000, text: "Hi", reason: "channel_error: failed" });
+  await t.flush();
+  endpoint.close();
+  const [sent, alone, ...more] = tracesOf(endpoint);
+  assert.equal(more.length, 0);
+  const send = sent!.spans.find((s: any) => s.name === "send whatsapp");
+  assert.equal(attrs(send)["flow.send.message_id"], "msg_1");
+  const delivery = sent!.spans.find((s: any) => s.name === "delivery whatsapp");
+  assert.equal(delivery.parentSpanId, send.spanId);
+  assert.deepEqual(delivery.status, { code: 2 });
+  assert.deepEqual(attrs(delivery), { "chinwag.conversation_id": "c1", "chinwag.contact_id": "c1", "chinwag.channel": "whatsapp", "flow.delivery.message_id": "msg_1", "flow.delivery.status": "failed", "flow.delivery.error_type": "permission", "flow.delivery.channel_code": "131042" });
+  assert.equal(alone!.root.name, "delivery whatsapp");
+  assert.deepEqual(alone!.attrs, { "chinwag.conversation_id": "c2", "chinwag.contact_id": "c2", "chinwag.channel": "whatsapp", "flow.delivery.message_id": "msg_other", "flow.delivery.status": "failed", "flow.delivery.error_type": "channel_error" });
+  assert.ok(!JSON.stringify(endpoint.requests.slice(1)).includes("Hello Sam"), "a delivery span holds no content");
+});
+
 test("each trace's root says what started it, with the instruction or result it began with", async () => {
   const endpoint = await fakeEndpoint();
   const clock = { now: Date.UTC(2026, 9, 12, 16) };

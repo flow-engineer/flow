@@ -59,7 +59,7 @@ import { ACT_NEXT, EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput,
 import { formatLocal, shortLocal, zoneLabel } from "./time.ts";
 import { activeCall, type QueuedBy, type TurnTrigger } from "./traces.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
-import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
+import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe, UndeliveredDetail } from "./types.ts";
 
 export interface ConversationSettings {
   model: Model;
@@ -777,8 +777,8 @@ export class Conversation {
   }
 
   /** The channel reports, now or later, that a message did not reach the person. */
-  undelivered(text: string, reason: string): void {
-    this.settings.emit(this.id, "message.undelivered", { text, reason });
+  undelivered(text: string, reason: string, detail?: UndeliveredDetail): void {
+    this.settings.emit(this.id, "message.undelivered", { text, reason, ...detail });
     this.note(`[Not delivered] "${text}": ${reason}`, false, false, { trigger: "direct", triggerText: `Not delivered: ${reason}` });
   }
 

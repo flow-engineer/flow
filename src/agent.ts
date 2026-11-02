@@ -29,7 +29,7 @@ import { Store, type ConversationRow, type EventStateStore, type IdentityRow, ty
 import { clock, quietUntil, validZone } from "./time.ts";
 import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } from "./tools.ts";
 import { activeCall, agentVersion, setting, traces, tracesFromEnv, type QueuedBy, type Traces, type TracesOptions, type TurnTrigger } from "./traces.ts";
-import type { BeforeSend, ChannelInfo, Deliver, Incoming, Model, Outbound, SendReceipt, Template, TemplateDefinition, Transcribe } from "./types.ts";
+import type { BeforeSend, ChannelInfo, Deliver, Incoming, Model, Outbound, SendReceipt, Template, TemplateDefinition, Transcribe, UndeliveredDetail } from "./types.ts";
 
 /** What a host supplies to an agent: `createAgent({ ..., host })`. */
 export interface HostOptions {
@@ -1073,9 +1073,13 @@ export class Agent {
     this.withConversation(conversationId, (c) => c.reacted(emoji, toText));
   }
 
-  /** The channel reports that a message did not reach the person; the agent hears about it, also after a restart. */
-  undelivered(conversationId: string, text: string, reason: string): void {
-    this.withConversation(conversationId, (c) => c.undelivered(text, reason));
+  /**
+   * The channel reports that a message did not reach the person; the agent hears about it, also after
+   * a restart. `detail` (the message's platform id, the error's type and channel code) goes on the
+   * `message.undelivered` event and, with traces on, a `delivery` span.
+   */
+  undelivered(conversationId: string, text: string, reason: string, detail?: UndeliveredDetail): void {
+    this.withConversation(conversationId, (c) => c.undelivered(text, reason, detail));
   }
 
   /** Acts on a conversation now when it is in memory, else once it is loaded from the store; never on one the store does not hold. */

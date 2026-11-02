@@ -79,8 +79,12 @@ interface Piece {
   body: Record<string, unknown>;
   preview?: false;
 }
-/** What the webhook and the stream need of an agent. */
-export type WebhookAgent = Pick<Agent, "message" | "reacted" | "undelivered">;
+/**
+ * What the webhook and the stream need of an agent. With `conversationOf`, a message the channel fails
+ * after its send resolved reaches the agent also when this process has not heard from the person
+ * (a nudge or template to someone new, or after a restart).
+ */
+export type WebhookAgent = Pick<Agent, "message" | "reacted" | "undelivered"> & Partial<Pick<Agent, "conversationOf">>;
 
 export interface StreamOptions {
   /**
@@ -249,6 +253,14 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   /** Sends waiting for their message's status, by Flow message id: true once settled by it. */
   const waiting = new Map<string, (status: string, error?: FlowMessage["error"]) => boolean>();
   const early = new Map<string, { status: string; error?: FlowMessage["error"] }>();
+  /** Messages whose failure was told already (a send that read it back, then its message.failed): told once. */
+  const failures = new Set<string>();
+  const firstFailure = (id: string): boolean => {
+    if (failures.has(id)) return false;
+    failures.add(id);
+    if (failures.size > EARLY_MAX) failures.delete(failures.values().next().value!);
+    return true;
+  };
   // A status can beat its POST response, before we know the message id to wait on.
   const posting = new Map<string, Set<Promise<void>>>();
   const key = (channel: string, address: string) => `${channel}\u0000${address}`;
@@ -374,7 +386,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         if (done || !status) return done;
         if (status === "failed" || status === "unsent") {
           const type = error?.type ?? (status === "unsent" ? "unsent" : "channel_error");
-          hinted(`message ${message.id} on ${route.name}`, { type, channelCode: error?.channel_code, hint: error?.hint, docUrl: error?.doc_url });
+          if (status === "unsent") hinted(`message ${message.id} on ${route.name}`, { type, channelCode: error?.channel_code, hint: error?.hint, docUrl: error?.doc_url });
+          else if (firstFailure(message.id)) notDelivered(route.name, { ...message, error });
           finish(new Error(reason({ type, channelCode: error?.channel_code, param: error?.param, channel: error?.channel, message: error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" })));
         } else if ((PROGRESS[status] ?? -1) >= PROGRESS[target]!) finish(PROGRESS[status]! >= PROGRESS.delivered! ? "delivered" : "sent");
         return done;
@@ -780,7 +793,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         early.set(m.id, { status, error: m.error });
         if (early.size > EARLY_MAX) early.delete(early.keys().next().value!);
       }
-      if (event.type !== "message.failed") return;
+      if (event.type !== "message.failed" || !firstFailure(m.id)) return;
+      // Its send resolved already (on the 202 with waitFor "queued", or as sent): the developer hears of it here.
+      notDelivered(routeOf(event)?.name ?? event.conversation?.channel ?? "an unknown channel", { ...m, conversation: m.conversation ?? event.conversation?.id });
     }
     if (event.conversation?.type === "group") {
       // An iMessage group has no one address to answer, so the agent never takes part: nothing is
@@ -801,8 +816,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       if (arrived) frameworkConversation.set(person, arrived.conversationId);
       return;
     }
-    const conversationId = frameworkConversation.get(person);
-    if (!conversationId) return; // not heard from since this process started: nothing to tell
+    // A failed message may be to someone this process has not heard from (a nudge or template to someone new, or after a restart): the agent's store knows them.
+    const conversationId = frameworkConversation.get(person) ?? (event.type === "message.failed" ? ((await agent.conversationOf?.({ channel: route.name, address })) ?? undefined) : undefined);
+    if (!conversationId) return; // not one of the agent's conversations: nothing to tell
     if (event.type === "reaction.added" && event.data?.message_id && event.data.emoji) {
       const target = await quoted(event.data.message_id);
       if (target?.fromAgent) agent.reacted(conversationId, event.data.emoji, target.text);
@@ -811,11 +827,16 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       // An edit or unsend Flow took and the channel then refused (it waited behind earlier messages past the limit, say): told as what it was.
       const c = kindOf(m.content);
       const target = typeof c.message_id === "string" ? c.message_id : "";
-      const text = c.kind === "edit" ? `edit of ${target}: ${textOf(c)}` : c.kind === "unsend" ? `unsend of ${target}` : textOf(m.content);
+      const text = c.kind === "edit" ? `edit of ${target}: ${textOf(c)}` : c.kind === "unsend" ? `unsend of ${target}` : c.kind === "template" ? `template ${templateName(route, c.template_id)}` : textOf(m.content);
       const type = m.error?.type ?? "channel_error";
-      hinted(`message ${m.id}`, { type, channelCode: m.error?.channel_code, hint: m.error?.hint, docUrl: m.error?.doc_url });
-      if (text) agent.undelivered(conversationId, text, reason({ type, channelCode: m.error?.channel_code, param: m.error?.param, channel: m.error?.channel, message: m.error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" }));
+      const channelCode = m.error?.channel_code;
+      if (text) agent.undelivered(conversationId, text, reason({ type, channelCode, param: m.error?.param, channel: m.error?.channel, message: m.error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" }), { channel: route.name, messageId: m.id, errorType: type, ...(channelCode ? { channelCode } : {}) });
     }
+  }
+
+  /** A template's approved name by its Flow id, as this process listed the sender's templates; else the id. */
+  function templateName(route: Route, id: unknown): string {
+    return templates.get(route.sender ?? "")?.find((t) => t.id === id)?.name ?? String(id ?? "");
   }
 
   /** Hands one event to the agent once: a redelivery (or the same event by webhook and stream) is dropped. */
@@ -1134,6 +1155,18 @@ function detailed(e: { type: string; channelCode?: string; param?: string; chann
 function hinted(what: string, e: { type: string; channelCode?: string; hint?: string; docUrl?: string }): void {
   if ((!e.hint && !e.docUrl) || e.type === "outside_window") return;
   console.warn(`@flow-engineer/flow/flow-messaging: ${what} was refused, ${detailed(e)}.${e.hint ? ` ${e.hint}` : ""}${e.docUrl ? ` (${e.docUrl})` : ""}`);
+}
+
+/**
+ * A message Flow accepted that the channel then failed (`message.failed`), on the console at error
+ * level, once: its channel, Flow conversation and message ids, the error's type and channel code, and
+ * Flow's sentence for the developer (with its hint and doc_url). Never the content or an address.
+ */
+function notDelivered(channel: string, m: { id: string; conversation?: string; error?: FlowError }): void {
+  const e = m.error;
+  const code = e?.channel_code ? `, channel_code ${e.channel_code}` : "";
+  const why = [e?.message ?? "The channel did not take it.", e?.hint, e?.doc_url && `(${e.doc_url})`].filter(Boolean).join(" ");
+  console.error(`@flow-engineer/flow/flow-messaging: message ${m.id} on ${channel}${m.conversation ? ` (conversation ${m.conversation})` : ""} was not delivered (type ${e?.type ?? "channel_error"}${code}): ${why}`);
 }
 
 function reason(e: { type: string; channelCode?: string; param?: string; channel?: string; message: string; retryable: boolean }): string {

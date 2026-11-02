@@ -229,6 +229,8 @@ test("failures reach the agent as Not delivered: a permanent refusal once, untri
   flow.queued.push({ match: post(path), status: 403, body: { error: { type: "permission", channel_code: "contact_opted_out", message: "The contact opted out.", hint, doc_url: "https://api.flow.engineer/docs/errors/permission" } } });
   const warnings: string[] = [];
   t.mock.method(console, "warn", (line: string) => void warnings.push(line));
+  const errors: string[] = [];
+  t.mock.method(console, "error", (line: string) => void errors.push(line));
 
   await live.deliver(received(SMS, "msg_1", { kind: "basic", text: "hi" }));
   (await live.nextCall(0)).answer(respond(call("send_sms", { text: "Hello" })));
@@ -246,7 +248,8 @@ test("failures reach the agent as Not delivered: a permanent refusal once, untri
   const third = await live.nextCall(2);
   assert.equal(lastUser(third.request.messages), "[Not delivered] \"Are you there?\": channel_error (carrier_filtered): A carrier filtered it. It will fail again: don't resend it.");
   assert.ok(!JSON.stringify(third.request).includes("Ask them to text the line first."), "a late failure's hint stays out of the model's text too");
-  assert.ok(warnings.some((w) => w.includes("Ask them to text the line first. (https://api.flow.engineer/docs/errors/channel_error)")), warnings.join("\n"));
+  // The developer hears of it at error level, with its hint, never its text or the person's number.
+  assert.deepEqual(errors, ["@flow-engineer/flow/flow-messaging: message msg_out1 on sms (conversation conv_sms) was not delivered (type channel_error, channel_code carrier_filtered): A carrier filtered it. Ask them to text the line first. (https://api.flow.engineer/docs/errors/channel_error)"]);
   third.answer(respond(call("send_sms", { text: "Sorry about that" })));
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });

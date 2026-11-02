@@ -261,6 +261,22 @@ export interface SendReceipt {
   messageId?: string;
 }
 
+/**
+ * What a provider knows of a message that did not reach the person after its send resolved (Flow
+ * Messaging's `message.failed`): agent.undelivered's `detail`, carried on the `message.undelivered`
+ * event and, with traces on, as a `delivery` span. Never the message's content or the person's address.
+ */
+export interface UndeliveredDetail {
+  /** The agent's name for the channel it went on. */
+  channel?: string;
+  /** The platform's id for the message (SendReceipt.messageId). */
+  messageId?: string;
+  /** The provider's error type, such as `permission` or `channel_error`. */
+  errorType?: string;
+  /** The channel's own code for it, such as WhatsApp's `131042`. */
+  channelCode?: string;
+}
+
 /** What the channel a conversation is on can show. */
 export interface ChannelInfo {
   /** Reactions on the person's message (WhatsApp, iMessage, web); plain SMS has none. */
