@@ -2,6 +2,25 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.15.5 (2026-11-02)
+
+### Changes
+
+- **iMessage read receipts are not sent when Flow Messaging would surely refuse them.** Flow
+  Messaging applies iMessage's typing window to read receipts too: within 5 minutes of the line's
+  own last message to the person, else `409 outside_window`, which the channel ignores. Until now
+  the `flow-messaging` iMessage channel sent a read receipt for every message the person wrote, so a
+  person writing after a quiet spell cost one more refused call per message. The channel now uses
+  what 0.15.4 remembers for typing: when the window is known to be closed it skips the read receipt
+  without calling Flow, and with nothing known it sends it as before.
+- A read receipt Flow refuses with `outside_window` now marks the window closed, as a refused typing
+  call does, so the typing that follows in the same turn is not sent either (and the reverse).
+- WhatsApp, Telegram, SMS and every other channel send read receipts exactly as before.
+
+### Migration notes
+
+None.
+
 ## 0.15.4 (2026-11-02)
 
 ### Changes

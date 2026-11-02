@@ -163,13 +163,13 @@ export const IMESSAGE: ChannelInfo = {
 };
 
 /**
- * iMessage shows typing only within this long of the line's own last message to the person (Flow
- * Messaging's rule for a two-way conversation: the person's message alone does not open it), and
- * refuses it outside with 409 outside_window.
+ * iMessage shows typing and sends read receipts only within this long of the line's own last message
+ * to the person (Flow Messaging's rule for a two-way conversation: the person's message alone does not
+ * open it), and refuses either outside with 409 outside_window.
  */
-const IMESSAGE_TYPING_WINDOW_MS = 5 * 60_000;
-/** What this process learned of a conversation's typing window is forgotten this long after it last learned something, so the map stays bounded; typing is then tried, as when nothing is known. */
-const TYPING_WINDOW_KEPT_MS = 60 * 60_000;
+const IMESSAGE_LINE_WINDOW_MS = 5 * 60_000;
+/** What this process learned of a conversation's line window is forgotten this long after it last learned something, so the map stays bounded; typing and read receipts are then tried, as when nothing is known. */
+const LINE_WINDOW_KEPT_MS = 60 * 60_000;
 /** WhatsApp's most reply buttons in one message; more choices go as a list. */
 const WHATSAPP_REPLY_BUTTONS = 3;
 /** The label of the button that opens a list made of more than 3 buttons (Flow Messaging's own, before V0). */
@@ -253,12 +253,13 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   const posting = new Map<string, Set<Promise<void>>>();
   const key = (channel: string, address: string) => `${channel}\u0000${address}`;
   /**
-   * iMessage's typing window per Flow conversation, as this process saw it: when it last had a message
-   * of the line's accepted, and when Flow last refused typing as outside_window. Oldest first (an entry
-   * moves to the end when updated). Only this process's sends are known: another one may have messaged
-   * the person since, and then a typing indicator is skipped that would have shown, which is harmless.
+   * iMessage's line window per Flow conversation, as this process saw it: when it last had a message
+   * of the line's accepted, and when Flow last refused typing or a read receipt as outside_window.
+   * Oldest first (an entry moves to the end when updated). Only this process's sends are known: another
+   * one may have messaged the person since, and then a typing indicator or read receipt is skipped that
+   * would have gone, which is harmless.
    */
-  const typingWindows = new Map<string, { sent?: number; refused?: number; at: number }>();
+  const lineWindows = new Map<string, { sent?: number; refused?: number; at: number }>();
 
   function register(kind: Kind, o: FlowChannelOptions): Route {
     const route: Route = { kind, name: o.name ?? kind, sender: o.sender ?? (process.env[`FLOW_MESSAGING_${kind.toUpperCase()}_SENDER`] || undefined) };
@@ -421,42 +422,48 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   /**
    * A read receipt is a courtesy: Flow's spec says to ignore its failures. Outside the window
-   * (on iMessage, more than 5 minutes after the line's last message to that person) it is expected
-   * to be refused, so that is not logged; any other failure is.
+   * (on iMessage, 5 minutes or more after the line's last message to that person) it is expected
+   * to be refused, so that is not logged; any other failure is. On iMessage, when this process knows
+   * the window is closed, Flow is not called.
    */
   async function markRead(route: Route, to: string, body: Record<string, unknown>, messageId?: string): Promise<void> {
+    let conversation: string | undefined;
     try {
-      const conversation = await conversationFor(route.name, to, messageId);
-      if (conversation) await client.post(`/v0/conversations/${idSegment("conv", conversation)}/read`, body, 1);
+      conversation = await conversationFor(route.name, to, messageId);
+      if (!conversation || (route.kind === "imessage" && lineWindowClosed(conversation))) return;
+      await client.post(`/v0/conversations/${idSegment("conv", conversation)}/read`, body, 1);
     } catch (error) {
-      if (error instanceof FlowMessagingError && error.type === "outside_window") return;
+      if (error instanceof FlowMessagingError && error.type === "outside_window") {
+        if (route.kind === "imessage" && conversation) learned(conversation, "refused");
+        return;
+      }
       console.warn(`@flow-engineer/flow/flow-messaging: read on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
     }
   }
 
-  /** Something learned of an iMessage conversation's typing window: a message of the line's went, or Flow refused typing. */
+  /** Something learned of an iMessage conversation's line window: a message of the line's went, or Flow refused typing or a read receipt. */
   function learned(conversation: string, what: "sent" | "refused"): void {
     const now = Date.now();
-    const known = typingWindows.get(conversation);
-    typingWindows.delete(conversation);
-    typingWindows.set(conversation, { ...known, [what]: now, at: now });
-    for (const [id, state] of typingWindows) {
-      if (now - state.at < TYPING_WINDOW_KEPT_MS) break;
-      typingWindows.delete(id);
+    const known = lineWindows.get(conversation);
+    lineWindows.delete(conversation);
+    lineWindows.set(conversation, { ...known, [what]: now, at: now });
+    for (const [id, state] of lineWindows) {
+      if (now - state.at < LINE_WINDOW_KEPT_MS) break;
+      lineWindows.delete(id);
     }
   }
 
   /**
-   * Whether iMessage would surely refuse typing now: Flow refused it after the line's last message
-   * this process knows of, or that message went more than the window ago. Nothing known (a restart,
-   * or forgotten): false, and the call is made.
+   * Whether iMessage would surely refuse typing or a read receipt now: Flow refused one after the
+   * line's last message this process knows of, or that message went more than the window ago. Nothing
+   * known (a restart, or forgotten): false, and the call is made.
    */
-  function typingWindowClosed(conversation: string): boolean {
-    const state = typingWindows.get(conversation);
+  function lineWindowClosed(conversation: string): boolean {
+    const state = lineWindows.get(conversation);
     const now = Date.now();
-    if (!state || now - state.at >= TYPING_WINDOW_KEPT_MS) return false;
+    if (!state || now - state.at >= LINE_WINDOW_KEPT_MS) return false;
     if (state.refused !== undefined && (state.sent === undefined || state.refused > state.sent)) return true;
-    return state.sent !== undefined && now - state.sent >= IMESSAGE_TYPING_WINDOW_MS;
+    return state.sent !== undefined && now - state.sent >= IMESSAGE_LINE_WINDOW_MS;
   }
 
   /**
@@ -473,7 +480,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     const conversation = await conversationFor(route.name, to);
     if (!conversation) return;
     const imessage = route.kind === "imessage";
-    if (imessage && typingWindowClosed(conversation)) throw new Error("outside_window");
+    if (imessage && lineWindowClosed(conversation)) throw new Error("outside_window");
     try {
       await client.post(`/v0/conversations/${idSegment("conv", conversation)}/typing`, {}, 1);
     } catch (error) {
