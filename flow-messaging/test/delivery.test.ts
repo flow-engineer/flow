@@ -35,6 +35,31 @@ test("a send waits for its message.sent; a message.failed instead fails it, and 
   next.answer(respond());
 });
 
+test("a template Flow accepted that the channel fails later, to someone this process never heard from, is logged at error level and told to the agent with the message's id and error", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  const errors: string[] = [];
+  t.mock.method(console, "error", (line: string) => void errors.push(line));
+  flow.contacts.ct_new = { address: { phone: "+15550100200" } };
+  flow.templates.push({ id: "tpl_order", sender: "snd_WA", name: "order_update", language: "en_US", status: "approved" });
+  const nudge = await live.agent.nudge({ to: { channel: "whatsapp", address: "+15550100200" }, template: { name: "order_update", body: ["Maya", "1042"] } });
+  assert.equal(nudge.status, "sent");
+  const out = live.events.find((e) => e.type === "message.out")!;
+  assert.equal(out.messageId, "msg_out1", "the send names Flow's message id, for its trace");
+
+  const error = { type: "permission", channel_code: "131042", message: "The WhatsApp Business Account has no valid payment method.", hint: "Add one in WhatsApp Manager.", doc_url: "https://api.flow.engineer/docs/errors/permission" };
+  const failed = { id: "msg_out1", conversation: "conv_new", direction: "out", status: "failed", content: { kind: "template", template_id: "tpl_order", language: "en_US" }, error };
+  assert.equal((await live.deliver(event("message.failed", { id: "conv_new", channel: "whatsapp", contact: "ct_new" }, { message: failed }))).status, 200);
+  assert.deepEqual(errors, ["@flow-engineer/flow/flow-messaging: message msg_out1 on whatsapp (conversation conv_new) was not delivered (type permission, channel_code 131042): The WhatsApp Business Account has no valid payment method. Add one in WhatsApp Manager. (https://api.flow.engineer/docs/errors/permission)"]);
+  const told = live.events.filter((e) => e.type === "message.undelivered").map(({ text, channel, messageId, errorType, channelCode }) => ({ text, channel, messageId, errorType, channelCode }));
+  assert.deepEqual(told, [{ text: "template order_update", channel: "whatsapp", messageId: "msg_out1", errorType: "permission", channelCode: "131042" }]);
+  const next = await live.nextCall(0);
+  assert.match(users(next.request.messages).at(-1) ?? "", /^\[Not delivered\] "template order_update": permission \(131042\): The WhatsApp Business Account has no valid payment method\. It will fail again/);
+  next.answer(respond());
+  await live.agent.conversation(out.conversationId)!.whenIdle();
+});
+
 test("a message.sent heard before Flow's 202 came back settles its send at once", async (t) => {
   const { flow, live, id, outs } = await waiting(t);
   assert.equal((await live.deliver(event("message.sent", WA, { message: outbound("msg_w1", "sent") }))).status, 200);

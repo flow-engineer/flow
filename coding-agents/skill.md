@@ -162,6 +162,11 @@ Each trace's root span says what started it, `flow.turn.trigger`: `person`, `nud
 `wake_up`, `task`, `queued_message` or `direct` (with content on, `flow.turn.trigger_text` is the
 nudge's prompt, the wake-up's note or the background result). A message sent as written (a nudge's
 `text` or `template`, a rule's answer) is a trace of its own, its send span `flow.message.as_written`.
+Every send span carries the platform's message id, `flow.send.message_id` (Flow Messaging's `msg_...`).
+A message the channel fails after its send resolved (Flow Messaging's late `message.failed`, such as
+a WhatsApp template refused for the business account's billing) is logged at error level, told to
+the agent as Not delivered, and traced as a `delivery <channel>` span under that send span, with
+`flow.delivery.status` `failed`, `flow.delivery.error_type` and `flow.delivery.channel_code`.
 A nudge your code records inside a tool call (say a tool in the seller's conversation telling the
 buyer) links its trace to that call: a span link with `flow.link.kind` `queued_by`, and
 `flow.origin.trace_id`, `.span_id`, `.conversation_id`, `.tool_call_id`, `.tool_name` on the root.

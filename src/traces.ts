@@ -48,6 +48,14 @@
 // that code queued while it ran in a turn (recordNudge from a tool, say, for another person) names
 // where: a span link to that span (`flow.link.kind` "queued_by") and, for ingest paths that drop
 // links, `flow.origin.*` on the root span.
+//
+// A send span carries the platform's id for the message it sent, `flow.send.message_id` (Flow
+// Messaging's `msg_...`, SendReceipt.messageId), content on or off. When the channel fails a
+// message after its send resolved (agent.undelivered with the message's id: Flow Messaging's late
+// `message.failed`), a `delivery <channel>` span follows: in the send's trace under its send span
+// when this process sent it, else a trace of its own. It holds `flow.delivery.message_id`,
+// `flow.delivery.status` ("failed"), `flow.delivery.error_type`, `flow.delivery.channel_code` (when
+// the channel gave one) and `chinwag.channel`, never the message's content, and its status is error.
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync } from "node:child_process";
@@ -75,6 +83,8 @@ const BATCH = 64;
 const TIMEOUT_MS = 10_000;
 /** The cap per content attribute. */
 const MAX_TEXT = 32 * 1024;
+/** Send spans remembered by the platform's message id, for a delivery failure heard later; past this the oldest goes. */
+const MAX_SENDS = 4096;
 
 /** Where traces go when a key is set and no address is, and the test cloud `flow test` uses when none is named. */
 export const OBSERVE_URL = "https://flow.engineer/observe";
@@ -205,6 +215,8 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
   const detached = new Map<string, { traceId: string; spanId: string }>();
   /** Messages and background results that came while no turn was open: they join the next one. */
   const waiting = new Map<string, { inbound: Inbound[]; spans: Array<(turn: Turn) => Span> }>();
+  /** Send spans by the platform's message id: where a failure the channel reports later goes. */
+  const sends = new Map<string, { traceId: string; spanId: string }>();
   const queue: Span[][] = [];
   const warned = new Set<string>();
   let sending: Promise<void> | null = null;
@@ -295,7 +307,27 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
     const text = typeof e.reads === "string" ? e.reads : e.text;
     if (content && typeof text === "string") attributes.push(attr("chinwag.agent_reply", clip(text)));
     if (content && e.sentTemplate) attributes.push(...templateAttributes(e.sentTemplate as SentTemplate));
-    return child(turn, `send ${channel}`, e.at, e.at, attributes);
+    const messageId = typeof e.messageId === "string" && e.messageId ? e.messageId : undefined;
+    if (messageId) attributes.push(attr("flow.send.message_id", messageId));
+    const made = child(turn, `send ${channel}`, e.at, e.at, attributes);
+    if (messageId) {
+      sends.set(messageId, { traceId: made.traceId, spanId: made.spanId });
+      if (sends.size > MAX_SENDS) sends.delete(sends.keys().next().value!);
+    }
+    return made;
+  }
+
+  /** A message the channel failed after its send resolved: under its send span when this process sent it, else a trace of its own. */
+  function delivery(conversationId: string, e: FlowEvent, messageId: string) {
+    const channel = typeof e.channel === "string" ? e.channel : undefined;
+    const send = sends.get(messageId);
+    const attributes = ids(conversationId);
+    const kind = kindOf(channel);
+    if (kind) attributes.push(attr("chinwag.channel", kind));
+    attributes.push(attr("flow.delivery.message_id", messageId), attr("flow.delivery.status", "failed"));
+    if (typeof e.errorType === "string" && e.errorType) attributes.push(attr("flow.delivery.error_type", e.errorType));
+    if (typeof e.channelCode === "string" && e.channelCode) attributes.push(attr("flow.delivery.channel_code", e.channelCode));
+    enqueue([span(send?.traceId ?? hex(16), channel ? `delivery ${channel}` : "delivery", e.at, e.at, attributes, send?.spanId, true)]);
   }
 
   function enqueue(spans: Span[]) {
@@ -381,6 +413,10 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
         return finish(id, false, e.at);
       case "model.error":
         return finish(id, true, e.at);
+      case "message.undelivered":
+        // Only a failure that names the message (heard after its send resolved) has a send to belong to.
+        if (typeof e.messageId === "string" && e.messageId) delivery(id, e, e.messageId);
+        return;
       case "message.out":
         // Sent as written (no model call: a nudge's text, a rule's answer): never part of a turn open meanwhile.
         if (!turn || e.answered || e.direct) return alone(id, e);

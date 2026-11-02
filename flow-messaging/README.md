@@ -190,7 +190,12 @@ older API gets the older shape (`content.type`); both read the same.
   or row's id and its label. A quick reply's payload is its ID.
 - Quotes, read from Flow.
 - Reactions to the agent's messages.
-- Late failures (`message.failed`), told to the agent as "Not delivered" (an edit's or unsend's as `edit of msg_...`, `unsend of msg_...`).
+- Late failures (`message.failed`), told to the agent as "Not delivered" (an edit's or unsend's as
+  `edit of msg_...`, `unsend of msg_...`, a template's as `template <name>`), also for someone this
+  process has not heard from (a nudge or template to someone new, or after a restart). Each is logged
+  once at error level: `message <msg_...> on <channel> (conversation <conv_...>) was not delivered
+  (type <type>, channel_code <code>): <Flow's message, hint and doc_url>`, never the message's content
+  or the person's address. With traces on it is a `delivery` span (see docs/guarantees.md).
 - Photos, voice notes, audio and documents, as attachments. Their bytes are fetched from
   `GET /v0/files/{id}` only when the agent can use them. A voice note Flow already transcribed
   arrives as its transcript.
