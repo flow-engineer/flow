@@ -60,6 +60,8 @@ export const INSTRUCTIONS = [
 
 const ENVIRONMENT = z.enum(["staging", "production"]);
 const WHEN = "a duration back from now (30m, 24h, 7d) or a time such as 2026-11-03T09:00:00Z";
+/** The most pages read_logs reads before it stops (truncated: newer lines were not read). */
+const LOG_PAGES = 20;
 const FLOW_KEY_NOTE = "Reads with FLOW_KEY: flow_test_ reads staging only; production needs a flow_live_ key with the traces scope.";
 
 interface ServeTool {
@@ -170,7 +172,7 @@ export const TOOLS: ServeTool[] = [
   tool({
     name: "read_logs",
     title: "Read logs",
-    description: "The hosted agent's log lines, oldest first: { time, severity, text }. Use it for why something errored or what the service did around a time: severity ERROR shows the failures, grep narrows to a tool, an id or a message. When more lines match than limit, the newest are kept and truncated is true: narrow since, severity or grep. Reads with the CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_...), staging and production.",
+    description: "The hosted agent's log lines, oldest first: { time, severity, text }. Use it for why something errored or what the service did around a time: severity ERROR shows the failures, grep narrows to a tool, an id or a message. When more lines match than limit, the newest are kept and truncated is true: narrow since, severity or grep (when it stops after 20 pages, newer_from is where the unread lines start). Reads with the CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_...), staging and production.",
     input: z.object({
       environment: ENVIRONMENT.default("staging").describe("staging or production"),
       since: z.string().default("1h").describe(`How far back, at most 30 days: ${WHEN}`),
@@ -188,20 +190,23 @@ export const TOOLS: ServeTool[] = [
       const { api } = reads.ci();
       let lines: Array<{ time: string; severity?: string; text: string }> = [];
       let from: string | null = null;
-      // Pages of 1000 up to now, as flow logs reads them; at most 10, keeping the newest.
-      for (let pages = 0; pages < 10; pages++) {
+      // Every page up to until (else now), as flow logs reads them, keeping the newest: the pages end
+      // when the cursor stops moving (next null, or the after just sent); a page past that is not kept.
+      let complete = false;
+      for (let pages = 0; pages < LOG_PAGES; pages++) {
         const page = await logsPage(api, query);
         if (pages === 0) from = page.from;
-        lines = [...lines, ...page.lines].slice(-input.limit - 1);
-        if (!page.next || !page.full) break;
-        query.after = page.next;
+        const moved = Boolean(page.next) && page.next !== query.after;
+        if (moved || pages === 0) lines = [...lines, ...page.lines].slice(-input.limit - 1);
+        if (!moved) { complete = true; break; }
+        query.after = page.next!;
       }
-      const truncated = lines.length > input.limit;
+      const truncated = lines.length > input.limit || !complete;
       const kept = lines.slice(-input.limit).map((l) => ({ time: l.time, severity: l.severity ?? null, text: l.text }));
       const errors = kept.filter((l) => ["ERROR", "CRITICAL", "ALERT", "EMERGENCY"].includes(String(l.severity).toUpperCase())).length;
       return {
-        data: { environment: input.environment, since, until: until ?? null, lines: kept, truncated, logs_start: from },
-        summary: `${kept.length} log line${kept.length === 1 ? "" : "s"} from ${input.environment}${truncated ? " (truncated: the newest kept; narrow since, severity or grep)" : ""}, ${errors} at ERROR or above.${from && Date.parse(from) - Date.parse(since) > 60_000 ? ` Logs start at ${from}.` : ""}`,
+        data: { environment: input.environment, since, until: until ?? null, lines: kept, truncated, ...(complete ? {} : { newer_from: kept.at(-1)?.time ?? null }), logs_start: from },
+        summary: `${kept.length} log line${kept.length === 1 ? "" : "s"} from ${input.environment}${!complete ? ` (stopped after ${LOG_PAGES} pages: newer lines from ${kept.at(-1)?.time ?? "?"} not read; call again with that since)` : truncated ? " (truncated: the newest kept; narrow since, severity or grep)" : ""}, ${errors} at ERROR or above.${from && Date.parse(from) - Date.parse(since) > 60_000 ? ` Logs start at ${from}.` : ""}`,
       };
     },
   }),
