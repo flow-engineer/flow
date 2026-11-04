@@ -188,7 +188,9 @@ export function keyRefused(status: number, code: string | undefined): boolean {
 export const KEYS_HELP = `Keys (the environment wins over the agent's .env; errors name a key by its prefix and last 4 only):
   FLOW_KEY                  flow_test_... reads staging, flow_live_... staging and production:
                             flow conversations, flow issues, flow templates. flow setup makes a
-                            flow_test_ one; for production reads, ask Flow for a flow_live_ one
+                            flow_test_ one; for production reads, ask Flow for a flow_live_ one.
+                            flow insights (and insights show) needs the live one, flow_live_...:
+                            flow setup writes only a test key today
   FLOW_FRAMEWORK_CLOUD_KEY  The CI key, oci_...: flow test, flow show, flow deploy (every
                             subcommand), flow logs, flow cli publish|rollback|status
   ${GET_KEY}.
