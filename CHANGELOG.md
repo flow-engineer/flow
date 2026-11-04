@@ -15,7 +15,11 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `flow test --json` reports an `src/agent.ts` that does not load as its report's error.
 - **A long `--json` answer is no longer cut off.** On macOS a pipe is written asynchronously and the
   CLI exited before stdout had taken it: a `conversations show --json` over 64 KB came out empty or
-  cut at 64 KB. Every command now exits once stdout and stderr have taken what it wrote.
+  cut at 64 KB, at random, more often when the reader was slow. Every command now exits once stdout
+  and stderr have taken what it wrote (`flow test` already wrote its report synchronously).
+- **`conversations show <id>` takes `--env`/`--environment`** (it reads one conversation by id, so
+  the environment changes nothing), and a refused `show` exits 2 with its usage error as the JSON
+  document; 0.15.6 printed the usage on stdout and exited 0.
 - **Rate limits and blips.** Every call to Flow's cloud (`conversations`, `issues`, `templates`,
   `show`, `deploy`, `logs`, `cli`) waits out a `429` for its `Retry-After` (at most 30 s, said on
   stderr; a longer one fails, naming the wait) and tries again, up to 3 times, and tries a GET, PUT
@@ -44,8 +48,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   reason), when the cloud sends them.
 - **`flow logs`** takes `--until <duration|time>`, `--severity <DEFAULT|INFO|WARNING|ERROR>` (that
   severity or above) and `--grep <text>`, sends them to the cloud and filters what an older cloud
-  sends anyway; `--since` takes a time or up to 30 days; full pages of 1000 lines are followed; when
-  the lines start later than `--since` asked, stderr says "Logs start at <time>: this Flow keeps <N> back".
+  sends anyway; `--since` takes a time or up to 30 days; when the lines start later than `--since`
+  asked, stderr says "Logs start at <time>: this Flow keeps <N> back".
+- **`flow logs` no longer stops at the host's first page.** Without `--follow` it read one page (the
+  host answers 500 lines, oldest first), so `--since 3d` printed the oldest 500 lines and silently
+  left out the newest. It now reads every page up to `--until` (else now) before printing, keeps the
+  newest `--limit` lines (default 10000, at most 100000), and when it leaves older ones out says on
+  stderr where the printed lines start and the `--since`/`--until` that gets the rest.
 - **`flow conversations`:** `--contact <label>` (`"Contact 9e35"` or `9e35`) keeps one contact's
   conversations, read over as many pages as it takes. `show` prints each agent reply's tool calls
   (time, ok or the error, input and output when Flow keeps them) and its delivery (`queued`,

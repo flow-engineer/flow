@@ -76,6 +76,10 @@ test("every --json failure prints exactly one JSON document on stdout, { ok: fal
       // --env is taken, as every cloud command takes it; the key is refused.
       { args: ["conversations", "--env", "staging", "--json"], dir: keyed, exit: 1, code: "bad_key" },
       { args: ["conversations", "show", "cnv_x", "--env", "staging", "--json"], dir: keyed, exit: 1, code: "not_found" },
+      // As a coding agent asked it of 0.15.6, which answered usage text on stdout and exit 0.
+      { args: ["conversations", "show", "cnv_x", "--environment", "production", "--json"], dir: keyed, exit: 1, code: "not_found" },
+      { args: ["conversations", "show", "cnv_x", "--grade", "wrong", "--json"], dir: keyed, exit: 2, code: "usage" },
+      { args: ["conversations", "show", "--json"], dir: keyed, exit: 2, code: "usage" },
       { args: ["conversations", "--json", "--cloud", nowhere], dir: keyed, exit: 1, code: "network" },
       { args: ["issues", "--environment", "production", "--json"], dir: keyed, exit: 1, code: "bad_key" },
       { args: ["templates", "--json"], dir: keyed, exit: 1, code: "bad_key" },
@@ -134,7 +138,7 @@ test("a long --json answer reaches a pipe whole before the CLI exits", { timeout
   const fake = await cloud();
   try {
     const dir = agentFolder([`FLOW_KEY=${FLOW_KEY}`, `FLOW_FRAMEWORK_CLOUD=${fake.url}`]);
-    const run = await flow(["conversations", "show", "cnv_big", "--json"], dir);
+    const run = await flow(["conversations", "show", "cnv_big", "--environment", "production", "--json"], dir);
     assert.equal(run.code, 0, run.stderr);
     assert.deepEqual(JSON.parse(run.stdout), fake.big);
   } finally { fake.close(); }

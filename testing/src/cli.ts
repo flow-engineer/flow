@@ -192,12 +192,12 @@ function nextSteps(): string {
 
 checkNode(process.versions.node);
 
-if (process.argv[2] === "plugin") process.exit(pluginCli(process.argv.slice(3)));
+if (process.argv[2] === "plugin") await exitFlushed(pluginCli(process.argv.slice(3)));
 
 if (process.argv[2] === "check-endpoint") {
   // Its token may be in the agent folder's .env; no value is ever printed.
   loadEnv(undefined);
-  process.exit(await checkEndpointCli(process.argv.slice(3)));
+  await exitFlushed(await checkEndpointCli(process.argv.slice(3)));
 }
 if (process.argv[2] === "show") await exitFlushed(await showCli(process.argv.slice(3)));
 if (process.argv[2] === "check") await exitFlushed(await checkCli(process.argv.slice(3)));
@@ -214,17 +214,17 @@ if (process.argv[2] === "cli" && ["pack", "publish", "rollback", "status"].inclu
 if (process.argv[2] === "cli") {
   // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client and @stricli/core, optional peers.
   const { defineCli, runCli } = await withPeers("cli", () => import("../../cli/src/index.ts"));
-  process.exit(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
+  await exitFlushed(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
 }
 if (process.argv[2] === "inspect") {
   // Loaded only here: it needs @modelcontextprotocol/client, an optional peer.
   const { inspectCli } = await withPeers("inspect", () => import("./inspect.ts"));
-  process.exit(await inspectCli(process.argv.slice(3)));
+  await exitFlushed(await inspectCli(process.argv.slice(3)));
 }
 if (process.argv[2] === "deploy") await exitFlushed(await deployCli(process.argv.slice(3)));
 if (process.argv[2] === "logs") await exitFlushed(await logsCli(process.argv.slice(3)));
-if (process.argv[2] === "chat") process.exit(await chatCli(process.argv.slice(3)));
-if (process.argv[2] === "records") process.exit(await recordsCli(process.argv.slice(3)));
+if (process.argv[2] === "chat") await exitFlushed(await chatCli(process.argv.slice(3)));
+if (process.argv[2] === "records") await exitFlushed(await recordsCli(process.argv.slice(3)));
 if (process.argv[2] === "projects") await exitFlushed(await projectsCli(process.argv.slice(3)));
 if (process.argv[2] === "conversations") await exitFlushed(await conversationsCli(process.argv.slice(3)));
 if (process.argv[2] === "issues") await exitFlushed(await issuesCli(process.argv.slice(3)));
@@ -264,17 +264,17 @@ const { values, positionals } = parseCommandLine();
 const [command, ...rest] = positionals;
 if (values.env !== undefined && values.environment !== undefined && values.env !== values.environment) {
   console.error(`flow: --env and --environment name different environments (${values.env}, ${values.environment}): give one.\n\n${TEST_USAGE}`);
-  process.exit(1);
+  await exitFlushed(1);
 }
 values.environment ??= values.env;
 
 if (values.version) {
   console.log(JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).version);
-  process.exit(0);
+  await exitFlushed(0);
 }
 if (values.help || process.argv.length <= 2) {
   console.log(command === "new" || command === "init" ? NEW_USAGE : command === "test" ? TEST_USAGE : USAGE);
-  process.exit(0);
+  await exitFlushed(0);
 }
 
 /** --display-name, else asked for in a terminal (Enter takes the folder's name in words), else that default. */
@@ -305,12 +305,12 @@ if (command === "new") {
     dir = newStandalone(name, { displayName: await askDisplayName(displayNameFlag, name) });
   } catch (error) {
     console.error((error as Error).message);
-    process.exit(1);
+    await exitFlushed(1);
   }
   console.log(`Made ./${name}/ from the café example. ${namedLine(dir)} Next:
   1. cd ${name} && npm install
 ${nextSteps()}`);
-  process.exit(0);
+  await exitFlushed(0);
 }
 
 if (command === "init") {
@@ -321,13 +321,13 @@ if (command === "init") {
     name = initHere(process.cwd(), { name: nameFlag, displayName: await askDisplayName(displayNameFlag, nameFlag ?? folderName(process.cwd())) });
   } catch (error) {
     console.error((error as Error).message);
-    process.exit(1);
+    await exitFlushed(1);
   }
   loadEnv(undefined); // a .env already here may hold a model key
   console.log(`Made ${name}, started from the café example, in this folder. ${namedLine(process.cwd())} Next:
   1. npm install
 ${nextSteps()}`);
-  process.exit(0);
+  await exitFlushed(0);
 }
 
 /** Every human line of `flow test`: stdout, or stderr with --json, where stdout is the report. */
@@ -767,7 +767,7 @@ async function withPeers<T>(command: string, load: () => Promise<T>): Promise<T>
     const peers = JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).peerDependencies as Record<string, string>;
     if ((error as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND" || !missing || !(missing in peers)) throw error;
     console.error(`flow ${command} needs ${missing}: run it from your agent's folder (npx @flow-engineer/flow ${command}), or npm install ${missing}.`);
-    process.exit(1);
+    return exitFlushed(1);
   }
 }
 
