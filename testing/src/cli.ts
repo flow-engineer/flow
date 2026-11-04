@@ -20,7 +20,8 @@
 // scenarios that did not pass. --json prints one report (testing/src/report.ts) on stdout at every exit,
 // and `flow show <run>` prints one run's record from the cloud (testing/src/show.ts).
 // `flow login`, `logout`, `whoami`, `setup` and `link` sign in to flow.engineer and get the agent's
-// keys and its phone link (testing/src/account.ts); `flow projects list | delete` lists and deletes
+// keys and its phone link, and `flow setup --live` the agent's live Flow key; `flow keys` lists
+// and revokes the account's keys (testing/src/account.ts); `flow projects list | delete` lists and deletes
 // that account's projects (testing/src/projects.ts). `flow deploy` puts the agent on Flow's hosting
 // (testing/src/deploy.ts). `flow conversations` and `flow issues` read the hosted agent's
 // conversations and the grades of its replies, and `flow insights` Flow Insights' findings
@@ -44,7 +45,7 @@ import type { SessionLimits } from "./protocol.ts";
 import { runPrinter } from "./print-run.ts";
 import { checkEndpointCli } from "./check-endpoint.ts";
 import { CHECK_LINE as TOOLS_CHECK_LINE, checkCli, mcpUpdateCli } from "./check.ts";
-import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
+import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli, keysCli } from "./account.ts";
 import { PROJECTS_LINE, projectsCli } from "./projects.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
 import { RECORDS_LINE, recordsCli } from "./records.ts";
@@ -244,6 +245,7 @@ if (process.argv[2] === "deploy") await exitFlushed(await deployCli(process.argv
 if (process.argv[2] === "logs") await exitFlushed(await logsCli(process.argv.slice(3)));
 if (process.argv[2] === "chat") await exitFlushed(await chatCli(process.argv.slice(3)));
 if (process.argv[2] === "records") await exitFlushed(await recordsCli(process.argv.slice(3)));
+if (process.argv[2] === "keys") await exitFlushed(await keysCli(process.argv.slice(3)));
 if (process.argv[2] === "projects") await exitFlushed(await projectsCli(process.argv.slice(3)));
 if (process.argv[2] === "conversations") await exitFlushed(await conversationsCli(process.argv.slice(3)));
 if (process.argv[2] === "issues") await exitFlushed(await issuesCli(process.argv.slice(3)));

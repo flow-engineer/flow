@@ -25,10 +25,10 @@ async function fakeCloud(answer: (req: IncomingMessage) => { status: number; bod
   return { url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, seen, close: () => new Promise((done) => server.close(done)) };
 }
 
-/** `flow mcp serve` in an agent folder whose .env points at the cloud, with a connected client. */
-async function serve(cloud: string) {
+/** `flow mcp serve` in an agent folder whose .env points at the cloud (and has `more` lines), with a connected client. */
+async function serve(cloud: string, more = "") {
   const dir = mkdtempSync(join(tmpdir(), "flow-mcp-serve-"));
-  writeFileSync(join(dir, ".env"), `FLOW_KEY=${KEY}\nFLOW_FRAMEWORK_CLOUD_KEY=oci_ci_secretvalue\nFLOW_FRAMEWORK_CLOUD=${cloud}\n`);
+  writeFileSync(join(dir, ".env"), `FLOW_KEY=${KEY}\nFLOW_FRAMEWORK_CLOUD_KEY=oci_ci_secretvalue\nFLOW_FRAMEWORK_CLOUD=${cloud}\n${more}`);
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(process.env)) if (value !== undefined && !/^(FLOW_|CHINWAG_)/.test(name)) env[name] = value;
   const client = new Client({ name: "test", version: "1" });
@@ -93,6 +93,25 @@ test("a refused key is a tool error naming the key it read, never its value, and
     assert.equal(error.code, "bad_key");
     assert.match(error.message, /It found FLOW_KEY=flow_test_…alue in .*\.env\..*\nGet the right one: npx @flow-engineer\/flow setup/s);
     assert.doesNotMatch(JSON.stringify(result), /secretvalue/);
+  } finally {
+    await client.close();
+    await cloud.close();
+  }
+});
+
+test("production tools read with FLOW_LIVE_KEY when .env has it, staging ones with FLOW_KEY, and each result keeps the text mode Flow sent", async () => {
+  const live = "flow_live_FAKElive00_0000FAKE0000live0000R3ad";
+  const cloud = await fakeCloud((req) => ({ status: 200, body: req.url!.startsWith("/v1/agent/insights") ? { state: "on", findings: [], text_mode: "deidentified" } : { conversations: [], next_cursor: null, text_mode: "deidentified" } }));
+  const client = await serve(cloud.url, `FLOW_LIVE_KEY=${live}\n`);
+  try {
+    const insights = await client.callTool({ name: "list_insights", arguments: {} });
+    assert.equal((insights.structuredContent as { text_mode?: string }).text_mode, "deidentified");
+    assert.match((insights.content as Array<{ text: string }>)[0]!.text, /Text: de-identified/);
+    await client.callTool({ name: "list_conversations", arguments: { environment: "production" } });
+    await client.callTool({ name: "list_conversations", arguments: { environment: "staging" } });
+    assert.deepEqual(cloud.seen.map((s) => s.authorization), [`Bearer ${live}`, `Bearer ${live}`, `Bearer ${KEY}`]);
+    const { tools } = await client.listTools();
+    assert.match(tools.find((t) => t.name === "list_insights")!.description!, /flow setup --live/);
   } finally {
     await client.close();
     await cloud.close();

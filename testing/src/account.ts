@@ -21,8 +21,10 @@ import { parseArgs } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   currentToken, deleteCredentials, deletePending, LoginRefused, loginUrl, pollToken, readPending, REQUEST_TIMEOUT_MS, revoke, saveCredentials, savePending,
-  modelCredit, SETUP_ENV, setup, startDevice, TimedOut, tryLink, warningsOf, whoami, type Account, type ModelCredit, type PendingLogin, type SetupAnswer,
+  listKeys, modelCredit, revokeKey, SETUP_ENV, setup, setupLive, startDevice, TimedOut, tryLink, warningsOf, whoami,
+  type Account, type ListedKey, type LiveKey, type LiveSetupAnswer, type ModelCredit, type PendingLogin, type SetupAnswer,
 } from "./flow-login.ts";
+import { textLine } from "./cloud-call.ts";
 import { packageRoot, setDisplayName } from "./new.ts";
 import { deployedFrom } from "./deploy.ts";
 import { flowModelURL, hasModelKey, MODEL_KEY_NAMES, NO_MODEL_KEY } from "../../src/model.ts";
@@ -46,6 +48,17 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
                             more; --now ends it at once). --workspace (here and on link) puts the
                             agent in that observe workspace of yours, kept in .env as
                             FLOW_FRAMEWORK_WORKSPACE; a new one makes the cloud and traces keys again
+  flow setup --live [--content] [--workspace <name|acc_id>] [--rotate] [--json]
+                            Write the agent's live Flow key, FLOW_LIVE_KEY, into ./.env: FLOW_KEY's
+                            scopes for production too, plus reading production conversations,
+                            traces and Insights, which flow conversations and flow insights then
+                            use (the workspace's owner only; a health workspace gets none). Text
+                            is de-identified unless --content. It lasts 30 days and ends after 7
+                            days unused; --rotate ends the agent's earlier live keys now
+  flow keys [--json]        Your account's live keys, never their values: id, agent, mode, scopes,
+                            whether its text is raw, when it expires, when last used
+  flow keys revoke <kid> [--json]
+                            End one of them at once
   flow link [--channel telegram|whatsapp|imessage] [--workspace <name|acc_id>] [--display-name <name>] [--timeout <s>] [--no-browser] [--json]
                             Print the link that opens a chat with this agent from a phone; signs in
                             and runs setup first when this folder is not set up yet. --display-name
@@ -103,6 +116,8 @@ const isCommand = (next: string) => /^(?:npx|npm|flow|gh) |^https?:\/\//.test(ne
 /** Runs one account command; resolves to the exit status. */
 export async function accountCli(command: string, args: string[]): Promise<number> {
   let values: Record<string, boolean | string | undefined>;
+  // With --live, --rotate takes no value: it makes the live key again.
+  if (command === "setup" && args.includes("--live")) args = args.map((a, i) => (a === "--rotate" && (args[i + 1] ?? "-").startsWith("-") ? "--rotate=live" : a));
   try {
     ({ values } = parseArgs({
       args,
@@ -118,7 +133,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
               force: { type: "boolean", default: false },
             }
           : {}),
-        ...(command === "setup" ? { replace: { type: "boolean", default: false }, rotate: { type: "string" }, now: { type: "boolean", default: false }, ci: { type: "boolean", default: false } } : {}),
+        ...(command === "setup" ? { replace: { type: "boolean", default: false }, rotate: { type: "string" }, now: { type: "boolean", default: false }, ci: { type: "boolean", default: false }, live: { type: "boolean", default: false }, content: { type: "boolean", default: false } } : {}),
         ...(command === "link" ? { channel: { type: "string", default: "telegram" } } : {}),
         ...(command === "link" || command === "setup" ? { "display-name": { type: "string" }, workspace: { type: "string" } } : {}),
       },
@@ -142,7 +157,17 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     return EXIT.usage;
   }
   const rotate = values.rotate === undefined ? [] : String(values.rotate).split(",").map((k) => k.trim());
-  if (rotate.some((k) => !(k in ROTATE)) || (rotate.includes("all") && rotate.length > 1)) {
+  const live = values.live === true;
+  if (values.content === true && !live) {
+    console.error(`flow setup: --content goes with --live: it makes the live key with message text as people wrote it.\n\n${USAGE}`);
+    return EXIT.usage;
+  }
+  const notLive = ["replace", "now", "ci", "display-name"].filter((n) => values[n] !== undefined && values[n] !== false);
+  if (live && (notLive.length || rotate.some((k) => k !== "live"))) {
+    console.error(`flow setup --live takes --content, --workspace, --rotate (with no value) and --json${notLive.length ? `, not --${notLive.join(", --")}` : ""}.\n\n${USAGE}`);
+    return EXIT.usage;
+  }
+  if (!live && (rotate.some((k) => !(k in ROTATE)) || (rotate.includes("all") && rotate.length > 1))) {
     console.error(`flow setup: --rotate takes ${Object.keys(ROTATE).filter((k) => k !== "all").join(", ")} (comma-separated), or all.\n\n${USAGE}`);
     return EXIT.usage;
   }
@@ -181,6 +206,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     else if (command === "logout") await logout(json, out, say);
     else if (command === "whoami") await showAccount(json, out, say);
     else if (command === "status") await status(json, out, say);
+    else if (command === "setup" && live) await setupLiveKey({ content: values.content === true, rotate: rotate.length > 0, workspace }, json, out, say);
     else if (command === "setup") await setupEnv({ replace: values.replace === true, rotate, now: values.now === true, ci: values.ci === true, workspace }, json, out, say);
     else await link({ channel, noBrowser: values["no-browser"] === true, timeoutSeconds, renamed, workspace }, json, out, say);
     return EXIT.ok;
@@ -421,7 +447,9 @@ async function showAccount(json: boolean, out: Out, say: Say): Promise<void> {
   say(`Signed in to flow.engineer as ${account.email} (account ${account.account}).`);
 }
 
-const SECRET = new Set<string>([SETUP_ENV.cloud_key, SETUP_ENV.traces_key, SETUP_ENV.messaging_key, ...MODEL_KEY_NAMES]);
+/** The live Flow key's name in .env (setup --live). */
+const LIVE_ENV = "FLOW_LIVE_KEY";
+const SECRET = new Set<string>([SETUP_ENV.cloud_key, SETUP_ENV.traces_key, SETUP_ENV.messaging_key, LIVE_ENV, ...MODEL_KEY_NAMES]);
 const masked = (name: string, value: string) => (SECRET.has(name) ? `${/^[a-z]+_(?:test_|live_)?/.exec(value)?.[0] ?? ""}…${value.slice(-4)}` : value);
 const ENV_LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/;
 /** The setting that sends what was written with traces, and its older name (src/names.ts). */
@@ -593,6 +621,153 @@ interface SetupOptions {
   workspace?: string;
 }
 
+/** The agent's name as setup sends it: the server takes 1 to 64 letters, digits, spaces, -, _ and ., so a package's scope and other characters go. */
+function agentName(dir: string): string {
+  const named = (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { name?: string }).name ?? basename(dir);
+  return named.replace(/^@[^/]*\//, "").replace(/[^A-Za-z0-9 ._-]/g, "-").slice(0, 64) || "my-agent";
+}
+
+/** The folder's .env: its path, its lines (no trailing empty one) and the values they set. */
+function dotenvFile(dir: string): { file: string; lines: string[]; before: Map<string, string> } {
+  const file = join(dir, ".env");
+  const text = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const lines = text ? text.split("\n") : [];
+  if (lines.at(-1) === "") lines.pop();
+  return { file, lines, before: envValues(lines) };
+}
+
+/** What production reads to run once the live key is in .env, when the server names none. */
+const LIVE_NEXT = [`${RUN} insights`, `${RUN} conversations --environment production`];
+
+/**
+ * `flow setup --live`: the agent's live Flow key, FLOW_LIVE_KEY, made by flow.engineer (its
+ * workspace's owner only) and written into .env, always over an older one (its value is shown only
+ * now). Every key is named as had and no channel asked for, so an older flow.engineer that ignores
+ * `live` makes nothing; its 400 to rotate ["flow_live_key"], or a 200 with no flow_live_key, says
+ * it makes no live keys yet. Refusals (owner_only, health_workspace, content_not_allowed,
+ * not_set_up) pass through with their next step; a 502 (observe_failed) exits as a network failure.
+ */
+async function setupLiveKey(options: { content: boolean; rotate: boolean; workspace?: string }, json: boolean, out: Out, say: Say): Promise<void> {
+  const dir = process.cwd();
+  agentFolder(dir);
+  const { token, url } = signedIn();
+  const { file, lines, before } = dotenvFile(dir);
+  const workspace = options.workspace ?? (before.get(WORKSPACE_ENV) || undefined);
+  const unsupported = (warnings: string[], said = "") => {
+    const stop = new Stop("live_unsupported", `flow.engineer does not make live keys yet, so none was made${said ? ` (${said.replace(/\.$/, "")})` : ""}.`, undefined, EXIT.refused);
+    stop.warnings = warnings;
+    return stop;
+  };
+  let answer: LiveSetupAnswer;
+  try {
+    answer = await setupLive(url, token, {
+      live: true, content: options.content, name: agentName(dir), ...(workspace ? { workspace } : {}), rotate: options.rotate ? ["flow_live_key"] : false,
+      hostname: hostname(), channels: [], have: [...Object.values(SETUP_ENV), ...MODEL_KEY_NAMES],
+    });
+  } catch (error) {
+    if (error instanceof LoginRefused && error.status === 400 && error.code === "invalid_request" && options.rotate) throw unsupported(warningsOf(error.fields), error.message);
+    if (error instanceof LoginRefused && error.status === 502) {
+      const stop = new Stop(error.code, `${error.message} No key was made; try again in a minute.`, error.next, EXIT.network);
+      stop.warnings = warningsOf(error.fields);
+      throw stop;
+    }
+    throw error;
+  }
+  const fields = answer as Record<string, unknown>;
+  const warnings = warningsOf(fields);
+  const key = objectField<LiveKey>(fields, "flow_live_key");
+  if (typeof key?.value !== "string" || !key.value) throw unsupported(warnings);
+  const written = writeEnv(file, lines, before, [[LIVE_ENV, key.value]], () => true);
+  printWarnings(warnings);
+  const textMode = key.text ?? (key.content ? "raw" : "deidentified");
+  const idle = typeof key.idle_days === "number" ? key.idle_days : 7;
+  const revoke = key.kid ? `${RUN} keys revoke ${key.kid}` : `${RUN} keys`;
+  const next = answer.next?.length ? answer.next : LIVE_NEXT;
+  const space = typeof answer.workspace_id === "string" && answer.workspace_id ? { id: answer.workspace_id, name: answer.workspace_name ?? null } : null;
+  if (json) {
+    out({
+      flow_live_key: { env: LIVE_ENV, kid: key.kid ?? null, mode: key.mode ?? null, scopes: key.scopes ?? [], content: key.content === true, expires_at: key.expires_at ?? null, idle_days: idle },
+      text_mode: textMode, env_written: { ".env": written }, rotated: options.rotate, workspace: space, agent: answer.agent_id ?? null, flow_agent_id: answer.flow_agent_id ?? null,
+      minted: answer.minted ?? [], revoke, next, warnings,
+    });
+  }
+  say("In .env:");
+  for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}`);
+  if (space) say(`Workspace: ${space.name ? `${space.name} (${space.id})` : space.id}`);
+  say(textLine(textMode));
+  say(`It is the agent's live Flow key${key.scopes?.length ? ` (${key.scopes.join(", ")})` : ""}: production reads (${RUN} conversations --environment production, ${RUN} insights) use it.`);
+  say(`It stops working ${key.expires_at ? `at ${key.expires_at}, 30 days after it was made,` : "30 days after it was made"} or after ${idle} days unused: then run ${RUN} setup --live again.`);
+  if (options.rotate) say("The agent's earlier live keys stopped working now.");
+  say(`Revoke it: ${revoke}`);
+  say(`Next: ${next.join(", then ")}`);
+}
+
+export const KEYS_USAGE = `Usage:
+  flow keys [--json]
+  flow keys revoke <kid> [--json]
+
+Lists your account's live keys, never their values: each agent's Flow keys (FLOW_KEY, and
+FLOW_LIVE_KEY from flow setup --live) and its hosted runtime keys, with the key's id, agent, mode,
+scopes, whether its text is raw (a key made with --content; else de-identified), when it expires
+and when it was last used. revoke ends one at once (a new FLOW_KEY: ${RUN} setup --rotate key;
+a new FLOW_LIVE_KEY: ${RUN} setup --live). Sign in first with ${RUN} login. --json: one JSON object on stdout
+({"keys": [...]}, {"kid", "revoked"}, or {"error": {code, message, next}}), every other line on stderr.
+
+Exit status: 0 done, 1 usage or not signed in, 2 network, 3 refused (no such key, or the sign-in has ended).`;
+
+/** Runs `flow keys` and `flow keys revoke <kid>`; resolves to the exit status. */
+export async function keysCli(args: string[]): Promise<number> {
+  let values: { json?: boolean; help?: boolean };
+  let positionals: string[];
+  try {
+    ({ values, positionals } = parseArgs({ args, strict: true, allowPositionals: true, options: { json: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false } } }));
+  } catch (error) {
+    console.error(`flow keys: ${(error as Error).message.split(". ")[0]}\n\n${KEYS_USAGE}`);
+    return EXIT.usage;
+  }
+  if (values.help) return console.log(KEYS_USAGE), EXIT.ok;
+  const [sub, kid, ...extra] = positionals;
+  const json = values.json === true;
+  const out = (report: unknown) => writeAll(1, `${JSON.stringify(report)}\n`);
+  const say = (line: string) => writeAll(json ? 2 : 1, `${line}\n`);
+  const usage = (problem: string) => {
+    if (json) out({ error: { code: "usage", message: `flow keys: ${problem}`, next: null } });
+    return console.error(`flow keys: ${problem}\n\n${KEYS_USAGE}`), EXIT.usage;
+  };
+  if (sub !== undefined && sub !== "revoke") return usage(`unknown command "${sub}": flow keys lists, flow keys revoke <kid> ends one`);
+  if (sub === "revoke" && (kid === undefined || extra.length || !/^[0-9A-Za-z]{10}$/.test(kid))) return usage("revoke takes one key id, 10 letters and digits, as flow keys lists it");
+  try {
+    const { token, url } = signedIn();
+    if (sub === undefined) {
+      const keys = await listKeys(url, token);
+      if (json) out({ keys });
+      if (!keys.length) say("No live keys.");
+      else for (const line of keyTable(keys)) say(line);
+      return EXIT.ok;
+    }
+    const done = await revokeKey(url, token, kid!);
+    if (json) out({ kid: done.kid ?? kid, revoked: done.revoked !== false });
+    say(`Revoked ${kid}: it stopped working now.`);
+    return EXIT.ok;
+  } catch (error) {
+    const stop = asStop(error);
+    writeAll(2, `${stop.next && isCommand(stop.next) ? `${stop.message} Next: ${stop.next}` : stop.message}\n`);
+    if (json) out({ error: { code: stop.code, message: stop.message, next: stop.next ?? null } });
+    return stop.exit;
+  }
+}
+
+/** The keys as aligned columns, a header first; a time as "2026-12-04 10:00". */
+function keyTable(keys: ListedKey[]): string[] {
+  const at = (time: string | null | undefined) => (time ? time.slice(0, 16).replace("T", " ") : "-");
+  // Text applies to a key that reads (read among its scopes): raw only for one made with --content.
+  const text = (k: ListedKey) => (k.scopes?.includes("read") ? (k.content ? "raw" : "de-identified") : "-");
+  const rows = [["KID", "AGENT", "MODE", "SCOPES", "TEXT", "EXPIRES", "LAST USED"],
+    ...keys.map((k) => [k.kid, k.agent ?? k.flow_agent_id ?? "-", k.mode ?? "-", k.scopes?.join(",") || "-", text(k), at(k.expires_at), at(k.last_used_at)])];
+  const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
+  return rows.map((r) => r.map((cell, i) => (i === r.length - 1 ? cell : cell.padEnd(widths[i]!))).join("  "));
+}
+
 async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say, forLink?: { channel: string }): Promise<{ answer: SetupAnswer; warnings: string[] }> {
   if (options.ci) {
     const steps = [
@@ -608,14 +783,8 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const dir = process.cwd();
   agentFolder(dir);
   const { token, url } = signedIn();
-  const file = join(dir, ".env");
-  const text = existsSync(file) ? readFileSync(file, "utf8") : "";
-  const lines = text ? text.split("\n") : [];
-  if (lines.at(-1) === "") lines.pop();
-  const before = envValues(lines);
-  const named = (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { name?: string }).name ?? basename(dir);
-  // The server takes 1 to 64 letters, digits, spaces, -, _ and .: a package's scope and other characters go.
-  const name = named.replace(/^@[^/]*\//, "").replace(/[^A-Za-z0-9 ._-]/g, "-").slice(0, 64) || "my-agent";
+  const { file, lines, before } = dotenvFile(dir);
+  const name = agentName(dir);
   const all = options.rotate.includes("all");
   const rotated = new Set(all ? Object.values(ROTATE).filter(Boolean) : options.rotate.map((k) => ROTATE[k]!));
   // The workspace asked for: --workspace, else the one an earlier --workspace kept in .env.
@@ -901,8 +1070,7 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     try {
       account = await whoami(url, current.token);
       if (joinCode && existsSync(join(process.cwd(), "package.json"))) {
-        const named = (JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { name?: string }).name ?? basename(process.cwd());
-        const name = named.replace(/^@[^/]*\//, "").replace(/[^A-Za-z0-9 ._-]/g, "-").slice(0, 64) || "my-agent";
+        const name = agentName(process.cwd());
         const have = [...Object.values(SETUP_ENV).filter((n) => n !== SETUP_ENV.try_url), ...MODEL_KEY_NAMES];
         const workspace = value(WORKSPACE_ENV);
         server = await setup(url, current.token, { name, hostname: hostname(), channels: [...CHANNELS], have, ...(workspace ? { workspace } : {}) });

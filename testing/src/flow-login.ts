@@ -23,6 +23,19 @@
 //        (whenever observe answered; an older server sends neither); 403 not_a_member, 409 workspace_ambiguous (pass the id);
 //        429 slow_down with Retry-After; 403 for a trial limit (sandbox_allowance_used, ...), its next prose
 //        Any answer may carry warnings: up to 20 strings to show the owner as they are.
+//   POST /cli/setup (bearer) {live: true, content, name, workspace?, rotate: false | ["flow_live_key"]}  (setup --live)
+//        -> {flow_live_key: {env: "FLOW_LIVE_KEY", value: "flow_live_...", kid, mode: "live", scopes, content,
+//            text: "deidentified" | "raw", expires_at (30 days), idle_days (7)}, workspace_id, workspace_name, agent_id,
+//            flow_agent_id, account, minted, next}; no other key and no Messaging call. The key is the agent's live
+//            Flow key: every developer scope (messaging, traces, cloud, model, deploy) plus read (conversations, traces
+//            and Insights, staging and production); rotate ends the agent's earlier live keys at once. 403 owner_only, health_workspace, content_not_allowed; 404 not_set_up; 502 observe_failed
+//            (the key is revoked before any error goes out). An older server ignores live: so the request also names
+//            every key as had and no channel, and its 400 invalid_request to rotate ["flow_live_key"], or a 200 with
+//            no flow_live_key, means it makes no live keys
+//   GET  /cli/keys (bearer) -> {keys: [{kid, kind, mode, scopes, agent, flow_agent_id, content, created_at, expires_at, last_used_at}]}:
+//        the account's live keys, never their values; kind is developer or runtime, a live key mode live with read
+//        among its scopes and content true when its text is raw
+//   POST /cli/keys/revoke (bearer) {kid} -> {kid, revoked: true, next}; 400 invalid_request, 404 not_found
 //   GET  <model URL>/credit (bearer FLOW_KEY) -> {limit_usd, spent_usd, left_usd, default_model, models};
 //        the model URL is src/model.ts's flowModelURL (flow.engineer/llm/framework/v1); 401 invalid_api_key,
 //        403 insufficient_scope (the key lacks model), 402 trial_credit_used or trial_credit_unavailable
@@ -367,6 +380,66 @@ export async function setup(url: string, token: string, request: { name: string;
   // A 200 is returned whole even without a join code: the keys it minted are shown only now.
   if (answer.status !== 200) throw refused("/cli/setup", answer, url);
   return answer.body as unknown as SetupAnswer;
+}
+
+/** setup --live's key: the agent's live Flow key, its value shown once. */
+export interface LiveKey {
+  env?: string;
+  value?: string;
+  kid?: string;
+  mode?: string;
+  scopes?: string[];
+  content?: boolean;
+  /** deidentified, or raw for a key made with --content. */
+  text?: string;
+  expires_at?: string;
+  idle_days?: number;
+}
+
+export interface LiveSetupAnswer {
+  flow_live_key?: LiveKey;
+  workspace_id?: string;
+  workspace_name?: string;
+  agent_id?: string;
+  flow_agent_id?: string;
+  account?: Account;
+  minted?: string[];
+  next?: string[];
+  warnings?: string[];
+}
+
+/** `flow setup --live`: mints the agent's live Flow key; a 200 without flow_live_key is an older server's (it made nothing). */
+export async function setupLive(url: string, token: string, request: { live: true; content: boolean; name: string; workspace?: string; rotate: false | ["flow_live_key"]; hostname: string; channels: []; have: string[] }): Promise<LiveSetupAnswer> {
+  const answer = await call(url, "/cli/setup", { token, body: request });
+  if (answer.status !== 200) throw refused("/cli/setup", answer, url);
+  return answer.body as LiveSetupAnswer;
+}
+
+/** One of the account's live keys as GET /cli/keys lists it (never its value). */
+export interface ListedKey {
+  kid: string;
+  kind?: string;
+  mode?: string;
+  scopes?: string[];
+  agent?: string | null;
+  flow_agent_id?: string | null;
+  content?: boolean;
+  created_at?: string;
+  expires_at?: string | null;
+  last_used_at?: string | null;
+}
+
+export async function listKeys(url: string, token: string): Promise<ListedKey[]> {
+  const answer = await call(url, "/cli/keys", { token, method: "GET" });
+  if (answer.status !== 200 || !Array.isArray(answer.body.keys)) throw refused("/cli/keys", answer, url);
+  return answer.body.keys as ListedKey[];
+}
+
+/** Ends one of the account's keys at once. */
+export async function revokeKey(url: string, token: string, kid: string): Promise<{ kid: string; revoked: boolean; next?: string }> {
+  const answer = await call(url, "/cli/keys/revoke", { token, body: { kid } });
+  if (answer.status !== 200) throw refused("/cli/keys/revoke", answer, url);
+  return answer.body as { kid: string; revoked: boolean; next?: string };
 }
 
 /** GET /credit's answer: the account's Flow trial credit in US dollars. */

@@ -88,6 +88,7 @@ test("a refused key says which key the command reads, where it looked, what it f
   assert.match(lines, /Get the right one: npx @flow-engineer\/flow setup/);
   assert.ok(!lines.includes(value));
   const scope = keyHelp("flow conversations", { kind: "flow_key", name: "FLOW_KEY", where: "the environment", value: "flow_test_k1_abcdefgh9z9z" }, { status: 403, code: "scope" });
-  assert.match(scope, /A test key reads staging only: add --env staging\. Production reads need a flow_live_ FLOW_KEY/);
+  assert.match(scope, /A test key reads staging only: add --env staging\. Production reads need a live key: npx @flow-engineer\/flow setup --live writes FLOW_LIVE_KEY/);
+  assert.doesNotMatch(scope, /ask Flow/);
   assert.equal(keyLabel("short"), "a key of another kind");
 });

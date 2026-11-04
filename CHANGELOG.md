@@ -4,6 +4,29 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ## Unreleased
 
+### New: `flow setup --live` and `flow keys`, production reads without a key Flow makes by hand
+
+- **`flow setup --live [--content] [--workspace <w>] [--rotate] [--json]`** writes the agent's
+  live Flow key, `FLOW_LIVE_KEY` (`flow_live_...`), into `.env`: FLOW_KEY's scopes in live mode
+  plus `read` (production conversations, traces and Insights). Only the workspace's owner can make
+  one, and a health workspace gets none (`owner_only`, `health_workspace`, `content_not_allowed`,
+  `not_set_up` pass through with their next step; `observe_failed` exits 2). Message text reads
+  de-identified (names, phones, emails, ids and addresses as placeholders) unless `--content`. The
+  key lasts 30 days and stops after 7 days unused; `--rotate` ends the agent's earlier live keys at
+  once. It prints the text mode, the expiry, the idle rule and `flow keys revoke <kid>`; never the
+  value. An older flow.engineer makes nothing and the command says `live_unsupported`.
+- **`flow keys [--json]`** lists the account's live keys (id, agent, mode, scopes, raw or
+  de-identified text, expiry, last use; never a value), and **`flow keys revoke <kid>`** ends one.
+- **Production reads use `FLOW_LIVE_KEY` when it is set**, else `FLOW_KEY`: `flow conversations
+  --env production`, `flow insights` and `insights show`, and `flow conversations show`, which
+  reads with FLOW_KEY first and asks once more with FLOW_LIVE_KEY when FLOW_KEY does not find the
+  id (`show --env production` goes to it at once). The same in `flow mcp serve`
+  (`show_conversation` takes `environment`). A refused test key and a refused live key now say to
+  run `flow setup --live`, not to ask Flow.
+- **Every read says its text mode**: one `Text: raw | de-identified | withheld` line first (from the
+  `Flow-Text` header or `text_mode`), and `text_mode` in `--json` and in MCP results.
+  `flow insights show` prints the messages around each flagged one (`window`) when Flow sends them.
+
 ### New: `flow mcp serve`, Flow's reads as MCP tools for your coding agent
 
 - **`flow mcp serve`** is a stdio MCP server, run in the agent's folder:
@@ -11,8 +34,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   (`readOnlyHint: true`), read what the commands print, as JSON: `list_conversations`,
   `show_conversation` (each reply's tool calls and delivery when Flow sends them), `list_issues`,
   `list_insights`, `insight_conversations` (what `flow insights` reads), `list_templates`
-  (FLOW_KEY: a `flow_test_` key reads staging only; production and Insights need a
-  `flow_live_` key with the traces scope), and `read_logs`, `deploy_status` (the CI key,
+  (FLOW_KEY: a `flow_test_` key reads staging only; production and Insights read with
+  `FLOW_LIVE_KEY` from `flow setup --live`), and `read_logs`, `deploy_status` (the CI key,
   `FLOW_FRAMEWORK_CLOUD_KEY`, staging and production). Each result is `structuredContent` and the
   same JSON as text under a one-line summary; a failure is `isError` with `--json`'s failure
   document (code, message with the key story, next). Keys are read again on every call, so a key
@@ -182,6 +205,14 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - `templateWarnings` (testing/src/templates.ts, not exported from the package) takes the key with
   where it was found.
 - `flow conversations`' table has a KIND column after CHANNEL; `--json` is unchanged.
+- With `FLOW_LIVE_KEY` in `.env`, `flow insights`, `flow conversations --env production` and the
+  MCP server's production tools read with it instead of `FLOW_KEY`; remove it to read with
+  `FLOW_KEY` as before. With neither key, a production read's `--json` error code is `no_live_key`
+  (was `no_flow_key`).
+- Reads print a `Text: ...` line first when Flow says the text mode; a script that parses the
+  human output skips it, or uses `--json` (`text_mode`).
+- `flow conversations show` takes `--env staging|production` (any other value is a usage error,
+  exit 2; it was ignored).
 - A Cloud Logging query or log-based metric that matched Flow's lines in `textPayload` matches
   `jsonPayload.message` instead (`flow logs` reads both). Nothing else changes.
 

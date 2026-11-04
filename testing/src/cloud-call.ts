@@ -2,7 +2,7 @@
 // deploy, logs): one call that waits out a 429 and tries an idempotent request once more after a
 // network error or a 5xx, a network failure that names the address and says it is one, a refused key
 // explained as which key the command reads, where it looked and what it found (prefix and last 4,
-// never the value), and --json's failure document. Node's own modules only.
+// never the value), the text mode a read says (Flow-Text), and --json's failure document. Node's own modules only.
 
 import { setTimeout as delay } from "node:timers/promises";
 import { RUN } from "../../src/names.ts";
@@ -72,10 +72,12 @@ export function retryAfter(header: string | null, now = Date.now()): number | un
   return Number.isNaN(at) ? undefined : Math.max(0, Math.ceil((at - now) / 1000));
 }
 
-/** An answer: its status, Retry-After in seconds when it sent one, and its body as text. */
+/** An answer: its status, Retry-After in seconds when it sent one, its Flow-Text header, and its body as text. */
 export interface Answer {
   status: number;
   retryAfter: number | undefined;
+  /** How the answer's message text came: raw, deidentified or withheld (the Flow-Text header); undefined when it said none. */
+  textMode?: string;
   text: string;
 }
 
@@ -98,7 +100,8 @@ export async function cloudCall(url: string, init: RequestInit & { timeoutMs?: n
     let answer: Answer;
     try {
       const response = await fetch(url, { ...init, signal: AbortSignal.timeout(init.timeoutMs ?? 60_000) });
-      answer = { status: response.status, retryAfter: retryAfter(response.headers.get("retry-after")), text: await response.text() };
+      const textMode = response.headers.get("flow-text")?.trim() || undefined;
+      answer = { status: response.status, retryAfter: retryAfter(response.headers.get("retry-after")), ...(textMode ? { textMode } : {}), text: await response.text() };
     } catch (error) {
       const code = codeOf(error);
       if (!code) throw error;
@@ -131,7 +134,7 @@ export async function cloudCall(url: string, init: RequestInit & { timeoutMs?: n
 }
 
 /** Which key a command reads. */
-export type KeyKind = "flow_key" | "ci_key";
+export type KeyKind = "flow_key" | "live_key" | "ci_key";
 
 /** The key a command found: its name, where it was, and its value (never printed: only its prefix and last 4). */
 export interface FoundKey {
@@ -152,11 +155,18 @@ export function keyLabel(value: string): string {
 /** What each key is, as the errors and the help say it. */
 const WANTS: Record<KeyKind, string> = {
   flow_key: "the agent's Flow key, FLOW_KEY (flow_test_... reads staging; flow_live_... reads staging and production)",
+  live_key: "the agent's live Flow key, FLOW_LIVE_KEY (flow_live_..., reads staging and production; it stops 30 days after it was made, after 7 days unused, or when revoked)",
   ci_key: "the agent's CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_..., staging and production for deploys, staging for tests)",
 };
 
 /** Where to get the right key. */
 export const GET_KEY = `${RUN} setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard)`;
+
+/** The command that makes the live Flow key, which production reads use. */
+export const SETUP_LIVE = `${RUN} setup --live`;
+
+/** Where to get a live key: the workspace's owner runs it. */
+const GET_LIVE_KEY = `${SETUP_LIVE} writes FLOW_LIVE_KEY into .env (the workspace's owner runs it; a health workspace gets none)`;
 
 /**
  * The lines that follow a refused key (401, 403, bad_key, scope): which key `command` reads, where it
@@ -169,13 +179,15 @@ export function keyHelp(command: string, found: FoundKey, refusal?: { status: nu
     found.kind === "flow_key" && /^(otk_|fk_)/.test(found.value) ? " That is a traces or messaging key, which does not read here." : "";
   const scope = refusal?.code === "scope" || refusal?.status === 403
     ? found.value.startsWith("flow_test_") || found.value.startsWith("oci_")
-      ? " A test key reads staging only: add --env staging. Production reads need a flow_live_ FLOW_KEY with the traces scope, which flow setup does not make today: ask Flow for one."
+      ? ` A test key reads staging only: add --env staging. Production reads need a live key: ${SETUP_LIVE} writes FLOW_LIVE_KEY, which they use whenever it is set.`
       : ""
     : "";
+  // A live key Flow no longer takes: expired, unused for 7 days or revoked (Flow does not say which).
+  const ended = found.kind === "live_key" && refusal?.status === 401 ? ` It has expired, gone unused for 7 days or been revoked: run ${SETUP_LIVE} again for a new one.` : "";
   return [
     `${command} reads with ${WANTS[found.kind]}.`,
-    `It found ${found.name}=${keyLabel(found.value)} in ${found.where}.${wrongKind}${scope}`,
-    `Get the right one: ${GET_KEY}.`,
+    `It found ${found.name}=${keyLabel(found.value)} in ${found.where}.${wrongKind}${scope}${ended}`,
+    `Get the right one: ${found.kind === "live_key" ? GET_LIVE_KEY : GET_KEY}.`,
   ].join("\n");
 }
 
@@ -188,14 +200,27 @@ export function keyRefused(status: number, code: string | undefined): boolean {
 export const KEYS_HELP = `Keys (the environment wins over the agent's .env; errors name a key by its prefix and last 4 only):
   FLOW_KEY                  flow_test_... reads staging, flow_live_... staging and production:
                             flow conversations, flow issues, flow templates. flow setup makes a
-                            flow_test_ one; for production reads, ask Flow for a flow_live_ one.
-                            flow insights (and insights show) needs the live one, flow_live_...:
-                            flow setup writes only a test key today
+                            flow_test_ one
+  FLOW_LIVE_KEY             The agent's live Flow key, flow_live_...: production reads (flow
+                            conversations --env production, flow conversations show of a
+                            production one, flow insights) use it whenever it is set, with text
+                            de-identified unless made with --content; ${SETUP_LIVE} makes it
+                            (the workspace's owner), for 30 days, ending after 7 unused
   FLOW_FRAMEWORK_CLOUD_KEY  The CI key, oci_...: flow test, flow show, flow deploy (every
                             subcommand), flow logs, flow cli publish|rollback|status
   ${GET_KEY}.
 Cloud (--cloud, else FLOW_FRAMEWORK_CLOUD): ${CLOUDS.us} (US, the default; /dashboard
   is the same) or ${CLOUDS.in} (an agent in the India cell).`;
+
+/** The line a read prints for its text mode (the Flow-Text header, or the answer's text_mode). */
+export function textLine(mode: string): string {
+  const words: Record<string, string> = {
+    deidentified: "de-identified (names, phones, emails, ids, addresses are placeholders)",
+    raw: "raw (as people wrote it)",
+    withheld: "withheld (this workspace keeps message text back)",
+  };
+  return `Text: ${words[mode] ?? mode}`;
+}
 
 /** --json's failure: one document on stdout, `{ ok: false, error: { code, message, hint? }, next }`. */
 export function failureDocument(code: string, message: string, hint?: string, next?: string): string {
