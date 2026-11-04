@@ -25,16 +25,23 @@
 //        Any answer may carry warnings: up to 20 strings to show the owner as they are.
 //   POST /cli/setup (bearer) {live: true, content, name, workspace?, rotate: false | ["flow_live_key"]}  (setup --live)
 //        -> {flow_live_key: {env: "FLOW_LIVE_KEY", value: "flow_live_...", kid, mode: "live", scopes, content,
-//            text: "deidentified" | "raw", expires_at (30 days), idle_days (7)}, workspace_id, workspace_name, agent_id,
-//            flow_agent_id, account, minted, next}; no other key and no Messaging call. The key is the agent's live
-//            Flow key: every developer scope (messaging, traces, cloud, model, deploy) plus read (conversations, traces
-//            and Insights, staging and production); rotate ends the agent's earlier live keys at once. 403 owner_only, health_workspace, content_not_allowed; 404 not_set_up; 502 observe_failed
+//            text: "deidentified" | "raw", expires_at (30 days), idle_days (7), checklist}, advisory, stopped?,
+//            workspace_id, workspace_name, agent_id, flow_agent_id, account, minted, next}; no other key and no
+//            Messaging call. The key is the agent's live Flow key with safe defaults (read, de-identified unless
+//            content; tests; traces; model; no sends, no live deploy: those are flow keys grant send|deploy). It
+//            replaces the agent's earlier live keys at once (their kids in stopped); rotate is still taken. 403 owner_only, health_workspace, content_not_allowed; 404 not_set_up; 502 observe_failed
 //            (the key is revoked before any error goes out). An older server ignores live: so the request also names
 //            every key as had and no channel, and its 400 invalid_request to rotate ["flow_live_key"], or a 200 with
 //            no flow_live_key, means it makes no live keys
-//   GET  /cli/keys (bearer) -> {keys: [{kid, kind, mode, scopes, agent, flow_agent_id, content, created_at, expires_at, last_used_at}]}:
-//        the account's live keys, never their values; kind is developer or runtime, a live key mode live with read
-//        among its scopes and content true when its text is raw
+//   GET  /cli/keys (bearer) -> {keys: [{kid, kind, mode, scopes, agent, flow_agent_id, environment, content, last4, created_at,
+//        expires_at, last_used_at, checklist: [{capability, label, allowed, grant}], grants: [{scope, at, by}]}]}:
+//        the account's live keys, never their values, expired and revoked ones left out; kind is developer or runtime;
+//        checklist is the same lines in the same order for every key, grant the command for a line not allowed
+//   POST /cli/keys/grant (bearer) {kid, grant: read|tests|traces|model|content|send|deploy} -> 200 {granted: true, already?,
+//        tier, advisory, key: {kid, mode, scopes, checklist}}; for send and deploy (critical) 202 {granted: false,
+//        status: "pending", tier, advisory, grant_id, approve_url, expires_at, interval, message, next}; 400 invalid_request,
+//        404 not_found, 409 not_for_this_key, observe's refusals for content, 429 slow_down
+//   GET  /cli/keys/grant/<grant_id> (bearer) -> {grant_id, status: pending|approved|denied|expired, kid, interval, key?}
 //   POST /cli/keys/revoke (bearer) {kid} -> {kid, revoked: true, next}; 400 invalid_request, 404 not_found
 //   GET  <model URL>/credit (bearer FLOW_KEY) -> {limit_usd, spent_usd, left_usd, default_model, models};
 //        the model URL is src/model.ts's flowModelURL (flow.engineer/llm/framework/v1); 401 invalid_api_key,
@@ -394,10 +401,29 @@ export interface LiveKey {
   text?: string;
   expires_at?: string;
   idle_days?: number;
+  checklist?: ChecklistLine[];
+}
+
+/** One line of what a key can do, in the server's fixed order; `grant` is the command that gives a line not allowed. */
+export interface ChecklistLine {
+  capability: string;
+  label: string;
+  allowed: boolean;
+  grant?: string | null;
+}
+
+/** The three advisory tiers, as flow.engineer words them. */
+export interface Advisory {
+  default?: string;
+  ask_user?: string;
+  critical?: string;
 }
 
 export interface LiveSetupAnswer {
   flow_live_key?: LiveKey;
+  advisory?: Advisory;
+  /** The agent's earlier live keys this one replaced. */
+  stopped?: string[];
   workspace_id?: string;
   workspace_name?: string;
   agent_id?: string;
@@ -423,10 +449,14 @@ export interface ListedKey {
   scopes?: string[];
   agent?: string | null;
   flow_agent_id?: string | null;
+  environment?: string | null;
   content?: boolean;
+  last4?: string;
   created_at?: string;
   expires_at?: string | null;
   last_used_at?: string | null;
+  checklist?: ChecklistLine[];
+  grants?: Array<{ scope: string; at?: string; by?: string }>;
 }
 
 export async function listKeys(url: string, token: string): Promise<ListedKey[]> {
@@ -440,6 +470,40 @@ export async function revokeKey(url: string, token: string, kid: string): Promis
   const answer = await call(url, "/cli/keys/revoke", { token, body: { kid } });
   if (answer.status !== 200) throw refused("/cli/keys/revoke", answer, url);
   return answer.body as { kid: string; revoked: boolean; next?: string };
+}
+
+/** A key's changed part, as a grant answers it. */
+export interface GrantedKey { kid?: string; mode?: string; scopes?: string[]; checklist?: ChecklistLine[] }
+
+/** POST /cli/keys/grant's answer: granted now (200), or waiting for the owner's click (202, critical). */
+export interface GrantAnswer {
+  granted: boolean;
+  already?: boolean;
+  status?: string;
+  tier?: string;
+  advisory?: Advisory;
+  key?: GrantedKey;
+  grant_id?: string;
+  approve_url?: string;
+  expires_at?: string;
+  interval?: number;
+  message?: string;
+  next?: string | string[];
+}
+
+/** Asks for one more thing on a live key; a 202 is returned (granted false) for the owner to approve in the browser. */
+export async function grantKey(url: string, token: string, kid: string, grant: string): Promise<GrantAnswer> {
+  const answer = await call(url, "/cli/keys/grant", { token, body: { kid, grant } });
+  if (answer.status === 200 || (answer.status === 202 && typeof answer.body.grant_id === "string")) return answer.body as unknown as GrantAnswer;
+  throw refused("/cli/keys/grant", answer, url);
+}
+
+/** Where a critical grant is: pending, approved (with the key's new checklist), denied or expired. */
+export async function grantStatus(url: string, token: string, grantId: string): Promise<{ grant_id?: string; status: string; kid?: string; interval?: number; key?: GrantedKey }> {
+  const path = `/cli/keys/grant/${encodeURIComponent(grantId)}`;
+  const answer = await call(url, path, { token, method: "GET" });
+  if (answer.status !== 200 || typeof answer.body.status !== "string") throw refused(path, answer, url);
+  return answer.body as { status: string };
 }
 
 /** GET /credit's answer: the account's Flow trial credit in US dollars. */

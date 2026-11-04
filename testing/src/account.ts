@@ -21,10 +21,10 @@ import { parseArgs } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   currentToken, deleteCredentials, deletePending, LoginRefused, loginUrl, pollToken, readPending, REQUEST_TIMEOUT_MS, revoke, saveCredentials, savePending,
-  listKeys, modelCredit, revokeKey, SETUP_ENV, setup, setupLive, startDevice, TimedOut, tryLink, warningsOf, whoami,
-  type Account, type ListedKey, type LiveKey, type LiveSetupAnswer, type ModelCredit, type PendingLogin, type SetupAnswer,
+  grantKey, grantStatus, listKeys, modelCredit, revokeKey, SETUP_ENV, setup, setupLive, startDevice, TimedOut, tryLink, warningsOf, whoami,
+  type Account, type ChecklistLine, type GrantAnswer, type GrantedKey, type ListedKey, type LiveKey, type LiveSetupAnswer, type ModelCredit, type PendingLogin, type SetupAnswer,
 } from "./flow-login.ts";
-import { textLine } from "./cloud-call.ts";
+import { ADVISORY, advisoryLines, checklistLines, liveKid, textLine } from "./cloud-call.ts";
 import { packageRoot, setDisplayName } from "./new.ts";
 import { flowModelURL, hasModelKey, MODEL_KEY_NAMES, NO_MODEL_KEY } from "../../src/model.ts";
 import { RUN } from "../../src/names.ts";
@@ -47,15 +47,24 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
                             more; --now ends it at once). --workspace (here and on link) puts the
                             agent in that observe workspace of yours, kept in .env as
                             FLOW_FRAMEWORK_WORKSPACE; a new one makes the cloud and traces keys again
-  flow setup --live [--content] [--workspace <name|acc_id>] [--rotate] [--json]
-                            Write the agent's live Flow key, FLOW_LIVE_KEY, into ./.env: FLOW_KEY's
-                            scopes for production too, plus reading production conversations,
-                            traces and Insights, which flow conversations and flow insights then
-                            use (the workspace's owner only; a health workspace gets none). Text
-                            is de-identified unless --content. It lasts 30 days and ends after 7
-                            days unused; --rotate ends the agent's earlier live keys now
-  flow keys [--json]        Your account's live keys, never their values: id, agent, mode, scopes,
-                            whether its text is raw, when it expires, when last used
+  flow setup --live [--content] [--workspace <name|acc_id>] [--json]
+                            Write the agent's live Flow key, FLOW_LIVE_KEY, into ./.env with safe
+                            defaults: it reads production conversations, traces and Insights
+                            (which flow conversations and flow insights then use), runs tests,
+                            writes traces and uses the model; it messages no customer and deploys
+                            nothing live (flow keys grant send|deploy). The workspace's owner
+                            only; a health workspace gets none. Text is de-identified unless
+                            --content. It replaces the agent's earlier live key at once, lasts 30
+                            days and ends after 7 days unused. It prints what the key can do
+  flow keys [list] [--json] Your account's live keys, never their values: agent, mode, last 4,
+                            what it can do, when it expires
+  flow keys show <kid> [--json]
+                            One key's checklist (✓/✗ what it can do) and its grants
+  flow keys grant <read|tests|traces|model|content|send|deploy> [--key <kid>] [--wait] [--json]
+                            Let a live key do one more thing (the FLOW_LIVE_KEY in .env unless
+                            --key). ${ADVISORY.default}
+                            ${ADVISORY.ask_user}
+                            ${ADVISORY.critical}
   flow keys revoke <kid> [--json]
                             End one of them at once
   flow link [--channel telegram|whatsapp|imessage] [--workspace <name|acc_id>] [--display-name <name>] [--timeout <s>] [--no-browser] [--json]
@@ -620,8 +629,8 @@ const LIVE_NEXT = [`${RUN} insights`, `${RUN} conversations --environment produc
 
 /**
  * `flow setup --live`: the agent's live Flow key, FLOW_LIVE_KEY, made by flow.engineer (its
- * workspace's owner only) and written into .env, always over an older one (its value is shown only
- * now). Every key is named as had and no channel asked for, so an older flow.engineer that ignores
+ * workspace's owner only) with safe defaults and written into .env, always over an older one (its
+ * value is shown only now), then what it can do (the server's checklist, ✓/✗) and the advisory tiers. Every key is named as had and no channel asked for, so an older flow.engineer that ignores
  * `live` makes nothing; its 400 to rotate ["flow_live_key"], or a 200 with no flow_live_key, says
  * it makes no live keys yet. Refusals (owner_only, health_workspace, content_not_allowed,
  * not_set_up) pass through with their next step; a 502 (observe_failed) exits as a network failure.
@@ -663,49 +672,83 @@ async function setupLiveKey(options: { content: boolean; rotate: boolean; worksp
   const revoke = key.kid ? `${RUN} keys revoke ${key.kid}` : `${RUN} keys`;
   const next = answer.next?.length ? answer.next : LIVE_NEXT;
   const space = typeof answer.workspace_id === "string" && answer.workspace_id ? { id: answer.workspace_id, name: answer.workspace_name ?? null } : null;
+  const checklist = Array.isArray(key.checklist) ? key.checklist : [];
+  const stopped = Array.isArray(answer.stopped) ? answer.stopped.filter((k): k is string => typeof k === "string") : [];
+  const advisory = advisoryLines(answer.advisory);
   if (json) {
     out({
-      flow_live_key: { env: LIVE_ENV, kid: key.kid ?? null, mode: key.mode ?? null, scopes: key.scopes ?? [], content: key.content === true, expires_at: key.expires_at ?? null, idle_days: idle },
-      text_mode: textMode, env_written: { ".env": written }, rotated: options.rotate, workspace: space, agent: answer.agent_id ?? null, flow_agent_id: answer.flow_agent_id ?? null,
-      minted: answer.minted ?? [], revoke, next, warnings,
+      flow_live_key: {
+        env: LIVE_ENV, kid: key.kid ?? null, mode: key.mode ?? null, scopes: key.scopes ?? [], content: key.content === true, expires_at: key.expires_at ?? null, idle_days: idle,
+        checklist,
+      },
+      text_mode: textMode, env_written: { ".env": written }, rotated: options.rotate, stopped, workspace: space, agent: answer.agent_id ?? null, flow_agent_id: answer.flow_agent_id ?? null,
+      minted: answer.minted ?? [], advisory: { default: advisory[0], ask_user: advisory[1], critical: advisory[2] }, revoke, next, warnings,
     });
   }
   say("In .env:");
   for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}`);
   if (space) say(`Workspace: ${space.name ? `${space.name} (${space.id})` : space.id}`);
   say(textLine(textMode));
-  say(`It is the agent's live Flow key${key.scopes?.length ? ` (${key.scopes.join(", ")})` : ""}: production reads (${RUN} conversations --environment production, ${RUN} insights) use it.`);
+  // An answer with no checklist (a flow.engineer before it) names the key's scopes instead.
+  if (checklist.length) {
+    say("What it can do:");
+    for (const line of checklistLines(checklist)) say(line);
+  } else if (key.scopes?.length) say(`Scopes: ${key.scopes.join(", ")}`);
+  say(`Production reads (${RUN} conversations --environment production, ${RUN} insights) use it.`);
   say(`It stops working ${key.expires_at ? `at ${key.expires_at}, 30 days after it was made,` : "30 days after it was made"} or after ${idle} days unused: then run ${RUN} setup --live again.`);
-  if (options.rotate) say("The agent's earlier live keys stopped working now.");
+  if (stopped.length) say(`It replaced the agent's earlier live ${stopped.length === 1 ? "key" : "keys"} ${stopped.join(", ")}: ${stopped.length === 1 ? "it" : "they"} stopped working now.`);
+  else if (options.rotate) say("The agent's earlier live keys stopped working now.");
   say(`Revoke it: ${revoke}`);
+  for (const line of advisory) say(line);
   say(`Next: ${next.join(", then ")}`);
 }
 
 export const KEYS_USAGE = `Usage:
-  flow keys [--json]
+  flow keys [list] [--json]
+  flow keys show <kid> [--json]
+  flow keys grant <read|tests|traces|model|content|send|deploy> [--key <kid>] [--wait] [--no-browser] [--json]
   flow keys revoke <kid> [--json]
 
-Lists your account's live keys, never their values: each agent's Flow keys (FLOW_KEY, and
-FLOW_LIVE_KEY from flow setup --live) and its hosted runtime keys, with the key's id, agent, mode,
-scopes, whether its text is raw (a key made with --content; else de-identified), when it expires
-and when it was last used. revoke ends one at once (a new FLOW_KEY: ${RUN} setup --rotate key;
-a new FLOW_LIVE_KEY: ${RUN} setup --live). Sign in first with ${RUN} login. --json: one JSON object on stdout
-({"keys": [...]}, {"kid", "revoked"}, or {"error": {code, message, next}}), every other line on stderr.
+list: your account's live keys, never their values (expired and revoked ones are left out): each
+agent's Flow keys (FLOW_KEY, and FLOW_LIVE_KEY from ${RUN} setup --live) and its hosted
+runtime keys, one row each with its id, agent, mode, last 4 and when it expires.
+show: one key's checklist, the same lines in the same order for every key (✓ it can, ✗ it cannot,
+with the command that grants it), and what was granted to it, when and by whom.
+grant: lets a live key do one more thing, in place (its value stays): the FLOW_LIVE_KEY in the
+environment or ./.env, or --key <kid>. By tier:
+  ${ADVISORY.default}
+  ${ADVISORY.ask_user}
+  ${ADVISORY.critical}
+  send and deploy print the approval page (and open it unless --no-browser) and exit 4 while it
+  waits; --wait asks again until the owner approves (exit 0), denies or it expires (exit 3).
+revoke: ends one at once (a new FLOW_KEY: ${RUN} setup --rotate key; a new FLOW_LIVE_KEY:
+${RUN} setup --live).
+Sign in first with ${RUN} login. --json: one JSON object per line on stdout ({"keys": [...]},
+{"key": {...}}, the grant's answer, {"kid", "revoked"}, or {"error": {code, message, next}}; grant
+--wait prints its pending answer first), every other line on stderr.
 
-Exit status: 0 done, 1 usage or not signed in, 2 network, 3 refused (no such key, or the sign-in has ended).`;
+Exit status: 0 done, 1 usage or not signed in, 2 network, 3 refused (no such key, a grant denied or
+expired, or the sign-in has ended), 4 a grant waiting for the owner's approval.`;
 
-/** Runs `flow keys` and `flow keys revoke <kid>`; resolves to the exit status. */
+/** What `flow keys grant` takes, as POST /cli/keys/grant names them. */
+const GRANTS = ["read", "tests", "traces", "model", "content", "send", "deploy"];
+const KID = /^[0-9A-Za-z]{10}$/;
+
+/** Runs `flow keys [list]`, `keys show <kid>`, `keys grant <name>` and `keys revoke <kid>`; resolves to the exit status. */
 export async function keysCli(args: string[]): Promise<number> {
-  let values: { json?: boolean; help?: boolean };
+  let values: { json?: boolean; help?: boolean; key?: string; wait?: boolean; "no-browser"?: boolean };
   let positionals: string[];
   try {
-    ({ values, positionals } = parseArgs({ args, strict: true, allowPositionals: true, options: { json: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false } } }));
+    ({ values, positionals } = parseArgs({
+      args, strict: true, allowPositionals: true,
+      options: { json: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false }, key: { type: "string" }, wait: { type: "boolean", default: false }, "no-browser": { type: "boolean", default: false } },
+    }));
   } catch (error) {
     console.error(`flow keys: ${(error as Error).message.split(". ")[0]}\n\n${KEYS_USAGE}`);
     return EXIT.usage;
   }
   if (values.help) return console.log(KEYS_USAGE), EXIT.ok;
-  const [sub, kid, ...extra] = positionals;
+  const [sub = "list", arg, ...extra] = positionals;
   const json = values.json === true;
   const out = (report: unknown) => writeAll(1, `${JSON.stringify(report)}\n`);
   const say = (line: string) => writeAll(json ? 2 : 1, `${line}\n`);
@@ -713,38 +756,146 @@ export async function keysCli(args: string[]): Promise<number> {
     if (json) out({ error: { code: "usage", message: `flow keys: ${problem}`, next: null } });
     return console.error(`flow keys: ${problem}\n\n${KEYS_USAGE}`), EXIT.usage;
   };
-  if (sub !== undefined && sub !== "revoke") return usage(`unknown command "${sub}": flow keys lists, flow keys revoke <kid> ends one`);
-  if (sub === "revoke" && (kid === undefined || extra.length || !/^[0-9A-Za-z]{10}$/.test(kid))) return usage("revoke takes one key id, 10 letters and digits, as flow keys lists it");
+  if (!["list", "show", "grant", "revoke"].includes(sub)) return usage(`unknown command "${sub}": flow keys list, show <kid>, grant <name> or revoke <kid>`);
+  if (sub !== "grant" && (values.key !== undefined || values.wait || values["no-browser"])) return usage("--key, --wait and --no-browser go with grant");
+  if (sub === "list" && arg !== undefined) return usage("list takes no key id: flow keys show <kid> shows one");
+  if ((sub === "show" || sub === "revoke") && (arg === undefined || extra.length || !KID.test(arg))) return usage(`${sub} takes one key id, 10 letters and digits, as flow keys lists it`);
+  if (sub === "grant" && (arg === undefined || extra.length || !GRANTS.includes(arg))) return usage(`grant takes one of ${GRANTS.join(", ")}`);
+  if (sub === "grant" && values.key !== undefined && !KID.test(values.key)) return usage("--key takes a key id, 10 letters and digits, as flow keys lists it");
   try {
+    if (sub === "grant") {
+      // The kid is the FLOW_LIVE_KEY's own (its 10 characters after flow_live_), found before signing in.
+      const kid = values.key ?? liveKid(dotenvValue()(LIVE_ENV) ?? "");
+      if (!kid) throw new Stop("no_live_key", `flow keys grant changes a live key: there is no ${LIVE_ENV} in the environment or ./.env to change, and no --key <kid>.`, `${RUN} setup --live`, EXIT.usage);
+      await grant({ kid, name: arg!, wait: values.wait === true, noBrowser: values["no-browser"] === true }, json, out, say);
+      return EXIT.ok;
+    }
     const { token, url } = signedIn();
-    if (sub === undefined) {
+    if (sub === "list") {
       const keys = await listKeys(url, token);
       if (json) out({ keys });
       if (!keys.length) say("No live keys.");
       else for (const line of keyTable(keys)) say(line);
       return EXIT.ok;
     }
-    const done = await revokeKey(url, token, kid!);
-    if (json) out({ kid: done.kid ?? kid, revoked: done.revoked !== false });
-    say(`Revoked ${kid}: it stopped working now.`);
+    if (sub === "show") {
+      const key = (await listKeys(url, token)).find((k) => k.kid === arg);
+      if (!key) throw new Stop("not_found", `This account has no live key ${arg} (expired and revoked keys are left out).`, `${RUN} keys list`, EXIT.refused);
+      if (json) out({ key });
+      for (const line of keyDetail(key)) say(line);
+      return EXIT.ok;
+    }
+    const done = await revokeKey(url, token, arg!);
+    if (json) out({ kid: done.kid ?? arg, revoked: done.revoked !== false });
+    say(`Revoked ${arg}: it stopped working now.`);
     return EXIT.ok;
   } catch (error) {
     const stop = asStop(error);
-    writeAll(2, `${stop.next && isCommand(stop.next) ? `${stop.message} Next: ${stop.next}` : stop.message}\n`);
-    if (json) out({ error: { code: stop.code, message: stop.message, next: stop.next ?? null } });
+    writeAll(2, `${stop.next && isCommand(stop.next) ? `${stop.message} Next: ${stop.next}` : stop.next ? `${stop.message}\n${stop.next}` : stop.message}\n`);
+    if (json && !(stop instanceof Printed)) out({ error: { code: stop.code, message: stop.message, next: stop.next ?? null } });
     return stop.exit;
   }
 }
 
-/** The keys as aligned columns, a header first; a time as "2026-12-04 10:00". */
+/** The longest a `keys grant --wait` asks again past the approval's own expiry, for a server that never says expired. */
+const GRANT_GRACE_MS = 60_000;
+
+/**
+ * `flow keys grant <name>`: 200 is granted now (or had it already), and the key's new checklist is
+ * printed; 202 (send, deploy) waits for the key's owner to approve once in the browser: its page is
+ * printed (and opened unless --no-browser), then without --wait exit 4, with --wait GET
+ * /cli/keys/grant/<id> every `interval` seconds until approved (its checklist), denied or expired (exit 3).
+ */
+async function grant(options: { kid: string; name: string; wait: boolean; noBrowser: boolean }, json: boolean, out: Out, say: Say): Promise<void> {
+  const { token, url } = signedIn();
+  const answer = await grantKey(url, token, options.kid, options.name);
+  const advisory = advisoryLines(answer.advisory);
+  if (answer.granted) {
+    if (json) out({ ...grantReport(answer, options), status: "granted" });
+    say(answer.already ? `${options.kid} could already: ${options.name}.` : `Granted ${options.name} to ${options.kid}.`);
+    sayKey(answer.key, say);
+    return;
+  }
+  const page = answer.approve_url ?? "";
+  const opened = page && !options.noBrowser ? await openBrowser(page) : false;
+  const again = `${RUN} keys grant ${options.name}${keyFlag(options.kid)}`;
+  const pendingReport = { ...grantReport(answer, options), status: "pending", opened_browser: opened };
+  if (json) out(pendingReport);
+  say(answer.message ?? `${options.name} on ${options.kid} needs the owner's yes in the browser.`);
+  say(advisory[2]!);
+  if (page) say(opened ? `Opened your browser at ${page}` : `${options.noBrowser ? "Open" : "Could not open a browser here; open"} ${page}`);
+  if (answer.expires_at) say(`The approval page works until ${answer.expires_at}.`);
+  if (!options.wait) {
+    const stop = new Stop("pending", `Waiting for the owner to approve ${options.name} on ${options.kid}.`, `${again} --wait`, EXIT.pending);
+    // Already printed above as the pending answer: --json gets no second document.
+    throw json ? new Printed(stop) : stop;
+  }
+  let interval = typeof answer.interval === "number" && answer.interval >= 0 ? answer.interval : 5;
+  const stopAt = answer.expires_at && !Number.isNaN(Date.parse(answer.expires_at)) ? Date.parse(answer.expires_at) + GRANT_GRACE_MS : Number.POSITIVE_INFINITY;
+  for (;;) {
+    await delay(interval * 1000);
+    const now = await grantStatus(url, token, answer.grant_id!);
+    if (typeof now.interval === "number" && now.interval >= 0) interval = now.interval;
+    if (now.status === "approved") {
+      if (json) out({ ...grantReport({ ...answer, key: now.key ?? answer.key }, options), status: "approved" });
+      say(`Approved: ${options.kid} has ${options.name} now.`);
+      sayKey(now.key, say);
+      return;
+    }
+    if (now.status === "denied") throw new Stop("grant_denied", `The owner denied ${options.name} on ${options.kid}.`, undefined, EXIT.refused);
+    if (now.status === "expired" || Date.now() > stopAt) throw new Stop("grant_expired", `The approval for ${options.name} on ${options.kid} expired before the owner approved it.`, again, EXIT.refused);
+  }
+}
+
+/** --key for a next step, when the grant named a key other than the FLOW_LIVE_KEY's. */
+const keyFlag = (kid: string) => (kid !== liveKid(dotenvValue()(LIVE_ENV) ?? "") ? ` --key ${kid}` : "");
+
+/** A Stop whose --json document went out already. */
+class Printed extends Stop {
+  constructor(stop: Stop) {
+    super(stop.code, stop.message, stop.next, stop.exit);
+  }
+}
+
+/** A grant's --json document: what was asked and the server's answer, the advisory always all three tiers. */
+function grantReport(answer: GrantAnswer, options: { kid: string; name: string }): Record<string, unknown> {
+  const advisory = advisoryLines(answer.advisory);
+  return {
+    kid: options.kid, grant: options.name, granted: answer.granted, already: answer.already === true, tier: answer.tier ?? null,
+    ...(answer.grant_id ? { grant_id: answer.grant_id, approve_url: answer.approve_url ?? null, expires_at: answer.expires_at ?? null, message: answer.message ?? null } : {}),
+    key: answer.key ?? null, advisory: { default: advisory[0], ask_user: advisory[1], critical: advisory[2] },
+  };
+}
+
+/** The key's checklist after a grant; when the server gave none, where to see it. */
+function sayKey(key: GrantedKey | undefined, say: Say): void {
+  const checklist: ChecklistLine[] = Array.isArray(key?.checklist) ? key!.checklist! : [];
+  if (!checklist.length) return say(`${RUN} keys show${key?.kid ? ` ${key.kid}` : ""} says what it can do now.`);
+  say("What it can do now:");
+  for (const line of checklistLines(checklist)) say(line);
+}
+
+const at = (time: string | null | undefined) => (time ? time.slice(0, 16).replace("T", " ") : "-");
+
+/** The keys as aligned columns, a header first: id, agent, mode, last 4, expiry ("2026-12-04 10:00"); flow keys show <kid> says what one can do. */
 function keyTable(keys: ListedKey[]): string[] {
-  const at = (time: string | null | undefined) => (time ? time.slice(0, 16).replace("T", " ") : "-");
-  // Text applies to a key that reads (read among its scopes): raw only for one made with --content.
-  const text = (k: ListedKey) => (k.scopes?.includes("read") ? (k.content ? "raw" : "de-identified") : "-");
-  const rows = [["KID", "AGENT", "MODE", "SCOPES", "TEXT", "EXPIRES", "LAST USED"],
-    ...keys.map((k) => [k.kid, k.agent ?? k.flow_agent_id ?? "-", k.mode ?? "-", k.scopes?.join(",") || "-", text(k), at(k.expires_at), at(k.last_used_at)])];
+  const rows = [["KID", "AGENT", "MODE", "KEY", "EXPIRES"],
+    ...keys.map((k) => [k.kid, k.agent ?? k.flow_agent_id ?? "-", k.mode ?? "-", k.last4 ? `…${k.last4}` : "-", at(k.expires_at)])];
   const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
   return rows.map((r) => r.map((cell, i) => (i === r.length - 1 ? cell : cell.padEnd(widths[i]!))).join("  "));
+}
+
+/** `flow keys show`: the key's row, its checklist (✓/✗, the server's order) and its grants. */
+function keyDetail(k: ListedKey): string[] {
+  const lines = [`${k.kid}  ${k.agent ?? k.flow_agent_id ?? "-"}  ${k.mode ?? "-"}${k.last4 ? `  …${k.last4}` : ""}${k.kind ? `  ${k.kind}` : ""}${k.environment ? `  ${k.environment}` : ""}`];
+  lines.push(`Expires: ${at(k.expires_at)}   Last used: ${at(k.last_used_at)}`);
+  const checklist = Array.isArray(k.checklist) ? k.checklist : [];
+  if (checklist.length) {
+    lines.push("What it can do:", ...checklistLines(checklist));
+  } else lines.push(`Scopes: ${k.scopes?.join(", ") || "-"}`);
+  const grants = Array.isArray(k.grants) ? k.grants : [];
+  if (grants.length) lines.push("Granted:", ...grants.map((g) => `  ${g.scope}  ${at(g.at)}${g.by ? `  by ${g.by}` : ""}`));
+  return lines;
 }
 
 async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say, forLink?: { channel: string }): Promise<{ answer: SetupAnswer; warnings: string[] }> {

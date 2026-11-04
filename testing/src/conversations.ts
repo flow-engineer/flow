@@ -278,7 +278,7 @@ export async function get(name: string, where: Access, path: string): Promise<{ 
     const again = answer.retryAfter !== undefined ? ` Try again in ${answer.retryAfter} s.` : "";
     const said = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
     const code = (error && typeof error === "object" && error.code) || (status === 404 ? "not_found" : `http_${status}`);
-    const keyLines = keyRefused(status, error?.code) ? `\n${keyHelp(name, key, { status, code: error?.code })}` : "";
+    const keyLines = keyRefused(status, error?.code) ? `\n${keyHelp(name, key, { status, code: error?.code, hint: error?.hint })}` : "";
     const failed = error && typeof error === "object" && error.message
       ? new Failed(`${name}: ${error.message}${error.code ? ` (${error.code}, ${status})` : ` (${status})`}${again}${error.hint ? `\n${error.hint}` : ""}${keyLines}`, code, error.hint)
       : new Failed(`${name}: ${cloud} answered ${status}${said ? `: ${said}` : ""}${status === 404 ? " (this Flow may not have this command's route yet)" : ""}.${keyLines}`, code);
@@ -706,7 +706,8 @@ async function insightsGet(name: string, where: Access, path: string, finding: b
     return await get(name, where, path);
   } catch (error) {
     if (!(error instanceof Failed)) throw error;
-    const words = error.status === 403 && error.code === "scope"
+    // A live key refused for a scope is the right key without that grant: its own message (Flow's hint, the grant) stands.
+    const words = error.status === 403 && error.code === "scope" && where.key.kind !== "live_key"
       ? `Insights reads production conversations, so it needs a live key: ${SETUP_LIVE} writes the live key FLOW_LIVE_KEY, which Insights then reads with (flow setup writes only a test key, flow_test_).`
       // Both routes answer not_found until Insights is open to the workspace; a finding's also for one not the agent's.
       : error.code === "not_found" && !finding ? "Insights is not open to this workspace yet." : undefined;

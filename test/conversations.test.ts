@@ -469,9 +469,10 @@ const READ = "flow_live_FAKElive00_0000FAKE0000live0000R3ad";
  * A fake flow.engineer for the live key: FLOW_KEY (KEY) reads staging and finds no production
  * conversation (404, as Flow answers a test key); the live key (READ) reads both, with text
  * de-identified, said by the Flow-Text header only (no text_mode in the body); `expired` refuses the
- * live key as Flow does once it expired, went unused 7 days or was revoked.
+ * live key as Flow does once it expired, went unused 7 days or was revoked; `ungranted` refuses it
+ * with a 403 for a scope it was not granted, its hint the one given (none when empty).
  */
-async function liveServer(options: { expired?: boolean } = {}) {
+async function liveServer(options: { expired?: boolean; ungranted?: string } = {}) {
   const asked: Array<{ url: string; authorization?: string }> = [];
   const http = createServer((req, res) => {
     asked.push({ url: req.url!, authorization: req.headers.authorization });
@@ -479,6 +480,7 @@ async function liveServer(options: { expired?: boolean } = {}) {
     const read = req.headers.authorization === `Bearer ${READ}`;
     const json = (status: number, body: unknown) => void res.writeHead(status, { "content-type": "application/json", ...(read && status === 200 ? { "flow-text": "deidentified" } : {}) }).end(JSON.stringify(body));
     if (read && options.expired) return json(401, { error: { code: "bad_key", message: "This key is not valid." } });
+    if (read && options.ungranted !== undefined) return json(403, { error: { code: "scope", message: "This key may not read this.", ...(options.ungranted ? { hint: options.ungranted } : {}) } });
     if (!read && req.headers.authorization !== `Bearer ${KEY}`) return json(401, { error: { code: "bad_key", message: "This key is not valid." } });
     if (url.pathname === "/v1/agent/conversations") return json(200, { conversations: [conversation(read ? "cnv_p" : "cnv_s", 0)], next_cursor: null });
     if (url.pathname === "/v1/agent/conversations/cnv_p" && read) return json(200, { ...detail, conversation: { ...detail.conversation, id: "cnv_p" }, messages: [], issues: [] });
@@ -557,6 +559,24 @@ test("a live key Flow refuses (401) says it expired, went unused 7 days or was r
     assert.equal(JSON.parse(none.stdout).error.code, "no_live_key");
     assert.equal(JSON.parse(none.stdout).next, "npx @flow-engineer/flow setup --live");
   } finally { fake.close(); }
+});
+
+test("a live key refused for a scope (403) prints Flow's hint as given, then the three advisory tiers, never \"Get the right one\"; with no hint it names keys show and keys grant", { timeout: 15_000 }, async () => {
+  const hint = "This key can't message customers: ask the user, then run npx @flow-engineer/flow keys grant send (the owner confirms once in the browser).";
+  const fake = await liveServer({ ungranted: hint });
+  try {
+    const refused = await flow(["insights", "--cloud", fake.url], liveDir());
+    assert.equal(refused.code, 1);
+    assert.ok(refused.stderr.includes(`(scope, 403)\n${hint}\n`), refused.stderr);
+    assert.match(refused.stderr, /^Only with the user's explicit yes: messaging customers and deploying live \(npx @flow-engineer\/flow keys grant send \| deploy\); the owner confirms once in the browser\.$/m);
+    assert.match(refused.stderr, /^Fine by default, granted at once: /m);
+    assert.doesNotMatch(refused.stderr, /Get the right one|keys show/);
+  } finally { fake.close(); }
+  const bare = await liveServer({ ungranted: "" });
+  try {
+    const refused = await flow(["insights", "--cloud", bare.url], liveDir());
+    assert.match(refused.stderr, /It is not granted what this needs: npx @flow-engineer\/flow keys show FAKElive00 says what it can do, and npx @flow-engineer\/flow keys grant <name> adds it\./);
+  } finally { bare.close(); }
 });
 
 test("flow insights show prints the messages around each flagged one when Flow sends them", { timeout: 15_000 }, async () => {

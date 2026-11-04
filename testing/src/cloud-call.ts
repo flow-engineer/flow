@@ -172,7 +172,7 @@ const GET_LIVE_KEY = `${SETUP_LIVE} writes FLOW_LIVE_KEY into .env (the workspac
  * The lines that follow a refused key (401, 403, bad_key, scope): which key `command` reads, where it
  * looked, what it found there, and how to get the right one.
  */
-export function keyHelp(command: string, found: FoundKey, refusal?: { status: number; code?: string }): string {
+export function keyHelp(command: string, found: FoundKey, refusal?: { status: number; code?: string; hint?: string }): string {
   const wrongKind =
     found.kind === "flow_key" && found.value.startsWith("oci_") ? " That is a CI key; this command reads FLOW_KEY." :
     found.kind === "ci_key" && found.value.startsWith("flow_") ? " That is a Flow key (FLOW_KEY); this command reads the CI key." :
@@ -184,11 +184,45 @@ export function keyHelp(command: string, found: FoundKey, refusal?: { status: nu
     : "";
   // A live key Flow no longer takes: expired, unused for 7 days or revoked (Flow does not say which).
   const ended = found.kind === "live_key" && refusal?.status === 401 ? ` It has expired, gone unused for 7 days or been revoked: run ${SETUP_LIVE} again for a new one.` : "";
+  // A live key refused for a scope is the right key without that grant: the server's hint (printed as
+  // given, above) names the keys grant, else this does; a new key would not have it either.
+  const kid = liveKid(found.value);
+  const ungranted = found.kind === "live_key" && refusal?.status === 403;
+  const grant = ungranted && !/keys grant/.test(refusal?.hint ?? "") ? ` It is not granted what this needs: ${RUN} keys show${kid ? ` ${kid}` : ""} says what it can do, and ${RUN} keys grant <name> adds it.` : "";
   return [
     `${command} reads with ${WANTS[found.kind]}.`,
-    `It found ${found.name}=${keyLabel(found.value)} in ${found.where}.${wrongKind}${scope}${ended}`,
-    `Get the right one: ${found.kind === "live_key" ? GET_LIVE_KEY : GET_KEY}.`,
+    `It found ${found.name}=${keyLabel(found.value)} in ${found.where}.${wrongKind}${scope}${ended}${grant}`,
+    ...(ungranted ? advisoryLines() : [`Get the right one: ${found.kind === "live_key" ? GET_LIVE_KEY : GET_KEY}.`]),
   ].join("\n");
+}
+
+/** A live Flow key's id (its 10 characters after flow_live_), never its secret; undefined for any other key. */
+export function liveKid(value: string): string | undefined {
+  return /^flow_live_([0-9A-Za-z]{10})_/.exec(value)?.[1];
+}
+
+/**
+ * The three advisory tiers, word for word as flow.engineer says them (cli_setup.ADVISORY): the CLI's
+ * help, setup --live, flow keys and flow mcp's tool descriptions repeat them.
+ */
+export const ADVISORY = {
+  default: "Fine by default, granted at once: de-identified reads, Insights, tests, traces, the model.",
+  ask_user: `Only when the user asked for it: raw message text (${RUN} keys grant content).`,
+  critical: `Only with the user's explicit yes: messaging customers and deploying live (${RUN} keys grant send | deploy); the owner confirms once in the browser.`,
+} as const;
+
+/** The advisory as lines: the server's words when it gave them, else the CLI's same ones. */
+export function advisoryLines(given?: { default?: string; ask_user?: string; critical?: string }): string[] {
+  return (["default", "ask_user", "critical"] as const).map((tier) => (typeof given?.[tier] === "string" && given[tier] ? given[tier]! : ADVISORY[tier]));
+}
+
+/**
+ * A key's checklist as aligned lines, in the server's order: "  ✓ Read Insights", or "  ✗ Deploy live"
+ * with the command that grants it in a column after the labels.
+ */
+export function checklistLines(checklist: Array<{ label: string; allowed: boolean; grant?: string | null }>, indent = "  "): string[] {
+  const width = Math.max(0, ...checklist.filter((c) => !c.allowed && c.grant).map((c) => c.label.length));
+  return checklist.map((c) => (c.allowed ? `${indent}✓ ${c.label}` : c.grant ? `${indent}✗ ${c.label.padEnd(width)}  ${c.grant}` : `${indent}✗ ${c.label}`));
 }
 
 /** Whether a refusal is about the key. */
@@ -205,7 +239,10 @@ export const KEYS_HELP = `Keys (the environment wins over the agent's .env; erro
                             conversations --env production, flow conversations show of a
                             production one, flow insights) use it whenever it is set, with text
                             de-identified unless made with --content; ${SETUP_LIVE} makes it
-                            (the workspace's owner), for 30 days, ending after 7 unused
+                            (the workspace's owner), for 30 days, ending after 7 unused. It
+                            reads, runs tests, writes traces and uses the model; it messages
+                            customers or deploys live only after ${RUN} keys grant send|deploy
+                            and the owner's one click
   FLOW_FRAMEWORK_CLOUD_KEY  The CI key, oci_...: flow test, flow show, flow deploy (every
                             subcommand), flow logs, flow cli publish|rollback|status
   ${GET_KEY}.
