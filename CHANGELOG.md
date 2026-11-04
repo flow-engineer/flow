@@ -55,8 +55,43 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `listConversations`, `showConversation`, `listIssues`, `logsPage` and `deployStatus` return data
   for callers other than the CLI.
 
+### Changes (the starter and setup, from dogfooding)
+
+- **The starter (`flow new`, `flow init`)**: `.env.example` says to sign in at
+  `https://flow.engineer/dashboard` for the CI and trace keys (the two `https://flow.engineer/observe`
+  lines are the cloud's API address, unchanged); its `AGENTS.md` says `npx @flow-engineer/flow check`
+  (bare `npx flow` fetches another npm package); `package.json` pins `@flow-engineer/flow` to the
+  exact version it is made with (no `^`), as the docs say for production. The café's
+  `place_order` and `order_status` say `signIn: "none"` like `get_menu`: the café has no accounts, so
+  its tools are public on purpose, and Flow's hosting no longer warns `mcp_open` about tools marked so
+  (flow-mono hosting).
+- **`flow setup --json`**: `whatsapp_link` and `imessage_link` say "Join <displayName> (ref ...)" like
+  `direct_links`, `join_message` and the printed links (they said the package name).
+- **Free-trial counts say whose they are**: the account's, shared by all its agents. Printed as
+  "(your account's free trial, across all its agents: 2 of 25 people)"; `--json` has them as
+  `account_trial` (setup) and each channel's `account_trial` (status). `trial` is the same object,
+  kept for a release.
+- **`flow check`** asks `src/mcp.ts`'s server, in-process, which tools it lists (what the CLI's
+  commands are made from). A tool it leaves out is no longer called "reachable as" a CLI command;
+  without a `src/mcp.ts` that answers signed out, the warning adds "if the CLI's MCP server serves
+  it". A `src/mcp.ts` that throws on import is an error.
+- **`flow deploy` no longer sends `FLOW_FRAMEWORK_JOIN_CODE`, `FLOW_FRAMEWORK_TRY_URL` or
+  `FLOW_FRAMEWORK_WORKSPACE`** as secrets: `setup` and `link` write them for the CLI alone. The
+  `FLOW_MESSAGING_<CHANNEL>_SENDER` ids are still sent (the hosted agent starts conversations from
+  them).
+
 ### Migration notes
 
+- An agent made before this release keeps `"^0.15.x"`; to pin it, set
+  `"@flow-engineer/flow": "<version>"` in package.json and run `npm install`. To stop the `mcp_open`
+  warning on a café-based agent that still has no accounts, add `signIn: "none"` to each tool its
+  `src/mcp.ts` serves on purpose (never to one that reads or changes a person's account: set up
+  sign-in instead). Its `.env.example` and `AGENTS.md` need nothing (comments only).
+- `setup --json` and `status --json` readers: read `account_trial` (`trial` goes in a later release).
+- `cliProblems` (cli/src/commands.ts) takes a third argument, `listed` (default true).
+- Secrets already sent by an earlier `flow deploy` (the join code, try URL, workspace) stay on the
+  environment until removed: `npx @flow-engineer/flow deploy secret --unset FLOW_FRAMEWORK_JOIN_CODE
+  --env staging` (and the same for the others and production). They are harmless if left.
 - `flow conversations`, `flow issues` and `flow templates` exit **2** for a wrong flag (was 1), as
   `deploy` and `logs` do. Scripts that treat any non-zero exit as failure need nothing.
 - With `--json`, a failure's document is now on stdout (it was empty): a script that took "stdout

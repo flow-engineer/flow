@@ -48,7 +48,7 @@ test("the café's tools are served as spec-valid MCP tools, every annotation sen
   assert.deepEqual(place.annotations, { title: "Place an order", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
   assert.equal(place.inputSchema.type, "object");
   assert.equal(place.outputSchema?.type, "object");
-  assert.deepEqual(place._meta, { securitySchemes: [{ type: "oauth2", scopes: [] }], "openai/toolInvocation/invoking": "Placing your order…", "openai/toolInvocation/invoked": "Order placed" });
+  assert.deepEqual(place._meta, { securitySchemes: [{ type: "noauth" }], "openai/toolInvocation/invoking": "Placing your order…", "openai/toolInvocation/invoked": "Order placed" });
   const status = listed.tools.find((t) => t.name === "order_status")!;
   assert.equal(status.title, "Order status", "derived from the name when the tool gives none");
   assert.deepEqual(status.annotations, { title: "Order status", readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false });

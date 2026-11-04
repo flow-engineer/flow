@@ -166,7 +166,7 @@ the CHINWAG_ names from before the rename still work):
                            (US) or https://flow.engineer/dashboard/in (an agent in the India cell)
   FLOW_TEST_MIN_PASS       The pass rate the session needs, when --min-pass is not given
   FLOW_FRAMEWORK_CLOUD_KEY The agent's CI key, for a hosted cloud (oci_...: flow setup
-                           writes it, or make one at https://flow.engineer/observe, your agent, Developers)
+                           writes it, or make one at https://flow.engineer/dashboard, your agent, Developers)
   FLOW_FRAMEWORK_AGENT_TOKEN
                            With --agent-url: sent to it as authorization: Bearer <token>
   OPENROUTER_API_KEY       The agent's model key, or OPENAI_API_KEY, ANTHROPIC_API_KEY or

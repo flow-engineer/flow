@@ -313,14 +313,17 @@ test("logs on a Flow without the logs route says it is not available yet", async
 
 const route = (calls: Call[]) => calls.map((c) => `${c.method} ${c.path.split("?")[0]}`);
 
-test("a first deploy sends the .env's values as secrets before the build starts, printing names only", async () => {
+test("a first deploy sends the .env's values as secrets before the build starts, printing names only, and never the CLI's own settings", async () => {
   const fake = await cloud({ neverDeployed: true });
-  const dir = agentFolder("FLOW_FRAMEWORK_CLOUD_KEY=oci_key\nANTHROPIC_API_KEY=sk-ant-secret-value\nFLOW_FRAMEWORK_TRACES_KEY=tk_1\nEMPTY=\n");
+  // What flow setup and link write for the CLI alone (the join code, the phone page, the workspace)
+  // stays home; the sender ids go, since the hosted agent starts conversations from them.
+  const setupLines = "FLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\nFLOW_FRAMEWORK_TRY_URL=https://flow.example/try/brave-otter-1?c=telegram\nFLOW_FRAMEWORK_WORKSPACE=acc_1\nFLOW_MESSAGING_TELEGRAM_SENDER=snd_tg\n";
+  const dir = agentFolder(`FLOW_FRAMEWORK_CLOUD_KEY=oci_key\nANTHROPIC_API_KEY=sk-ant-secret-value\nFLOW_FRAMEWORK_TRACES_KEY=tk_1\nEMPTY=\n${setupLines}`);
   const { code, printed } = await run(["--dir", dir, "--version", "v1"], { FLOW_FRAMEWORK_CLOUD: fake.url });
   assert.equal(code, 0, printed);
-  assert.deepEqual(route(fake.calls).slice(0, 4), ["POST /v1/hosting/deploys", "PUT /v1/hosting/secrets/ANTHROPIC_API_KEY", "PUT /upload/hdp_1", "POST /v1/hosting/deploys/hdp_1/start"]);
+  assert.deepEqual(route(fake.calls).slice(0, 5), ["POST /v1/hosting/deploys", "PUT /v1/hosting/secrets/ANTHROPIC_API_KEY", "PUT /v1/hosting/secrets/FLOW_MESSAGING_TELEGRAM_SENDER", "PUT /upload/hdp_1", "POST /v1/hosting/deploys/hdp_1/start"]);
   assert.deepEqual(fake.calls[1]!.body, { environment: "staging", value: "sk-ant-secret-value" });
-  assert.match(printed, /Sent 1 secret from \.env to staging: ANTHROPIC_API_KEY\./);
+  assert.match(printed, /Sent 2 secrets from \.env to staging: ANTHROPIC_API_KEY, FLOW_MESSAGING_TELEGRAM_SENDER\./);
   assert.ok(!printed.includes("sk-ant-secret-value") && !printed.includes("oci_key"), "no value is printed");
   const kept = readFileSync(join(dir, ".flow", "secrets.json"), "utf8");
   assert.ok(!kept.includes("sk-ant-secret-value") && kept.includes("ANTHROPIC_API_KEY"), "a hash per name, never the value");
