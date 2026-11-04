@@ -17,6 +17,10 @@ world: |
   The menu is as in tests/tools/get_menu.yaml. The café's point of sale is down this morning and
   stays down for the whole conversation.
 
+given:
+  menu: get_menu.yaml
+  tools: { place_order: down }   # every call gets place_order.yaml's first response with an error
+
 max_turns: 6
 
 expect:

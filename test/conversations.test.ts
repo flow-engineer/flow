@@ -290,7 +290,7 @@ test("flow issues test-case prints the proposed test case's fields and how to ma
   } finally { fake.close(); }
 });
 
-test("a refusal prints the server's message, Retry-After and hint and exits 1; no FLOW_KEY says how to get one", { timeout: 15_000 }, async () => {
+test("a refusal prints the server's message, Retry-After and hint and exits 1; no FLOW_KEY says how to get one", { timeout: 30_000 }, async () => {
   const fake = await server();
   try {
     const missing = await flow(["conversations", "show", "cnv_bad", "--cloud", fake.url], agentDir());

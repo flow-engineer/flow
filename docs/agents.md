@@ -188,11 +188,13 @@ flow.engineer may add `warnings` (up to 20 lines) to any setup answer. Each is p
 line on stderr; with `--json` setup's line has `warnings` (an empty list when there are none), and
 an error line has it when there were any. Pass them on to the owner.
 
-`setup` also shows the free trial: the people on each channel and those waiting for a place
-(`free trial: 3 of 25 people, 2 waiting for a place`; `trial.<channel>` `{limit, used, held}` in
-`--json`). A person past the limit is held: their messages are kept, not delivered, and reach the
+`setup` also shows the free trial: the people on each channel and those waiting for a place. The
+counts are the account's, shared by all its agents, so a brand-new agent can show people already
+(`your account's free trial, across all its agents: 3 of 25 people, 2 waiting for a place`;
+`account_trial.<channel>` `{limit, used, held}` in `--json`, and in `status --json` each channel's
+`account_trial`; `trial` is the older name of the same object, kept for a release). A person past the limit is held: their messages are kept, not delivered, and reach the
 agent once a place frees up (a contact removed) or the owner buys a paid plan. An older flow.engineer counts messages instead (`3 of 300 messages used`, no
-`held`), and on iMessage the people it may reach (`iMessage: 1 of 2 people`, `trial.imessage.contacts`).
+`held`), and on iMessage the people it may reach (`iMessage (your account's free trial, across all its agents): 1 of 2 people`, `account_trial.imessage.contacts`).
 
 ### Paid plans
 
@@ -436,8 +438,10 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
 
 - `deploy` first sends each non-empty value in the agent's `.env` as a secret for that
   environment, before the service starts, so the first live version has its keys: never the CI
-  key, the cloud's address or a name Flow sets itself (`FLOW_FRAMEWORK_TRACES_*`, `FLOW_STORE_*`,
-  `PORT`, ...). Later deploys send only the new or changed ones (`.flow/secrets.json` keeps a hash
+  key, the cloud's address, what `setup` and `link` write for the CLI alone
+  (`FLOW_FRAMEWORK_JOIN_CODE`, `FLOW_FRAMEWORK_TRY_URL`, `FLOW_FRAMEWORK_WORKSPACE`; the
+  `FLOW_MESSAGING_<CHANNEL>_SENDER` ids are sent, the agent starts conversations from them) or a
+  name Flow sets itself (`FLOW_FRAMEWORK_TRACES_*`, `FLOW_STORE_*`, `PORT`, ...). Later deploys send only the new or changed ones (`.flow/secrets.json` keeps a hash
   per name, never a value). It prints the names it sent, never values; `--no-secrets` sends none.
   A secret the host refuses stops the deploy before it starts, naming it.
 - `deploy` packs the folder (without `node_modules`, `.git`, `.env*` and `.flow`, at most 50 MB),

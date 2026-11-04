@@ -28,7 +28,7 @@ async function fakeCloud(answer: (req: IncomingMessage) => { status: number; bod
 /** `flow mcp serve` in an agent folder whose .env points at the cloud (and has `more` lines), with a connected client. */
 async function serve(cloud: string, more = "") {
   const dir = mkdtempSync(join(tmpdir(), "flow-mcp-serve-"));
-  writeFileSync(join(dir, ".env"), `FLOW_KEY=${KEY}\nFLOW_FRAMEWORK_CLOUD=${cloud}\n${more}`);
+  writeFileSync(join(dir, ".env"), `FLOW_KEY=${KEY}\nFLOW_FRAMEWORK_CLOUD_KEY=oci_ci_secretvalue\nFLOW_FRAMEWORK_CLOUD=${cloud}\n${more}`);
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(process.env)) if (value !== undefined && !/^(FLOW_|CHINWAG_)/.test(name)) env[name] = value;
   const client = new Client({ name: "test", version: "1" });
@@ -78,6 +78,24 @@ test("list_conversations reads the cloud with FLOW_KEY and returns the conversat
     assert.deepEqual(result.structuredContent, { conversations: [conversation], next_cursor: null });
     assert.match((result.content as Array<{ text: string }>)[0]!.text, /^1 conversation, 2 replies graded wrong\./);
     assert.deepEqual(cloud.seen, [{ url: "/v1/agent/conversations?environment=staging&grade=wrong&limit=20", authorization: `Bearer ${KEY}` }]);
+  } finally {
+    await client.close();
+    await cloud.close();
+  }
+});
+
+test("read_logs follows the cursor until it stops moving and keeps the newest lines under its limit", async () => {
+  const line = (n: number) => ({ time: `2026-11-04T09:00:0${n}Z`, severity: "INFO", text: `line ${n}` });
+  // Page 1 (no after), page 2 (after c1), then the host answers its last cursor again: the end.
+  const pages: Record<string, { lines: unknown[]; next: string | null }> = { "": { lines: [line(1), line(2)], next: "c1" }, c1: { lines: [line(3), line(4)], next: "c2" }, c2: { lines: [line(4)], next: "c2" } };
+  const cloud = await fakeCloud((req) => ({ status: 200, body: pages[new URL(req.url!, "http://x").searchParams.get("after") ?? ""] }));
+  const client = await serve(cloud.url);
+  try {
+    const result = await client.callTool({ name: "read_logs", arguments: { limit: 3 } });
+    const data = result.structuredContent as { lines: Array<{ text: string }>; truncated: boolean };
+    assert.deepEqual(data.lines.map((l) => l.text), ["line 2", "line 3", "line 4"]);
+    assert.equal(data.truncated, true);
+    assert.equal(cloud.seen.length, 3);
   } finally {
     await client.close();
     await cloud.close();

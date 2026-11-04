@@ -1,4 +1,4 @@
-// covers: testing/src/account.ts testing/src/flow-login.ts testing/src/cli.ts
+// covers: testing/src/account.ts testing/src/flow-login.ts testing/src/cli.ts testing/src/deploy.ts
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage } from "node:http";
@@ -408,7 +408,7 @@ test("link goes on when only observe's part of setup failed: the phone link, the
   assert.equal(result.code, 0, result.err);
   assert.equal(result.err.split("\n").filter((l) => l === warning).length, 1, "one warning line, with the server's own fix");
   assert.match(result.out, /^https:\/\/wa\.me\/15550100001\?text=/m, "the phone link");
-  assert.match(result.out, /^WhatsApp free trial: 3 of 300 messages used$/m);
+  assert.match(result.out, /^WhatsApp \(your account's free trial, across all its agents\): 3 of 300 messages used$/m);
   assert.match(result.out, /^Next: .*npm start, then send the link above\.$/m);
   assert.match(result.out, /that phone chats with this agent/, "FLOW_KEY came with Messaging's part, so the agent answers");
   assert.doesNotMatch(result.out + result.err, /undefined/);
@@ -600,15 +600,26 @@ test("setup saves each open channel's sender and prints its link; link --channel
   const dotenv = readFileSync(join(cwd, ".env"), "utf8");
   assert.match(dotenv, /^FLOW_MESSAGING_WHATSAPP_SENDER=snd_wa$/m);
   assert.match(dotenv, /^FLOW_MESSAGING_IMESSAGE_SENDER=snd_im$/m);
-  assert.equal(set.lines[0]!.imessage_link, channels.imessage_link);
+  // flow.engineer names the agent by its package name ("my agent" here); every link setup prints
+  // names it as people call it (package.json's displayName, "cafe"), as join_message does.
+  assert.equal(set.lines[0]!.imessage_link, "sms:+15550100002?&body=Join%20cafe%20%28ref%20brave-otter-1%29");
+  assert.equal(set.lines[0]!.whatsapp_link, "https://wa.me/15550100001?text=Join%20cafe%20%28ref%20brave-otter-1%29");
   assert.equal(set.lines[0]!.try_urls.imessage, `${flow.url}/try/brave-otter-1?c=imessage&n=cafe`);
   assert.equal(set.lines[0]!.direct_links.imessage, "sms:+15550100002?&body=Join%20cafe%20%28ref%20brave-otter-1%29", "the iMessage link itself, named");
   assert.equal(set.lines[0]!.join_message, "Join cafe (ref brave-otter-1)");
-  assert.deepEqual(set.lines[0]!.trial, channels.trial);
-  assert.match(set.err, /^On WhatsApp: https:\/\/wa\.me\/15550100001\?text=Join%20cafe%20%28ref%20brave-otter-1%29 \(on a computer: .*\?c=whatsapp&n=cafe\) \(free trial: 12 of 300 messages used\)$/m);
-  assert.match(set.err, /^On iMessage: sms:\+15550100002\?&body=Join%20cafe%20%28ref%20brave-otter-1%29 \(on a computer: .*\?c=imessage&n=cafe\) \(free trial: 0 of 100 messages used\)$/m);
+  assert.deepEqual(set.lines[0]!.account_trial, channels.trial, "the account's counts, under a name that says so");
+  assert.deepEqual(set.lines[0]!.trial, channels.trial, "the older name, kept for a release");
+  assert.match(set.err, /^On WhatsApp: https:\/\/wa\.me\/15550100001\?text=Join%20cafe%20%28ref%20brave-otter-1%29 \(on a computer: .*\?c=whatsapp&n=cafe\) \(your account's free trial, across all its agents: 12 of 300 messages used\)$/m);
+  assert.match(set.err, /^On iMessage: sms:\+15550100002\?&body=Join%20cafe%20%28ref%20brave-otter-1%29 \(on a computer: .*\?c=imessage&n=cafe\) \(your account's free trial, across all its agents: 0 of 100 messages used\)$/m);
+  // A try page that gives no direct link: the answer's own links, renamed.
+  const pageless = await flowServer([], 200, { setup: { ...channels, try_urls: undefined }, tryOpen: ["telegram"] });
+  t.after(pageless.close);
+  const renamed = await run(["setup", "--json"], { url: pageless.url, config: temp(), cwd: agentDir(), env });
+  assert.equal(renamed.code, 0, renamed.err);
+  assert.equal(renamed.lines[0]!.whatsapp_link, "https://wa.me/15550100001?text=Join%20cafe%20%28ref%20brave-otter-1%29");
+  assert.equal(renamed.lines[0]!.imessage_link, "sms:+15550100002?&body=Join%20cafe%20%28ref%20brave-otter-1%29");
 
-  const imessage = await run(["link", "--channel", "imessage", "--json"], { url: flow.url, config: temp(), cwd });
+  const imessage =await run(["link", "--channel", "imessage", "--json"], { url: flow.url, config: temp(), cwd });
   assert.equal(imessage.code, 0, imessage.err);
   assert.equal(imessage.lines[0]!.reply_only, true);
   assert.match(imessage.lines[0]!.say_to_person, /can reply after you write to it first, any time later/);
@@ -710,13 +721,13 @@ test("setup prints each of the server's warnings on stderr (at most 20, strings 
   assert.deepEqual(result.lines[0]!.trial.imessage.contacts, { limit: 2, used: 1 });
   for (const w of warnings.slice(0, 20)) assert.ok(result.err.split("\n").includes(w), w);
   assert.ok(!result.err.includes("Warning 21."));
-  assert.match(result.err, /^iMessage: 1 of 2 people$/m);
+  assert.match(result.err, /^iMessage \(your account's free trial, across all its agents\): 1 of 2 people$/m);
 
   const human = await run(["setup"], { url: flow.url, config: temp(), cwd: agentDir(), env });
   assert.equal(human.code, 0, human.err);
   assert.match(human.err, /^Warning 1\.$/m, "warnings go to stderr");
   assert.ok(!human.out.includes("Warning 1."));
-  assert.match(human.out, /^iMessage: 1 of 2 people$/m);
+  assert.match(human.out, /^iMessage \(your account's free trial, across all its agents\): 1 of 2 people$/m);
 
   const none = await flowServer();
   t.after(none.close);
@@ -881,12 +892,12 @@ test("status says what the folder has and lacks, never a key's value; signed in,
   assert.equal(out.lines[0]!.signed_in, false);
   assert.deepEqual(out.lines[0]!.model_key, { set: true, env: "OPENROUTER_API_KEY", flow_credit: null });
   assert.deepEqual(out.lines[0]!.flow_key, { set: false });
-  assert.deepEqual(out.lines[0]!.channels.whatsapp, { sender: false, open: null, trial: null });
+  assert.deepEqual(out.lines[0]!.channels.whatsapp, { sender: false, open: null, account_trial: null, trial: null });
 
   const signed = await run(["status", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
   assert.equal(signed.code, 0, signed.err);
   assert.deepEqual(signed.lines[0]!.signed_in, { email: "dev@example.com", account: "uid_1" });
-  assert.deepEqual(signed.lines[0]!.channels.whatsapp, { sender: false, open: true, trial: { limit: 300, used: 12 } });
+  assert.deepEqual(signed.lines[0]!.channels.whatsapp, { sender: false, open: true, account_trial: { limit: 300, used: 12 }, trial: { limit: 300, used: 12 } });
   assert.equal(signed.lines[0]!.channels.imessage.open, false);
   assert.deepEqual(signed.lines[0]!.next, ["npm start", "npx @flow-engineer/flow link --channel whatsapp"]);
   const asked = flow.seen.find((r) => r.path === "/cli/setup")!;
@@ -898,6 +909,23 @@ test("status says what the folder has and lacks, never a key's value; signed in,
   assert.equal(human.code, 0, human.err);
   assert.ok(human.out.split("\n").includes(NO_KEY));
   assert.match(human.out, /^Next: run npx @flow-engineer\/flow setup to get Flow's free trial credit, or add your own key, then npx @flow-engineer\/flow link$/m);
+});
+
+test("status in a folder that has deployed names the hosted agent, not npm start and a first deploy", async (t) => {
+  const flow = await flowServer();
+  t.after(flow.close);
+  const cwd = agentDir();
+  writeFileSync(join(cwd, ".env"), `OPENROUTER_API_KEY=${OWN}\n`);
+  mkdirSync(join(cwd, ".flow"));
+  writeFileSync(join(cwd, ".flow", "deploys.json"), JSON.stringify({ staging: { id: "hdp_1" } }));
+
+  const out = await run(["status", "--json"], { url: flow.url, config: temp(), cwd });
+  assert.equal(out.code, 0, out.err);
+  assert.deepEqual(out.lines[0]!.deployed, ["staging"]);
+  assert.ok(!(out.lines[0]!.next as string[]).includes("npm start"));
+  const human = await run(["status"], { url: flow.url, config: temp(), cwd });
+  assert.match(human.out, /^Deployed from this folder to staging: npx @flow-engineer\/flow deploy status shows what is live\.$/m);
+  assert.doesNotMatch(human.out, /To keep it answering while this machine sleeps/);
 });
 
 test("status with FLOW_KEY the model's key asks Flow's GET /credit for what is left; a key Flow does not know gets --rotate key, and Flow not reachable never fails status", async (t) => {
@@ -981,8 +1009,8 @@ test("link --channel whatsapp writes WhatsApp's page as FLOW_FRAMEWORK_TRY_URL a
   const result = await run(["link", "--channel", "whatsapp"], { url: signed.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
   assert.equal(result.code, 0, result.err);
   assert.ok(readFileSync(join(cwd, ".env"), "utf8").split("\n").includes(`FLOW_FRAMEWORK_TRY_URL=${signed.url}/try/brave-otter-1?c=whatsapp&from=setup`), "the server's page for the chosen channel");
-  assert.match(result.out, /^WhatsApp free trial: 3 of 300 messages used$/m);
-  assert.ok(!/iMessage: 1 of 2 people/.test(result.out), "no other channel's trial line");
+  assert.match(result.out, /^WhatsApp \(your account's free trial, across all its agents\): 3 of 300 messages used$/m);
+  assert.ok(!/1 of 2 people/.test(result.out), "no other channel's trial line");
   assert.match(result.out, /^Next: .*npm start, then send the link above\.$/m);
 
   // Without the server's try_urls, the page is built for the chosen channel the same way.
@@ -990,8 +1018,8 @@ test("link --channel whatsapp writes WhatsApp's page as FLOW_FRAMEWORK_TRY_URL a
   const plain = await run(["link", "--channel", "imessage"], { url: flow.url, config: temp(), cwd: built, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
   assert.equal(plain.code, 0, plain.err);
   assert.match(readFileSync(join(built, ".env"), "utf8"), /^FLOW_FRAMEWORK_TRY_URL=\S+\/try\/brave-otter-1\?c=imessage$/m);
-  assert.match(plain.out, /^iMessage free trial: 3 of 100 messages used$/m);
-  assert.match(plain.out, /^iMessage: 1 of 2 people$/m, "iMessage's own people count, on iMessage's link");
+  assert.match(plain.out, /^iMessage \(your account's free trial, across all its agents\): 3 of 100 messages used$/m);
+  assert.match(plain.out, /^iMessage \(your account's free trial, across all its agents\): 1 of 2 people$/m, "iMessage's own people count, on iMessage's link");
 });
 
 test("a trial answer with held counts people (Flow Messaging since Oct 2026): setup, link and status say who waits for a place, with no messages line", async (t) => {
@@ -1002,17 +1030,17 @@ test("a trial answer with held counts people (Flow Messaging since Oct 2026): se
   const cwd = agentDir();
   const set = await run(["setup"], { url: flow.url, config: temp(), cwd, env });
   assert.equal(set.code, 0, set.err);
-  assert.match(set.out, /^On Telegram: .* \(free trial: 25 of 25 people, 2 waiting for a place\)$/m);
-  assert.match(set.out, /^On WhatsApp: .* \(free trial: 3 of 25 people\)$/m);
+  assert.match(set.out, /^On Telegram: .* \(your account's free trial, across all its agents: 25 of 25 people, 2 waiting for a place\)$/m);
+  assert.match(set.out, /^On WhatsApp: .* \(your account's free trial, across all its agents: 3 of 25 people\)$/m);
   assert.ok(!/messages used|iMessage: \d+ of \d+ people/.test(set.out), set.out);
 
   const link = await run(["link", "--channel", "telegram"], { url: flow.url, config: temp(), cwd: agentDir(), env });
   assert.equal(link.code, 0, link.err);
-  assert.match(link.out, /^Telegram free trial: 25 of 25 people, 2 waiting for a place$/m);
+  assert.match(link.out, /^Telegram \(your account's free trial, across all its agents\): 25 of 25 people, 2 waiting for a place$/m);
 
   const status = await run(["status"], { url: flow.url, config: temp(), cwd, env });
   assert.equal(status.code, 0, status.err);
-  assert.match(status.out, /^iMessage: sender in \.env; open now \(free trial: 1 of 25 people\)$/m);
+  assert.match(status.out, /^iMessage: sender in \.env; open now \(your account's free trial, across all its agents: 1 of 25 people\)$/m);
   // A full trial names the plans and where the owner buys one, on each.
   for (const said of [set, link, status]) assert.ok(said.out.split("\n").includes(PLANS_FULL), said.out);
 });
