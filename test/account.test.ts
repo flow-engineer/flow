@@ -30,7 +30,7 @@ interface Seen { method: string; path: string; auth?: string; accept?: string; b
  * try page (as JSON, with its direct link) as open for `options.tryOpen` (default Telegram), the model API's
  * GET /credit with `options.credit` (default 404), and records every request.
  */
-async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = [], setupStatus = 200, options: { setup?: Record<string, unknown>; tryOpen?: string[]; setupError?: { status: number; body: Record<string, unknown>; headers?: Record<string, string> }; credit?: { status: number; body: Record<string, unknown> } } = {}) {
+async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = [], setupStatus = 200, options: { setup?: Record<string, unknown>; tryOpen?: string[]; setupError?: { status: number; body: Record<string, unknown>; headers?: Record<string, string> }; credit?: { status: number; body: Record<string, unknown> }; deviceBusyOnce?: boolean } = {}) {
   const seen: Seen[] = [];
   const read = (req: IncomingMessage) => new Promise<string>((done) => { let b = ""; req.on("data", (c) => { b += c; }); req.on("end", () => done(b)); });
   const server = createServer(async (req, res) => {
@@ -53,9 +53,15 @@ async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => 
     }
     if (req.url === "/llm/framework/v1/credit") return send(options.credit?.status ?? 404, options.credit?.body ?? {});
     const bearer = req.headers.authorization?.startsWith("Bearer fcli_");
+    // Too many sign-ins from this address, once: 429 slow_down with a short Retry-After.
+    if (req.url === "/cli/device" && options.deviceBusyOnce && seen.filter((r) => r.path === "/cli/device").length === 1) {
+      return void res.writeHead(429, { "content-type": "application/json", "retry-after": "0" }).end(JSON.stringify({ error: "slow_down", error_description: "Too many logins started from this address." }));
+    }
     if (req.url === "/cli/device") return send(200, { device_code: "fcd_1", user_code: "BCDF-GHJK", verification_uri: `${url}/cli/approve`, verification_uri_complete: `${url}/cli/approve?code=BCDF-GHJK`, interval: 0, expires_in: 600 });
     if (req.url === "/cli/token") {
       const a = typeof tokenAnswers === "function" ? tokenAnswers() : (tokenAnswers.shift() ?? { error: "expired_token" });
+      // { http: 429 }: slow_down as a 429 in the nested error shape, with Retry-After.
+      if (a?.http === 429) return void res.writeHead(429, { "content-type": "application/json", "retry-after": "0" }).end(JSON.stringify({ error: { code: "slow_down", message: "Poll less often." } }));
       return a ? send(a.access_token ? 200 : 400, a) : undefined;
     }
     if (!bearer) return send(401, { error: "invalid_token", error_description: "Sign in again.", next: "npx @flow-engineer/flow login" });
@@ -126,8 +132,8 @@ const agentDir = (name = "cafe") => {
   return dir;
 };
 
-test("login prints the code as a pending line, waits through pending and slow_down, then saves the token at mode 0600", async (t) => {
-  const flow = await flowServer([{ error: "authorization_pending" }, { error: "slow_down" }, { access_token: TOKEN, expires_at: "2027-01-01T00:00:00Z" }]);
+test("login prints the code as a pending line, waits through a 429 start, pending and a 429 slow_down, then saves the token at mode 0600", async (t) => {
+  const flow = await flowServer([{ error: "authorization_pending" }, { http: 429 }, { access_token: TOKEN, expires_at: "2027-01-01T00:00:00Z" }], 200, { deviceBusyOnce: true });
   t.after(flow.close);
   const config = temp();
   const result = await run(["login", "--no-browser", "--json"], { url: flow.url, config, cwd: temp() });
@@ -136,6 +142,8 @@ test("login prints the code as a pending line, waits through pending and slow_do
   const file = join(config, "flow-framework", "credentials.json");
   assert.deepEqual(result.lines[1], { status: "signed_in", account: { email: "dev@example.com", account: "uid_1" }, token_path: file });
   assert.equal(flow.seen.filter((r) => r.path === "/cli/token").length, 3);
+  assert.equal(flow.seen.filter((r) => r.path === "/cli/device").length, 2, "a 429 start with a short Retry-After is asked again");
+  assert.match(result.err, /asked to wait 0 s before a new sign-in \(429 slow_down\); waiting\./);
   assert.match(String(flow.seen[0]!.body.client_name), /^flow \d+\.\d+\.\d+/, "the approval page shows the version");
   assert.equal(statSync(file).mode & 0o777, 0o600);
   assert.equal(JSON.parse(readFileSync(file, "utf8")).token, TOKEN);

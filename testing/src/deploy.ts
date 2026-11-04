@@ -5,8 +5,11 @@
 //                                                                                pack, send .env's new or changed values as secrets, upload, build, go live
 //   flow deploy promote [--no-secrets] [--no-cli] [--json]                       staging's live version to production
 //   flow deploy status [--env staging|production] [--json]                       what is live, its version, when, its URL
-//   flow logs [--env staging|production] [--since 1h] [--follow] [--json]        the hosted agent's log lines
-//   flow deploy secret <NAME> [--env staging|production] [--json]                a secret, its value read from stdin
+//   flow logs [--env staging|production] [--since 1h] [--until] [--severity] [--grep] [--follow] [--json]
+//                                                                                the hosted agent's log lines
+//   flow deploy secret <NAME> [--env staging|production] [--apply] [--json]      a secret, its value read from stdin
+//   flow deploy secret --unset <NAME> [--env staging|production] [--apply]       a secret taken away
+//   flow deploy restart [--env staging|production] [--json]                      the live version again, with the secrets as they are now
 //   flow deploy secrets --from-env [<file>] [--env staging|production] [--json]  every value in the agent's .env
 //
 // The folder is packed without node_modules, .git, .env files and the framework's local results
@@ -18,6 +21,9 @@
 // With a CLI file (src/cli.ts), the CLI is packed for the environment's address before anything is
 // sent and published once live (flow cli publish); promote publishes a production build of it.
 // `flow cli pack|publish|rollback|status` are here too, on the /v1/hosting/cli routes.
+// Every call waits out a 429 and tries an idempotent one again after a network error or a 5xx
+// (testing/src/cloud-call.ts). --env and --environment are one flag. With --json, stdout is one JSON
+// document, a failure's { ok: false, error: { code, message, hint? }, next } too (flow logs: one per line).
 // Nothing here prints a key or a secret's value.
 
 import { execFileSync } from "node:child_process";
@@ -27,25 +33,38 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 
+import { createInterface } from "node:readline";
+import { Writable } from "node:stream";
 import { RUN } from "../../src/names.ts";
 import { fixedServer, packCli, PackError, type PackedCli } from "./cli-pack.ts";
 import { agentVersion } from "../../src/traces.ts";
-const DEFAULT_CLOUD = "https://flow.engineer/observe";
+import { CLOUDS, cloudCall, failureDocument, keyHelp, keyRefused, KEYS_HELP, NetworkError, type FoundKey, type Waits } from "./cloud-call.ts";
+const DEFAULT_CLOUD = CLOUDS.us;
 
 export const DEPLOY_LINE = `  flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--no-cli] [--json]
                             Put this agent on Flow's hosting, so it answers while this machine
                             sleeps (flow deploy --help: status, promote, secret, secrets)
-  flow logs [--env staging|production] [--since 1h] [--follow] [--json]
-                            The hosted agent's recent log lines`;
+  flow logs [--env staging|production] [--since 1h] [--until <when>] [--severity <min>] [--grep <text>] [--follow] [--json]
+                            The hosted agent's log lines (flow logs --help)`;
 
 export const LOGS_USAGE = `Usage:
-  flow logs [--env staging|production] [--since 1h] [--follow] [--json]
+  flow logs [--env staging|production] [--since 1h] [--until <when>] [--severity <min>] [--grep <text>] [--follow] [--json]
 
-  --env        Which (default: staging).
-  --since      How far back: 30s, 15m, 1h (the default) or 2d, at most 30d.
+  --env        Which (default: staging); --environment works too.
+  --since      How far back: 30s, 15m, 1h (the default), 3d, at most 30d, or a time such as
+               2026-11-03T09:00:00Z.
+  --until      Up to when: a duration back from now (2h) or a time. Not with --follow.
+  --severity   Only lines at this severity or above: DEFAULT, INFO, WARNING or ERROR.
+  --grep       Only lines that hold this text (any case).
   --follow     Keep printing new lines until Ctrl-C.
-  --json       One JSON object per line on stdout: { time, severity, text }.
-  --dir, --cloud, FLOW_FRAMEWORK_CLOUD_KEY: as for flow deploy (flow deploy --help).`;
+  --json       One JSON object per line on stdout: { time, severity, text }; nothing else goes there
+               (a failure is one { ok: false, error, next } line).
+  --dir, --cloud, FLOW_FRAMEWORK_CLOUD_KEY: as for flow deploy (flow deploy --help).
+
+Flow sends only the lines that match --until, --severity and --grep; an older Flow that does not
+filter gets them filtered here, so the lines are the same either way. Flow keeps an agent's logs
+for a while (30 days, older hosts 24 hours): when the lines start later than --since asked, stderr
+says "Logs start at <time>: this Flow keeps <N> back".`;
 
 export const DEPLOY_USAGE = `Usage:
   flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--no-cli] [--json]
@@ -55,13 +74,19 @@ export const DEPLOY_USAGE = `Usage:
   flow deploy promote [--no-secrets] [--no-cli] [--json]   staging's live version to production (the
                                                            .env's new or changed values sent there first)
   flow deploy status [--env staging|production] [--json]   what is live, its version, when, and its URL
-  flow deploy secret <NAME> [--env staging|production]     one secret, the value on stdin
+  flow deploy secret <NAME> [--env staging|production] [--apply]
+                                                           one secret, the value on stdin (a terminal
+                                                           reads one line, not echoed)
+  flow deploy secret --unset <NAME> [--env staging|production] [--apply]
+                                                           takes a secret away
+  flow deploy restart [--env staging|production]           the live version again, so it reads the
+                                                           secrets as they are now
   flow deploy secrets --from-env [<file>] [--env staging|production]
                                                            every value in <file> now (default: the agent's .env);
                                                            flow deploy does this itself
 
-  --env        Where (default: staging). Production takes only an agent whose buildAgent passes
-               options.host on to createAgent, with no database of its own.
+  --env        Where (default: staging); --environment works too. Production takes only an agent
+               whose buildAgent passes options.host on to createAgent, with no database of its own.
   --dir        The agent's folder (default: .): package.json, package-lock.json, src/agent.ts.
   --version    A label for this version (default: the agent's version, as its traces and flow test
                send it: FLOW_AGENT_VERSION, else the CI's commit, else the folder's git commit with
@@ -72,7 +97,12 @@ export const DEPLOY_USAGE = `Usage:
   --from-env   With secrets: send each non-empty value in the file as a secret (never the CI key,
                the cloud's address, or a name Flow sets itself, such as the
                FLOW_FRAMEWORK_TRACES_* that flow link writes). Prints names only.
-  --json       Print one JSON answer on stdout (progress goes to stderr).
+  --apply      With secret: restart the live version once the secret is saved or taken away (as
+               deploy restart), so it takes effect now. Without it, a new value takes effect only
+               at the next deploy or promote.
+  --unset      With secret: take the secret away instead of setting it.
+  --json       Print one JSON answer on stdout, a failure's { ok: false, error, next } too (progress
+               goes to stderr).
 
 flow deploy (and deploy promote, for production) sends each non-empty .env value as a secret (the
 same names as secrets --from-env sends) before the service starts, and later only the new or changed ones: .flow/secrets.json keeps a
@@ -94,7 +124,9 @@ in .flow/deploys.json (never packed).
 
 Environment (or the agent folder's .env):
   FLOW_FRAMEWORK_CLOUD_KEY   The agent's CI key (oci_...): flow setup writes it, or make one on
-                             your agent's Developers page. CHINWAG_CLOUD_KEY, its older name, works too.`;
+                             your agent's Developers page. CHINWAG_CLOUD_KEY, its older name, works too.
+
+${KEYS_HELP}`;
 
 /** The CLI's own settings in a .env: never sent as secrets. */
 const CLI_NAMES = new Set(["FLOW_FRAMEWORK_CLOUD_KEY", "CHINWAG_CLOUD_KEY", "FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD"]);
@@ -168,10 +200,15 @@ class Refused extends Error {
   readonly code: string;
   /** The cloud has no such route (an older Flow): a plain 404 or 405, not one of its JSON errors. */
   readonly missing: boolean;
-  constructor(message: string, code: string, missing = false) {
+  /** The cloud's status, when it answered. */
+  readonly status: number | undefined;
+  /** What to do next, when the CLI knows. */
+  next?: string;
+  constructor(message: string, code: string, missing = false, status?: number) {
     super(message);
     this.code = code;
     this.missing = missing;
+    this.status = status;
   }
 }
 class Usage extends Error {}
@@ -185,12 +222,16 @@ class TooNew extends Error {
 }
 /** What this Flow's cloud cannot do yet; the CLI side is ready for when it can. */
 class NotAvailable extends Error {}
+/** Reading the secret's value from stdin failed: never the cloud's fault. */
+class StdinFailed extends Error {}
 
 type Api = <T>(method: string, path: string, body?: unknown) => Promise<T>;
 
 export interface DeployOptions {
-  /** Where the value of `flow deploy secret` comes from (default: stdin). */
-  readStdin?: () => string;
+  /** Where the value of `flow deploy secret` comes from (default: stdin, a terminal's one line not echoed). */
+  readStdin?: () => string | Promise<string>;
+  /** How a call waits out a 429 or a retry, and says so (tests: no sleeping). */
+  waits?: Waits;
   /** Milliseconds between looks at a building deploy, or new log lines with --follow (default 3000). */
   pollMs?: number;
   /** With `flow logs --follow`: stop after this many looks (tests); default never. */
@@ -218,21 +259,26 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
       allowPositionals: true,
       options: {
         env: { type: "string" },
+        environment: { type: "string" },
         dir: { type: "string", default: "." },
         version: { type: "string" },
         cloud: { type: "string" },
         "from-env": { type: "boolean" },
         "no-secrets": { type: "boolean" },
         "no-cli": { type: "boolean" },
+        unset: { type: "boolean" },
+        apply: { type: "boolean" },
         since: { type: "string" },
+        until: { type: "string" },
+        severity: { type: "string" },
+        grep: { type: "string" },
         follow: { type: "boolean", short: "f" },
         json: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
   } catch (error) {
-    console.error(`${(error as Error).message}\n\n${usage}`);
-    return 2;
+    return failer(argv.includes("--json"))("usage", `${(error as Error).message}\n\n${usage}`, 2);
   }
   const { values, positionals } = parsed;
   if (values.help) {
@@ -245,26 +291,30 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
 
   const command = top === "logs" ? "logs" : positionals[0];
   const args = top === "logs" ? positionals : positionals.slice(1);
-  const given = values.env;
+  if (values.env !== undefined && values.environment !== undefined && values.env !== values.environment) return fail("usage", `--env and --environment name different environments (${values.env}, ${values.environment}): give one\n\n${usage}`, 2);
+  const given = values.env ?? values.environment;
   if (given !== undefined && given !== "staging" && given !== "production") return fail("usage", `--env is staging or production\n\n${usage}`, 2);
-  if (command !== "logs" && (values.since !== undefined || values.follow)) return fail("usage", `--since and --follow go with flow logs\n\n${usage}`, 2);
+  if (command !== "logs" && (values.since !== undefined || values.follow || values.until !== undefined || values.severity !== undefined || values.grep !== undefined)) return fail("usage", `--since, --until, --severity, --grep and --follow go with flow logs\n\n${usage}`, 2);
+  if (command !== "secret" && (values.unset || values.apply)) return fail("usage", `--unset and --apply go with deploy secret\n\n${usage}`, 2);
   const environment: "staging" | "production" = given ?? "staging";
   const dir = resolve(values.dir!);
-  const { key, cloud, api, dotEnv } = cloudOf(dir, env, values.cloud);
+  const { key, cloud, api, dotEnv } = cloudOf(dir, env, values.cloud, options.waits);
   if (!key) return fail("no_ci_key", NO_KEY, 2, `${RUN} setup`);
 
-  const ctx: Ctx = { api, say, json, dir, pollMs: options.pollMs ?? 3000, maxPolls: options.maxPolls, now: options.now ?? Date.now, keyId: createHash("sha256").update(key).digest("hex").slice(0, 16), env: { ...Object.fromEntries(dotEnv), ...env } };
+  const ctx: Ctx = { api, say, json, dir, pollMs: options.pollMs ?? 3000, maxPolls: options.maxPolls, now: options.now ?? Date.now, keyId: createHash("sha256").update(key.value).digest("hex").slice(0, 16), env: { ...Object.fromEntries(dotEnv), ...env } };
   try {
     const [name, extra] = args;
     for (const flag of ["no-secrets", "no-cli"] as const) if (values[flag] && command !== undefined && command !== "promote") throw new Usage(`--${flag} goes with flow deploy and deploy promote\n\n${usage}`);
     if (command === "logs") {
       if (name !== undefined) throw new Usage(`flow logs takes no arguments.\n\n${usage}`);
-      return await logs(ctx, environment, values.since ?? "1h", Boolean(values.follow));
+      return await logs(ctx, environment, { since: values.since ?? "1h", until: values.until, severity: values.severity, grep: values.grep }, Boolean(values.follow));
     }
     if (extra !== undefined || (name !== undefined && command !== "secret" && command !== "secrets")) throw new Usage(`Too many arguments.\n\n${usage}`);
     if (command === "promote") return await promote(ctx, !values["no-secrets"], !values["no-cli"]);
     if (command === "status") return await status(ctx, given ? [given] : ["staging", "production"]);
-    if (command === "secret") return await secret(ctx, name, environment, options.readStdin ?? (() => readFileSync(0, "utf8")));
+    if (command === "restart") return await restart(ctx, environment);
+    if (command === "secret" && values.unset) return await unsetSecret(ctx, name, environment, Boolean(values.apply));
+    if (command === "secret") return await secret(ctx, name, environment, options.readStdin ?? readValue, Boolean(values.apply));
     if (command === "secrets") {
       if (!values["from-env"]) throw new Usage(`secrets takes --from-env [<file>]\n\n${usage}`);
       return await secretsFromEnv(ctx, resolve(name ? name : join(dir, ".env")), environment);
@@ -276,15 +326,18 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
     if (error instanceof TooNew) return fail("chinwag_too_new", `Refused: ${error.message}`, 1, error.next);
     if (error instanceof NotAvailable) return fail("not_available", error.message, 1);
     if (error instanceof PackError) return fail(error.code, `The CLI did not pack, so nothing was sent: ${error.message}`, error.exit, "fix it, or add --no-cli");
-    if (error instanceof Refused) return fail(error.code, `Refused: ${error.message}`, 1);
-    return fail("network", `Could not reach ${cloud}: ${(error as Error).message}`, 1);
+    if (error instanceof Refused) return fail(error.code, `Refused: ${error.message}`, 1, error.next);
+    if (error instanceof StdinFailed) return fail("stdin", error.message, 1, `pipe the value in: printf %s "$VALUE" | ${RUN} deploy secret ${args[0] ?? "NAME"}`);
+    if (error instanceof NetworkError) return fail("network", `Could not reach the cloud: ${error.message}.`, 1);
+    // Anything else is this CLI's own failure: said as one, never as the cloud being down.
+    return fail("internal", `flow ${top}${command && top !== "logs" ? ` ${command}` : ""} failed: ${(error as Error).message}`, 1);
   }
 }
 
 /** Prints a failure, also as JSON with --json; returns the exit code. */
 function failer(json: boolean): (code: string, message: string, exit: number, next?: string) => number {
   return (code, message, exit, next) => {
-    if (json) console.log(JSON.stringify({ ok: false, error: { code, message }, next: next ?? null }));
+    if (json) console.log(failureDocument(code, message, undefined, next).trimEnd());
     console.error(next ? `${message}\nNext: ${next}` : message);
     return exit;
   };
@@ -292,33 +345,40 @@ function failer(json: boolean): (code: string, message: string, exit: number, ne
 
 const NO_KEY = "Set FLOW_FRAMEWORK_CLOUD_KEY to your agent's CI key (oci_...), in the environment or the agent's .env.";
 
-/** The cloud's address and the agent's CI key (the environment's, else the agent's .env's), and a caller of the cloud's routes. */
-function cloudOf(dir: string, env: NodeJS.ProcessEnv, given: string | undefined): { key: string | undefined; cloud: string; api: Api; dotEnv: Map<string, string> } {
+/**
+ * The cloud's address and the agent's CI key (the environment's, else the agent's .env's), and a
+ * caller of the cloud's routes: a 429 waited out and an idempotent call tried again (cloudCall), a
+ * refused key explained as which key it reads and which it found.
+ */
+function cloudOf(dir: string, env: NodeJS.ProcessEnv, given: string | undefined, waits?: Waits): { key: FoundKey | undefined; cloud: string; api: Api; dotEnv: Map<string, string> } {
   const dotEnv = readEnvFile(join(dir, ".env"));
-  const setting = (...names: string[]) => {
-    for (const name of names) if (env[name]) return env[name];
-    for (const name of names) if (dotEnv.get(name)) return dotEnv.get(name);
+  const found = (...names: string[]): { name: string; where: string; value: string } | undefined => {
+    for (const name of names) if (env[name]) return { name, where: "the environment", value: env[name]! };
+    for (const name of names) if (dotEnv.get(name)) return { name, where: join(dir, ".env"), value: dotEnv.get(name)! };
     return undefined;
   };
-  const key = setting("FLOW_FRAMEWORK_CLOUD_KEY", "CHINWAG_CLOUD_KEY");
-  const cloud = (given || setting("FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD") || DEFAULT_CLOUD).replace(/\/$/, "");
+  const ci = found("FLOW_FRAMEWORK_CLOUD_KEY", "CHINWAG_CLOUD_KEY");
+  const key: FoundKey | undefined = ci ? { kind: "ci_key", ...ci } : undefined;
+  const cloud = (given || found("FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD")?.value || DEFAULT_CLOUD).replace(/\/$/, "");
   const api: Api = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
-    const res = await fetch(cloud + path, {
+    const res = await cloudCall(cloud + path, {
       method,
-      headers: { authorization: `Bearer ${key}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      headers: { authorization: `Bearer ${key?.value}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
       body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const text = await res.text();
+    }, waits);
     let answer: { error?: { code?: string; message?: string; hint?: string } } & Record<string, unknown> = {};
     try {
-      answer = JSON.parse(text);
+      answer = JSON.parse(res.text);
     } catch {
       // not JSON: the status says it
     }
-    if (!res.ok) {
-      const why = answer.error?.message ?? `${res.status} ${res.statusText}`;
+    if (res.status < 200 || res.status >= 300) {
+      const why = answer.error?.message ?? `${cloud} answered ${res.status}`;
+      const again = res.status === 429 && res.retryAfter !== undefined ? `; try again in ${res.retryAfter} s` : "";
       const missing = (res.status === 404 || res.status === 405) && typeof answer.error?.code !== "string";
-      throw new Refused(answer.error?.hint ? `${why} (${answer.error.hint})` : why, answer.error?.code ?? "refused", missing);
+      const code = answer.error?.code ?? (res.status === 429 ? "rate_limited" : "refused");
+      const keyLines = key && keyRefused(res.status, answer.error?.code) ? `\n${keyHelp(`flow ${path.startsWith("/v1/hosting/logs") ? "logs" : "deploy"}`, key, { status: res.status, code: answer.error?.code })}` : "";
+      throw new Refused(`${answer.error?.hint ? `${why} (${answer.error.hint})` : why}${again}${keyLines}`, code, missing, res.status);
     }
     return answer as T;
   };
@@ -517,17 +577,120 @@ async function cliStep(ctx: Ctx, environment: "staging" | "production", out: str
   };
 }
 
-async function secret(ctx: Ctx, name: string | undefined, env: string, readStdin: () => string): Promise<number> {
+/**
+ * The secret's value from stdin. A terminal is read one line at a time through readline, not echoed
+ * (a plain read of a terminal can fail with EAGAIN); a pipe or a file is read to its end, any number
+ * of lines. A failure to read is a StdinFailed, never the cloud's.
+ */
+async function readValue(name: string, env: string): Promise<string> {
+  try {
+    if (process.stdin.isTTY) return await readHidden(`Paste ${name}'s value for ${env}, then press Enter (it is not shown; pipe a value of several lines): `);
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+    return Buffer.concat(chunks).toString("utf8");
+  } catch (error) {
+    if (error instanceof StdinFailed) throw error;
+    throw new StdinFailed(`Could not read ${name}'s value from stdin: ${(error as Error).message}`);
+  }
+}
+
+/** One line typed or pasted in the terminal, with the prompt on stderr and nothing echoed. */
+function readHidden(prompt: string): Promise<string> {
+  process.stderr.write(prompt);
+  const muted = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const rl = createInterface({ input: process.stdin, output: muted, terminal: true });
+  return new Promise((done, failed) => {
+    rl.once("line", (line) => {
+      rl.close();
+      process.stderr.write("\n");
+      done(line);
+    });
+    rl.once("SIGINT", () => {
+      rl.close();
+      failed(new StdinFailed("Stopped before a value was typed."));
+    });
+    rl.once("close", () => done(""));
+    process.stdin.once("error", (error) => failed(error));
+  });
+}
+
+/** Names whose refusal says what Flow's hosting already sets for traces, and how to turn message text off. */
+const TRACES_NAME = /^(FLOW_FRAMEWORK|CHINWAG)_TRACES_/;
+const tracesWhy = (env: string) => `Flow's hosting sets the traces settings itself: message text in traces is already on for a hosted agent (hosting sets FLOW_FRAMEWORK_TRACES_CONTENT=1 and CHINWAG_TRACES_CONTENT=1), with Flow's own traces address and key. To send no message text from ${env}: printf 0 | ${RUN} deploy secret FLOW_FRAMEWORK_TRACES_CONTENT --env ${env} --apply, or pass createAgent({ traces: { url, key, content: false } }) in the agent's code.`;
+
+/** `flow deploy secret NAME`: the value from stdin, saved for the environment; with --apply, the live version restarted with it. */
+async function secret(ctx: Ctx, name: string | undefined, env: "staging" | "production", readStdin: (name: string, env: string) => string | Promise<string>, apply: boolean): Promise<number> {
   if (!name || !SECRET_NAME.test(name)) throw new Usage(`A secret's name is upper case letters, digits and _ (like ANTHROPIC_API_KEY).\n\n${DEPLOY_USAGE}`);
-  if (process.stdin.isTTY) console.error(`Paste ${name}'s value for ${env}, then press Enter and Ctrl-D:`);
-  const value = readStdin().replace(/\r?\n$/, "");
+  let raw: string;
+  try {
+    raw = await readStdin(name, env);
+  } catch (error) {
+    if (error instanceof StdinFailed) throw error;
+    throw new StdinFailed(`Could not read ${name}'s value from stdin: ${(error as Error).message}`);
+  }
+  const value = raw.replace(/\r?\n$/, "");
   if (!value) throw new Usage("No value on stdin.");
-  const saved = await ctx.api<{ name: string; last4: string }>("PUT", `/v1/hosting/secrets/${name}`, { environment: env, value });
-  const next = `${RUN} deploy${env === "production" ? " --env production" : ""}`;
-  if (ctx.json) console.log(JSON.stringify({ ok: true, secret: { name: saved.name, last4: saved.last4, environment: env }, next }));
-  ctx.say(`Saved ${saved.name} (••••${saved.last4}) for ${env}. It takes effect on the next deploy.`);
+  let saved: { name: string; last4: string };
+  try {
+    saved = await ctx.api<{ name: string; last4: string }>("PUT", `/v1/hosting/secrets/${name}`, { environment: env, value });
+  } catch (error) {
+    if (error instanceof Refused && TRACES_NAME.test(name) && /set by Flow/i.test(error.message)) throw new Refused(`${error.message}. ${tracesWhy(env)}`, error.code, false, error.status);
+    throw error;
+  }
+  const done = { name: saved.name, last4: saved.last4, environment: env };
+  ctx.say(`Saved ${saved.name} (••••${saved.last4}) for ${env}.${apply ? "" : " It takes effect on the next deploy or promote (--apply restarts the live version now)."}`);
+  if (apply) return await restart(ctx, env, { secret: done });
+  const next = `${RUN} deploy restart${env === "production" ? " --env production" : ""} (or the next deploy)`;
+  if (ctx.json) console.log(JSON.stringify({ ok: true, secret: done, restart: null, next }));
   ctx.say(`Next: ${next}`);
   return 0;
+}
+
+/** `flow deploy secret --unset NAME`: the secret taken away (DELETE /v1/hosting/secrets/{NAME}?environment=); with --apply, the live version restarted. */
+async function unsetSecret(ctx: Ctx, name: string | undefined, env: "staging" | "production", apply: boolean): Promise<number> {
+  if (!name || !SECRET_NAME.test(name)) throw new Usage(`deploy secret --unset takes the secret's name, upper case letters, digits and _.\n\n${DEPLOY_USAGE}`);
+  try {
+    await ctx.api("DELETE", `/v1/hosting/secrets/${name}?environment=${env}`);
+  } catch (error) {
+    if (error instanceof Refused && error.missing) throw new NotAvailable(`This Flow's cloud cannot take a secret away yet: ${name} stays as it is. Set it to another value with ${RUN} deploy secret ${name}; a new value applies at the next deploy or promote.`);
+    if (error instanceof Refused && error.code === "not_found") throw Object.assign(new Refused(`${name} is not set for ${env}: there was nothing to take away (${error.message})`, "not_found", false, error.status), { next: `${RUN} deploy status${env === "production" ? " --env production" : ""}` });
+    throw error;
+  }
+  const done = { name, environment: env, unset: true };
+  ctx.say(`Took ${name} away from ${env}.${apply ? "" : " The live version keeps it until the next deploy or promote (--apply restarts it now)."}`);
+  if (apply) return await restart(ctx, env, { secret: done });
+  const next = `${RUN} deploy restart${env === "production" ? " --env production" : ""} (or the next deploy)`;
+  if (ctx.json) console.log(JSON.stringify({ ok: true, secret: done, restart: null, next }));
+  ctx.say(`Next: ${next}`);
+  return 0;
+}
+
+/**
+ * `flow deploy restart`, and secret --apply: the live version again (POST /v1/hosting/restart, which
+ * answers a deploy as promote does), followed to live, so it reads the secrets as they are now.
+ * `extra` goes into --json's answer.
+ */
+async function restart(ctx: Ctx, env: "staging" | "production", extra: Record<string, unknown> = {}): Promise<number> {
+  let deploy: Deploy;
+  try {
+    ({ deploy } = await ctx.api<{ deploy: Deploy }>("POST", "/v1/hosting/restart", { environment: env }));
+  } catch (error) {
+    const after = `${RUN} deploy${env === "production" ? " promote" : ""}`;
+    if (error instanceof Refused && error.missing) {
+      throw new NotAvailable(`This Flow's cloud cannot restart an agent yet${extra.secret ? "; the secret is saved" : ""}: a secret's value applies at the next deploy or promote (${after}).`);
+    }
+    if (error instanceof Refused && error.code === "nothing_to_restart") {
+      // Nothing live: the secret is there for the first deploy, which is all --apply could do.
+      ctx.say(`Nothing is live in ${env} to restart: ${error.message}. The secrets apply at its first deploy.`);
+      if (ctx.json) console.log(JSON.stringify({ ok: true, ...extra, restart: null, next: after }));
+      ctx.say(`Next: ${after}`);
+      return 0;
+    }
+    throw error;
+  }
+  remember(ctx.dir, env, deploy.id);
+  ctx.say(`Restarting ${env}'s ${deploy.version ?? "live version"} with its secrets as they are now (${deploy.id}).`);
+  return await follow(ctx, deploy.id, undefined, extra);
 }
 
 interface Sent {
@@ -566,7 +729,7 @@ async function sendSecrets(ctx: Ctx, file: string, env: string, onlyChanged: boo
     if (CLI_NAMES.has(name)) continue;
     if (HOST_NAMES.test(name)) {
       out.skipped.push({ name, why: "set by Flow" });
-      if (!onlyChanged) ctx.say(`  ${name} skipped (set by Flow)`);
+      if (!onlyChanged) ctx.say(`  ${name} skipped (set by Flow${TRACES_NAME.test(name) ? `: ${tracesWhy(env)}` : ""})`);
       continue;
     }
     if (!ENV_SECRET_NAME.test(name)) {
@@ -626,7 +789,7 @@ async function secretsFromEnv(ctx: Ctx, file: string, env: string): Promise<numb
 }
 
 /** Follows a deploy until it is live, refused or failed, printing each change. */
-async function follow(ctx: Ctx, id: string, cli?: () => Promise<CliOutcome>): Promise<number> {
+async function follow(ctx: Ctx, id: string, cli?: () => Promise<CliOutcome>, extra: Record<string, unknown> = {}): Promise<number> {
   const until = Date.now() + GIVE_UP_MS;
   let last = "";
   for (;;) {
@@ -654,7 +817,7 @@ async function follow(ctx: Ctx, id: string, cli?: () => Promise<CliOutcome>): Pr
       const after = live && cli ? await cli() : undefined;
       if (ctx.json) {
         const { id: deployId, environment, status, version, findings, error } = deploy;
-        console.log(JSON.stringify({ ok: live && !after?.failed, deploy: { id: deployId, environment, status, version, findings: findings ?? [], error }, url, cli: after?.cli ?? null, next }));
+        console.log(JSON.stringify({ ok: live && !after?.failed, ...extra, deploy: { id: deployId, environment, status, version, findings: findings ?? [], error }, url, cli: after?.cli ?? null, next }));
       }
       if (live) {
         ctx.say(`Next: ${next}`);
@@ -713,10 +876,19 @@ interface TraceText {
   source: "flow" | "owner";
 }
 
-interface EnvironmentStatus {
+/** Whether observe takes an environment's traces (absent on an older Flow). */
+interface TraceHealth {
+  state: "ok" | "refused" | "quiet";
+  accepted_at: string | null;
+  refused: { at: string | null; status: number; code?: string; message?: string; hint?: string } | null;
+}
+
+export interface EnvironmentStatus {
   environment: string;
   /** The deploy serving it: the newest live one; else the newest. */
-  deploy: (Deploy & { created_at?: string; updated_at?: string; source?: string; trace_text?: TraceText | null }) | null;
+  deploy: (Deploy & { created_at?: string; updated_at?: string; source?: string; trace_text?: TraceText | null; framework?: { package: string; version: string } | null }) | null;
+  /** Whether its traces reach observe, when the cloud says. */
+  traces: TraceHealth | null;
   /** A newer deploy still on its way (building, deploying), when there is one. */
   pending: { id: string; status: string; version: string | null } | null;
   url: string | null;
@@ -724,14 +896,22 @@ interface EnvironmentStatus {
   from: "list" | "this_folder" | null;
 }
 
-/** `flow deploy status`: per environment, what is live, its version, when, and its URL. */
-async function status(ctx: Ctx, environments: string[]): Promise<number> {
+/**
+ * Per environment, what is live, its version, when, its URL and whether its traces reach observe;
+ * and the Flow Framework version hosting runs, when the cloud says (null else).
+ */
+export async function deployStatus(ctx: Pick<Ctx, "api" | "dir">, environments: string[]): Promise<{ environments: EnvironmentStatus[]; framework: string | null }> {
   const found: EnvironmentStatus[] = [];
+  let framework: string | null = null;
   for (const environment of environments) {
     let deploys: EnvironmentStatus["deploy"][] = [];
     let from: EnvironmentStatus["from"] = null;
+    let traces: TraceHealth | null = null;
     try {
-      deploys = (await ctx.api<{ deploys: NonNullable<EnvironmentStatus["deploy"]>[] }>("GET", `/v1/hosting/deploys?environment=${environment}`)).deploys ?? [];
+      const listed = await ctx.api<{ deploys: NonNullable<EnvironmentStatus["deploy"]>[]; framework?: { version?: unknown }; traces?: Record<string, TraceHealth> }>("GET", `/v1/hosting/deploys?environment=${environment}`);
+      deploys = listed.deploys ?? [];
+      if (typeof listed.framework?.version === "string") framework = listed.framework.version;
+      traces = listed.traces?.[environment] ?? null;
       from = "list";
     } catch (error) {
       if (!(error instanceof Refused) || !error.missing) throw error;
@@ -748,16 +928,23 @@ async function status(ctx: Ctx, environments: string[]): Promise<number> {
     const serving = live ?? top;
     const pending = top && top !== serving && !["live", "refused", "failed", "replaced"].includes(top.status) ? { id: top.id, status: top.status, version: top.version } : null;
     const url = live ? (live.url ?? (await address(ctx, environment))) : null;
-    found.push({ environment, deploy: serving, pending, url, from });
+    found.push({ environment, deploy: serving, traces, pending, url, from });
   }
+  return { environments: found, framework };
+}
+
+/** `flow deploy status`: per environment, what is live, its version, when, its URL and its traces. */
+async function status(ctx: Ctx, environments: string[]): Promise<number> {
+  const { environments: found, framework } = await deployStatus(ctx, environments);
   const anyLive = found.some((f) => f.deploy?.status === "live");
   const next = anyLive
     ? `${RUN} logs${found.length === 1 && found[0]!.environment === "production" ? " --env production" : ""}`
     : `${RUN} deploy`;
   if (ctx.json) {
-    console.log(JSON.stringify({ ok: true, environments: Object.fromEntries(found.map((f) => [f.environment, f.deploy ? { deploy: pick(f.deploy), pending: f.pending, url: f.url, from: f.from } : null])), next }));
+    console.log(JSON.stringify({ ok: true, framework, environments: Object.fromEntries(found.map((f) => [f.environment, f.deploy ? { deploy: pick(f.deploy), pending: f.pending, url: f.url, from: f.from, traces: f.traces } : null])), next }));
     return 0;
   }
+  if (framework) ctx.say(`Flow hosts Flow Framework ${framework}.`);
   for (const f of found) {
     if (!f.deploy) {
       ctx.say(`${f.environment}: no deploy known${f.from === null ? " (this Flow lists deploys to a dashboard member only, and this folder has made none: the dashboard shows them)" : ""}.`);
@@ -767,11 +954,20 @@ async function status(ctx: Ctx, environments: string[]): Promise<number> {
     const when = d.updated_at ?? d.created_at;
     ctx.say(`${f.environment}: ${d.status}${d.version ? `, version ${d.version}` : ""}, deploy ${d.id}${when ? `, ${d.status === "live" ? "deployed" : "updated"} ${when}` : ""}${f.from === "this_folder" ? " (the last deploy from this folder)" : ""}`);
     if (d.status === "live") ctx.say(`  URL: ${f.url ?? NO_URL}`);
+    if (d.framework) ctx.say(`  framework: ${d.framework.package} ${d.framework.version}`);
     if (d.trace_text) ctx.say(`  trace text: ${d.trace_text.on ? "on" : "off"} (${d.trace_text.source === "owner" ? "set by you" : "Flow's default"})`);
+    if (f.traces) ctx.say(`  traces: ${traceLine(f.traces)}`);
     if (f.pending) ctx.say(`  then ${f.pending.id}${f.pending.version ? ` (${f.pending.version})` : ""}: ${f.pending.status}…`);
   }
   ctx.say(`Next: ${next}`);
   return 0;
+}
+
+/** "ok, last taken 2026-11-04T10:00:00Z", or the refusal observe gave. */
+function traceLine(t: TraceHealth): string {
+  if (t.state === "refused" && t.refused) return `REFUSED (${t.refused.status}${t.refused.code ? ` ${t.refused.code}` : ""})${t.refused.at ? ` at ${t.refused.at}` : ""}: ${t.refused.message ?? "observe takes none of them"}${t.refused.hint ? ` (${t.refused.hint})` : ""}`;
+  if (t.state === "ok") return `ok, last taken ${t.accepted_at}`;
+  return t.accepted_at ? `quiet, none taken since ${t.accepted_at}` : "none taken yet";
 }
 
 const pick = (d: NonNullable<EnvironmentStatus["deploy"]>) => ({
@@ -783,6 +979,7 @@ const pick = (d: NonNullable<EnvironmentStatus["deploy"]>) => ({
   created_at: d.created_at ?? null,
   updated_at: d.updated_at ?? null,
   trace_text: d.trace_text ?? null,
+  framework: d.framework ?? null,
 });
 
 interface LogLine {
@@ -799,36 +996,99 @@ export function sinceSeconds(since: string): number | undefined {
   return n * { s: 1, m: 60, h: 3600, d: 86400 }[m[2] as "s" | "m" | "h" | "d"];
 }
 
-/**
- * `flow logs`: the hosted agent's log lines, from GET /v1/hosting/logs?environment=&since=&after=
- * → { lines: [{ time, severity, text }], next } (next: the cursor for the lines after these).
- * A Flow without that route says so and exits 1.
- */
-async function logs(ctx: Ctx, environment: string, since: string, followLines: boolean): Promise<number> {
-  const seconds = sinceSeconds(since);
-  if (seconds === undefined || seconds <= 0 || seconds > 30 * 86400) throw new Usage(`--since is a duration such as 30s, 15m, 1h or 2d (at most 30d).\n\n${LOGS_USAGE}`);
-  const from = new Date(ctx.now() - seconds * 1000).toISOString();
-  let after: string | undefined;
-  let polls = 0;
-  for (;;) {
-    const query = new URLSearchParams({ environment, ...(after ? { after } : { since: from }) });
-    let page: { lines?: LogLine[]; next?: string | null };
-    try {
-      page = await ctx.api("GET", `/v1/hosting/logs?${query}`);
-    } catch (error) {
-      if (error instanceof Refused && error.missing) {
-        throw new NotAvailable(`Logs are not available on this Flow yet: its cloud has no logs route for a CI key. The dashboard shows the agent's deploys; ${RUN} deploy status shows what is live.`);
-      }
-      throw error;
+/** The severities --severity takes, lowest first, as Cloud Logging orders them. */
+export const SEVERITIES = ["DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY"] as const;
+
+/** The most lines asked for in one page; a full page is followed by the next. */
+const LOGS_PAGE = 1000;
+
+/** What `flow logs` asks for: RFC 3339 times, a minimum severity, a text to find. */
+export interface LogsQuery {
+  environment: string;
+  since: string;
+  until?: string;
+  severity?: string;
+  grep?: string;
+  /** The cursor of the lines after the last page. */
+  after?: string;
+}
+
+/** One page of log lines, filtered here too (an older Flow ignores until, severity and grep), with the cursor and where the host's logs start (from). */
+export async function logsPage(api: Api, query: LogsQuery): Promise<{ lines: LogLine[]; next: string | null; from: string | null; full: boolean }> {
+  const params = new URLSearchParams({ environment: query.environment, ...(query.after ? { after: query.after } : { since: query.since }), limit: String(LOGS_PAGE) });
+  if (query.until) params.set("until", query.until);
+  if (query.severity) params.set("severity", query.severity);
+  if (query.grep) params.set("grep", query.grep);
+  let page: { lines?: LogLine[]; next?: string | null; from?: string | null };
+  try {
+    page = await api("GET", `/v1/hosting/logs?${params}`);
+  } catch (error) {
+    if (error instanceof Refused && error.missing) {
+      throw new NotAvailable(`Logs are not available on this Flow yet: its cloud has no logs route for a CI key. The dashboard shows the agent's deploys; ${RUN} deploy status shows what is live.`);
     }
-    for (const line of page.lines ?? []) {
+    throw error;
+  }
+  const rank = (s: string | undefined) => Math.max(0, SEVERITIES.indexOf((s ?? "DEFAULT").toUpperCase() as (typeof SEVERITIES)[number]));
+  const until = query.until ? Date.parse(query.until) : undefined;
+  const grep = query.grep?.toLowerCase();
+  const lines = (page.lines ?? []).filter((line) =>
+    (query.severity === undefined || rank(line.severity) >= rank(query.severity)) &&
+    (until === undefined || !(Date.parse(line.time) > until)) &&
+    (grep === undefined || line.text.toLowerCase().includes(grep)));
+  return { lines, next: page.next ?? null, from: typeof page.from === "string" ? page.from : null, full: (page.lines ?? []).length >= LOGS_PAGE };
+}
+
+/** A time for --since or --until: a duration back from now (30m, 3d), or an RFC 3339 time; undefined when it is neither. */
+function logsTime(value: string, now: number): number | undefined {
+  const seconds = sinceSeconds(value);
+  if (seconds !== undefined) return seconds > 0 ? now - seconds * 1000 : undefined;
+  return /^\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:\d\d)$/.test(value) && !Number.isNaN(Date.parse(value)) ? Date.parse(value) : undefined;
+}
+
+/** "3 days", "24 hours": how far back a host keeps logs, as said in the notice. */
+function span(ms: number): string {
+  const hours = Math.round(ms / 3_600_000);
+  return hours >= 48 ? `${Math.round(hours / 24)} days` : `${hours} hours`;
+}
+
+/**
+ * `flow logs`: the hosted agent's log lines, from GET /v1/hosting/logs?environment=&since=&until=
+ * &severity=&grep=&after=&limit= → { lines: [{ time, severity, text }], next, from } (next: the cursor
+ * for the lines after these; from: the earliest time the answer covers, absent from an older host,
+ * which keeps 24 hours). When the lines start later than --since asked, one notice on stderr says
+ * where they start. A Flow without that route says so and exits 1.
+ */
+async function logs(ctx: Ctx, environment: string, asked: { since: string; until?: string; severity?: string; grep?: string }, followLines: boolean): Promise<number> {
+  const now = ctx.now();
+  const since = logsTime(asked.since, now);
+  if (since === undefined || now - since > 30 * 86400_000) throw new Usage(`--since is a duration such as 30s, 15m, 1h or 3d (at most 30d), or a time such as 2026-11-03T09:00:00Z.\n\n${LOGS_USAGE}`);
+  const until = asked.until === undefined ? undefined : logsTime(asked.until, now);
+  if (asked.until !== undefined && (until === undefined || until <= since)) throw new Usage(`--until is a duration back from now (2h) or a time, after --since.\n\n${LOGS_USAGE}`);
+  if (until !== undefined && followLines) throw new Usage(`--until and --follow do not go together: --follow prints lines as they come.\n\n${LOGS_USAGE}`);
+  const severity = asked.severity?.toUpperCase();
+  if (severity !== undefined && !(SEVERITIES as readonly string[]).includes(severity)) throw new Usage(`--severity is DEFAULT, INFO, WARNING or ERROR (the lines at it or above).\n\n${LOGS_USAGE}`);
+  if (asked.grep !== undefined && (!asked.grep || asked.grep.length > 200)) throw new Usage(`--grep is the text to find, 1 to 200 characters.\n\n${LOGS_USAGE}`);
+  const query: LogsQuery = { environment, since: new Date(since).toISOString(), ...(until !== undefined ? { until: new Date(until).toISOString() } : {}), ...(severity ? { severity } : {}), ...(asked.grep ? { grep: asked.grep } : {}) };
+  let polls = 0;
+  let noticed = false;
+  for (;;) {
+    const page = await logsPage(ctx.api, query);
+    if (!noticed && polls === 0) {
+      noticed = true;
+      // Where the logs start, when later than asked: the host's from, else (an older host) its 24 hours.
+      const starts = page.from ? Date.parse(page.from) : now - since > 86400_000 ? now - 86400_000 : undefined;
+      if (starts !== undefined && starts - since > 60_000) console.error(`Logs start at ${new Date(starts).toISOString()}: this Flow keeps ${span(now - starts)} back.`);
+    }
+    for (const line of page.lines) {
       if (ctx.json) console.log(JSON.stringify({ time: line.time, severity: line.severity ?? null, text: line.text }));
       else console.log(`${line.time} ${(line.severity ?? "").padEnd(7)} ${line.text}`);
     }
-    if (page.next) after = page.next;
+    if (page.next) query.after = page.next;
     polls++;
-    if (!followLines || (ctx.maxPolls !== undefined && polls >= ctx.maxPolls)) return 0;
-    await new Promise((r) => setTimeout(r, ctx.pollMs));
+    // Without --follow, the pages up to now; with it, a look every pollMs until Ctrl-C.
+    if (!followLines && (!page.next || !page.full || polls >= 100)) return 0;
+    if (ctx.maxPolls !== undefined && polls >= ctx.maxPolls) return 0;
+    if (followLines) await new Promise((r) => setTimeout(r, ctx.pollMs));
   }
 }
 
@@ -925,7 +1185,7 @@ export async function cliReleaseCli(argv: string[], env: NodeJS.ProcessEnv = pro
   if (args.length !== (command === "rollback" ? 1 : 0)) return usage(command === "rollback" ? "cli rollback takes the version to serve again" : `cli ${command} takes no arguments`);
 
   const dir = resolve(values.dir!);
-  const { key, cloud, api } = cloudOf(dir, env, values.cloud);
+  const { key, api } = cloudOf(dir, env, values.cloud);
   // A pack may need no cloud (an https server, or the CLI file's servers): it says when it does.
   if (!key && command !== "pack") return fail("no_ci_key", NO_KEY, 2, `${RUN} setup`);
   const ctx: CliCtx = { api, say, json, dir, noKey: !key };
@@ -955,7 +1215,8 @@ export async function cliReleaseCli(argv: string[], env: NodeJS.ProcessEnv = pro
     if (error instanceof Refused && error.code === "no_ci_key") return fail("no_ci_key", NO_KEY, 2, `${RUN} setup`);
     if (error instanceof Refused && error.code === "server_changed") return fail("server_changed", `Refused: ${error.message}`, 1);
     if (error instanceof Refused) return fail(error.code, `Refused: ${error.message}`, 1, NEXT_AFTER[error.code]?.(environment ?? "staging"));
-    return fail("network", `Could not reach ${cloud}: ${(error as Error).message}`, 1);
+    if (error instanceof NetworkError) return fail("network", `Could not reach the cloud: ${error.message}.`, 1);
+    return fail("internal", `flow cli ${command} failed: ${(error as Error).message}`, 1);
   }
 }
 
