@@ -201,6 +201,8 @@ export class Failed extends Error {
   readonly code: string;
   readonly hint?: string;
   readonly next?: string;
+  /** The server's error message as it wrote it, when it sent one. */
+  said?: string;
   constructor(message: string, code = "failed", hint?: string, next?: string) {
     super(message);
     this.code = code;
@@ -221,12 +223,12 @@ const PAGE_LIMIT = 100;
 /** With --contact, the most pages read looking for its conversations. */
 const CONTACT_PAGES = 100;
 
-/** GET path; the body's text and its JSON, or Failed with what to print. */
-export async function get(name: string, where: Access, path: string): Promise<{ text: string; body: Record<string, unknown> }> {
+/** GET path (or POST it with no body); the body's text and its JSON ({} for a 204), or Failed with what to print. */
+export async function get(name: string, where: Access, path: string, method: "GET" | "POST" = "GET"): Promise<{ text: string; body: Record<string, unknown> }> {
   const { cloud, key } = where;
   let answer;
   try {
-    answer = await cloudCall(`${cloud}${path}`, { headers: { authorization: `Bearer ${key.value}`, accept: "application/json" }, timeoutMs: 30_000 }, where.waits);
+    answer = await cloudCall(`${cloud}${path}`, { method, headers: { authorization: `Bearer ${key.value}`, accept: "application/json" }, timeoutMs: 30_000 }, where.waits);
   } catch (error) {
     if (error instanceof NetworkError) throw new Failed(`${name}: ${error.message}.`, "network");
     throw error;
@@ -244,8 +246,10 @@ export async function get(name: string, where: Access, path: string): Promise<{ 
       ? new Failed(`${name}: ${error.message}${error.code ? ` (${error.code}, ${status})` : ` (${status})`}${again}${error.hint ? `\n${error.hint}` : ""}${keyLines}`, code, error.hint)
       : new Failed(`${name}: ${cloud} answered ${status}${said ? `: ${said}` : ""}${status === 404 ? " (this Flow may not have this command's route yet)" : ""}.${keyLines}`, code);
     failed.status = status;
+    if (error && typeof error === "object" && error.message) failed.said = error.message;
     throw failed;
   }
+  if (status === 204) return { text: "", body: {} };
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Failed(`${name}: ${cloud} answered ${status} with something that is not JSON.`, "bad_answer");
   return { text, body: body as Record<string, unknown> };
 }

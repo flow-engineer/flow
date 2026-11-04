@@ -378,7 +378,8 @@ test("a version Flow does not keep is never sent: the next one is, with a warnin
 
 test("with no version option, traces carry the agent's version as service.version, its status says it, and it is logged once when the agent starts", async (t) => {
   const saved = { version: process.env.FLOW_AGENT_VERSION, context: process.env.NODE_TEST_CONTEXT };
-  const warn = t.mock.method(console, "warn", () => {});
+  t.mock.method(console, "warn", () => {});
+  const info = t.mock.method(console, "info", () => {});
   process.env.FLOW_AGENT_VERSION = "build-42";
   delete process.env.NODE_TEST_CONTEXT; // the line is left out of an agent's own tests
   const endpoint = await fakeEndpoint();
@@ -394,7 +395,7 @@ test("with no version option, traces carry the agent's version as service.versio
   let request;
   try {
     assert.equal(h.agent.status().version, "build-42");
-    assert.deepEqual(warn.mock.calls.map((c) => c.arguments[0]).filter((l) => String(l).includes("agent version")), ["flow: agent version build-42 (from FLOW_AGENT_VERSION)"]);
+    assert.deepEqual(info.mock.calls.map((c) => c.arguments[0]).filter((l) => String(l).includes("agent version")), ["flow: agent version build-42 (from FLOW_AGENT_VERSION)"]);
     await playTurn(h, "+15550100123");
     request = await endpoint.next(1);
   } finally { endpoint.close(); }

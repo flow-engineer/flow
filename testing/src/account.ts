@@ -24,6 +24,7 @@ import {
   modelCredit, SETUP_ENV, setup, startDevice, TimedOut, tryLink, warningsOf, whoami, type Account, type ModelCredit, type PendingLogin, type SetupAnswer,
 } from "./flow-login.ts";
 import { packageRoot, setDisplayName } from "./new.ts";
+import { deployedFrom } from "./deploy.ts";
 import { flowModelURL, hasModelKey, MODEL_KEY_NAMES, NO_MODEL_KEY } from "../../src/model.ts";
 import { RUN } from "../../src/names.ts";
 import { runningAgent } from "../../src/local.ts";
@@ -887,15 +888,17 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     open: server ? typeof fields[`${c}_sender`] === "string" : null,
     trial: server && typeof fields[`${c}_sender`] === "string" ? server.trial?.[c] ?? null : null,
   }]));
-  // The playground (npm start) before the phone, as setup's next.
+  // The playground (npm start) before the phone, as setup's next. Once this folder has deployed, the
+  // hosted agent answers the phone, so status points at it instead of npm start and deploy.
+  const deployed = deployedFrom(process.cwd());
   const next = [
     ...(model.next ? [model.next] : []),
-    ...(model.report.set && !model.next ? ["npm start"] : []),
+    ...(model.report.set && !model.next && !deployed.length ? ["npm start"] : []),
     ...(!joinCode || !value(SETUP_ENV.messaging_key) ? [NEXT.link] : CHANNELS.filter((c) => channels[c]!.open && !channels[c]!.sender).map((c) => `${NEXT.link} --channel ${c}`)),
   ];
   const workspace = value(WORKSPACE_ENV) || "personal";
   const plans = plansNext(Object.fromEntries(CHANNELS.map((c) => [c, channels[c]!.trial])));
-  if (json) out({ model_key: model.report, flow_key: { set: Boolean(value(FLOW_KEY)) }, workspace, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, next, plans: plans ?? null });
+  if (json) out({ model_key: model.report, flow_key: { set: Boolean(value(FLOW_KEY)) }, workspace, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, deployed, next, plans: plans ?? null });
   if (model.report.env && model.report.env !== FLOW_KEY) say(value(FLOW_KEY) ? `${FLOW_KEY} is set.` : `${FLOW_KEY}: not set yet (${RUN} setup writes it).`);
   say(model.line);
   say(`Workspace: ${workspace}`);
@@ -908,7 +911,7 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
   }
   if (next.length) say(`Next: ${next.join(", then ")}`);
   if (plans) say(`Next: ${plans.message}`);
-  say(DEPLOY_HINT);
+  say(deployed.length ? `Deployed from this folder to ${deployed.join(" and ")}: ${RUN} deploy status shows what is live.` : DEPLOY_HINT);
 }
 
 /**
