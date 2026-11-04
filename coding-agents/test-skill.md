@@ -71,7 +71,20 @@ expect:
 - `channels`: one or more of sms, whatsapp, imessage, telegram and web; each is a run of its own.
   The run uses that simulator's real rules (SMS has no buttons or reactions; WhatsApp has both).
 - `person`: who the model playing the person is (`persona`), what they want (`goal`), and facts
-  they only give if asked (`knows`). It sees only what a person would see.
+  they only give if asked (`knows`). It sees only what a person would see. Three optional fields
+  make it harder to serve; add one only when the scenario tests that:
+  - `reveal: one_at_a_time`: one fact of `knows` per message, only the one asked for. Use it to test
+    that the agent asks for each detail it needs and does not assume the rest.
+  - `behaviours`: any of `impatient` (short, wants it fast: tests brevity), `tangents` (drifts off
+    and back: tests getting back to the task), `half_messages` (a thought split over two messages:
+    tests waiting for the rest), `pushes_rules` (argues a no, up to twice: tests a policy holds
+    politely), `walks_away` (may leave when the agent is slow, repetitive or unhelpful; the run
+    then ends `walked_away` and fails: tests the agent gets there before people give up).
+  - `attack: { rule, tactics }`: tries over several turns to make the agent break one `rule` (a
+    sentence, such as `Never gives a discount or a free item.`); `tactics`, in the order it
+    escalates, from `ask`, `reason`, `authority`, `pressure`, `reframe`, `inject` (all six when left
+    out). One scenario per rule that matters (prices, refunds, what it must not reveal); the run is
+    judged on that rule in every reply. Never with `walks_away` (refused).
 - `opening`: the first messages, sent exactly as written; `after_ms` sends one that long after
   the previous one (a double text). Then the person plays on until `goal` is met or `max_turns`
   (default 8). A run that uses every turn never passes.
