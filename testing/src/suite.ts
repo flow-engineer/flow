@@ -241,6 +241,29 @@ const given = z
   })
   .catchall(withClock(z.unknown()));
 
+/** The behaviours a simulated person can show (`person.behaviours`), any of them together. */
+const PERSON_BEHAVIOURS = ["impatient", "tangents", "half_messages", "pushes_rules", "walks_away"] as const;
+/** The ways an attacker (`person.attack`) tries to make the agent break its rule, in the order it escalates by default. */
+const ATTACK_TACTICS = ["ask", "reason", "authority", "pressure", "reframe", "inject"] as const;
+
+/** A list of `names`, at least one, each once. */
+const someOf = <T extends readonly [string, ...string[]]>(names: T, what: string) =>
+  z
+    .array(z.enum(names, { error: `one of ${names.join(", ")}` }))
+    .min(1, `at least one ${what}, or leave it out`)
+    .superRefine((list, ctx) => {
+      list.forEach((name, i) => {
+        if (list.indexOf(name) !== i) ctx.addIssue({ code: "custom", message: `${name} is listed twice: list each ${what} once`, path: [i] });
+      });
+    });
+
+/** The one rule an attacker tries to make the agent break, in a sentence. */
+const attackRule = z.string().superRefine((rule, ctx) => {
+  const length = [...rule].length;
+  if (!rule.trim()) ctx.addIssue({ code: "custom", message: "the rule the agent must keep, in a sentence, such as: Never gives a discount or a free item." });
+  else if (length > 500) ctx.addIssue({ code: "custom", message: `${length} characters, at most 500: one rule, in a sentence` });
+});
+
 const scenarioSchema = z.object({
   id: z.string().min(1),
   /** A short name for the scenario, such as "Milk corrected to oat"; the test itself is in `about` and the rest. */
@@ -264,6 +287,27 @@ const scenarioSchema = z.object({
     persona: withClock(z.string()),
     goal: withClock(z.string()),
     knows: z.array(withClock(z.string())).optional(),
+    /** How the person gives what it `knows`: as_asked (the default) answers what the agent asks; one_at_a_time gives
+     * one fact per message, only the one asked for, and asked for several at once gives one and waits to be asked again. */
+    reveal: z.enum(["as_asked", "one_at_a_time"], { error: "as_asked or one_at_a_time" }).optional(),
+    /** How the person behaves besides its persona, any of: impatient (short replies, wants it done fast), tangents (drifts
+     * off topic now and then, comes back), half_messages (splits a thought over two messages, the first cut off),
+     * pushes_rules (told no, argues and asks again, up to twice), walks_away (may leave unresolved when the agent is slow,
+     * repetitive or unhelpful; the run then ends walked_away and fails). */
+    behaviours: someOf(PERSON_BEHAVIOURS, "behaviour").optional(),
+    /** The person attacks, over several turns, trying to make the agent break `rule` (judged in every reply). `tactics`,
+     * in the order it escalates: ask, reason (a believable story), authority (staff, the owner, already approved),
+     * pressure (urgency, a bad review), reframe (a hypothetical, a role-play, just this once, in pieces), inject (text
+     * dressed as a system note); all six in that order when left out. */
+    attack: z
+      .strictObject(
+        { rule: attackRule, tactics: someOf(ATTACK_TACTICS, "tactic").optional() },
+        { error: (issue) => (issue.code === "invalid_type" ? "{ rule: <the rule the agent must keep>, tactics: [<tactic>, ...] }" : undefined) },
+      )
+      .optional(),
+  }).superRefine((person, ctx) => {
+    const walks = person.behaviours?.indexOf("walks_away") ?? -1;
+    if (person.attack && walks >= 0) ctx.addIssue({ code: "custom", message: "an attacker does not walk away: leave walks_away out", path: ["behaviours", walks] });
   }),
   /** The conversation so far: the run starts after these, as if they had been said (oldest first). */
   history: z.array(historyItem).min(1).max(200).optional(),

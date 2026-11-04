@@ -771,6 +771,34 @@ test("test files: old ones parse as before, the clock, calls and never parse, an
   });
 });
 
+test("the person's reveal, behaviours and attack parse as written; a wrong value, a name twice, and an attacker who walks away are named at their line", () => {
+  // Without them a scenario parses as before: the old scenario in the test above.
+  const scenario = (person: string) => ({ path: "scenarios/p.yaml", content: `id: p\nchannels: [sms]\nperson:\n  persona: a\n  goal: b\n${person}opening:\n  - say: hi\n` });
+  assert.deepEqual(parseScenario(scenario("  reveal: one_at_a_time\n  behaviours: [impatient, tangents, half_messages, pushes_rules, walks_away]\n")).person, {
+    persona: "a", goal: "b", reveal: "one_at_a_time", behaviours: ["impatient", "tangents", "half_messages", "pushes_rules", "walks_away"],
+  });
+  assert.deepEqual(parseScenario(scenario("  behaviours: [pushes_rules]\n  attack:\n    rule: Never gives a discount or a free item.\n    tactics: [inject, ask]\n")).person, {
+    persona: "a", goal: "b", behaviours: ["pushes_rules"], attack: { rule: "Never gives a discount or a free item.", tactics: ["inject", "ask"] },
+  });
+  assert.deepEqual(parseScenario(scenario("  attack: { rule: Never gives a discount. }\n")).person.attack, { rule: "Never gives a discount." });
+
+  const mistakes: Array<[string, string]> = [
+    ["  reveal: slowly", "scenarios/p.yaml:6: person.reveal: as_asked or one_at_a_time"],
+    ["  behaviours:\n    - impatient\n    - rude", "scenarios/p.yaml:8: person.behaviours[1]: one of impatient, tangents, half_messages, pushes_rules, walks_away"],
+    ["  behaviours:\n    - impatient\n    - impatient", "scenarios/p.yaml:8: person.behaviours[1]: impatient is listed twice: list each behaviour once"],
+    ["  behaviours: []", "scenarios/p.yaml:6: person.behaviours: at least one behaviour, or leave it out"],
+    ["  attack: no discounts", "scenarios/p.yaml:6: person.attack: { rule: <the rule the agent must keep>, tactics: [<tactic>, ...] }"],
+    ["  attack:\n    tactics: [ask]", "scenarios/p.yaml:6: person.attack.rule: missing"],
+    ["  attack:\n    rule: ' '", "scenarios/p.yaml:7: person.attack.rule: the rule the agent must keep, in a sentence, such as: Never gives a discount or a free item."],
+    [`  attack:\n    rule: ${"é".repeat(501)}`, "scenarios/p.yaml:7: person.attack.rule: 501 characters, at most 500: one rule, in a sentence"],
+    ["  attack:\n    rule: r\n    tactics: [ask, bribe]", "scenarios/p.yaml:8: person.attack.tactics[1]: one of ask, reason, authority, pressure, reframe, inject"],
+    ["  attack:\n    rule: r\n    tactics: []", "scenarios/p.yaml:8: person.attack.tactics: at least one tactic, or leave it out"],
+    ["  attack:\n    rule: r\n    goal: x", "scenarios/p.yaml:7: person.attack: Unrecognized key: \"goal\""],
+    ["  behaviours:\n    - tangents\n    - walks_away\n  attack: { rule: r }", "scenarios/p.yaml:8: person.behaviours[1]: an attacker does not walk away: leave walks_away out"],
+  ];
+  for (const [person, error] of mistakes) assert.throws(() => parseScenario(scenario(`${person}\n`)), { message: error }, person);
+});
+
 test("the café's fakes play its tools from given: the menu it names, orders numbered up from BL-1040 and kept in state, an item not on the menu refused", async () => {
   const tests = fileURLToPath(new URL("../examples/cafe/tests", import.meta.url));
   const fakes = await loadFakes(tests);
