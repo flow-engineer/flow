@@ -26,7 +26,8 @@
 // conversations and the grades of its replies, and `flow insights` Flow Insights' findings
 // (testing/src/conversations.ts); `flow templates` the
 // project's approved WhatsApp templates (testing/src/templates.ts), which `flow test` compares with
-// the declared ones. `flow test pull` writes the test drafts Flow made from the hosted agent's
+// the declared ones. `flow mcp serve` serves those reads, and logs and deploy status, as read-only MCP
+// tools on stdio for the coding agent in the agent's folder (testing/src/mcp-serve.ts). `flow test pull` writes the test drafts Flow made from the hosted agent's
 // conversations into tests/drafts/, which flow test never reads (testing/src/pull.ts).
 
 import { mkdirSync, existsSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
@@ -80,7 +81,11 @@ const CHECK_LINE = `  flow check-endpoint <url> [--token-env NAME] [--json]
                             Check an agent's HTTP endpoint against the contract, for --agent-url
                             (flow check-endpoint --help)`;
 const MCP_LINE = `  flow mcp update        Write the tools of the MCP servers the agent uses (mcpTools) to
-                            mcp.lock.json, from the agent's folder; commit it after the tests`;
+                            mcp.lock.json, from the agent's folder; commit it after the tests
+  flow mcp serve [--dir <folder>] [--cloud <url>]
+                            This agent's conversations, issues, templates, logs and deploys as
+                            read-only MCP tools for your coding agent (flow mcp serve --help):
+                            claude mcp add flow -- npx @flow-engineer/flow mcp serve`;
 const CLI_LINE = `  flow cli --server <url> <command>
                             Any MCP server's tools as commands (flow cli --server <url> --help)`;
 const INSPECT_LINE = `  flow inspect <url> <command>
@@ -207,8 +212,17 @@ if (process.argv[2] === "check-endpoint") {
 if (process.argv[2] === "show") await exitFlushed(await showCli(process.argv.slice(3)));
 if (process.argv[2] === "check") await exitFlushed(await checkCli(process.argv.slice(3)));
 if (process.argv[2] === "mcp") {
+  if (process.argv[3] === "--help" || process.argv[3] === "-h") {
+    console.log(`Usage:\n${MCP_LINE}`);
+    process.exit(0);
+  }
+  if (process.argv[3] === "serve") {
+    // Loaded only here: it needs @modelcontextprotocol/server, an optional peer.
+    const { mcpServeCli } = await withPeers("mcp serve", () => import("./mcp-serve.ts"));
+    process.exit(await mcpServeCli(process.argv.slice(4)));
+  }
   if (process.argv[3] !== "update") {
-    console.error(MCP_LINE.trim());
+    console.error(`Usage:\n${MCP_LINE}`);
     process.exit(1);
   }
   // Loaded here first, so a missing optional peer is one line; mcpUpdateCli's own import of it is then cached.
