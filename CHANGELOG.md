@@ -10,7 +10,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `claude mcp add flow -- npx @flow-engineer/flow mcp serve`. Its tools, all read-only
   (`readOnlyHint: true`), read what the commands print, as JSON: `list_conversations`,
   `show_conversation` (each reply's tool calls and delivery when Flow sends them), `list_issues`,
-  `list_templates` (FLOW_KEY: a `flow_test_` key reads staging only; production needs a
+  `list_insights`, `insight_conversations` (what `flow insights` reads), `list_templates`
+  (FLOW_KEY: a `flow_test_` key reads staging only; production and Insights need a
   `flow_live_` key with the traces scope), and `read_logs`, `deploy_status` (the CI key,
   `FLOW_FRAMEWORK_CLOUD_KEY`, staging and production). Each result is `structuredContent` and the
   same JSON as text under a one-line summary; a failure is `isError` with `--json`'s failure

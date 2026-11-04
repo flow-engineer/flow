@@ -40,7 +40,7 @@ test("flow mcp serve lists its tools, every one read-only, and says what it is f
   const client = await serve("http://127.0.0.1:9");
   try {
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((t) => t.name), ["list_conversations", "show_conversation", "list_issues", "list_templates", "read_logs", "deploy_status"]);
+    assert.deepEqual(tools.map((t) => t.name), ["list_conversations", "show_conversation", "list_issues", "list_insights", "insight_conversations", "list_templates", "read_logs", "deploy_status"]);
     for (const t of tools) assert.equal(t.annotations?.readOnlyHint, true, t.name);
     assert.deepEqual((tools.find((t) => t.name === "list_issues")!.inputSchema.properties as Record<string, { enum?: string[]; default?: string }>).status, { type: "string", enum: ["open", "resolved", "ignored", "all"], default: "open", description: "Which issues" });
     assert.match(client.getInstructions() ?? "", /Did a tool call fail, or was a reply delivered\?.*show_conversation/);
