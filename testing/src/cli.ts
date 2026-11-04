@@ -322,7 +322,7 @@ const nameFlag = (values as { name?: string }).name;
 
 if (command === "new") {
   const name = rest.length === 1 ? rest[0]! : "";
-  let dir: string;
+  let dir!: string; // set below, or exitFlushed(1) has ended the process (TypeScript cannot tell an awaited never)
   try {
     if (!name) throw new Error("Usage: flow new <name> [--display-name <name>]");
     dir = newStandalone(name, { displayName: await askDisplayName(displayNameFlag, name) });
@@ -337,7 +337,7 @@ ${nextSteps()}`);
 }
 
 if (command === "init") {
-  let name: string;
+  let name!: string; // set below, or exitFlushed(1) has ended the process
   try {
     if (rest.length) throw new Error("Usage: flow init [--name <name>] [--display-name <name>] (it makes the agent in the current folder; flow new <name> makes a folder for it)");
     if (nameFlag !== undefined) checkName(nameFlag);
