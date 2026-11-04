@@ -6,6 +6,26 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **Flow Framework's own log lines have real severities on Cloud Run.** On Cloud Run (Flow's
+  hosting included: `K_SERVICE`, or `CLOUD_RUN_JOB`) each line the framework, the `flow-messaging`
+  adapter and the playground write is one JSON entry, `{ "severity", "message", ...fields }`, which
+  Cloud Logging reads: warnings are `WARNING`, errors `ERROR`, notes `INFO` or `DEBUG`, where all of
+  them were `DEFAULT`. An Error's stack is inside the entry's `message`, so a stack is one entry, not
+  one per line. Everywhere else (a terminal, `flow dev`, tests) the lines are the same text as before.
+  What an agent's own code prints is unchanged.
+- **A failed tool call is logged**, in every environment, with no event sink needed: one line with
+  the tool's name, the kind of failure (the error's name, or `unknown_tool`, `invalid_json`,
+  `invalid_input` for a call refused before it ran), the error's `code` and `status` when it has
+  them, the conversation and call ids, and the ms it ran. Never the call's input or output, nor the
+  error's message. A `WARNING`, or an `ERROR` when the tool threw JavaScript's own error for broken
+  code (`TypeError`, `ReferenceError`, ...):
+  `flow: tool refund failed after 212 ms (Error, not_refundable, 409) in conversation p_3f2a9c1d0b4e`.
+- The `flow-messaging` adapter's stream: the first close after a healthy connection (Flow's
+  connections close about hourly, `1006`) is `INFO`; a refusal, or a close right after another, stays
+  a `WARNING`.
+- `flow: agent version ...` is an `INFO` line (`console.info`), not a warning.
+- Opening SQLite no longer prints Node 22's "SQLite is an experimental feature" warning (two log
+  lines on every start of a hosted agent, whose start check opens one); other warnings print as usual.
 - **`flow status` knows the folder has deployed.** After `flow deploy`, status no longer says
   `Next: npm start` and "To keep it answering while this machine sleeps: flow deploy"; it says
   `Deployed from this folder to staging: npx @flow-engineer/flow deploy status shows what is live.`
@@ -15,7 +35,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
-None: every agent keeps working unchanged. `status --json` has one more field.
+- A Cloud Logging query or log-based metric that matched Flow's lines in `textPayload` matches
+  `jsonPayload.message` instead (`flow logs` reads both). Nothing else changes.
 
 ## 0.16.0 (2026-11-04)
 

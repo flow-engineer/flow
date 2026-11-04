@@ -30,6 +30,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { carouselMessages, replyButton, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type SendReceipt, type Template, type WhatsAppFeature } from "../../src/index.ts";
+import { log } from "../../src/events.ts";
 import { Client, FlowMessagingError, idSegment, verifySignature } from "./client.ts";
 import { imessageStyles, telegramHTML } from "./richtext.ts";
 
@@ -398,7 +399,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       if (heard && take(heard.status, heard.error)) return;
       waiting.set(message.id, take);
       timeout = setTimeout(() => {
-        console.warn(`@flow-engineer/flow/flow-messaging: ${message.id} on ${route.name} was not ${target} within ${waitTimeoutMs} ms; going on (it may still arrive, and is not sent again)`);
+        log("WARNING", `@flow-engineer/flow/flow-messaging: ${message.id} on ${route.name} was not ${target} within ${waitTimeoutMs} ms; going on (it may still arrive, and is not sent again)`);
         finish("unconfirmed");
       }, waitTimeoutMs);
       let delay = POLL_FIRST;
@@ -450,7 +451,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         if (route.kind === "imessage" && conversation) learned(conversation, "refused");
         return;
       }
-      console.warn(`@flow-engineer/flow/flow-messaging: read on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
+      log("WARNING", `@flow-engineer/flow/flow-messaging: read on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
     }
   }
 
@@ -800,7 +801,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     if (event.conversation?.type === "group") {
       // An iMessage group has no one address to answer, so the agent never takes part: nothing is
       // answered there, and no typing or read receipt goes to it.
-      if (!groupsWarned) console.warn("@flow-engineer/flow/flow-messaging: group conversations are not handled; their events are passed over");
+      if (!groupsWarned) log("WARNING", "@flow-engineer/flow/flow-messaging: group conversations are not handled; their events are passed over");
       groupsWarned = true;
       return;
     }
@@ -853,7 +854,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   const failed = (event: FlowEvent, error: unknown) =>
-    console.warn(`@flow-engineer/flow/flow-messaging: event ${event.id} (${event.type}) failed: ${error instanceof FlowMessagingError ? error.type : error instanceof Error ? error.name : "error"}`);
+    log("WARNING", `@flow-engineer/flow/flow-messaging: event ${event.id} (${event.type}) failed: ${error instanceof FlowMessagingError ? error.type : error instanceof Error ? error.name : "error"}`);
 
   /**
    * One delivery: checks Flow-Signature, drops a redelivered event, hands the event to the agent.
@@ -972,7 +973,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         if (STREAM_FINAL.has(code)) {
           if (code === 4400 && refusal?.param === "after" && cursor) {
             // The cursor's event has left Flow's log (past retention): start again from now.
-            console.warn("@flow-engineer/flow/flow-messaging: the last handled event is no longer in Flow's log; the stream starts again from now");
+            log("WARNING", "@flow-engineer/flow/flow-messaging: the last handled event is no longer in Flow's log; the stream starts again from now");
             moveCursor(undefined);
             return void later(0);
           }
@@ -982,16 +983,18 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
           const hint = refusal?.hint || undefined;
           const docUrl = refusal?.doc_url || undefined;
           const channelCode = refusal?.channel_code || undefined;
-          console.warn(`@flow-engineer/flow/flow-messaging: the stream stopped: ${type} (${channelCode ? `${channelCode}, ` : ""}${code})${hint ? `. ${hint}` : ""}${docUrl ? ` (${docUrl})` : ""}`);
+          log("WARNING", `@flow-engineer/flow/flow-messaging: the stream stopped: ${type} (${channelCode ? `${channelCode}, ` : ""}${code})${hint ? `. ${hint}` : ""}${docUrl ? ` (${docUrl})` : ""}`);
           return void stop({ code, type, message: why, ...(channelCode ? { channelCode } : {}), ...(hint ? { hint } : {}), ...(docUrl ? { docUrl } : {}) });
         }
         // 1012 follows a reconnect frame: at once. Else back off, never less than Flow's retry_after.
         if (code === 1012) {
-          console.debug("@flow-engineer/flow/flow-messaging: the stream closed (1012) after a reconnect frame; reconnecting now");
+          log("DEBUG", "@flow-engineer/flow/flow-messaging: the stream closed (1012) after a reconnect frame; reconnecting now");
           return void later(0);
         }
+        // The first close after a healthy connection (Flow's ~hourly 1006, say) is routine; a refusal, or closes in a row, are not.
+        const routine = tries === 0 && !refusal?.type;
         const ms = streamWait(code, refusal?.retry_after, tries++);
-        console.warn(`@flow-engineer/flow/flow-messaging: the stream closed (${code}${refusal?.type ? ` ${refusal.type}` : ""}); reconnecting in ${(ms / 1000).toFixed(1)} s`);
+        log(routine ? "INFO" : "WARNING", `@flow-engineer/flow/flow-messaging: the stream closed (${code}${refusal?.type ? ` ${refusal.type}` : ""}); reconnecting in ${(ms / 1000).toFixed(1)} s`);
         later(ms);
       };
     }
@@ -1014,7 +1017,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
           if (mine === generation) ws.close(1000, "event failed; resuming");
           return;
         }
-        console.warn(`@flow-engineer/flow/flow-messaging: event ${event.id} failed ${times} times; going on without it (it stays in Flow's log, GET /v0/events)`);
+        log("WARNING", `@flow-engineer/flow/flow-messaging: event ${event.id} failed ${times} times; going on without it (it stays in Flow's log, GET /v0/events)`);
       }
       failing = undefined;
       tries = 0;
@@ -1154,7 +1157,7 @@ function detailed(e: { type: string; channelCode?: string; param?: string; chann
  */
 function hinted(what: string, e: { type: string; channelCode?: string; hint?: string; docUrl?: string }): void {
   if ((!e.hint && !e.docUrl) || e.type === "outside_window") return;
-  console.warn(`@flow-engineer/flow/flow-messaging: ${what} was refused, ${detailed(e)}.${e.hint ? ` ${e.hint}` : ""}${e.docUrl ? ` (${e.docUrl})` : ""}`);
+  log("WARNING", `@flow-engineer/flow/flow-messaging: ${what} was refused, ${detailed(e)}.${e.hint ? ` ${e.hint}` : ""}${e.docUrl ? ` (${e.docUrl})` : ""}`);
 }
 
 /**
@@ -1166,7 +1169,7 @@ function notDelivered(channel: string, m: { id: string; conversation?: string; e
   const e = m.error;
   const code = e?.channel_code ? `, channel_code ${e.channel_code}` : "";
   const why = [e?.message ?? "The channel did not take it.", e?.hint, e?.doc_url && `(${e.doc_url})`].filter(Boolean).join(" ");
-  console.error(`@flow-engineer/flow/flow-messaging: message ${m.id} on ${channel}${m.conversation ? ` (conversation ${m.conversation})` : ""} was not delivered (type ${e?.type ?? "channel_error"}${code}): ${why}`);
+  log("ERROR", `@flow-engineer/flow/flow-messaging: message ${m.id} on ${channel}${m.conversation ? ` (conversation ${m.conversation})` : ""} was not delivered (type ${e?.type ?? "channel_error"}${code}): ${why}`);
 }
 
 function reason(e: { type: string; channelCode?: string; param?: string; channel?: string; message: string; retryable: boolean }): string {
