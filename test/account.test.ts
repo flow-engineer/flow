@@ -1,4 +1,4 @@
-// covers: testing/src/account.ts testing/src/flow-login.ts testing/src/cli.ts
+// covers: testing/src/account.ts testing/src/flow-login.ts testing/src/cli.ts testing/src/deploy.ts
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage } from "node:http";
@@ -885,6 +885,23 @@ test("status says what the folder has and lacks, never a key's value; signed in,
   assert.equal(human.code, 0, human.err);
   assert.ok(human.out.split("\n").includes(NO_KEY));
   assert.match(human.out, /^Next: run npx @flow-engineer\/flow setup to get Flow's free trial credit, or add your own key, then npx @flow-engineer\/flow link$/m);
+});
+
+test("status in a folder that has deployed names the hosted agent, not npm start and a first deploy", async (t) => {
+  const flow = await flowServer();
+  t.after(flow.close);
+  const cwd = agentDir();
+  writeFileSync(join(cwd, ".env"), `OPENROUTER_API_KEY=${OWN}\n`);
+  mkdirSync(join(cwd, ".flow"));
+  writeFileSync(join(cwd, ".flow", "deploys.json"), JSON.stringify({ staging: { id: "hdp_1" } }));
+
+  const out = await run(["status", "--json"], { url: flow.url, config: temp(), cwd });
+  assert.equal(out.code, 0, out.err);
+  assert.deepEqual(out.lines[0]!.deployed, ["staging"]);
+  assert.ok(!(out.lines[0]!.next as string[]).includes("npm start"));
+  const human = await run(["status"], { url: flow.url, config: temp(), cwd });
+  assert.match(human.out, /^Deployed from this folder to staging: npx @flow-engineer\/flow deploy status shows what is live\.$/m);
+  assert.doesNotMatch(human.out, /To keep it answering while this machine sleeps/);
 });
 
 test("status with FLOW_KEY the model's key asks Flow's GET /credit for what is left; a key Flow does not know gets --rotate key, and Flow not reachable never fails status", async (t) => {

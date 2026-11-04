@@ -512,7 +512,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       what: "file upload",
     });
   }
-  log(`Session ${opened.sessionId}: suite ${suiteHash(options.files).slice(0, 12)}, ${options.files.length} files (${uploads.length} new to the cloud, the rest it already had).`);
+  log(`Session ${opened.sessionId}: suite ${suiteHash(options.files).slice(0, 12)}, ${options.files.length} files (${uploads.length === options.files.length ? "all new to the cloud" : uploads.length ? `${uploads.length} new to the cloud, the rest it already had` : "the cloud already had them all"}).`);
   const limits = sessionLimits(opened.limits);
   if (limits) {
     const line = limitsLine(limits);

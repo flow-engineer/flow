@@ -2,6 +2,21 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **`flow status` knows the folder has deployed.** After `flow deploy`, status no longer says
+  `Next: npm start` and "To keep it answering while this machine sleeps: flow deploy"; it says
+  `Deployed from this folder to staging: npx @flow-engineer/flow deploy status shows what is live.`
+  `status --json` adds `deployed`, the environments this folder deployed to (from `.flow/deploys.json`).
+- `flow test`'s session line says "all new to the cloud" or "the cloud already had them all" when
+  that is so, in place of "6 new to the cloud, the rest it already had" for a suite of 6.
+
+### Migration notes
+
+None: every agent keeps working unchanged. `status --json` has one more field.
+
 ## 0.15.6 (2026-11-02)
 
 ### Changes
