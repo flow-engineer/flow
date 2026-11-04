@@ -265,3 +265,31 @@ test("a tool's output on its tool.end event is whole up to 64,000 characters, el
   const outputs = h.events.filter((e) => e.type === "tool.end" && e.tool === "list").map((e) => e.output);
   assert.deepEqual(outputs, [whole, `${long.slice(0, 63_999)}\n[cut: 16002 more characters not shown]`]);
 });
+
+// Tool failures reached logs only through an agent's own event sink, so production logged none.
+test("a failed tool call logs one line, a WARNING for the tool's own error and an ERROR for a bug, with ids and kinds only", async (t) => {
+  const lines: Array<{ method: string; entry: Record<string, unknown> }> = [];
+  for (const method of ["warn", "error"] as const) t.mock.method(console, method, (line: string) => void lines.push({ method, entry: JSON.parse(line) }));
+  const saved = process.env.K_SERVICE;
+  process.env.K_SERVICE = "agent"; // as on Flow's hosting, so each line's fields can be read
+  t.after(() => (saved === undefined ? delete process.env.K_SERVICE : (process.env.K_SERVICE = saved)));
+  const refund = tool({ name: "refund", description: "Refund.", input: z.object({ order: z.string() }), run: ({ order }) => { throw Object.assign(new Error(`order ${order} is not refundable`), { code: "not_refundable", status: 409 }); } });
+  const crash = tool({ name: "crash", description: "Crash.", input: z.object({ order: z.string() }), run: ({ order }) => (null as unknown as Record<string, () => string>)[order]!() });
+  const h = multi({ channels: { web: { info: WEB_APP } }, tools: [refund, crash] });
+  const taken = await h.message("web", "visitor-1", "refund my order");
+  (await h.nextCall(0)).answer(respond(call("send_web", { text: "Checking." }), call("refund", { order: "A-private-1" }), call("crash", { order: "A-private-2" }), call("refund", { order: 7 })));
+  (await h.nextCall(1)).answer(respond(call("send_web", { text: "Sorry." })));
+  await h.agent.conversation(taken!.conversationId)!.whenIdle();
+  const id = taken!.conversationId;
+  const [error, bug, refused] = [["refund", "Error"], ["crash", "TypeError"], ["refund", "invalid_input"]].map(([tool, kind]) => lines.find((l) => l.entry.tool === tool && l.entry.kind === kind)!);
+  assert.equal(lines.length, 3, JSON.stringify(lines));
+  const { ms, callId, ...rest } = error!.entry;
+  assert.equal(error!.method, "warn");
+  assert.equal(typeof ms, "number");
+  assert.match(String(callId), /./);
+  assert.deepEqual(rest, { severity: "WARNING", message: `flow: tool refund failed after ${ms} ms (Error, not_refundable, 409) in conversation ${id}`, tool: "refund", kind: "Error", code: "not_refundable", status: 409, conversation: id });
+  assert.deepEqual([bug!.method, bug!.entry.severity], ["error", "ERROR"]);
+  assert.deepEqual([refused!.method, refused!.entry.message], ["warn", `flow: tool refund was refused (invalid_input) in conversation ${id}`]);
+  // Never the call's input, the error's message, or anything said in the chat.
+  assert.doesNotMatch(JSON.stringify(lines), /private|is not refundable|refund my order|Checking/);
+});

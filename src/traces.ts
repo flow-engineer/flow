@@ -62,7 +62,7 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EventSink, FlowEvent } from "./events.ts";
+import { log, type EventSink, type FlowEvent } from "./events.ts";
 import { setting } from "./names.ts";
 
 export interface TracesOptions {
@@ -207,7 +207,7 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
   const content = options.content === true;
   if (!content && !warnedMetadataOnly) {
     warnedMetadataOnly = true;
-    console.warn("flow: traces are metadata only. Set FLOW_FRAMEWORK_TRACES_CONTENT=1 to send what was written.");
+    log("WARNING", "flow: traces are metadata only. Set FLOW_FRAMEWORK_TRACES_CONTENT=1 to send what was written.");
   }
   const open = new Map<string, Turn>();
   const calls = new Map<string, { at: number; input?: unknown }>();
@@ -229,7 +229,7 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
   function warnOnce(kind: string, message: string) {
     if (warned.has(kind)) return;
     warned.add(kind);
-    console.warn(`flow: ${message}; later failures of this kind are not logged`);
+    log("WARNING", `flow: ${message}; later failures of this kind are not logged`);
   }
 
   const kindOf = (channel: string | undefined) => (channel ? CHANNEL_KIND[agent.kindOf(channel) ?? ""] ?? "other" : undefined);
@@ -595,7 +595,7 @@ export function agentVersion(options: { given?: string; dir?: string; env?: Node
     if (validVersion(version)) return { version, from };
     if (CI_COMMITS.includes(from) || warnedVersions.has(from)) continue;
     warnedVersions.add(from);
-    console.warn(`flow: the version ${from === "given" ? "given" : `in ${from}`} is not sent: a version is 1 to 100 letters, digits and . _ : / + -`);
+    log("WARNING", `flow: the version ${from === "given" ? "given" : `in ${from}`} is not sent: a version is 1 to 100 letters, digits and . _ : / + -`);
   }
   if (options.dir) return gitVersion(options.dir) ?? packageVersion(options.dir);
   ownFolder ??= { version: gitVersion(process.cwd()) ?? packageVersion(process.cwd()) };

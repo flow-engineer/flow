@@ -18,6 +18,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import type { Agent, NudgeInput, NudgeState } from "./agent.ts";
 import { declaredTemplate, fillTemplate } from "./channels.ts";
+import { log, logFields } from "./events.ts";
 
 /** Wrong tokens one address may try in a window before it is refused for the rest of it. */
 const MAX_FAILURES = 10;
@@ -158,13 +159,13 @@ export function nudgeHandler(agent: NudgeAgent, options: NudgeHandlerOptions): (
     };
     const state: NudgeState = await agent.recordNudge(input);
     const kind = body.text !== undefined ? "text" : body.prompt !== undefined ? "prompt" : "template";
-    console.info(JSON.stringify({ chinwag: "nudge", id: state.id, status: state.status, ...(state.reason ? { reason: state.reason } : {}), channel: body.to.channel, kind, at: new Date().toISOString(), ip }));
+    logFields("INFO", { chinwag: "nudge", id: state.id, status: state.status, ...(state.reason ? { reason: state.reason } : {}), channel: body.to.channel, kind, at: new Date().toISOString(), ip });
     return json(res, 202, state);
   }
 
   return (req, res) =>
     handle(req, res).catch((error) => {
-      console.warn("flow nudges:", error);
+      log("WARNING", "flow nudges:", error);
       if (!res.headersSent) json(res, 500, { error: "the nudge could not be recorded" });
     });
 }
@@ -250,7 +251,7 @@ export function peopleHandler(agent: Pick<Agent, "setTimeZone" | "setQuietHours"
 
   return (req, res) =>
     handle(req, res).catch((error) => {
-      console.warn("flow people:", error);
+      log("WARNING", "flow people:", error);
       if (!res.headersSent) json(res, 500, { error: "that could not be done" });
     });
 }
