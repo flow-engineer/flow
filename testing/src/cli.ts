@@ -20,8 +20,8 @@
 // scenarios that did not pass. --json prints one report (testing/src/report.ts) on stdout at every exit,
 // and `flow show <run>` prints one run's record from the cloud (testing/src/show.ts).
 // `flow login`, `logout`, `whoami`, `setup` and `link` sign in to flow.engineer and get the agent's
-// keys and its phone link, and `flow setup --live` the agent's live Flow key; `flow keys` lists
-// and revokes the account's keys (testing/src/account.ts); `flow projects list | delete` lists and deletes
+// keys and its phone link, and `flow setup --live` the agent's live Flow key; `flow keys` lists,
+// shows, grants to and revokes the account's keys (testing/src/account.ts); `flow projects list | delete` lists and deletes
 // that account's projects (testing/src/projects.ts). `flow deploy` puts the agent on Flow's hosting
 // (testing/src/deploy.ts). `flow conversations` and `flow issues` read the hosted agent's
 // conversations and the grades of its replies, and `flow insights` Flow Insights' findings

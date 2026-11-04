@@ -6,17 +6,34 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### New: `flow setup --live` and `flow keys`, production reads without a key Flow makes by hand
 
-- **`flow setup --live [--content] [--workspace <w>] [--rotate] [--json]`** writes the agent's
-  live Flow key, `FLOW_LIVE_KEY` (`flow_live_...`), into `.env`: FLOW_KEY's scopes in live mode
-  plus `read` (production conversations, traces and Insights). Only the workspace's owner can make
-  one, and a health workspace gets none (`owner_only`, `health_workspace`, `content_not_allowed`,
-  `not_set_up` pass through with their next step; `observe_failed` exits 2). Message text reads
-  de-identified (names, phones, emails, ids and addresses as placeholders) unless `--content`. The
-  key lasts 30 days and stops after 7 days unused; `--rotate` ends the agent's earlier live keys at
-  once. It prints the text mode, the expiry, the idle rule and `flow keys revoke <kid>`; never the
-  value. An older flow.engineer makes nothing and the command says `live_unsupported`.
-- **`flow keys [--json]`** lists the account's live keys (id, agent, mode, scopes, raw or
-  de-identified text, expiry, last use; never a value), and **`flow keys revoke <kid>`** ends one.
+- **`flow setup --live [--content] [--workspace <w>] [--json]`** writes the agent's live Flow key,
+  `FLOW_LIVE_KEY` (`flow_live_...`), into `.env` with safe defaults: it reads production
+  conversations, traces and Insights, runs tests, writes traces and uses the model; it messages no
+  customer and deploys nothing live. Only the workspace's owner can make one, and a health
+  workspace gets none (`owner_only`, `health_workspace`, `content_not_allowed`, `not_set_up` pass
+  through with their next step; `observe_failed` exits 2). Message text reads de-identified (names,
+  phones, emails, ids and addresses as placeholders) unless `--content`. A new key replaces the
+  agent's earlier live key at once (their ids are printed; `--rotate` is still taken). The key
+  lasts 30 days and stops after 7 days unused. It prints the text mode, what the key can do as
+  `✓`/`✗` lines in flow.engineer's order (each `✗` with the command that grants it), the expiry,
+  the idle rule, `flow keys revoke <kid>` and the three advisory tiers; never the value (`--json`:
+  `checklist`, `advisory`, `stopped`). An older flow.engineer makes nothing and the command says
+  `live_unsupported`.
+- **`flow keys [list] [--json]`** lists the account's live keys (id, agent, mode, last 4, expiry;
+  never a value), **`flow keys show <kid>`** prints one key's `✓`/`✗` checklist and its grants, and
+  **`flow keys revoke <kid>`** ends one.
+- **`flow keys grant <read|tests|traces|model|content|send|deploy> [--key <kid>] [--wait]`** lets
+  the live key (the `FLOW_LIVE_KEY` in `.env` unless `--key`) do one more thing, in place, by
+  tier, in the same words in the help, the output and `flow mcp serve`'s tool descriptions: fine by
+  default (de-identified reads, Insights, tests, traces, the model) is granted at once; raw message
+  text (`content`) only when the user asked; messaging customers and deploying live (`send`,
+  `deploy`) only with the user's explicit yes, and the owner confirms once in the browser: the CLI
+  prints (and opens, unless `--no-browser`) the approval page and exits 4, or with `--wait` asks
+  again until it is approved (the new checklist, exit 0), denied or expired (exit 3). A live key
+  not made by `flow setup --live` is refused (`not_for_this_key`, its next step as given).
+- **A live key refused for something it was not granted (403)** prints Flow's hint as given (such
+  as Messaging's "can't message customers" naming `keys grant send`) and the three tiers, not "get
+  the right key".
 - **Production reads use `FLOW_LIVE_KEY` when it is set**, else `FLOW_KEY`: `flow conversations
   --env production`, `flow insights` and `insights show`, and `flow conversations show`, which
   reads with FLOW_KEY first and asks once more with FLOW_LIVE_KEY when FLOW_KEY does not find the

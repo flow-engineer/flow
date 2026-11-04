@@ -16,7 +16,7 @@ import { z } from "zod";
 import { ProtocolError, ProtocolErrorCode, Server, type CallToolResult } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RUN } from "../../src/names.ts";
-import { NetworkError, textLine, type FoundKey } from "./cloud-call.ts";
+import { ADVISORY, NetworkError, textLine, type FoundKey } from "./cloud-call.ts";
 import { Failed, get, insightConversations, listConversations, listInsights, listIssues, noKey, readKey, showConversation, sinceTime, type Access } from "./conversations.ts";
 import { cloudOf, deployStatus, logsPage, NotAvailable, Refused, SEVERITIES, type LogsQuery } from "./deploy.ts";
 import { packageRoot } from "./new.ts";
@@ -49,9 +49,16 @@ folder's .env, so a key fixed in .env works on the next call without a restart.
                             list_conversations and show_conversation with environment production,
                             list_insights, insight_conversations (else FLOW_KEY); show_conversation
                             tries it once when FLOW_KEY does not find the id. Text is de-identified
-                            unless it was made with --content; flow setup --live makes it
+                            unless it was made with --content; flow setup --live makes it.
+                            What it may do, by tier (flow keys grant adds one):
+                            ${ADVISORY.default}
+                            ${ADVISORY.ask_user}
+                            ${ADVISORY.critical}
   FLOW_FRAMEWORK_CLOUD_KEY  read_logs, deploy_status: the CI key (oci_...), staging and production
 Nothing goes to stdout but the protocol; waits and retries are said on stderr.`;
+
+/** The advisory tiers in flow.engineer's words, for the instructions and the tool descriptions. */
+const KEY_TIERS = `${ADVISORY.default} ${ADVISORY.ask_user} ${ADVISORY.critical}`;
 
 /** What a host is told on connecting: what the server is for, and which tool answers what. */
 export const INSTRUCTIONS = [
@@ -59,14 +66,15 @@ export const INSTRUCTIONS = [
   "Did a tool call fail, or was a reply delivered? list_conversations (grade: wrong finds badly graded replies), then show_conversation: each agent reply carries its tool calls (name, ms, ok, error) and its delivery (queued, sent, delivered, read, or failed with the channel's code).",
   "What is live? deploy_status. Why did it error? read_logs with severity ERROR (grep narrows it), then show_conversation for the conversation involved. Recurring problems: list_issues (graded replies, with a suggested fix) and list_insights (what real people ran into in production).",
   "Conversations, issues and templates read FLOW_KEY (a flow_test_ key reads staging only). Production reads (environment production, Insights) read the live Flow key FLOW_LIVE_KEY when it is set, else FLOW_KEY; without one, ask the developer to run `npx @flow-engineer/flow setup --live` (the workspace's owner), which writes it with text de-identified by default. Every result says its text_mode (raw, deidentified or withheld). Logs and deploys read the CI key FLOW_FRAMEWORK_CLOUD_KEY (oci_), both environments.",
+  `What the live key may do, by tier (\`npx @flow-engineer/flow keys show <kid>\` lists it, \`keys grant <name>\` adds one): ${KEY_TIERS}`,
 ].join("\n");
 
 const ENVIRONMENT = z.enum(["staging", "production"]);
 const WHEN = "a duration back from now (30m, 24h, 7d) or a time such as 2026-11-03T09:00:00Z";
 /** The most pages read_logs reads before it stops (truncated: newer lines were not read). */
 const LOG_PAGES = 20;
-const FLOW_KEY_NOTE = "Reads staging with FLOW_KEY (flow_test_ reads staging only); production with FLOW_LIVE_KEY when set (flow setup --live makes it), else FLOW_KEY. The result's text_mode says whether text is raw, deidentified or withheld.";
-const INSIGHTS_KEY_NOTE = "Reads with FLOW_LIVE_KEY (flow setup --live makes it), else a flow_live_ FLOW_KEY: Insights reads production only, so a flow_test_ key is refused. The result's text_mode says whether text is raw, deidentified or withheld.";
+const FLOW_KEY_NOTE = `Reads staging with FLOW_KEY (flow_test_ reads staging only); production with FLOW_LIVE_KEY when set (flow setup --live makes it), else FLOW_KEY. The result's text_mode says whether text is raw, deidentified or withheld. The live key, by tier: ${KEY_TIERS}`;
+const INSIGHTS_KEY_NOTE = `Reads with FLOW_LIVE_KEY (flow setup --live makes it), else a flow_live_ FLOW_KEY: Insights reads production only, so a flow_test_ key is refused. The result's text_mode says whether text is raw, deidentified or withheld. The live key, by tier: ${KEY_TIERS}`;
 
 interface ServeTool {
   name: string;

@@ -49,6 +49,25 @@ test("flow mcp serve lists its tools, every one read-only, and says what it is f
   }
 });
 
+test("the instructions and every Flow-key tool's description say the live key's three tiers in flow.engineer's words", async () => {
+  const tiers = [
+    "Fine by default, granted at once: de-identified reads, Insights, tests, traces, the model.",
+    "Only when the user asked for it: raw message text (npx @flow-engineer/flow keys grant content).",
+    "Only with the user's explicit yes: messaging customers and deploying live (npx @flow-engineer/flow keys grant send | deploy); the owner confirms once in the browser.",
+  ];
+  const client = await serve("http://127.0.0.1:9");
+  try {
+    const { tools } = await client.listTools();
+    const flowKeyTools = tools.filter((t) => !/^(read_logs|deploy_status)$/.test(t.name));
+    assert.equal(flowKeyTools.length, 6);
+    for (const text of [client.getInstructions() ?? "", ...flowKeyTools.map((t) => t.description!)]) {
+      for (const tier of tiers) assert.ok(text.includes(tier), `${text.slice(0, 40)}: ${tier}`);
+    }
+  } finally {
+    await client.close();
+  }
+});
+
 test("list_conversations reads the cloud with FLOW_KEY and returns the conversations as structured data", async () => {
   const conversation = { id: "cnv_1", environment: "staging", channel: "whatsapp", contact: "Contact 0100", messages: 4, grades: { good: 1, unhelpful: 0, wrong: 2, not_graded: 1 } };
   const cloud = await fakeCloud(() => ({ status: 200, body: { conversations: [conversation], next_cursor: null } }));
