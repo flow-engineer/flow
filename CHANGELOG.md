@@ -4,6 +4,20 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ## Unreleased
 
+### New: `flow mcp serve`, Flow's reads as MCP tools for your coding agent
+
+- **`flow mcp serve`** is a stdio MCP server, run in the agent's folder:
+  `claude mcp add flow -- npx @flow-engineer/flow mcp serve`. Its tools, all read-only
+  (`readOnlyHint: true`), read what the commands print, as JSON: `list_conversations`,
+  `show_conversation` (each reply's tool calls and delivery when Flow sends them), `list_issues`,
+  `list_templates` (FLOW_KEY: a `flow_test_` key reads staging only; production needs a
+  `flow_live_` key with the traces scope), and `read_logs`, `deploy_status` (the CI key,
+  `FLOW_FRAMEWORK_CLOUD_KEY`, staging and production). Each result is `structuredContent` and the
+  same JSON as text under a one-line summary; a failure is `isError` with `--json`'s failure
+  document (code, message with the key story, next). Keys are read again on every call, so a key
+  fixed in `.env` works without a restart. It needs `@modelcontextprotocol/server`, an optional
+  peer (installed in an agent made by `flow new`). `flow mcp --help` lists it.
+
 ### Changes (the CLI, for coding agents)
 
 - **`--json` is one JSON document on stdout, failures too.** `flow conversations` (and `show`),

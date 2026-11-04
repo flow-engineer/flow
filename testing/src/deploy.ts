@@ -199,7 +199,7 @@ interface Deploy {
   url?: string | null;
 }
 
-class Refused extends Error {
+export class Refused extends Error {
   readonly code: string;
   /** The cloud has no such route (an older Flow): a plain 404 or 405, not one of its JSON errors. */
   readonly missing: boolean;
@@ -224,11 +224,11 @@ class TooNew extends Error {
   }
 }
 /** What this Flow's cloud cannot do yet; the CLI side is ready for when it can. */
-class NotAvailable extends Error {}
+export class NotAvailable extends Error {}
 /** Reading the secret's value from stdin failed: never the cloud's fault. */
 class StdinFailed extends Error {}
 
-type Api = <T>(method: string, path: string, body?: unknown) => Promise<T>;
+export type Api = <T>(method: string, path: string, body?: unknown) => Promise<T>;
 
 export interface DeployOptions {
   /** Where the value of `flow deploy secret` comes from (default: stdin, a terminal's one line not echoed). */
@@ -354,7 +354,7 @@ const NO_KEY = "Set FLOW_FRAMEWORK_CLOUD_KEY to your agent's CI key (oci_...), i
  * caller of the cloud's routes: a 429 waited out and an idempotent call tried again (cloudCall), a
  * refused key explained as which key it reads and which it found.
  */
-function cloudOf(dir: string, env: NodeJS.ProcessEnv, given: string | undefined, waits?: Waits): { key: FoundKey | undefined; cloud: string; api: Api; dotEnv: Map<string, string> } {
+export function cloudOf(dir: string, env: NodeJS.ProcessEnv, given: string | undefined, waits?: Waits): { key: FoundKey | undefined; cloud: string; api: Api; dotEnv: Map<string, string> } {
   const dotEnv = readEnvFile(join(dir, ".env"));
   const found = (...names: string[]): { name: string; where: string; value: string } | undefined => {
     for (const name of names) if (env[name]) return { name, where: "the environment", value: env[name]! };
