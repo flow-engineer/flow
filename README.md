@@ -96,7 +96,8 @@ controls, media and voice notes; Debug mode shows the underlying platform payloa
 provides channels through one API; you can also bring your own providers. Once it is live,
 `npx @flow-engineer/flow conversations --grade wrong` lists the conversations whose replies were
 graded wrong, `flow conversations show <id>` prints one with each grade's rule and reason, and
-`flow issues` the problems they add up to, so a coding agent can fix them.
+`flow issues` the problems they add up to, and `flow insights` where people gave up or got
+annoyed, so a coding agent can fix them.
 
 [Deployment](https://flow.engineer/docs/hosting) · [Self-hosting](https://flow.engineer/docs/self-hosting) · [Testing](https://flow.engineer/docs/testing) · [Traces](https://flow.engineer/docs/traces)
 
