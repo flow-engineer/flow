@@ -3,7 +3,7 @@
 
 import { existsSync } from "node:fs";
 import { CloudEnded, isTransportFailure, PostError, SessionStopped, type SendPathProblem } from "./client.ts";
-import type { RunOutcome, ScenarioSummary, SessionLimits } from "./protocol.ts";
+import type { RunOutcome, RunSummary, ScenarioSummary, SessionLimits, ToolsPlayedBy } from "./protocol.ts";
 
 /** How a `flow test` ended, one per exit status (0 passed; 1 failed, invalid; 2 errored, transport; 3 refused; 130 interrupted). */
 export type Outcome = "passed" | "failed" | "errored" | "transport" | "refused" | "interrupted" | "invalid";
@@ -43,6 +43,8 @@ export interface ReportRun {
   label: "flaky" | "failing" | null;
   /** How many person, tool and judge answers this run replayed from stored ones; null when the cloud said none. */
   replayed: { person: number; tools: number; judge: number } | null;
+  /** How this run's tool calls were played (by rule, fake, recorded response or model), as the cloud sent it; null from an older cloud. */
+  toolsPlayedBy: ToolsPlayedBy | null;
 }
 
 /** A scenario the cloud could not play, once per scenario. */
@@ -136,6 +138,26 @@ export function scenarioRates(runs: Array<{ scenario: string; path?: string; cha
     }
   }
   return [...out.values()].map(({ mixed, ...s }) => (mixed || (s.passedRuns > 0 && s.passedRuns < s.runs) ? { ...s, label: "flaky" as const } : s));
+}
+
+/** The line after a session whose tool calls a model played (from the runs' toolsPlayedBy, every play counted, as it cost),
+ * naming each tool that has a fake on this machine (`fakes`) yet was played by a model; null when a model played none. */
+export function modelPlayedLine(runs: Array<Pick<RunSummary, "toolsPlayedBy" | "replayed">>, fakes: Iterable<string>): string | null {
+  const byTool = new Map<string, number>();
+  let total = 0;
+  let saved = 0;
+  for (const r of runs) {
+    if (!r.toolsPlayedBy) continue;
+    total += r.toolsPlayedBy.model;
+    saved += r.replayed?.tools ?? 0;
+    for (const [tool, n] of Object.entries(r.toolsPlayedBy.byModel ?? {})) byTool.set(tool, (byTool.get(tool) ?? 0) + n);
+  }
+  if (!total) return null;
+  const tools = [...byTool].sort(([a, m], [b, n]) => n - m || a.localeCompare(b));
+  const free = saved ? `; ${saved} saved from ${saved === 1 ? "an earlier run" : "earlier runs"}, free` : "";
+  const have = new Set(fakes);
+  const hints = tools.filter(([tool]) => have.has(tool)).map(([tool]) => ` ${tool} has a fake: add a given: block to its scenarios to use it.`);
+  return `${total} tool ${total === 1 ? "call was" : "calls were"} played by a model (${tools.map(([tool, n]) => `${tool} ${n}`).join(", ")}${free}). Write a fake (tests/tools/<tool>.fake.ts) to make them free and repeatable.${hints.join("")}`;
 }
 
 /** A run's verdict: errored when the cloud names an error for it or ended it run_failed, since the cloud

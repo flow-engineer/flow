@@ -2,6 +2,56 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.16.0 (2026-11-04)
+
+### Changes
+
+- **Tools in tests are played by rule, a model only as the last resort.** A scenario can now describe
+  its world as data, in a `given:` block beside its prose `world`: `tools` sets how each tool
+  behaves (`usual`, `slow`, `down` or `flaky N%`, N a whole number from 0 to 100), `seed` fixes
+  flaky's dice so the same calls fail on every run (default 1), and any other value is plain data;
+  a tool file's name there (`menu: get_menu.yaml`) is that tool's usual output. In a scenario with
+  `given:`, each tool call is played by the first rule that fits: the tool's mode (`down` plays the
+  tool file's first response with an error, `flaky` fails that way when its die says so), the
+  developer's fake, a response in the tool file whose `input` equals the call's, and only then a
+  model, whose answer the cloud saves so a rerun is free. A scenario without `given:` plays exactly
+  as before.
+- **Fakes.** `tests/tools/<tool>.fake.ts` is the developer's own code for a tool in tests: its
+  default export (`Fake`, from `@flow-engineer/flow/testing`) gets the call's input, the scenario's
+  `given:` data (`world`), one `state` object per run that every fake changes in place, the test's
+  clock (`now`), the call's number for that tool and the tool file's responses, and answers
+  `{ output }` or `{ error }`, with `changes` in plain words. Fakes run on the developer's machine,
+  beside the agent, and are never uploaded: the open names the tools that have one, and the cloud
+  asks for the fake when its rule comes up. A fake that throws, or answers neither output nor
+  error, or something that is not plain JSON, makes the run an infrastructure error (`fake_failed`),
+  not a failure of the agent. `flow test` loads every fake before anything is sent; one that does
+  not load, or whose default export is not a function, stops it with `tests/tools/<file>: ...`.
+  `loadFakes(testsDir)` and the types `Fake`, `FakeCall` and `FakeAnswer` are exported.
+- **`expect.state`** checks in code what the fakes kept: each top-level key is one check; objects
+  match in part, arrays have the same length with each expected element matched in part (any
+  order), other values are equal.
+- `flow test` checks `given:` before sending: a mode other than the four, a `given.tools` key the
+  agent has no tool for, and `down` or `flaky` for a tool whose file has no response with an error
+  are named with their file, and nothing is sent.
+- After a session, one line says how many tool calls a model played and of which tools (and how
+  many of those answers were saved from an earlier run), naming a tool that has a fake on this
+  machine but was played by a model in a scenario without `given:`. `flow test --json` carries each
+  run's `toolsPlayedBy` (`rule`, `fake`, `recorded`, `model`, `byModel`), null from an older cloud.
+- A cloud older than this release ignores the fakes and plays every tool by a model, as before;
+  `flow test` then says once: `This cloud does not play fakes: a model plays every tool (tests/tools/*.fake.ts unused).`
+- The café example (and so `flow new` and `flow init`) has `tests/tools/get_menu.fake.ts` and
+  `tests/tools/place_order.fake.ts`; `latte-correction` has a `given:` block (the point of sale
+  slow) and checks the one order with `expect.state`, and `order-fails` plays the point of sale
+  `down` by rule. `reads-like-a-text` keeps only its prose world. A new agent's `tsconfig.json`
+  includes `tests`, and its fakes import their types from `@flow-engineer/flow/testing`.
+
+### Migration notes
+
+None. Scenarios without `given:` play as before, and tool files are unchanged. To adopt: add a
+`given:` block to a scenario (its prose `world` stays as the note for the person and the judge),
+and write a fake for the tools whose answers depend on what happened before in the run (an order
+number that goes up, an order the scenario's `expect.state` checks). An older cloud ignores both.
+
 ## 0.15.6 (2026-11-02)
 
 ### Changes
