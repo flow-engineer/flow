@@ -16,8 +16,8 @@ import { z } from "zod";
 import { ProtocolError, ProtocolErrorCode, Server, type CallToolResult } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RUN } from "../../src/names.ts";
-import { NetworkError, type FoundKey } from "./cloud-call.ts";
-import { Failed, get, insightConversations, listConversations, listInsights, listIssues, showConversation, sinceTime, type Access } from "./conversations.ts";
+import { NetworkError, textLine, type FoundKey } from "./cloud-call.ts";
+import { Failed, get, insightConversations, listConversations, listInsights, listIssues, noKey, readKey, showConversation, sinceTime, type Access } from "./conversations.ts";
 import { cloudOf, deployStatus, logsPage, NotAvailable, Refused, SEVERITIES, type LogsQuery } from "./deploy.ts";
 import { packageRoot } from "./new.ts";
 
@@ -43,10 +43,13 @@ print, as JSON.
 
 Keys: each call reads them again, the environment the server started with first, then the
 folder's .env, so a key fixed in .env works on the next call without a restart.
-  FLOW_KEY                  list_conversations, show_conversation, list_issues, list_insights,
-                            insight_conversations, list_templates. flow_test_... reads staging
-                            only; production and Insights need a flow_live_ key
-                            with the traces scope, which flow setup does not make: ask Flow for one
+  FLOW_KEY                  list_conversations, show_conversation, list_issues, list_templates.
+                            flow_test_... reads staging only
+  FLOW_LIVE_KEY             The live Flow key, for production reads whenever it is set:
+                            list_conversations and show_conversation with environment production,
+                            list_insights, insight_conversations (else FLOW_KEY); show_conversation
+                            tries it once when FLOW_KEY does not find the id. Text is de-identified
+                            unless it was made with --content; flow setup --live makes it
   FLOW_FRAMEWORK_CLOUD_KEY  read_logs, deploy_status: the CI key (oci_...), staging and production
 Nothing goes to stdout but the protocol; waits and retries are said on stderr.`;
 
@@ -55,12 +58,13 @@ export const INSTRUCTIONS = [
   "Flow's own record of this agent once it is hosted: its conversations and the grades of its replies, its issues, its WhatsApp templates, its deploys and its log lines. Every tool only reads.",
   "Did a tool call fail, or was a reply delivered? list_conversations (grade: wrong finds badly graded replies), then show_conversation: each agent reply carries its tool calls (name, ms, ok, error) and its delivery (queued, sent, delivered, read, or failed with the channel's code).",
   "What is live? deploy_status. Why did it error? read_logs with severity ERROR (grep narrows it), then show_conversation for the conversation involved. Recurring problems: list_issues (graded replies, with a suggested fix) and list_insights (what real people ran into in production).",
-  "Conversations, issues, insights and templates read FLOW_KEY: a flow_test_ key reads staging only; production and Insights need a flow_live_ key with the traces scope (flow setup makes only flow_test_). Logs and deploys read the CI key FLOW_FRAMEWORK_CLOUD_KEY (oci_), both environments.",
+  "Conversations, issues and templates read FLOW_KEY (a flow_test_ key reads staging only). Production reads (environment production, Insights) read the live Flow key FLOW_LIVE_KEY when it is set, else FLOW_KEY; without one, ask the developer to run `npx @flow-engineer/flow setup --live` (the workspace's owner), which writes it with text de-identified by default. Every result says its text_mode (raw, deidentified or withheld). Logs and deploys read the CI key FLOW_FRAMEWORK_CLOUD_KEY (oci_), both environments.",
 ].join("\n");
 
 const ENVIRONMENT = z.enum(["staging", "production"]);
 const WHEN = "a duration back from now (30m, 24h, 7d) or a time such as 2026-11-03T09:00:00Z";
-const FLOW_KEY_NOTE = "Reads with FLOW_KEY: flow_test_ reads staging only; production needs a flow_live_ key with the traces scope.";
+const FLOW_KEY_NOTE = "Reads staging with FLOW_KEY (flow_test_ reads staging only); production with FLOW_LIVE_KEY when set (flow setup --live makes it), else FLOW_KEY. The result's text_mode says whether text is raw, deidentified or withheld.";
+const INSIGHTS_KEY_NOTE = "Reads with FLOW_LIVE_KEY (flow setup --live makes it), else a flow_live_ FLOW_KEY: Insights reads production only, so a flow_test_ key is refused. The result's text_mode says whether text is raw, deidentified or withheld.";
 
 interface ServeTool {
   name: string;
@@ -73,10 +77,14 @@ interface ServeTool {
 
 /** How the tools reach Flow: the keys as found on this call, and the cloud. */
 interface Reads {
-  flow(): Access;
+  /** FLOW_KEY or the live key, by where the tool reads (readKey's rule). */
+  flow(environment?: "staging" | "production"): Access;
   ci(): ReturnType<typeof cloudOf> & { key: FoundKey };
   dir: string;
 }
+
+/** A summary's note of the read's text mode, when it said one: " Text: de-identified (...)." */
+const textNote = (mode: unknown) => (typeof mode === "string" && mode ? ` ${textLine(mode)}.` : "");
 
 const tool = <S extends z.ZodObject>(t: { name: string; title: string; description: string; input: S; run(input: z.output<S>, reads: Reads): Promise<{ data: Record<string, unknown>; summary: string }> }): ServeTool => t as unknown as ServeTool;
 
@@ -96,11 +104,11 @@ export const TOOLS: ServeTool[] = [
     async run(input, reads) {
       const since = input.since === undefined ? undefined : sinceTime(input.since);
       if (input.since !== undefined && !since) throw new Failed(`since is ${WHEN} (got "${input.since}").`, "usage");
-      const { last, conversations, cursor } = await listConversations("list_conversations", reads.flow(), { ...input, since });
+      const { last, conversations, cursor } = await listConversations("list_conversations", reads.flow(input.environment), { ...input, since });
       const wrong = conversations.reduce((n, c) => n + (c.grades?.wrong ?? 0), 0);
       return {
         data: { ...last, conversations, next_cursor: cursor },
-        summary: `${conversations.length} conversation${conversations.length === 1 ? "" : "s"}${cursor ? " (more: raise limit)" : ""}, ${wrong} repl${wrong === 1 ? "y" : "ies"} graded wrong. Read one: show_conversation.`,
+        summary: `${conversations.length} conversation${conversations.length === 1 ? "" : "s"}${cursor ? " (more: raise limit)" : ""}, ${wrong} repl${wrong === 1 ? "y" : "ies"} graded wrong.${textNote(last.text_mode)} Read one: show_conversation.`,
       };
     },
   }),
@@ -108,13 +116,16 @@ export const TOOLS: ServeTool[] = [
     name: "show_conversation",
     title: "Show a conversation",
     description: `One conversation, message by message: each agent reply's tool calls (name, ms, ok or the error, and input and output when the account shows them), its delivery (queued, sent, delivered, read, or failed with the channel's code) and its grade (label, rule, reason, quoted words), and the issues it belongs to. Use it to answer "did that tool call fail", "was it delivered" or "why was this reply graded wrong". Text is as Flow sends it: withheld or masked for some accounts. ${FLOW_KEY_NOTE}`,
-    input: z.object({ id: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).describe("A conversation id from list_conversations or list_issues") }),
-    async run({ id }, reads) {
-      const { body } = await showConversation("show_conversation", reads.flow(), id);
+    input: z.object({
+      id: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).describe("A conversation id from list_conversations or list_issues"),
+      environment: ENVIRONMENT.optional().describe("production reads with FLOW_LIVE_KEY straight away; unset, FLOW_KEY first, then FLOW_LIVE_KEY when FLOW_KEY does not find it"),
+    }),
+    async run({ id, environment }, reads) {
+      const { body } = await showConversation("show_conversation", reads.flow(environment), id);
       const messages = (body.messages as Array<{ tools?: Array<{ ok?: boolean | null } | string>; delivery?: { state?: string } | null }> | undefined) ?? [];
       const failedTools = messages.flatMap((m) => m.tools ?? []).filter((t) => typeof t === "object" && t.ok === false).length;
       const failedDeliveries = messages.filter((m) => m.delivery?.state === "failed").length;
-      return { data: body, summary: `Conversation ${id}: ${messages.length} messages, ${failedTools} failed tool call${failedTools === 1 ? "" : "s"}, ${failedDeliveries} failed deliver${failedDeliveries === 1 ? "y" : "ies"}.` };
+      return { data: body, summary: `Conversation ${id}: ${messages.length} messages, ${failedTools} failed tool call${failedTools === 1 ? "" : "s"}, ${failedDeliveries} failed deliver${failedDeliveries === 1 ? "y" : "ies"}.${textNote(body.text_mode)}` };
     },
   }),
   tool({
@@ -131,29 +142,29 @@ export const TOOLS: ServeTool[] = [
   tool({
     name: "list_insights",
     title: "List Insights findings",
-    description: "Flow Insights' findings over closed production conversations (24 h quiet), ranked as the dashboard ranks them: id, signal (no reply, send failed, repeated question, loop, ...), status, topic, and conversations in the window with the window before's. Use it to see what keeps going wrong with real people, or, a window after a fix is deployed, whether a finding's count dropped; insight_conversations reads one finding's conversations. Needs a flow_live_ FLOW_KEY: Insights reads production only, so a flow_test_ key is refused.",
+    description: `Flow Insights' findings over closed production conversations (24 h quiet), ranked as the dashboard ranks them: id, signal (no reply, send failed, repeated question, loop, ...), status, topic, and conversations in the window with the window before's. Use it to see what keeps going wrong with real people, or, a window after a fix is deployed, whether a finding's count dropped; insight_conversations reads one finding's conversations. ${INSIGHTS_KEY_NOTE}`,
     input: z.object({
       days: z.union([z.literal(7), z.literal(30)]).default(7).describe("The window: 7 or 30 days"),
       status: z.enum(["open", "fixed", "muted", "all"]).default("open").describe("Which findings"),
     }),
     async run({ days, status }, reads) {
-      const { body } = await listInsights("list_insights", reads.flow(), { days, status });
+      const { body } = await listInsights("list_insights", reads.flow("production"), { days, status });
       const n = ((body.findings as unknown[] | undefined) ?? []).length;
-      return { data: body, summary: `${n} ${status === "all" ? "" : `${status} `}finding${n === 1 ? "" : "s"} over ${days} days${typeof body.state === "string" ? ` (state: ${body.state})` : ""}. Read one: insight_conversations.` };
+      return { data: body, summary: `${n} ${status === "all" ? "" : `${status} `}finding${n === 1 ? "" : "s"} over ${days} days${typeof body.state === "string" ? ` (state: ${body.state})` : ""}.${textNote(body.text_mode)} Read one: insight_conversations.` };
     },
   }),
   tool({
     name: "insight_conversations",
     title: "Insight conversations",
-    description: "One Insights finding's conversations in the window: conversation id, time, why it was flagged and, when the account shows them, the person's words. Use it after list_insights to see the cases behind a finding, then show_conversation with an id for the whole conversation. Needs a flow_live_ FLOW_KEY: Insights reads production only.",
+    description: `One Insights finding's conversations in the window: conversation id, time, why it was flagged, the person's words when the account shows them, and the window: the 3 messages before the flagged one and 2 after. Use it after list_insights to see the cases behind a finding, then show_conversation with an id (and environment production) for the whole conversation. ${INSIGHTS_KEY_NOTE}`,
     input: z.object({
       finding: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).describe("A finding id from list_insights"),
       days: z.union([z.literal(7), z.literal(30)]).default(7).describe("The window: 7 or 30 days"),
     }),
     async run({ finding, days }, reads) {
-      const { body } = await insightConversations("insight_conversations", reads.flow(), finding, days);
+      const { body } = await insightConversations("insight_conversations", reads.flow("production"), finding, days);
       const n = Array.isArray(body.data) ? body.data.length : 0;
-      return { data: body, summary: `Finding ${finding}: ${n} conversation${n === 1 ? "" : "s"} over ${days} days. Read one: show_conversation.` };
+      return { data: body, summary: `Finding ${finding}: ${n} conversation${n === 1 ? "" : "s"} over ${days} days.${textNote(body.text_mode)} Read one: show_conversation.` };
     },
   }),
   tool({
@@ -259,12 +270,15 @@ function readsIn(dir: string, env: NodeJS.ProcessEnv, cloud: string | undefined)
   const found = () => cloudOf(dir, env, cloud);
   return {
     dir,
-    flow() {
+    flow(environment) {
       const { cloud: address, dotEnv } = found();
-      const fromEnvironment = env.FLOW_KEY?.trim();
-      const value = fromEnvironment || dotEnv.get("FLOW_KEY")?.trim();
-      if (!value) throw new Failed("This tool reads with the agent's Flow key: set FLOW_KEY in the agent's .env (flow setup writes it there).", "no_flow_key", undefined, `${RUN} setup`);
-      return { cloud: address, key: { kind: "flow_key", name: "FLOW_KEY", where: fromEnvironment ? "the environment" : join(dir, ".env"), value } };
+      const keys = readKey(environment, (name) => {
+        const fromEnvironment = env[name]?.trim();
+        const value = fromEnvironment || dotEnv.get(name)?.trim();
+        return value ? { value, where: fromEnvironment ? "the environment" : join(dir, ".env") } : undefined;
+      });
+      if (!keys) throw noKey("This tool", environment);
+      return { cloud: address, ...keys };
     },
     ci() {
       const now = found();

@@ -28,9 +28,9 @@ interface Seen { method: string; path: string; auth?: string; accept?: string; b
  * in turn (or from the function: null holds the request unanswered), /cli/setup with `setupStatus`
  * (a 502 carries what worked, as the real one does) and `options.setup` merged into its 200, the
  * try page (as JSON, with its direct link) as open for `options.tryOpen` (default Telegram), the model API's
- * GET /credit with `options.credit` (default 404), and records every request.
+ * GET /credit with `options.credit` (default 404), any signed-in route in `options.answers` by its path as given, and records every request.
  */
-async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = [], setupStatus = 200, options: { setup?: Record<string, unknown>; tryOpen?: string[]; setupError?: { status: number; body: Record<string, unknown>; headers?: Record<string, string> }; credit?: { status: number; body: Record<string, unknown> }; deviceBusyOnce?: boolean } = {}) {
+async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = [], setupStatus = 200, options: { setup?: Record<string, unknown>; tryOpen?: string[]; setupError?: { status: number; body: Record<string, unknown>; headers?: Record<string, string> }; credit?: { status: number; body: Record<string, unknown> }; deviceBusyOnce?: boolean; answers?: Record<string, { status: number; body: Record<string, unknown> }> } = {}) {
   const seen: Seen[] = [];
   const read = (req: IncomingMessage) => new Promise<string>((done) => { let b = ""; req.on("data", (c) => { b += c; }); req.on("end", () => done(b)); });
   const server = createServer(async (req, res) => {
@@ -65,6 +65,8 @@ async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => 
       return a ? send(a.access_token ? 200 : 400, a) : undefined;
     }
     if (!bearer) return send(401, { error: "invalid_token", error_description: "Sign in again.", next: "npx @flow-engineer/flow login" });
+    const given = options.answers?.[req.url!];
+    if (given) return send(given.status, given.body);
     if (req.url === "/cli/whoami") return send(200, { email: "dev@example.com", account: "uid_1" });
     if (req.url === "/cli/revoke") return send(200, {});
     if (req.url === "/cli/setup") {
@@ -1147,4 +1149,126 @@ test("setup --workspace refused (403 not_a_member, 409 workspace_ambiguous) show
   t.after(flow.close);
   assert.equal((await run(["setup", "--workspace", ""], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } })).code, 1);
   assert.equal((await run(["link", "--workspace", "x".repeat(101)], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } })).code, 1);
+});
+
+const LIVE_KEY = "flow_live_FAKElive00_0000FAKE0000live0000R3ad";
+const LIVE_SCOPES = [...SCOPES, "read"];
+/** /cli/setup's answer to {live: true}: the live key and the workspace, nothing else. */
+const LIVE = {
+  flow_live_key: { env: "FLOW_LIVE_KEY", value: LIVE_KEY, kid: "FAKElive00", mode: "live", scopes: LIVE_SCOPES, content: false, text: "deidentified", expires_at: "2026-12-04T10:00:00Z", idle_days: 7 },
+  workspace_id: "acc_team1", workspace_name: "Team", agent_id: "agt_obs1", flow_agent_id: "agt_1", account: { account: "uid_1", email: "dev@example.com" },
+  minted: ["flow_live_key"], next: ["npx @flow-engineer/flow insights", "npx @flow-engineer/flow conversations --environment production"],
+};
+
+test("setup --live asks for the live key only, writes FLOW_LIVE_KEY over an older one at 0600, and prints its text mode, expiry, idle rule and revoke command, never its value; --json is one document", async (t) => {
+  const flow = await flowServer([], 200, { setupError: { status: 200, body: LIVE } });
+  t.after(flow.close);
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  const cwd = agentDir();
+  writeFileSync(join(cwd, ".env"), "FLOW_KEY=flow_test_mine\nFLOW_LIVE_KEY=flow_live_old_one_0000\n", { mode: 0o644 });
+  const human = await run(["setup", "--live"], { url: flow.url, config: temp(), cwd, env });
+  assert.equal(human.code, 0, human.err);
+  const { body } = setupCall(flow);
+  assert.deepEqual({ ...body, have: undefined, hostname: undefined }, { live: true, content: false, name: "cafe", rotate: false, channels: [], have: undefined, hostname: undefined });
+  assert.ok((body.have as string[]).includes("FLOW_KEY") && (body.have as string[]).includes("FLOW_FRAMEWORK_CLOUD_KEY"), "every key named as had, so an older server makes none");
+  assert.equal(readFileSync(join(cwd, ".env"), "utf8"), `FLOW_KEY=flow_test_mine\nFLOW_LIVE_KEY=${LIVE_KEY}\n`);
+  assert.equal(statSync(join(cwd, ".env")).mode & 0o777, 0o600);
+  assert.equal(human.out, [
+    "In .env:",
+    "  FLOW_LIVE_KEY=flow_live_…R3ad  replaced",
+    "Workspace: Team (acc_team1)",
+    "Text: de-identified (names, phones, emails, ids, addresses are placeholders)",
+    "It is the agent's live Flow key (messaging, traces, cloud, model, deploy, read): production reads (npx @flow-engineer/flow conversations --environment production, npx @flow-engineer/flow insights) use it.",
+    "It stops working at 2026-12-04T10:00:00Z, 30 days after it was made, or after 7 days unused: then run npx @flow-engineer/flow setup --live again.",
+    "Revoke it: npx @flow-engineer/flow keys revoke FAKElive00",
+    "Next: npx @flow-engineer/flow insights, then npx @flow-engineer/flow conversations --environment production",
+    "",
+  ].join("\n"));
+  const json = await run(["setup", "--live", "--json"], { url: flow.url, config: temp(), cwd, env });
+  assert.equal(json.code, 0, json.err);
+  assert.equal(json.lines.length, 1, "one document");
+  assert.deepEqual(json.lines[0]!.flow_live_key, { env: "FLOW_LIVE_KEY", kid: "FAKElive00", mode: "live", scopes: LIVE_SCOPES, content: false, expires_at: "2026-12-04T10:00:00Z", idle_days: 7 });
+  assert.equal(json.lines[0]!.text_mode, "deidentified");
+  assert.equal(json.lines[0]!.revoke, "npx @flow-engineer/flow keys revoke FAKElive00");
+  for (const r of [human, json]) assert.ok(!r.out.includes("0000FAKE0000live") && !r.err.includes("0000FAKE0000live"), "the key is never printed");
+});
+
+test("setup --live --rotate --content --workspace sends rotate [\"flow_live_key\"], content and the workspace, and says the earlier live keys stopped", async (t) => {
+  const flow = await flowServer([], 200, { setupError: { status: 200, body: { ...LIVE, flow_live_key: { ...LIVE.flow_live_key, content: true, text: "raw" } } } });
+  t.after(flow.close);
+  const result = await run(["setup", "--live", "--rotate", "--content", "--workspace", "Team"], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(result.code, 0, result.err);
+  const { body } = setupCall(flow);
+  assert.deepEqual([body.rotate, body.content, body.workspace], [["flow_live_key"], true, "Team"]);
+  assert.match(result.out, /^Text: raw \(as people wrote it\)$/m);
+  assert.match(result.out, /^The agent's earlier live keys stopped working now\.$/m);
+});
+
+test("setup --live passes refusals through with their next step and writes nothing; a 502 exits 2; an older flow.engineer (no flow_live_key, or 400 to the rotate) is live_unsupported", async (t) => {
+  const cases = [
+    { status: 403, body: { error: "owner_only", error_description: "Only the workspace's owner makes a live key.", next: "Ask the workspace's owner to run npx @flow-engineer/flow setup --live" }, exit: 3, code: "owner_only" },
+    { status: 404, body: { error: "not_set_up", error_description: "This agent is not set up in that workspace.", next: "npx @flow-engineer/flow setup" }, exit: 3, code: "not_set_up" },
+    { status: 502, body: { error: "observe_failed", error_description: "The dashboard did not answer.", next: "npx @flow-engineer/flow setup --live" }, exit: 2, code: "observe_failed" },
+    { status: 200, body: { agent_id: "agt_1", join_code: "brave-otter-1", minted: [] }, exit: 3, code: "live_unsupported" },
+  ];
+  for (const c of cases) {
+    const flow = await flowServer([], 200, { setupError: { status: c.status, body: c.body } });
+    t.after(flow.close);
+    const cwd = agentDir();
+    const result = await run(["setup", "--live", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+    assert.equal(result.code, c.exit, `${c.code}: ${result.err}`);
+    assert.equal(result.lines.length, 1);
+    assert.equal(result.lines[0]!.error.code, c.code);
+    if (c.status !== 200) assert.equal(result.lines[0]!.error.next, c.body.next);
+    assert.ok(!existsSync(join(cwd, ".env")), c.code);
+  }
+  const older = await flowServer([], 200, { setupError: { status: 400, body: { error: "invalid_request", error_description: "rotate is true, false or a list of cloud_key, traces_key, messaging_key and flow_key." } } });
+  t.after(older.close);
+  const rotated = await run(["setup", "--live", "--rotate", "--json"], { url: older.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(rotated.code, 3);
+  assert.equal(rotated.lines[0]!.error.code, "live_unsupported");
+});
+
+test("--content goes only with --live, and --live takes none of setup's other flags", async (t) => {
+  const flow = await flowServer();
+  t.after(flow.close);
+  const options = { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } };
+  for (const args of [["setup", "--content"], ["setup", "--live", "--replace"], ["setup", "--live", "--rotate", "key"], ["setup", "--live", "--display-name", "Pip"]]) {
+    const result = await run(args, options);
+    assert.equal(result.code, 1, args.join(" "));
+  }
+  assert.ok(!flow.seen.some((r) => r.path === "/cli/setup"), "nothing asked of the server");
+});
+
+test("flow keys lists the account's keys, never a value, as a table or {keys}; keys revoke <kid> ends one; a malformed id is a usage error and an unknown one the server's refusal", async (t) => {
+  const keys = [
+    { kid: "FAKElive00", kind: "developer", mode: "live", scopes: LIVE_SCOPES, agent: "cafe", flow_agent_id: "agt_1", content: true, created_at: "2026-11-04T10:00:00Z", expires_at: "2026-12-04T10:00:00Z", last_used_at: null },
+    { kid: "FAKEkid000", kind: "developer", mode: "test", scopes: SCOPES, agent: "cafe", flow_agent_id: "agt_1", content: false, created_at: "2026-11-01T09:30:00Z", expires_at: null, last_used_at: "2026-11-04T08:00:00Z" },
+  ];
+  const flow = await flowServer([], 200, { answers: {
+    "/cli/keys": { status: 200, body: { keys } },
+    "/cli/keys/revoke": { status: 200, body: { kid: "FAKElive00", revoked: true, next: "npx @flow-engineer/flow setup --rotate" } },
+  } });
+  t.after(flow.close);
+  const options = { url: flow.url, config: temp(), cwd: temp(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } };
+  const listed = await run(["keys"], options);
+  assert.equal(listed.code, 0, listed.err);
+  assert.equal(listed.out, [
+    "KID         AGENT  MODE  SCOPES                                    TEXT  EXPIRES           LAST USED",
+    "FAKElive00  cafe   live  messaging,traces,cloud,model,deploy,read  raw   2026-12-04 10:00  -",
+    "FAKEkid000  cafe   test  messaging,traces,cloud,model,deploy       -     -                 2026-11-04 08:00",
+    "",
+  ].join("\n"));
+  const json = await run(["keys", "--json"], options);
+  assert.deepEqual(json.lines, [{ keys }]);
+  const revoked = await run(["keys", "revoke", "FAKElive00", "--json"], options);
+  assert.equal(revoked.code, 0, revoked.err);
+  assert.deepEqual(revoked.lines, [{ kid: "FAKElive00", revoked: true }]);
+  assert.deepEqual(flow.seen.filter((r) => r.path === "/cli/keys/revoke").map((r) => [r.method, r.body]), [["POST", { kid: "FAKElive00" }]]);
+  assert.equal((await run(["keys", "revoke", "not-a-kid"], options)).code, 1);
+  const unknown = await flowServer([], 200, { answers: { "/cli/keys/revoke": { status: 404, body: { error: "not_found", error_description: "This account has no live key with that id.", next: "npx @flow-engineer/flow keys" } } } });
+  t.after(unknown.close);
+  const refused = await run(["keys", "revoke", "FAKElive00", "--json"], { ...options, url: unknown.url });
+  assert.equal(refused.code, 3);
+  assert.equal(refused.lines[0]!.error.code, "not_found");
 });

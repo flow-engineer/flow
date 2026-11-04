@@ -457,8 +457,130 @@ test("flow insights says Insights is not open to this workspace yet, with the se
 test("flow insights and insights show say a test key cannot read Insights, with the server's hint, and exit 1 when refused with scope", { timeout: 15_000 }, async () => {
   const fake = await server({ insightsScope: true });
   try {
-    const stderr = "flow insights: Insights reads production conversations, so it needs the agent's live Flow key (flow_live_); flow setup writes a test key (flow_test_).\nUse the agent's live key.\n";
+    const stderr = "flow insights: Insights reads production conversations, so it needs a live key: npx @flow-engineer/flow setup --live writes the live key FLOW_LIVE_KEY, which Insights then reads with (flow setup writes only a test key, flow_test_).\nUse the agent's live key.\n";
     assert.deepEqual(await flow(["insights", "--cloud", fake.url], agentDir()), { code: 1, stdout: "", stderr });
     assert.deepEqual(await flow(["insights", "show", "fnd_2", "--cloud", fake.url], agentDir()), { code: 1, stdout: "", stderr });
+  } finally { fake.close(); }
+});
+
+const READ = "flow_live_FAKElive00_0000FAKE0000live0000R3ad";
+
+/**
+ * A fake flow.engineer for the live key: FLOW_KEY (KEY) reads staging and finds no production
+ * conversation (404, as Flow answers a test key); the live key (READ) reads both, with text
+ * de-identified, said by the Flow-Text header only (no text_mode in the body); `expired` refuses the
+ * live key as Flow does once it expired, went unused 7 days or was revoked.
+ */
+async function liveServer(options: { expired?: boolean } = {}) {
+  const asked: Array<{ url: string; authorization?: string }> = [];
+  const http = createServer((req, res) => {
+    asked.push({ url: req.url!, authorization: req.headers.authorization });
+    const url = new URL(req.url!, "http://x");
+    const read = req.headers.authorization === `Bearer ${READ}`;
+    const json = (status: number, body: unknown) => void res.writeHead(status, { "content-type": "application/json", ...(read && status === 200 ? { "flow-text": "deidentified" } : {}) }).end(JSON.stringify(body));
+    if (read && options.expired) return json(401, { error: { code: "bad_key", message: "This key is not valid." } });
+    if (!read && req.headers.authorization !== `Bearer ${KEY}`) return json(401, { error: { code: "bad_key", message: "This key is not valid." } });
+    if (url.pathname === "/v1/agent/conversations") return json(200, { conversations: [conversation(read ? "cnv_p" : "cnv_s", 0)], next_cursor: null });
+    if (url.pathname === "/v1/agent/conversations/cnv_p" && read) return json(200, { ...detail, conversation: { ...detail.conversation, id: "cnv_p" }, messages: [], issues: [] });
+    if (url.pathname.startsWith("/v1/agent/conversations/")) return json(404, { error: { code: "not_found", message: "No such conversation for this agent." } });
+    if (url.pathname === "/v1/agent/insights" && read) return json(200, { state: "collecting", window_days: 7, closed_sessions: 3, people: 2, findings: [], small_numbers: small });
+    json(403, { error: { code: "scope", message: "this key may not read Insights" } });
+  });
+  const url = await new Promise<string>((done) => http.listen(0, "127.0.0.1", () => done(`http://127.0.0.1:${(http.address() as AddressInfo).port}`)));
+  return { url, asked, close: () => { http.closeAllConnections(); http.close(); } };
+}
+
+/** An agent folder whose .env has FLOW_KEY and the live key. */
+function liveDir(): string {
+  const dir = agentDir();
+  writeFileSync(join(dir, ".env"), `FLOW_KEY=${KEY}\nFLOW_LIVE_KEY=${READ}\n`);
+  return dir;
+}
+
+test("production reads (conversations --env production, insights) read with FLOW_LIVE_KEY when .env has it; staging and unnamed reads read with FLOW_KEY", { timeout: 15_000 }, async () => {
+  const fake = await liveServer();
+  try {
+    const dir = liveDir();
+    for (const args of [["conversations", "--env", "production"], ["insights"], ["conversations", "--env", "staging"], ["conversations"]]) {
+      const result = await flow([...args, "--json", "--cloud", fake.url], dir);
+      assert.equal(result.code, 0, result.stderr);
+    }
+    assert.deepEqual(fake.asked.map((a) => a.authorization), [`Bearer ${READ}`, `Bearer ${READ}`, `Bearer ${KEY}`, `Bearer ${KEY}`]);
+    // Without the live key, production reads with FLOW_KEY as before.
+    await flow(["conversations", "--env", "production", "--cloud", fake.url], agentDir());
+    assert.equal(fake.asked.at(-1)!.authorization, `Bearer ${KEY}`);
+  } finally { fake.close(); }
+});
+
+test("each read prints one Text: line first from Flow-Text, and --json keeps text_mode, added from the header when the body has none", { timeout: 15_000 }, async () => {
+  const fake = await liveServer();
+  try {
+    const dir = liveDir();
+    const listed = await flow(["conversations", "--env", "production", "--cloud", fake.url], dir);
+    assert.equal(listed.stdout.split("\n")[0], "Text: de-identified (names, phones, emails, ids, addresses are placeholders)");
+    assert.equal(listed.stdout.match(/^Text: /gm)!.length, 1);
+    const json = await flow(["conversations", "--env", "production", "--json", "--cloud", fake.url], dir);
+    assert.equal(json.stdout.trim().split("\n").length, 1, "one document");
+    assert.equal(JSON.parse(json.stdout).text_mode, "deidentified");
+    const insights = await flow(["insights", "--json", "--cloud", fake.url], dir);
+    assert.equal(JSON.parse(insights.stdout).text_mode, "deidentified");
+  } finally { fake.close(); }
+});
+
+test("conversations show reads with FLOW_KEY and, when it does not find the id, once more with FLOW_LIVE_KEY; --env production reads with the live key first", { timeout: 15_000 }, async () => {
+  const fake = await liveServer();
+  try {
+    const dir = liveDir();
+    const shown = await flow(["conversations", "show", "cnv_p", "--cloud", fake.url], dir);
+    assert.equal(shown.code, 0, shown.stderr);
+    assert.match(shown.stdout, /^Text: de-identified .*\nConversation cnv_p: /);
+    assert.deepEqual(fake.asked.map((a) => a.authorization), [`Bearer ${KEY}`, `Bearer ${READ}`]);
+    const direct = await flow(["conversations", "show", "cnv_p", "--env", "production", "--json", "--cloud", fake.url], dir);
+    assert.equal(direct.code, 0, direct.stderr);
+    assert.deepEqual(fake.asked.slice(2).map((a) => a.authorization), [`Bearer ${READ}`]);
+    // With no live key, FLOW_KEY's not found is the answer: no second try.
+    const missing = await flow(["conversations", "show", "cnv_p", "--cloud", fake.url], agentDir());
+    assert.equal(missing.code, 1);
+    assert.deepEqual(fake.asked.slice(3).map((a) => a.authorization), [`Bearer ${KEY}`]);
+  } finally { fake.close(); }
+});
+
+test("a live key Flow refuses (401) says it expired, went unused 7 days or was revoked and how to get one; a production read with no key names FLOW_LIVE_KEY", { timeout: 15_000 }, async () => {
+  const fake = await liveServer({ expired: true });
+  try {
+    const refused = await flow(["insights", "--cloud", fake.url], liveDir());
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /It found FLOW_LIVE_KEY=flow_live_…R3ad in \.env in this folder\. It has expired, gone unused for 7 days or been revoked: run npx @flow-engineer\/flow setup --live again for a new one\./);
+    assert.match(refused.stderr, /Get the right one: npx @flow-engineer\/flow setup --live writes FLOW_LIVE_KEY/);
+    assert.doesNotMatch(refused.stderr, /0000FAKE0000live/);
+    const none = await flow(["insights", "--json", "--cloud", fake.url], mkdtempSync(join(tmpdir(), "flow-conversations-")));
+    assert.equal(JSON.parse(none.stdout).error.code, "no_live_key");
+    assert.equal(JSON.parse(none.stdout).next, "npx @flow-engineer/flow setup --live");
+  } finally { fake.close(); }
+});
+
+test("flow insights show prints the messages around each flagged one when Flow sends them", { timeout: 15_000 }, async () => {
+  const window = [
+    { id: "m0", role: "agent", at: "2026-10-29T08:59:00Z", text: "Which order is it?", text_state: "shown" },
+    { id: "m1", role: "person", at: "2026-10-29T09:00:00Z", text: "The one from [DATE_1]", text_state: "shown" },
+    { id: "m2", role: "person", at: "2026-10-29T09:00:30Z", text: null, text_state: "not_sent" },
+  ];
+  const withWindow = { ...findingConversations, data: [{ ...findingConversations.data[0], window }] };
+  const fake = await server({ insights: { "/v1/agent/insights/findings/fnd_2/conversations 7": withWindow } });
+  try {
+    const shown = await flow(["insights", "show", "fnd_2", "--cloud", fake.url], agentDir());
+    assert.equal(shown.code, 0, shown.stderr);
+    assert.equal(shown.stdout, [
+      "fnd_2  open  Unanswered · Refunds: 2 (was 5) conversations in the last 7 days",
+      "",
+      "cnv_1  2026-10-29 09:00:00Z  Unanswered; Got annoyed when the agent got a fact wrong",
+      "    \"That's not my order\"",
+      "    around it:",
+      "      2026-10-29 08:59:00Z  agent: Which order is it?",
+      "      2026-10-29 09:00:00Z  person: The one from [DATE_1]",
+      "      2026-10-29 09:00:30Z  person: (text not sent to Flow)",
+      "    next: flow conversations show cnv_1",
+      "",
+    ].join("\n"));
   } finally { fake.close(); }
 });

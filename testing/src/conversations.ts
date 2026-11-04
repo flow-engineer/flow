@@ -1,6 +1,7 @@
 // `flow conversations` and `flow issues`: the hosted agent's conversations, each agent reply's grade
 // (good, unhelpful or wrong, with the rule, the reason and the quoted words), and the issues the
-// grades add up to, read from flow.engineer with the agent's Flow key (FLOW_KEY), so a coding agent
+// grades add up to, read from flow.engineer with the agent's Flow key (FLOW_KEY; production reads with
+// the live Flow key FLOW_LIVE_KEY when it is set, from `flow setup --live`), so a coding agent
 // finds the replies graded wrong and fixes the agent without a person reading the chats:
 //   GET {cloud}/v1/agent/conversations?environment=&grade=&since=&limit=&cursor=
 //   GET {cloud}/v1/agent/conversations/{id}
@@ -12,6 +13,8 @@
 // behind one finding:
 //   GET {cloud}/v1/agent/insights?days=7|30
 //   GET {cloud}/v1/agent/insights/findings/{finding}/conversations?days=7|30
+// Every read says how its message text came (the Flow-Text header and the answer's text_mode: raw,
+// deidentified or withheld), printed as one Text: line and kept as text_mode in --json.
 // Errors are { error: { code, message, hint } }. The reads wait out a 429 and try once more after a
 // network error or a 5xx (testing/src/cloud-call.ts). With --json, stdout is one JSON document: the
 // server's, or { ok: false, error: { code, message, hint? }, next } when it did not work.
@@ -21,14 +24,14 @@
 
 import { parseArgs } from "node:util";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
-import { cloudCall, failureDocument, keyHelp, keyRefused, KEYS_HELP, NetworkError, type FoundKey, type Waits } from "./cloud-call.ts";
+import { cloudCall, failureDocument, keyHelp, keyRefused, KEYS_HELP, NetworkError, SETUP_LIVE, textLine, type FoundKey, type Waits } from "./cloud-call.ts";
 import { sinceSeconds } from "./deploy.ts";
 import { loadEnv } from "./report.ts";
 
 export const CONVERSATIONS_LINES = `  flow conversations [--env staging|production] [--grade wrong|unhelpful|good] [--contact <label>] [--since 24h] [--limit n] [--json]
                             The hosted agent's conversations, with how many of its replies were
                             graded wrong or unhelpful
-  flow conversations show <id> [--json]
+  flow conversations show <id> [--env production] [--json]
                             One conversation, message by message, with each graded reply's label,
                             rule, reason and the words it was graded on, and each reply's tool calls
                             and delivery when Flow has them
@@ -46,7 +49,10 @@ const COMMON = `  --json                   One JSON document on stdout: the serv
   --dotenv <path>          Read the environment from this file instead of the folder's .env
   -h, --help               Show this help
 
-Reads with the agent's Flow key, FLOW_KEY (flow setup writes it into .env); it is never printed.
+Reads with the agent's Flow key, FLOW_KEY (flow setup writes it into .env); production reads
+(--env production, insights) read with the live Flow key FLOW_LIVE_KEY when it is set
+(${SETUP_LIVE} writes it), else FLOW_KEY. No key is ever printed. Each read prints how its
+message text came, one line such as "Text: de-identified (...)"; --json keeps it as text_mode.
 A 429 (60 reads a minute per key) is waited out, up to 30 s, and said on stderr; a read that hit a
 network error or a 5xx is tried once more.
 Exit status: 0 printed, 1 no key, or the server refused or could not be reached (its message and
@@ -56,13 +62,15 @@ ${KEYS_HELP}`;
 
 const CONVERSATIONS_USAGE = `Usage:
   flow conversations [options]
-  flow conversations show <id> [--json]
+  flow conversations show <id> [--env production] [--json]
 
 Lists the hosted agent's conversations, newest first: id, last message, channel, the agent version
 behind its latest reply, contact, messages, and how many replies were graded wrong and unhelpful. show prints one conversation, one line per
 message, and under each graded agent reply its label, the rule it was graded on, why, and the quoted
 words; under an agent reply, its tool calls (name, time, ok or the error) and its delivery (queued,
-sent, delivered, read or failed, with the channel's code) when Flow has them. To fix bad replies:
+sent, delivered, read or failed, with the channel's code) when Flow has them. show reads with
+FLOW_KEY and, when Flow does not find the id with it, once more with FLOW_LIVE_KEY when set;
+show --env production reads with FLOW_LIVE_KEY straight away. To fix bad replies:
 flow conversations --grade wrong, then flow conversations show <id>.
 
 Options:
@@ -179,20 +187,47 @@ export function usageFailed(json: boolean, message: string, usage?: string): num
 export interface Access {
   cloud: string;
   key: FoundKey;
+  /** The live key, for showConversation's one more try when FLOW_KEY does not find the id (a production conversation). */
+  fallback?: FoundKey;
   waits?: Waits;
 }
 
-/** The address and the key, after .env (or --dotenv) is read; a Failed says what is missing. */
-export function access(name: string, values: { cloud?: string; dotenv?: string }): Access | Failed {
-  const fromEnvironment = Boolean(process.env.FLOW_KEY?.trim());
+/** The live Flow key's name in .env (flow setup --live writes it). */
+export const LIVE_KEY = "FLOW_LIVE_KEY";
+
+/**
+ * The key a read uses, by where it reads: production with the live key when it is set, else
+ * FLOW_KEY; staging with FLOW_KEY, else the live key (it reads staging too); unnamed (show without
+ * --env) as staging, with the live key as the fallback. `found` gives a name's value and where it was.
+ */
+export function readKey(environment: "staging" | "production" | undefined, found: (name: string) => { value: string; where: string } | undefined): { key: FoundKey; fallback?: FoundKey } | undefined {
+  const flow = found("FLOW_KEY");
+  const read = found(LIVE_KEY);
+  const flowKey: FoundKey | undefined = flow && { kind: "flow_key", name: "FLOW_KEY", ...flow };
+  const liveKey: FoundKey | undefined = read && { kind: "live_key", name: LIVE_KEY, ...read };
+  const [first, second] = environment === "production" ? [liveKey, flowKey] : [flowKey, liveKey];
+  if (!first) return second && { key: second };
+  return { key: first, ...(environment === undefined && second && first === flowKey ? { fallback: second } : {}) };
+}
+
+/** What a read says with no key; for production it names the live key first. */
+export function noKey(name: string, environment: "staging" | "production" | undefined): Failed {
+  return environment === "production"
+    ? new Failed(`${name} reads production with the agent's live Flow key: set ${LIVE_KEY} (${SETUP_LIVE} writes it into .env), or a flow_live_ FLOW_KEY.`, "no_live_key", undefined, SETUP_LIVE)
+    : new Failed(`${name} reads with the agent's Flow key: set FLOW_KEY (flow setup writes it into .env).`, "no_flow_key", undefined, "npx @flow-engineer/flow setup");
+}
+
+/** The address and the key for reading `environment`, after .env (or --dotenv) is read; a Failed says what is missing. */
+export function access(name: string, values: { cloud?: string; dotenv?: string }, environment?: "staging" | "production"): Access | Failed {
+  const fromEnvironment = new Set(["FLOW_KEY", LIVE_KEY].filter((n) => process.env[n]?.trim()));
   const envProblem = loadEnv(values.dotenv);
   if (envProblem) return new Failed(envProblem, "bad_dotenv");
-  const key = process.env.FLOW_KEY?.trim();
-  if (!key) return new Failed(`${name} reads with the agent's Flow key: set FLOW_KEY (flow setup writes it into .env).`, "no_flow_key", undefined, "npx @flow-engineer/flow setup");
-  return {
-    cloud: (values.cloud || setting("CLOUD") || OBSERVE_URL).replace(/\/+$/, ""),
-    key: { kind: "flow_key", name: "FLOW_KEY", where: fromEnvironment ? "the environment" : values.dotenv ?? ".env in this folder", value: key },
-  };
+  const keys = readKey(environment, (n) => {
+    const value = process.env[n]?.trim();
+    return value ? { value, where: fromEnvironment.has(n) ? "the environment" : values.dotenv ?? ".env in this folder" } : undefined;
+  });
+  if (!keys) return noKey(name, environment);
+  return { cloud: (values.cloud || setting("CLOUD") || OBSERVE_URL).replace(/\/+$/, ""), ...keys };
 }
 
 /** What to print when a read did not work; status is the server's, when it answered. */
@@ -221,8 +256,11 @@ const PAGE_LIMIT = 100;
 /** With --contact, the most pages read looking for its conversations. */
 const CONTACT_PAGES = 100;
 
-/** GET path; the body's text and its JSON, or Failed with what to print. */
-export async function get(name: string, where: Access, path: string): Promise<{ text: string; body: Record<string, unknown> }> {
+/**
+ * GET path; the body's text and its JSON, or Failed with what to print. The text mode (the answer's
+ * text_mode, else its Flow-Text header) is `textMode`, put in the body as text_mode when only the header said it.
+ */
+export async function get(name: string, where: Access, path: string): Promise<{ text: string; body: Record<string, unknown>; textMode?: string }> {
   const { cloud, key } = where;
   let answer;
   try {
@@ -231,7 +269,8 @@ export async function get(name: string, where: Access, path: string): Promise<{ 
     if (error instanceof NetworkError) throw new Failed(`${name}: ${error.message}.`, "network");
     throw error;
   }
-  const { status, text } = answer;
+  const { status } = answer;
+  let { text } = answer;
   let body: unknown;
   try { body = JSON.parse(text); } catch { /* not JSON: said below */ }
   if (status < 200 || status >= 300) {
@@ -247,8 +286,17 @@ export async function get(name: string, where: Access, path: string): Promise<{ 
     throw failed;
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Failed(`${name}: ${cloud} answered ${status} with something that is not JSON.`, "bad_answer");
-  return { text, body: body as Record<string, unknown> };
+  const said = (body as { text_mode?: unknown }).text_mode;
+  const textMode = typeof said === "string" && said ? said : answer.textMode;
+  if (textMode && said === undefined) {
+    body = { ...(body as Record<string, unknown>), text_mode: textMode };
+    text = JSON.stringify(body);
+  }
+  return { text, body: body as Record<string, unknown>, ...(textMode ? { textMode } : {}) };
 }
+
+/** The lines with the Text: line first, when the read said its text mode. */
+const withTextLine = (textMode: unknown, lines: string[]) => (typeof textMode === "string" && textMode ? [textLine(textMode), ...lines] : lines);
 
 /** What `flow conversations` asks for. */
 export interface ListQuery {
@@ -293,9 +341,18 @@ export async function listConversations(name: string, where: Access, query: List
   return { last, conversations: all.slice(0, query.limit), cursor };
 }
 
-/** One conversation, as the server answers it: its text and its JSON. */
-export function showConversation(name: string, where: Access, id: string): Promise<{ text: string; body: Record<string, unknown> }> {
-  return get(name, where, `/v1/agent/conversations/${encodeURIComponent(id)}`);
+/**
+ * One conversation, as the server answers it: its text and its JSON. Not found with FLOW_KEY (a test
+ * key does not find a production conversation), it is asked once more with the fallback, the live key.
+ */
+export async function showConversation(name: string, where: Access, id: string): Promise<{ text: string; body: Record<string, unknown>; textMode?: string }> {
+  const path = `/v1/agent/conversations/${encodeURIComponent(id)}`;
+  try {
+    return await get(name, where, path);
+  } catch (error) {
+    if (!(error instanceof Failed) || error.status !== 404 || !where.fallback) throw error;
+    return get(name, { cloud: where.cloud, key: where.fallback, waits: where.waits }, path);
+  }
 }
 
 /** The issues with a status, as the server answers them. */
@@ -318,11 +375,11 @@ export async function conversationsCli(args: string[]): Promise<number> {
   if (values.help) return console.log(CONVERSATIONS_USAGE), 0;
   const show = positionals[0] === "show";
   if (show ? positionals.length !== 2 : positionals.length !== 0) return usageFailed(json, `${name} takes no arguments, or show <id>.`, CONVERSATIONS_USAGE);
-  // show reads one conversation by its id: --env is taken (scripts pass it to every command) and means nothing there.
-  if (show && (values.grade || values.since || values.limit || values.contact)) return usageFailed(json, `${name} show takes only an id (and --json).`, CONVERSATIONS_USAGE);
+  // show reads one conversation by its id: --env production reads it with the live key.
+  if (show && (values.grade || values.since || values.limit || values.contact)) return usageFailed(json, `${name} show takes only an id (and --env, --json).`, CONVERSATIONS_USAGE);
+  if (values.environment && !["staging", "production"].includes(values.environment)) return usageFailed(json, `--env is staging or production (got "${values.environment}").`);
   const query: ListQuery = { limit: 20 };
   if (!show) {
-    if (values.environment && !["staging", "production"].includes(values.environment)) return usageFailed(json, `--env is staging or production (got "${values.environment}").`);
     if (values.grade && !["wrong", "unhelpful", "good"].includes(values.grade)) return usageFailed(json, `--grade is wrong, unhelpful or good (got "${values.grade}").`);
     if (values.limit !== undefined) {
       query.limit = /^\d+$/.test(values.limit) ? Number(values.limit) : NaN;
@@ -339,18 +396,18 @@ export async function conversationsCli(args: string[]): Promise<number> {
   }
   const id = positionals[1];
   if (show && !/^[A-Za-z0-9_-]{1,100}$/.test(id!)) return usageFailed(json, `"${id}" is not a conversation id: use one from flow conversations.`);
-  const where = access(name, values);
+  const where = access(name, values, values.environment as ListQuery["environment"]);
   if (where instanceof Failed) return failed(json, where);
   try {
     if (show) {
-      const { text, body } = await showConversation(name, where, id!);
+      const { text, body, textMode } = await showConversation(name, where, id!);
       if (json) process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
-      else console.log(transcript(body).join("\n"));
+      else console.log(withTextLine(textMode, transcript(body)).join("\n"));
       return 0;
     }
     const { last, conversations, cursor } = await listConversations(name, where, query);
     if (json) return process.stdout.write(`${JSON.stringify({ ...last, conversations, next_cursor: cursor })}\n`), 0;
-    console.log(list(conversations, cursor !== null).join("\n"));
+    console.log(withTextLine(last.text_mode, list(conversations, cursor !== null)).join("\n"));
     return 0;
   } catch (error) {
     if (error instanceof Failed) return failed(json, error);
@@ -376,6 +433,7 @@ export async function issuesCli(args: string[]): Promise<number> {
     const { text, body } = await listIssues(name, where, status);
     if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;
     const issues = (body.issues as Issue[] | undefined) ?? [];
+    for (const line of withTextLine(body.text_mode, [])) console.log(line);
     if (!issues.length) console.log(`No ${status === "all" ? "" : `${status} `}issues.`);
     else {
       const rows = issues.map((i) => [i.id, i.status ?? "", String(i.conversations ?? ""), when(i.last_seen), i.title ?? ""]);
@@ -417,6 +475,7 @@ async function issueTestCase(name: string, id: string, values: { json?: boolean;
     const e = tc.expectations ?? {};
     const list = (label: string, items: string[] | undefined) => (items?.length ? [`${label}:`, ...items.map((item) => `  - ${JSON.stringify(item)}`)] : []);
     console.log([
+      ...withTextLine(body.text_mode, []),
       `issue: ${tc.issue ?? id}`,
       `rule: ${tc.rule_id ?? "-"}`,
       tc.from ? `from: conversation ${tc.from.conversation ?? "?"}, reply ${tc.from.message ?? "?"}` : "from: none of the agent's stored replies",
@@ -542,8 +601,7 @@ function transcript(body: Record<string, unknown>): string[] {
   for (const m of (body.messages as Message[] | undefined) ?? []) {
     const head = `${when(m.at)}  ${m.role === "your_code" ? "your code" : m.role ?? "?"}: `;
     const pad = " ".repeat(head.length);
-    const text = typeof m.text === "string" && (m.text_state ?? "shown") === "shown" ? m.text : TEXT_STATES[m.text_state ?? "none"] ?? `(text ${m.text_state})`;
-    out.push(...indent(text, head, pad));
+    out.push(...indent(messageText(m), head, pad));
     if (m.text_state === "not_sent") out.push(`${pad}  ${NOT_SENT_WHY}`);
     const tools = m.tools ?? [];
     // An older server sends names only: one line, as before. A newer one each call's time and outcome.
@@ -564,6 +622,11 @@ function transcript(body: Record<string, unknown>): string[] {
   return out;
 }
 
+/** A message's text, or what stands in for a text the server does not send. */
+function messageText(m: { text?: string | null; text_state?: string }): string {
+  return typeof m.text === "string" && (m.text_state ?? "shown") === "shown" ? m.text : TEXT_STATES[m.text_state ?? "none"] ?? `(text ${m.text_state})`;
+}
+
 /** Text over several lines: the first after `first`, the rest after `rest`. */
 function indent(text: string, first: string, rest = first): string[] {
   return text.split("\n").map((line, i) => `${i === 0 ? first : rest}${line}`);
@@ -573,7 +636,8 @@ export const INSIGHTS_LINES = `  flow insights [--days 7|30] [--status open|fixe
                             Flow Insights' findings: where people gave up, asked again or got
                             annoyed in the agent's closed production conversations, by topic
   flow insights show <finding> [--days 7|30] [--json]
-                            One finding's conversations, each with why it was flagged`;
+                            One finding's conversations, each with why it was flagged and the
+                            messages around the flagged one`;
 
 const INSIGHTS_USAGE = `Usage:
   flow insights [--days 7|30] [--status open|fixed|muted|all] [--json]
@@ -581,8 +645,10 @@ const INSIGHTS_USAGE = `Usage:
 
 Lists Flow Insights' findings as the dashboard ranks them: id, status, conversations in the window
 (with the window before's: "4 (was 9)"), topic, and what happened. show prints one finding's
-conversations: id, time, why it was flagged and the person's words. Insights reads only closed
-production conversations (quiet for 24 h), so it needs the agent's live Flow key (flow_live_). To check
+conversations: id, time, why it was flagged, the person's words and, when Flow sends them, the
+3 messages before the flagged one and 2 after. Insights reads only closed production conversations
+(quiet for 24 h), so it reads with the live Flow key, FLOW_LIVE_KEY (${SETUP_LIVE}), else a
+flow_live_ FLOW_KEY. To check
 a finding: flow insights show <finding>, then flow conversations show <id>; once a fix is deployed
 and a window has passed, flow insights again to see its count drop.
 
@@ -626,7 +692,7 @@ export interface Finding {
   conversations?: number; previous?: number | null; tag_only?: boolean;
 }
 /** quote is the person's words, null unless the account's data lets them be shown. */
-interface FindingConversation { conversation: string; at?: string; annoyed?: boolean; cause?: string | null; quote?: string | null }
+interface FindingConversation { conversation: string; at?: string; annoyed?: boolean; cause?: string | null; quote?: string | null; window?: Message[] | null }
 
 /** "4 (was 9)": the window's conversations, and the window before's when the server sent it. */
 function counted(f: Finding): string {
@@ -641,7 +707,7 @@ async function insightsGet(name: string, where: Access, path: string, finding: b
   } catch (error) {
     if (!(error instanceof Failed)) throw error;
     const words = error.status === 403 && error.code === "scope"
-      ? "Insights reads production conversations, so it needs the agent's live Flow key (flow_live_); flow setup writes a test key (flow_test_)."
+      ? `Insights reads production conversations, so it needs a live key: ${SETUP_LIVE} writes the live key FLOW_LIVE_KEY, which Insights then reads with (flow setup writes only a test key, flow_test_).`
       // Both routes answer not_found until Insights is open to the workspace; a finding's also for one not the agent's.
       : error.code === "not_found" && !finding ? "Insights is not open to this workspace yet." : undefined;
     const message = words ? `${name}: ${words}${error.hint ? `\n${error.hint}` : ""}`
@@ -683,14 +749,14 @@ export async function insightsCli(args: string[]): Promise<number> {
   if (!["open", "fixed", "muted", "all"].includes(status)) return usageFailed(json, `--status is open, fixed, muted or all (got "${status}").`);
   const id = positionals[1];
   if (show && !/^[A-Za-z0-9_-]{1,100}$/.test(id!)) return usageFailed(json, `"${id}" is not a finding id: use one from flow insights.`);
-  const where = access(name, values);
+  const where = access(name, values, "production");
   if (where instanceof Failed) return failed(json, where);
   try {
     const { text, body } = show
       ? await insightConversations(name, where, id!, Number(days) as 7 | 30)
       : await listInsights(name, where, { days: Number(days) as 7 | 30, status: status as "open" });
     if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;
-    console.log((show ? findingLines(body, days) : insightsLines(body, status)).join("\n"));
+    console.log(withTextLine(body.text_mode, show ? findingLines(body, days) : insightsLines(body, status)).join("\n"));
     return 0;
   } catch (error) {
     if (error instanceof Failed) return failed(json, error);
@@ -738,6 +804,13 @@ function findingLines(body: Record<string, unknown>, days: string): string[] {
     const why = [...signal, ...(c.cause ? [signalTitle(`annoyed_${c.cause}`)] : c.annoyed ? ["Got annoyed"] : [])];
     out.push(`${c.conversation}  ${when(c.at)}  ${why.join("; ") || signalTitle(f.signal ?? "")}`);
     if (typeof c.quote === "string" && c.quote) out.push(`    "${c.quote}"`);
+    if (c.window?.length) {
+      out.push("    around it:");
+      for (const m of c.window) {
+        const head = `      ${when(m.at)}  ${m.role === "your_code" ? "your code" : m.role ?? "?"}: `;
+        out.push(...indent(messageText(m), head, " ".repeat(head.length)));
+      }
+    }
     out.push(`    next: flow conversations show ${c.conversation}`);
   }
   return out;
