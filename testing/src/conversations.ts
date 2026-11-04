@@ -445,7 +445,7 @@ function feedbackLines(f: Feedback): string[] {
 }
 
 /** --since as an RFC 3339 time: a duration back from now, or a time given as one. */
-function sinceTime(since: string): string | undefined {
+export function sinceTime(since: string): string | undefined {
   const seconds = sinceSeconds(since);
   if (seconds !== undefined) return seconds > 0 ? new Date(Date.now() - seconds * 1000).toISOString() : undefined;
   return /^\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:\d\d)$/.test(since) && !Number.isNaN(Date.parse(since)) ? since : undefined;
