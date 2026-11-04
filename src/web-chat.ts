@@ -702,7 +702,7 @@ function turnSlots(most: number): () => Promise<() => void> {
  * their types stripped; gzipped once for browsers that take it, and tagged so a browser that has the
  * same file gets a 304. `cache` is how long a browser keeps it unasked (default five minutes).
  */
-const widgetFiles = new Map<string, Promise<{ text: string; gzip: Uint8Array<ArrayBuffer>; etag: string } | null>>();
+const widgetFiles = new Map<string, Promise<ScriptFile | null>>();
 export async function widgetFile(name: string, request: Request, cache = "public, max-age=300"): Promise<Response> {
   let file = widgetFiles.get(name);
   if (!file) {
@@ -714,12 +714,19 @@ export async function widgetFile(name: string, request: Request, cache = "public
         const { stripTypeScriptTypes } = (await import("node:module")) as { stripTypeScriptTypes?: (code: string) => string };
         text = source !== null && stripTypeScriptTypes ? stripTypeScriptTypes(source) : null;
       }
-      return text === null ? null : { text, gzip: new Uint8Array(gzipSync(text)), etag: `"${createHash("sha256").update(text).digest("base64url").slice(0, 16)}"` };
+      return text === null ? null : scriptFile(text);
     })();
     widgetFiles.set(name, file);
   }
   const found = await file;
   if (!found) return problem(404, "not_found", "no such widget file");
+  return serveScript(found, request, cache);
+}
+
+/** A script to serve: its text, gzipped once, and the tag a browser that has it sends back for a 304. */
+export type ScriptFile = { text: string; gzip: Uint8Array<ArrayBuffer>; etag: string };
+export const scriptFile = (text: string): ScriptFile => ({ text, gzip: new Uint8Array(gzipSync(text)), etag: `"${createHash("sha256").update(text).digest("base64url").slice(0, 16)}"` });
+export function serveScript(found: ScriptFile, request: Request, cache: string): Response {
   const headers = { "content-type": "text/javascript; charset=utf-8", "cache-control": cache, etag: found.etag, "access-control-allow-origin": "*", vary: "accept-encoding" };
   if (request.headers.get("if-none-match") === found.etag) return new Response(null, { status: 304, headers });
   return /\bgzip\b/.test(request.headers.get("accept-encoding") ?? "")

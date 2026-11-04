@@ -2,6 +2,49 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **The web app: the agent in the brand's own site.** `mcpServer({ app })` serves a chat panel that
+  a site embeds with `<script async src="<origin>/app/embed.js"></script>`. It docks at the side of
+  the page (the page moves over), chats over `/app/chat` (channel `app`, traced as `web`), shows each
+  tool call as a step with its CLI command (`app.cli`), opens links to the site's pages in the site
+  (`FlowAppConfig.navigate`), and shows how to add the same tools to Claude, ChatGPT, Cursor, VS Code
+  and the terminal. `origins` (required), `title`, `subtitle`, `logo`, `greeting`, `placeholder`,
+  `suggestions`, `launcher`, `width`, `site`, `pages`, `url`, `cli` and `theme` set it up; `window.FlowApp`
+  has `open`, `close`, `configure` and `signOut`.
+- **Signed in from the site, no page shown.** `oauthBridge({ app: true })` serves `/app/session`; the
+  site's `FlowAppConfig.signIn(request)` returns the code its login page would mint for the request.
+  The person's token stays in the panel's own origin.
+- **Views (`app.ui`).** Each `AppUi` (`name`, `description`, `input`, an HTML `template`) is the tool
+  `ui_<name>`, offered only on the `app` channel and only on Flow's hosting (`FLOW_APP_SERVICE_URL` and
+  `FLOW_KEY`). At most one view per answer; with `app.pages`, a view linking a page the site does not
+  have is refused. `uiTools` and `UI_INSTRUCTIONS` are exported for an agent's own channels.
+- **The panel's look.** `theme`: `mode`, `accent`, `accentText`, `colors`, `dark`, `font`, `fontUrl`,
+  `monoFont`, `radius`, `style`, `pattern`, `density` and `css`. Every part's root has
+  `data-part="<name>"` beside its class (`header` `.head`, `message` `.msg`, `typing` `.msg.typing`,
+  `background` `.backdrop`, `composer` `.composer` with `.field` and `.send`).
+- **The panel's parts in the agent's own code.** `app.panel` names a browser module (a file URL or a
+  path; one file that imports only types, TypeScript types stripped), served at `/app/parts.js`. It
+  exports any of `header`, `message`, `typing`, `background` and `composer` (type `AppPanel`), each
+  given the part the panel drew and returning the node to show. The composer's field and send button
+  keep their behaviour wherever they go. A part not exported, or one that throws, stays the panel's own.
+- **The bottom row.** "Use it in" and "Powered by Flow" are always shown, outside the reach of
+  `theme.css` and the panel module. `app.places` sets which places it offers and in what order
+  (`"terminal"`, `"claude"`, `"chatgpt"`, `"cursor"`, `"vscode"`); their addresses are `url` and
+  `cli.install`.
+- **`ChannelInfo.showsTools`** (default off): on a channel that draws each tool call, the agent sends no
+  acknowledgement, progress or early partial answer, and answers once. `Channel.tools` (and
+  `customUI`'s `tools`) offers tools only on that channel, read every turn.
+- **`terminalServer`** takes `showsTools`, `instructions`, `traceChannel`, `tools` and `onRequest`, and
+  `{ "reset": true }` starts a new chat (the agent stops seeing the earlier messages, which are kept).
+  `commandLine` (`@flow-engineer/flow/cli`) gives the CLI line for a tool call.
+
+### Migration notes
+
+None.
+
 ## 0.14.8 (2026-10-30)
 
 ### Changes

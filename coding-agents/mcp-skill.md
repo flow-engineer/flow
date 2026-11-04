@@ -477,7 +477,7 @@ draws each tool call as it runs: the agent then answers once, with no acknowledg
 For people who use the brand's website, not an assistant or a terminal: the same tools and agent as
 a chat panel docked at the side of the site (the page moves over; it never covers it), with each tool
 call shown as it runs, the CLI line that does the same, and how to add the tools to Claude, ChatGPT,
-Cursor, VS Code and the terminal. Flow hosts the panel; the brand styles it. Turn it on with `app`:
+Cursor, VS Code and the terminal. The agent's own process serves the panel; the brand styles it. Turn it on with `app`:
 
 ```ts
 import { cli } from "./cli.ts";
@@ -490,6 +490,10 @@ mcpServer({ ..., auth: bridge.auth, agent, app: {
   cli: { file: cli, install: "curl -fsSL https://cli.acme.com | sh" },   // each step's CLI line, from the CLI file
   theme: { accent: "#645bff", font: "Geist, system-ui", fontUrl: "https://fonts.googleapis.com/css2?family=Geist", monoFont: "Geist Mono",
            radius: 8, style: "soft", pattern: "dots", density: "compact", colors: { surface: "#F5F7FA" }, css: ".copy{background:#22221f}" },
+  panel: new URL("./ui/panel.ts", import.meta.url),   // the panel's parts in code (below)
+  places: ["claude", "terminal", "cursor"],      // the "Use it in" row: which, in this order
+  ui,                                            // the views the agent can show (below)
+  pages: ["/dashboard", "/dashboard/orders"],    // the site's real pages: views link only these
 } });
 ```
 
@@ -507,18 +511,56 @@ so the person's token never reaches the site's page. Its chat is its own channel
   one is recorded for the brand's insights. Give the agent a skill listing the site's real page URLs
   (which results have a page, which are found from a list page, which have none), so it only links
   pages that exist, and test that list against the live site.
-- **Generative UI is Flow's hosted service only.** On Flow's hosting (`FLOW_APP_SERVICE_URL` and the
-  agent's `FLOW_KEY`) the agent shows its answers with **UI tools**, offered only on the web app's
-  channel (`Channel.tools`): at most 25 `ui_<name>` tools from the brand's catalog, each with a short
-  description of what it shows and when, and a compact input the agent fills in its own words (never a
-  copy of a tool's response), plus `ui_create({ intent, data })` for a view made on the spot. The agent
-  picks one view for what the person asked; nothing is drawn on its own. After each made view, Flow's
-  curator decides whether it was a one-off, an existing UI tool would have done, or a new general UI
-  tool is worth having; a new one is designed as a template, tested with real and edge-case data at
-  several widths from screenshots, and added to the catalog. Self-hosted, there are no UI tools: the
-  agent answers in Markdown and nothing is sent anywhere; everything else works the same.
-- Every generated piece stays the team's: `theme.css` styles the panel's stable classes, and the
-  panel's routes (`/app`, `/app/embed.js`, `/app/chat`, `/app/view`, `/app/link`, `/app/command`) are
+- **Views are Flow's hosted service only.** On Flow's hosting (`FLOW_APP_SERVICE_URL` and the
+  agent's `FLOW_KEY`) each of the brand's `ui` (`AppUi`: `name`, `description`, `input` as a Zod
+  schema, `template` as HTML) is a `ui_<name>` tool, offered only on the web app's channel
+  (`Channel.tools`). The agent fills the input in its own words (never a copy of a tool's response)
+  and the panel draws the template in a sandboxed frame. It shows a view when one helps, at most one
+  per answer, and its words add only what the view does not show. A view linking a page not in
+  `pages` (a `{name}` is one segment, e.g. `/dashboard/orders/{order_id}`) is refused, and the agent
+  is told to fix it. Self-hosted, there are no views: the agent answers in Markdown and nothing is
+  sent anywhere; everything else works the same.
+- **The panel's parts are the team's code.** `panel: new URL("./ui/panel.ts", import.meta.url)` (or a
+  path from the working directory) is a browser module, served from the agent's own process at
+  `/app/parts.js`: one file that imports only types (TypeScript has its types stripped as Node does, so
+  no enums or namespaces; a `.js` file is served as it is). It exports any of `header`, `message`,
+  `typing`, `background` and `composer` (`AppPanel` from `@flow-engineer/flow/mcp`); each gets the
+  element the panel drew and what it shows, and returns the node to show: that element restyled,
+  wrapped, or a new one. A part it does not export, or one that throws, stays the panel's own.
+
+  ```ts
+  import type { AppPanel } from "@flow-engineer/flow/mcp";
+  export const message: AppPanel["message"] = (element, { role }) => {
+    if (role === "agent") element.querySelector<HTMLElement>(".bubble")!.style.border = "1px solid var(--border)";
+    return element;
+  };
+  // The field and its send button keep their behaviour wherever they go (Enter sends, Shift+Enter is
+  // a new line, off while the agent answers); a node without both is not used.
+  export const composer: AppPanel["composer"] = (element, { input, send }) => {
+    const box = document.createElement("div");
+    box.className = "my-composer";
+    box.append(input, send);
+    return box;
+  };
+  ```
+
+  `header` gets `{ title, subtitle, logo, mark, status, newChat, close }` (`status` changes as the
+  person signs in; the buttons work wherever they are placed), `message` `{ role: "me" | "agent", text,
+  body }` (`body` is the agent's Markdown, drawn with its HTML escaped), `typing` `{ avatar }`,
+  `background` `{ pattern, mode }` (a layer behind the panel that takes no clicks), `composer`
+  `{ input, send, placeholder }`. Use `textContent`, or `body`, never `innerHTML` with the text.
+- **Part names for CSS.** Each part's root has `data-part="<name>"`, the panel's own and a module's
+  alike, beside its class: `header` (`.head`), `message` (`.msg.me`, `.msg.agent`, their `.bubble`),
+  `typing` (`.msg.typing`), `background` (`.backdrop`), `composer` (`.composer`, the field `.field`,
+  the button `.send`). Also `.thread`, `.welcome`, `.starter`, `.steps`, `.view-box`, `.sheet`.
+- **The row under the composer is Flow's.** "Use it in" and "Powered by Flow" are drawn by the panel
+  in a closed shadow root on the body, in the top layer; no module or CSS reaches it, and the panel puts
+  it back if a script moves or covers it. Only `places` is the team's: which of `"terminal"`,
+  `"claude"`, `"chatgpt"`, `"cursor"`, `"vscode"` it offers, in that order (default all, the terminal
+  first and only with `cli`); their addresses are `url` and `cli.install`. Its colors follow the
+  theme's background, text and muted colors while they read clearly (3:1), else the panel's defaults.
+- Everything else generated stays the team's: `theme.css` styles the parts above, and the panel's routes
+  (`/app`, `/app/embed.js`, `/app/parts.js`, `/app/chat`, `/app/view`, `/app/link`, `/app/command`) are
   listed in `paths`.
 
 Without sign-in, or to serve chat from the agent's own port, mount the terminal handler as one of

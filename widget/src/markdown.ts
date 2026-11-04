@@ -1,7 +1,7 @@
 // The agent's Markdown as safe HTML. Everything is escaped first; then only a small subset is drawn:
-// **bold**, *italics*, `code`, ``` blocks ```, line breaks, - and 1. lists, and http(s) links, which
-// open in a new tab with rel="noopener noreferrer". No raw HTML ever reaches the page, and a link to
-// any other scheme (javascript:, data:) stays plain text.
+// **bold**, *italics*, `code`, ``` blocks ```, line breaks, - and 1. lists, http(s) links and links to a
+// path on the same site ([Crawls](/dashboard/crawls)), which open in a new tab with rel="noopener noreferrer".
+// No raw HTML ever reaches the page, and a link to any other scheme (javascript:, data:) stays plain text.
 
 const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 export const escapeHtml = (text: string): string => text.replace(/[&<>"']/g, (c) => ESCAPES[c]);
@@ -13,6 +13,7 @@ const PIECES: Array<[RegExp, (...m: string[]) => string]> = [
   [/```(?:[\w-]*\n)?([\s\S]+?)```/g, (_, code) => `<pre><code>${escapeHtml(code)}</code></pre>`],
   [/`([^`\n]+)`/g, (_, code) => `<code>${escapeHtml(code)}</code>`],
   [/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/gi, (_, label, url) => anchor(url, label)],
+  [/\[([^\]\n]+)\]\((\/(?![/\\])[^\s)]*)\)/g, (_, label, path) => anchor(path, label)],
   [/\bhttps?:\/\/[^\s<>"]*[^\s<>".,;:!?)\]'*_~]/gi, (url) => anchor(url, url)],
 ];
 

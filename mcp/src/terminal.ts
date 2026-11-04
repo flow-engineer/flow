@@ -1,5 +1,6 @@
 // A terminal channel beside MCP. Mount fetch wherever the agent's HTTP routes live. A bearer token
 // makes the person whoever auth.verify says; without one, a guest chats under the id its CLI keeps.
+// `{ reset: true }` instead of a message starts a new chat: the agent no longer sees what came before.
 import { customUI } from "../../src/channels.ts";
 import type { Agent } from "../../src/agent.ts";
 import type { Tool } from "../../src/tools.ts";
@@ -22,6 +23,8 @@ export interface TerminalServerOptions {
   showsTools?: boolean;
   /** Tools of this client's own, offered only on its channel and read every turn (Channel.tools). */
   tools?: () => Tool[];
+  /** Called as each request starts, with the person it is for (key:<key> or guest:<id>), before the agent runs. */
+  onRequest?: (person: string) => void;
 }
 
 export function terminalServer(options: TerminalServerOptions) {
@@ -42,9 +45,15 @@ export function terminalServer(options: TerminalServerOptions) {
       if (!identity?.key && !guest) return Response.json({ error: "sign_in_required" }, { status: 401, headers: { "www-authenticate": "Bearer" } });
       if (guest && !/^[A-Za-z0-9_-]{16,128}$/.test(guest)) return Response.json({ error: "invalid_request" }, { status: 400 });
       const person = identity?.key ? { key: identity.key, credentials: identity.credentials } : { guest: guest! };
+      options.onRequest?.(identity?.key ? `key:${identity.key}` : `guest:${guest}`);
       const queue = identity?.key ? `key:${identity.key}` : `guest:${guest}`;
       let input;
-      try { input = await request.json() as { text?: unknown; conversationId?: unknown }; } catch { return Response.json({ error: "invalid_request" }, { status: 400 }); }
+      try { input = await request.json() as { text?: unknown; conversationId?: unknown; reset?: unknown }; } catch { return Response.json({ error: "invalid_request" }, { status: 400 }); }
+      // A new chat: the agent stops seeing what came before (kept, not deleted), on this channel's person.
+      if (input?.reset === true) {
+        const reset = await options.agent().resetHistory({ to: { channel: channel.name, address: identity?.key ?? `guest:${guest}` }, note: "They started a new chat here." });
+        return Response.json({ reset: reset.status === "reset" });
+      }
       if (!input || typeof input.text !== "string" || !input.text.trim() || input.text.length > 32_768 || (input.conversationId !== undefined && typeof input.conversationId !== "string")) return Response.json({ error: "invalid_request" }, { status: 400 });
       if (inFlight >= 128) return Response.json({ error: "busy" }, { status: 429 });
       inFlight++;

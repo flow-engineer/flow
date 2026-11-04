@@ -1054,7 +1054,7 @@ export class Agent {
     const isNew = !this.conversations.has(conversationId) && !this.rows.has(conversationId);
     const conversation = this.open(conversationId, `${name}:${conversationId}`);
     if (isNew) conversation.persist(() => this.store.addIdentity(conversationId, name, conversationId, "channel"));
-    conversation.link({ name, info: defined?.info ?? options.channel ?? NO_EXTRAS, params: defined?.params, instructions: defined?.instructions, address: conversationId, deliver, lastMessageAt: null });
+    conversation.link({ name, info: defined?.info ?? options.channel ?? NO_EXTRAS, params: defined?.params, instructions: defined?.instructions, tools: defined?.tools, address: conversationId, deliver, lastMessageAt: null });
     const answer = kind ? this.keyword(conversation, defined!.keywords!, kind, text, fixed, name) : null;
     const reply = answer ? answer.reply : fixed;
     if (reply === null) return conversation.receive(message, { channel: name, messageId: options.messageId });

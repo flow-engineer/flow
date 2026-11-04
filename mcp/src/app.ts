@@ -11,58 +11,70 @@
 // page shown: the site's `FlowAppConfig.signIn` mints the code the brand's login page would.
 
 import { commandLine, type CliConfig, type ToolInfo } from "../../cli/src/commands.ts";
-import { widgetFile } from "../../src/web-chat.ts";
-import { tool, z, type Tool } from "../../src/index.ts";
+import { readFileSync } from "node:fs";
+import { stripTypeScriptTypes } from "node:module";
+import { serveScript, scriptFile, widgetFile } from "../../src/web-chat.ts";
+import { tool, type Tool } from "../../src/tools.ts";
+import type { z } from "zod";
 import type { McpIdentity } from "./server.ts";
 
 /**
  * Generative views are Flow's hosted service: on with its address (FLOW_APP_SERVICE_URL, which Flow's
  * hosting sets) and the agent's Flow key. Self-hosted, answers are Markdown and nothing is sent anywhere.
  */
-/** What the agent is told on the web app's channel when its answers are shown with UI tools. */
+/** What the agent is told on the web app's channel when it has UI tools. */
 export const UI_INSTRUCTIONS = [
-  "This is the brand's own web app. The person sees each tool call as it runs; you show the answer with a UI tool (ui_…).",
-  "First work out what they actually asked, then gather what you need. Then call exactly ONE ui_ tool with only the data that answers them, never every result you looked at. Fill its input from what you learned, in their words. Then reply in one short sentence; never repeat what the view shows, and never write tables.",
-  "When no ui_ tool fits, call ui_create with what to show (intent) and exactly that data. For a simple answer (a yes or no, one fact, a question back) show nothing: just reply.",
+  "This is the brand's own web app. The person sees each tool call as it runs, and you can show part of an answer with a ui_ tool.",
+  "Show a UI when it helps, at most ONE per answer: after gathering what you need, call the ui_ tool that best shows the main thing they asked (several things, one thing in detail, an action to take), filled with only what answers them, in their words. A single fact, a yes or no, or a question back to them needs none.",
+  "A ui_ tool is part of your answer, not a tool you wait for: call it in the same response as your reply. Never a second ui_ tool in the same answer.",
+  "The person reads your view and your words as one answer, and the view is the main way you answer: the things themselves (items, numbers, fields, actions) go in it. Your words, ONE message, complement it: what it means, a caveat, a recommendation, what to do next.",
+  "Do not repeat what the view already shows. Before you write, check each name, number and fact: if the view has it, leave it out of your words. Bad: the view lists four areas with their yields and prices, and your words walk through the four areas and their yields again. Good: \"These are gross yields, not returns after costs. **Check service charges and realistic rents before you commit.**\"",
+  "In a view, give href (a page on the site where that thing lives, from the pages you know) for what has a page, and ask (a message they can send) for a follow-up; leave both out where neither makes sense.",
+  "In your words, bold the one or two things that should catch their eye (the key fact, what to do next) with **…**; the rest plain. No headings or tables.",
+  "Every answer about something on the site shows where they can see it there, so they learn the site: through the view's link or button to its page when there is a view, else end your reply with a link to that page, like [View your crawls](/dashboard/crawls). Use only the site's real pages.",
 ].join("\n");
 
-/** The brand's UI tools from Flow's service, read again at most every 30 s, and ui_create. */
-const catalogs = new Map<string, { at: number; tools: Promise<Array<{ name: string; description: string; input: JsonSchema; template: string }>> }>();
-export function catalogOf(service: { url: string; key: string }, agent: string) {
-  let known = catalogs.get(agent);
-  if (!known || Date.now() - known.at > 30_000) {
-    // The service unreachable: keep the catalog read before (this request's own promise would wait on itself).
-    const before = known?.tools ?? Promise.resolve([]);
-    const tools = fetch(`${service.url}/v1/ui/catalog?${new URLSearchParams({ agent })}`, { headers: { authorization: `Bearer ${service.key}` }, signal: AbortSignal.timeout(10_000) })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`catalog ${r.status}`)))).then((b: { tools?: [] }) => b.tools ?? []).catch(() => before);
-    known = { at: Date.now(), tools: tools as never };
-    catalogs.set(agent, known);
-  }
-  return known.tools;
-}
-let latest: Array<{ name: string; description: string; input: JsonSchema; template: string }> = [];
-export function uiTools(service: { url: string; key: string }, agent: string): Tool[] {
-  void catalogOf(service, agent).then((tools) => { latest = tools; }, () => undefined);
-  const shown = { run: () => ({ shown: true }), signIn: "none" as const, hints: { readOnly: true, destructive: false, openWorld: false } };
-  return [
-    ...latest.slice(0, 24).map((t) => tool({ name: `ui_${t.name}`, description: t.description, input: zodOf(t.input) as z.ZodObject<Record<string, z.ZodType>>, ...shown })),
-    tool({ name: "ui_create", description: "Show the answer in a view made now, when no other ui_ tool fits: what to show, and exactly the data to show.", input: z.object({ intent: z.string().describe("What the view shows, in a few words"), data: z.record(z.string(), z.unknown()).describe("The data to show, and nothing else") }), ...shown }),
-  ];
+/**
+ * The brand's UIs as the agent's ui_ tools: calling one shows it (the panel draws it from the call). At most one
+ * per answer: `answer` starts a person's answer afresh (the web app's chat calls it as each request starts).
+ */
+export function uiTools(ui: AppUi[], pages?: string[], site?: string): { tools: () => Tool[]; answer: (person: string) => void } {
+  const shown = new Map<string, number>();
+  const tools = ui.map((u) => tool({
+    name: `ui_${u.name}`, description: `${u.description} Your words beside it add only what it does not show; never repeat its contents.`, input: u.input, signIn: "none",
+    hints: { readOnly: true, destructive: false, openWorld: false },
+    run: (input, context) => {
+      // A link to a page the site does not have is refused before anything is shown, so the agent fixes it.
+      const wrong = pages ? hrefsOf(input).filter((h) => !isPage(h, pages, site)) : [];
+      if (wrong.length) return { shown: false, note: `Not shown: these links are not pages on the site: ${wrong.join(", ")}. Use only these pages (a {name} is one value): ${pages!.join(", ")}. A thing with no page of its own: link its list page and say how to find it there. Call the ui_ tool again with fixed links.` };
+      if (shown.has(context.person)) return { shown: false, note: "Already showing a view in this answer: one per answer. Put the rest in your reply as Markdown." };
+      shown.set(context.person, Date.now());
+      if (shown.size > 10_000) shown.delete(shown.keys().next().value!);
+      // The reply usually went out with this call: then the answer is complete, and another message would only repeat it.
+      return { shown: true, note: "Shown to them. If you sent your reply together with this view, your answer is complete: send nothing more. Only if you have not replied yet, send one message now that adds what the view does not show." };
+    },
+  }));
+  return { tools: () => tools, answer: (person) => void shown.delete(person) };
 }
 
-type JsonSchema = { type?: string | string[]; enum?: unknown[]; description?: string; items?: JsonSchema; properties?: Record<string, JsonSchema>; required?: string[] };
-/** A UI tool's compact input (JSON Schema, from the curator) as a schema the agent validates against; loose where it is unsure. */
-function zodOf(schema: JsonSchema = {}): z.ZodType {
-  const type = [schema.type].flat().find((t) => t !== "null");
-  let value: z.ZodType;
-  if (schema.enum?.length && schema.enum.every((v) => typeof v === "string")) value = z.enum(schema.enum as [string, ...string[]]);
-  else if (type === "string") value = z.string();
-  else if (type === "number" || type === "integer") value = z.number();
-  else if (type === "boolean") value = z.boolean();
-  else if (type === "array") value = z.array(zodOf(schema.items));
-  else if (type === "object" || schema.properties) value = z.object(Object.fromEntries(Object.entries(schema.properties ?? {}).map(([k, v]) => [k, (schema.required ?? []).includes(k) ? zodOf(v) : zodOf(v).optional()]))).passthrough();
-  else value = z.unknown();
-  return schema.description ? value.describe(schema.description) : value;
+/** Every href in a view's input. */
+function hrefsOf(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap(hrefsOf);
+  if (!value || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([k, v]) => (k === "href" || k === "path") && typeof v === "string" ? [v] : hrefsOf(v));
+}
+
+/** Whether a link is one of the site's pages; a follow-up, a copy or a link to another site is not checked. */
+export function isPage(href: string, pages: string[], site?: string): boolean {
+  if (/^(#|mailto:)/.test(href)) return true;
+  let url: URL;
+  try { url = new URL(href, "https://site.invalid"); } catch { return false; }
+  const own = url.hostname === "site.invalid" || (site !== undefined && url.hostname === new URL(site).hostname);
+  if (!own) return true;
+  return pages.some((page) => {
+    const pattern = page.split(/[?#]/)[0]!.split("/").map((part) => (/^\{[^}]+\}$/.test(part) ? "[^/]+" : part.replace(/[.*+?^$()|[\]\\]/g, "\\$&"))).join("/");
+    return new RegExp(`^${pattern}/?$`).test(url.pathname);
+  });
 }
 
 export function appViewsOn(env: NodeJS.ProcessEnv = process.env): { url: string; key: string } | undefined {
@@ -96,7 +108,7 @@ export interface McpAppTheme {
   /** Behind the chat: "none" (default), "dots", "grid" or "glow" (a soft accent wash). */
   pattern?: "none" | "dots" | "grid" | "glow";
   density?: "comfortable" | "compact";
-  /** The brand's own CSS for the panel, applied last; its parts keep stable class names (`.app`, `.msg`, `.step`...). */
+  /** The brand's own CSS for the panel, applied last; each part keeps a stable class and `data-part` (AppPanel). */
   css?: string;
 }
 
@@ -106,6 +118,46 @@ export interface McpAppColors {
   text?: string;
   muted?: string;
   border?: string;
+}
+
+/**
+ * The agent's own module for the panel (`McpAppOptions.panel`): it exports any of these, each drawing one
+ * part. Each gets the part as the panel drew it and what it shows, and returns the node to show instead:
+ * that element restyled, wrapped, or one built anew. A part it does not export stays the panel's own.
+ * Every part's root carries `data-part="<name>"` beside its class, for CSS: header (`.head`), message
+ * (`.msg.me`, `.msg.agent`, their `.bubble`), typing (`.msg.typing`), background (`.backdrop`) and
+ * composer (`.composer`). The row under the composer ("Use it in", "Powered by Flow") is the panel's
+ * alone: no module or CSS reaches it.
+ */
+export interface AppPanel {
+  /** The top bar. `status` (the subtitle, or the sign-in state) changes as the person signs in; `newChat` and `close` work wherever they are placed. */
+  header(element: HTMLElement, part: { title: string; subtitle?: string; logo?: string; mark: HTMLElement; status: HTMLElement; newChat: HTMLButtonElement; close: HTMLButtonElement }): Node;
+  /** A message: the person's (`me`, plain text) or the agent's (`agent`, `body` its Markdown drawn safely). Called for each one drawn. */
+  message(element: HTMLElement, part: { role: "me" | "agent"; text: string; body: HTMLElement }): Node;
+  /** What shows while the agent answers; removed when it is done. */
+  typing(element: HTMLElement, part: { avatar: HTMLElement }): Node;
+  /** A layer behind the whole panel (the theme's pattern by default), drawn once; it takes no clicks. */
+  background(element: HTMLElement, part: { pattern: string; mode: string }): Node;
+  /**
+   * The text field and its send button. They keep their behaviour wherever they are placed (Enter sends,
+   * Shift+Enter is a new line, both are off while the agent answers); a node without both is not used.
+   */
+  composer(element: HTMLElement, part: { input: HTMLTextAreaElement; send: HTMLButtonElement; placeholder: string }): Node;
+}
+
+/** Where else the tools work, as the panel's "Use it in" row offers them. */
+export type AppPlace = "terminal" | "claude" | "chatgpt" | "cursor" | "vscode";
+const PLACES: AppPlace[] = ["terminal", "claude", "chatgpt", "cursor", "vscode"];
+
+export interface AppUi {
+  /** ui_<name> to the agent: what it shows, short (stat, list, compare). */
+  name: string;
+  /** What it shows and when to use it. */
+  description: string;
+  /** What the agent fills in: few, general fields. */
+  input: z.ZodObject<Record<string, z.ZodType>>;
+  /** Its HTML, with {{field}} placeholders, in the brand's look. */
+  template: string;
 }
 
 export interface McpAppOptions {
@@ -134,8 +186,32 @@ export interface McpAppOptions {
   /** The panel's starting width in pixels, 340 to 720; people can drag it wider. Default 420. */
   width?: number;
   theme?: McpAppTheme;
+  /**
+   * The agent's own module for the panel's parts (AppPanel), served from this process: a file URL
+   * (`new URL("./ui/panel.ts", import.meta.url)`) or a path from the working directory. One file with no
+   * imports but `import type`; TypeScript has its types stripped, as Node runs it (no enums or namespaces).
+   */
+  panel?: string | URL;
+  /**
+   * The "Use it in" row: which places, in this order. Default all of them, the terminal first (only with
+   * `cli`). Their addresses are `url` and `cli.install`. The rest of the row is the panel's own.
+   */
+  places?: AppPlace[];
   /** The brand's site, whose links the app opens in the site itself (https://www.example.com); its own origin when embedded elsewhere, such as locally. */
   site?: string;
+  /**
+   * The brand's own UIs: views the agent can show an answer with, on Flow's hosting. Each is offered on
+   * the web app's channel as the tool ui_<name>: what it shows and when (description), a compact input the
+   * agent fills in its own words, and a template (Mustache-style, app-fill.ts) the panel fills with it.
+   * The agent uses one only when it fits, at most one per answer; otherwise it answers in text.
+   */
+  ui?: AppUi[];
+  /**
+   * The site's real pages, as paths with {placeholders} for one segment each ("/dashboard/monitors/{id}"); a
+   * query or hash is allowed after any. With them, a view whose link is not one of them is refused (the agent
+   * is told the pages there are), and a link that still is not one opens the nearest page that is.
+   */
+  pages?: string[];
   /** The MCP URL people add to their assistant. Default: auth.resource, else this origin's MCP path. */
   url?: string;
   /** The agent's CLI: how to install it, and its CLI file, which says the command for each tool the chat runs. */
@@ -150,6 +226,8 @@ export interface McpAppOptions {
 export const APP_PATH = "/app";
 /** The files the app serves: the launcher, the panel and what it imports. */
 const FILES: Record<string, string> = { "embed.js": "app-embed", "panel.js": "app-panel", "markdown.js": "markdown", "app-icons.js": "app-icons", "app-fill.js": "app-fill" };
+/** Where the agent's own module for the panel is served. */
+const PARTS = "parts.js";
 const LOCAL = ["localhost", "127.0.0.1", "[::1]"];
 
 export function appServer(options: McpAppOptions, server: { name: string; mcpPath: string; resource?: string; terminalPath?: string; tools: ToolInfo[]; chat?: { fetch(request: Request): Promise<Response> }; verify?: (token: string, request: Request) => Promise<McpIdentity | null> }) {
@@ -168,6 +246,10 @@ export function appServer(options: McpAppOptions, server: { name: string; mcpPat
   if (!origins.length) throw new Error("@flow-engineer/flow/mcp: give the sites that embed the app as app.origins");
   const theme = options.theme ?? {};
   for (const url of [options.logo, theme.fontUrl]) if (url && !/^(https:|data:image\/)/.test(url)) throw new Error(`@flow-engineer/flow/mcp: app.logo and theme.fontUrl are https (or data:image/) URLs, not "${url}"`);
+  for (const place of options.places ?? []) if (!PLACES.includes(place)) throw new Error(`@flow-engineer/flow/mcp: app.places are ${PLACES.join(", ")}, not "${place}"`);
+  if (options.places?.includes("terminal") && !options.cli) throw new Error("@flow-engineer/flow/mcp: app.places has terminal, which needs app.cli");
+  const places = [...new Set(options.places ?? PLACES.filter((place) => place !== "terminal" || options.cli))];
+  const parts = options.panel === undefined ? undefined : panelModule(options.panel);
   const title = options.title ?? server.name;
   const width = Math.min(720, Math.max(340, Math.round(options.width ?? 420)));
   // What the launcher on the site needs before the panel exists.
@@ -196,17 +278,9 @@ export function appServer(options: McpAppOptions, server: { name: string; mcpPat
         const body = await request.json().catch(() => null) as Record<string, unknown> | null;
         if (!body) return Response.json({ error: "invalid_request" }, { status: 400 });
         if (url.pathname.endsWith("/view")) {
-          // A UI tool the agent called: ui_create is made now by Flow's service; another is a catalog template the panel fills.
-          if (typeof body.ui !== "string" || !body.data || typeof body.data !== "object") return Response.json({ error: "invalid_request" }, { status: 400 });
-          if (body.ui === "ui_create") {
-            const { intent, data } = body.data as { intent?: unknown; data?: unknown };
-            const answer = await service("/v1/ui/create", { agent: server.name, intent, data, question: body.question }).catch(() => null);
-            return answer?.ok ? Response.json(await answer.json()) : Response.json({ error: "no_view" }, { status: 502 });
-          }
-          const found = (await catalogOf(views, server.name)).find((t) => `ui_${t.name}` === body.ui);
-          if (!found) return Response.json({ error: "no_view" }, { status: 404 });
-          void service("/v1/ui/used", { agent: server.name, name: found.name }).catch(() => null);
-          return Response.json({ template: found.template });
+          // A UI the agent called: its template, which the panel fills with the agent's input.
+          const found = options.ui?.find((u) => `ui_${u.name}` === body.ui);
+          return found ? Response.json({ template: found.template }) : Response.json({ error: "no_view" }, { status: 404 });
         }
         // Where a link the assistant gave led, for the brand's insights.
         if (typeof body.url !== "string") return Response.json({ error: "invalid_request" }, { status: 400 });
@@ -241,8 +315,11 @@ export function appServer(options: McpAppOptions, server: { name: string; mcpPat
           terminal: server.chat ? `${APP_PATH}/chat` : server.terminalPath,
           views: !!views,
           site: options.site,
+          pages: options.pages,
           url: options.url ?? server.resource ?? `${url.origin}${server.mcpPath}`,
           cli: options.cli && { name: options.cli.file.name, install: options.cli.install },
+          places,
+          parts: !!parts,
         };
         const fonts = theme.fontUrl ? " https:" : "";
         return new Response(page(settings, title), {
@@ -255,12 +332,25 @@ export function appServer(options: McpAppOptions, server: { name: string; mcpPat
           },
         });
       }
+      if (parts && url.pathname === `${APP_PATH}/${PARTS}`) return serveScript(parts, request, "no-cache");
       const file = url.pathname.startsWith(`${APP_PATH}/`) ? FILES[url.pathname.slice(APP_PATH.length + 1)] : undefined;
       // Checked on every load, so a new version reaches people at once (a 304 when it has not changed).
       if (file) return widgetFile(file, request, "no-cache");
       return new Response("Not found", { status: 404 });
     },
   };
+}
+
+/** The agent's module for the panel, read once at start, so a missing file or one the browser cannot load fails here. */
+function panelModule(at: string | URL) {
+  const file = typeof at === "string" && !at.startsWith("file:") ? at : new URL(at);
+  const where = typeof file === "string" ? file : file.pathname;
+  let text: string;
+  try { text = readFileSync(file, "utf8"); } catch (error) { throw new Error(`@flow-engineer/flow/mcp: app.panel: cannot read ${where} (${(error as Error).message})`); }
+  if (/\.[mc]?ts$/.test(where)) text = stripTypeScriptTypes(text);
+  // Served alone at /app/parts.js: anything it imported would not be there.
+  if (/^\s*(import\s*[\w{*'"]|export\s[^;]*\bfrom\s*['"])/m.test(text)) throw new Error(`@flow-engineer/flow/mcp: app.panel (${where}) is one file: import only types (import type)`);
+  return scriptFile(text);
 }
 
 /** The iframe's page: its settings as JSON (never run as script), the brand's font, and the panel module. */

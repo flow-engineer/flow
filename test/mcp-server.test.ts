@@ -1,7 +1,11 @@
-// covers: mcp/src/server.ts mcp/src/describe.ts src/skills.ts src/tools.ts src/records.ts
+// covers: mcp/src/server.ts mcp/src/describe.ts mcp/src/app.ts src/skills.ts src/tools.ts src/records.ts src/web-chat.ts
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { isSpecType } from "@modelcontextprotocol/server";
 import { z } from "zod";
@@ -345,4 +349,54 @@ test("plugin routes can be moved or disabled and keep instruction overrides", as
   const disabled = mcpServer({ name: "cafe", version: "1", tools: [], plugin: false });
   assert.equal(disabled.plugin, undefined);
   assert.equal((await disabled.fetch(new Request("http://127.0.0.1/mcp/plugin"))).status, 404);
+});
+
+// The web app's panel: what an agent may change (its parts, in its own module; which places it offers)
+// and what it may not (Flow's row is drawn by the panel, never by the module).
+const appDir = mkdtempSync(join(tmpdir(), "flow-app-panel-"));
+after(() => rmSync(appDir, { recursive: true, force: true }));
+const SITE = "https://shop.example";
+function appOf(app: Omit<NonNullable<McpServerOptions["app"]>, "origins">) {
+  const handle = mcpServer({ name: "cafe", version: "1", tools: cafeTools, app: { origins: [SITE], ...app } });
+  const get = (path: string) => handle.fetch(new Request(`https://cafe.example${path}`));
+  /** The settings the panel's page carries. */
+  const settings = async () => JSON.parse(/<script type="application\/json" id="flow-app">(.*?)<\/script>/.exec(await (await get(`/app?origin=${SITE}`)).text())![1]!) as { parts: boolean; places: string[] };
+  return { get, settings };
+}
+
+test("an agent's own panel module is served from its process with its types stripped, and the panel loads it", async () => {
+  const file = join(appDir, "panel.ts");
+  writeFileSync(file, `import type { AppPanel } from "@flow-engineer/flow/mcp";\nexport const message: AppPanel["message"] = (element: HTMLElement) => element;\n`);
+  for (const panel of [file, pathToFileURL(file)]) {
+    const app = appOf({ panel });
+    assert.equal((await app.settings()).parts, true);
+    const served = await app.get("/app/parts.js");
+    assert.equal(served.status, 200);
+    assert.equal(served.headers.get("content-type"), "text/javascript; charset=utf-8");
+    const code = await served.text();
+    assert.match(code, /export const message\s+= \(element\s*\) => element;/);
+    assert.doesNotMatch(code, /import|AppPanel|HTMLElement/);
+  }
+  const plain = appOf({});
+  assert.equal((await plain.settings()).parts, false);
+  assert.equal((await plain.get("/app/parts.js")).status, 404);
+});
+
+test("a panel module the browser could not load is refused at start: a missing file, or one that imports", () => {
+  assert.throws(() => appOf({ panel: join(appDir, "missing.ts") }), /app\.panel: cannot read/);
+  const imports = join(appDir, "imports.js");
+  for (const code of [`import { x } from "./x.js";`, `import "./x.js";`, `export { x } from "./x.js";`]) {
+    writeFileSync(imports, `${code}\nexport const header = (element) => element;\n`);
+    assert.throws(() => appOf({ panel: imports }), /is one file: import only types/, code);
+  }
+});
+
+test("places sets which of the row's places show and in what order; nothing else of the row is an option", async () => {
+  const cli = { file: { name: "cafe" } as never, install: "curl -fsSL https://cli.cafe.example | sh" };
+  assert.deepEqual((await appOf({}).settings()).places, ["claude", "chatgpt", "cursor", "vscode"], "the terminal only with a CLI");
+  assert.deepEqual((await appOf({ cli }).settings()).places, ["terminal", "claude", "chatgpt", "cursor", "vscode"]);
+  assert.deepEqual((await appOf({ cli, places: ["vscode", "terminal", "vscode"] }).settings()).places, ["vscode", "terminal"]);
+  assert.deepEqual((await appOf({ places: [] }).settings()).places, []);
+  assert.throws(() => appOf({ places: ["terminal"] }), /places has terminal, which needs app\.cli/);
+  assert.throws(() => appOf({ places: ["slack" as never] }), /app\.places are terminal, claude, chatgpt, cursor, vscode, not "slack"/);
 });

@@ -6,5 +6,6 @@ export { mcpServer, type McpAuth, type McpIdentity, type McpServerHandle, type M
 export { mcpTools, fingerprint, type McpDescriptor, type McpLock, type McpToolsOptions } from "./client.ts";
 export { describe, titleOf, toolProblems, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
 
-export type { McpAppColors, McpAppOptions, McpAppTheme } from "./app.ts";
+export type { AppPanel, AppPlace, AppUi, McpAppColors, McpAppOptions, McpAppTheme } from "./app.ts";
+export { uiTools, UI_INSTRUCTIONS } from "./app.ts";
 export { terminalServer, type TerminalServerOptions } from "./terminal.ts";

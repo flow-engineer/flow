@@ -349,6 +349,7 @@ function appChatOf(options: McpServerOptions, terminal: ReturnType<typeof termin
   if (!options.app || !terminal || !options.agent) return undefined;
   const given = options.agent;
   const views = appViewsOn();
+  const ui = views && options.app.ui?.length ? uiTools(options.app.ui, options.app.pages, options.app.site) : undefined;
   const chat = terminalServer({
     agent: () => { const built = typeof given === "function" ? given() : given; built.addChannel(chat.channel); return built; },
     ...(options.auth ? { auth: { verify: (token: string, request: Request) => options.auth!.verify(token, request) } } : {}),
@@ -358,7 +359,7 @@ function appChatOf(options: McpServerOptions, terminal: ReturnType<typeof termin
     // The panel draws every tool call as it runs, so the agent answers once instead of acknowledging first.
     showsTools: true,
     // On Flow's hosting the answer is shown with the brand's UI tools (uiTools), picked by the agent.
-    ...(views ? { instructions: UI_INSTRUCTIONS, tools: () => uiTools(views, options.name) } : {}),
+    ...(ui ? { instructions: UI_INSTRUCTIONS, tools: ui.tools, onRequest: ui.answer } : {}),
   });
   if (typeof given !== "function") given.addChannel(chat.channel);
   return chat;
