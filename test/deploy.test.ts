@@ -94,7 +94,7 @@ async function cloud(options: { ending?: "live" | "refused"; address?: boolean; 
 const waited: number[] = [];
 
 /** Runs the CLI, keeping stdout and stderr apart. */
-async function run(argv: string[], env: NodeJS.ProcessEnv, stdin?: string) {
+async function run(argv: string[], env: NodeJS.ProcessEnv, stdin?: string, polls: number | null = 2) {
   const out: string[] = [];
   const err: string[] = [];
   waited.length = 0;
@@ -103,7 +103,7 @@ async function run(argv: string[], env: NodeJS.ProcessEnv, stdin?: string) {
   console.log = (...a: unknown[]) => void out.push(a.join(" "));
   console.error = (...a: unknown[]) => void err.push(a.join(" "));
   try {
-    const options = { pollMs: 1, maxPolls: 2, now: () => Date.parse("2026-10-20T11:00:00Z"), readStdin: () => stdin ?? "", waits: { wait: async (ms: number) => void waited.push(ms), note: (line: string) => void err.push(line) } };
+    const options = { pollMs: 1, maxPolls: polls ?? undefined, now: () => Date.parse("2026-10-20T11:00:00Z"), readStdin: () => stdin ?? "", waits: { wait: async (ms: number) => void waited.push(ms), note: (line: string) => void err.push(line) } };
     const code = argv[0] === "logs" ? await logsCli(argv.slice(1), env, options) : await deployCli(argv, env, options);
     return { code, stdout: out.join("\n"), printed: [...out, ...err].join("\n") };
   } finally {
@@ -547,4 +547,43 @@ test("a 429 from the cloud is waited out for its Retry-After and the call sent a
   assert.deepEqual(waited, [2000]);
   assert.match(printed, /rate limiting this key \(429\): waiting 2 s, then trying again\./);
   assert.equal(fake.calls.filter((c) => c.path.startsWith("/v1/hosting/deploys?")).length, 2);
+});
+
+/** A host with `count` log lines a minute apart, answering 500 a page, oldest first, as hosting does: `next` is the last line's cursor, unchanged when there are no more. */
+async function pagedLogs(count: number) {
+  const asked: URLSearchParams[] = [];
+  const http = createServer((req, res) => {
+    const query = new URL(req.url!, "http://x").searchParams;
+    asked.push(query);
+    const after = query.has("after") ? Number(query.get("after")) : -1;
+    const lines = Array.from({ length: count }, (_, i) => ({ time: new Date(Date.parse("2026-10-18T00:00:00Z") + i * 60_000).toISOString(), severity: "INFO", text: `line ${i}` })).slice(after + 1, after + 501);
+    const next = lines.length ? String(after + lines.length) : (query.get("after") ?? String(after));
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ lines, next, from: "2026-10-17T11:00:00Z" }));
+  });
+  await new Promise<void>((done) => http.listen(0, "127.0.0.1", done));
+  return { url: `http://127.0.0.1:${(http.address() as AddressInfo).port}`, asked, close: () => http.close() };
+}
+
+test("logs without --follow reads every 500-line page to the end and prints them all, oldest first", async () => {
+  const host = await pagedLogs(1200);
+  try {
+    const { code, stdout, printed } = await run(["logs", "--env", "production", "--since", "3d", "--json", "--dir", agentFolder()], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url }, undefined, null);
+    assert.equal(code, 0, printed);
+    const texts = stdout.split("\n").map((l) => JSON.parse(l).text);
+    assert.equal(texts.length, 1200);
+    assert.deepEqual([texts[0], texts[499], texts[500], texts.at(-1)], ["line 0", "line 499", "line 500", "line 1199"]);
+    assert.deepEqual(host.asked.map((q) => q.get("after")), [null, "499", "999", "1199"], "the last page's cursor did not move: the end");
+  } finally { host.close(); }
+});
+
+test("logs over --limit keeps the newest lines and says on stderr where they start and how to get the older ones", async () => {
+  const host = await pagedLogs(1200);
+  try {
+    const { code, stdout, printed } = await run(["logs", "--since", "3d", "--limit", "1000", "--json", "--dir", agentFolder()], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url }, undefined, null);
+    assert.equal(code, 0, printed);
+    const texts = stdout.split("\n").map((l) => JSON.parse(l).text);
+    assert.deepEqual([texts.length, texts[0], texts.at(-1)], [1000, "line 200", "line 1199"]);
+    assert.match(printed, /Printed the newest 1000 of 1200 lines, from 2026-10-18T03:20:00\.000Z \(--limit 1000\)\. The 200 older ones: npx @flow-engineer\/flow logs --since 2026-10-17T11:00:00\.000Z --until 2026-10-18T03:19:00\.000Z/);
+    assert.equal((await run(["logs", "--limit", "0", "--dir", agentFolder()], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url })).code, 2);
+  } finally { host.close(); }
 });

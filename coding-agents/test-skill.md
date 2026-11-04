@@ -351,6 +351,12 @@ runs only while the tests are the same. The session's version is the commit the 
 same label the agent's traces carry; leave `--agent-version` unset unless the commit is not what
 runs, and record deploys on the owner's own servers as `build-agent-skill.md` ("Deploy it") says. Every run calls real models, so it costs a little.
 
+`tests/drafts/` holds test drafts: `npx @flow-engineer/flow test pull` writes there the scenarios Flow
+made from the hosted agent's conversations that went wrong (the business kept, the people made up,
+`origin: { from: chat, check: not_checked }`). Drafts never run or gate; `flow test` reads only
+`tests/scenarios/` and `tests/tools/`. Read each draft against the agent, fix what is wrong in it, and
+move it into `tests/scenarios/` to keep it; delete the ones that do not test a real problem.
+
 ## An agent on another framework, in any language
 
 An agent not built on Flow Framework is tested through an HTTP endpoint: `npx @flow-engineer/flow test --agent-url <url>`.

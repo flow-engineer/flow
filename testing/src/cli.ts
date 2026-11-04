@@ -23,9 +23,12 @@
 // keys and its phone link (testing/src/account.ts); `flow projects list | delete` lists and deletes
 // that account's projects (testing/src/projects.ts). `flow deploy` puts the agent on Flow's hosting
 // (testing/src/deploy.ts). `flow conversations` and `flow issues` read the hosted agent's
-// conversations and the grades of its replies (testing/src/conversations.ts); `flow templates` the
+// conversations and the grades of its replies, and `flow insights` Flow Insights' findings
+// (testing/src/conversations.ts); `flow templates` the
 // project's approved WhatsApp templates (testing/src/templates.ts), which `flow test` compares with
-// the declared ones.
+// the declared ones. `flow mcp serve` serves those reads, and logs and deploy status, as read-only MCP
+// tools on stdio for the coding agent in the agent's folder (testing/src/mcp-serve.ts). `flow test pull` writes the test drafts Flow made from the hosted agent's
+// conversations into tests/drafts/, which flow test never reads (testing/src/pull.ts).
 
 import { mkdirSync, existsSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -45,17 +48,19 @@ import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
 import { PROJECTS_LINE, projectsCli } from "./projects.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
 import { RECORDS_LINE, recordsCli } from "./records.ts";
-import { CONVERSATIONS_LINES, conversationsCli, issuesCli } from "./conversations.ts";
+import { CONVERSATIONS_LINES, conversationsCli, INSIGHTS_LINES, insightsCli, issuesCli } from "./conversations.ts";
 import { TEMPLATES_LINE, templatesCli, templateWarnings } from "./templates.ts";
 import { KEYS_HELP } from "./cloud-call.ts";
+import { PULL_LINE, pullCli } from "./pull.ts";
 import type { TemplateDefinition } from "../../src/types.ts";
 import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
-import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
+import { PROFILE_TOOL } from "../../src/conversation.ts";
+import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, modelPlayedLine, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
-import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
+import { givenProblems, loadFakes, loadSuite, parseScenario, parseToolFile, suiteHash, type ToolFile } from "./suite.ts";
 import type { RunOutcome, RunSummary } from "./protocol.ts";
 
 const NEW_LINE = `  flow new <name> [--display-name <name>]
@@ -70,12 +75,17 @@ const NEW_LINE = `  flow new <name> [--display-name <name>]
                             the folder's name)`;
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
-                            the tests are in tests/scenarios and tests/tools)`;
+                            the tests are in tests/scenarios and tests/tools)
+${PULL_LINE}`;
 const CHECK_LINE = `  flow check-endpoint <url> [--token-env NAME] [--json]
                             Check an agent's HTTP endpoint against the contract, for --agent-url
                             (flow check-endpoint --help)`;
 const MCP_LINE = `  flow mcp update        Write the tools of the MCP servers the agent uses (mcpTools) to
-                            mcp.lock.json, from the agent's folder; commit it after the tests`;
+                            mcp.lock.json, from the agent's folder; commit it after the tests
+  flow mcp serve [--dir <folder>] [--cloud <url>]
+                            This agent's conversations, issues, templates, logs and deploys as
+                            read-only MCP tools for your coding agent (flow mcp serve --help):
+                            claude mcp add flow -- npx @flow-engineer/flow mcp serve`;
 const CLI_LINE = `  flow cli --server <url> <command>
                             Any MCP server's tools as commands (flow cli --server <url> --help)`;
 const INSPECT_LINE = `  flow inspect <url> <command>
@@ -176,7 +186,7 @@ the CHINWAG_ names from before the rename still work):
 ${KEYS_HELP}`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
 const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${RECORDS_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${CLI_RELEASE_LINE}\n${INSPECT_LINE}
-${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${PROJECTS_LINE}\n${DEPLOY_LINE}\n${CONVERSATIONS_LINES}\n${TEMPLATES_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
+${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${PROJECTS_LINE}\n${DEPLOY_LINE}\n${CONVERSATIONS_LINES}\n${INSIGHTS_LINES}\n${TEMPLATES_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
 
 /** What to do after new or init, from step 2; a model key comes first when none is set here. */
 function nextSteps(): string {
@@ -192,18 +202,27 @@ function nextSteps(): string {
 
 checkNode(process.versions.node);
 
-if (process.argv[2] === "plugin") process.exit(pluginCli(process.argv.slice(3)));
+if (process.argv[2] === "plugin") await exitFlushed(pluginCli(process.argv.slice(3)));
 
 if (process.argv[2] === "check-endpoint") {
   // Its token may be in the agent folder's .env; no value is ever printed.
   loadEnv(undefined);
-  process.exit(await checkEndpointCli(process.argv.slice(3)));
+  await exitFlushed(await checkEndpointCli(process.argv.slice(3)));
 }
 if (process.argv[2] === "show") await exitFlushed(await showCli(process.argv.slice(3)));
 if (process.argv[2] === "check") await exitFlushed(await checkCli(process.argv.slice(3)));
 if (process.argv[2] === "mcp") {
+  if (process.argv[3] === "--help" || process.argv[3] === "-h") {
+    console.log(`Usage:\n${MCP_LINE}`);
+    process.exit(0);
+  }
+  if (process.argv[3] === "serve") {
+    // Loaded only here: it needs @modelcontextprotocol/server, an optional peer.
+    const { mcpServeCli } = await withPeers("mcp serve", () => import("./mcp-serve.ts"));
+    process.exit(await mcpServeCli(process.argv.slice(4)));
+  }
   if (process.argv[3] !== "update") {
-    console.error(MCP_LINE.trim());
+    console.error(`Usage:\n${MCP_LINE}`);
     process.exit(1);
   }
   // Loaded here first, so a missing optional peer is one line; mcpUpdateCli's own import of it is then cached.
@@ -214,21 +233,23 @@ if (process.argv[2] === "cli" && ["pack", "publish", "rollback", "status"].inclu
 if (process.argv[2] === "cli") {
   // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client and @stricli/core, optional peers.
   const { defineCli, runCli } = await withPeers("cli", () => import("../../cli/src/index.ts"));
-  process.exit(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
+  await exitFlushed(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
 }
 if (process.argv[2] === "inspect") {
   // Loaded only here: it needs @modelcontextprotocol/client, an optional peer.
   const { inspectCli } = await withPeers("inspect", () => import("./inspect.ts"));
-  process.exit(await inspectCli(process.argv.slice(3)));
+  await exitFlushed(await inspectCli(process.argv.slice(3)));
 }
 if (process.argv[2] === "deploy") await exitFlushed(await deployCli(process.argv.slice(3)));
 if (process.argv[2] === "logs") await exitFlushed(await logsCli(process.argv.slice(3)));
-if (process.argv[2] === "chat") process.exit(await chatCli(process.argv.slice(3)));
-if (process.argv[2] === "records") process.exit(await recordsCli(process.argv.slice(3)));
+if (process.argv[2] === "chat") await exitFlushed(await chatCli(process.argv.slice(3)));
+if (process.argv[2] === "records") await exitFlushed(await recordsCli(process.argv.slice(3)));
 if (process.argv[2] === "projects") await exitFlushed(await projectsCli(process.argv.slice(3)));
 if (process.argv[2] === "conversations") await exitFlushed(await conversationsCli(process.argv.slice(3)));
 if (process.argv[2] === "issues") await exitFlushed(await issuesCli(process.argv.slice(3)));
+if (process.argv[2] === "insights") await exitFlushed(await insightsCli(process.argv.slice(3)));
 if (process.argv[2] === "templates") await exitFlushed(await templatesCli(process.argv.slice(3)));
+if (process.argv[2] === "test" && process.argv[3] === "pull") await exitFlushed(await pullCli(process.argv.slice(4)));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) await exitFlushed(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
 const TEST_FLAGS = {
@@ -264,17 +285,17 @@ const { values, positionals } = parseCommandLine();
 const [command, ...rest] = positionals;
 if (values.env !== undefined && values.environment !== undefined && values.env !== values.environment) {
   console.error(`flow: --env and --environment name different environments (${values.env}, ${values.environment}): give one.\n\n${TEST_USAGE}`);
-  process.exit(1);
+  await exitFlushed(1);
 }
 values.environment ??= values.env;
 
 if (values.version) {
   console.log(JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).version);
-  process.exit(0);
+  await exitFlushed(0);
 }
 if (values.help || process.argv.length <= 2) {
   console.log(command === "new" || command === "init" ? NEW_USAGE : command === "test" ? TEST_USAGE : USAGE);
-  process.exit(0);
+  await exitFlushed(0);
 }
 
 /** --display-name, else asked for in a terminal (Enter takes the folder's name in words), else that default. */
@@ -305,12 +326,12 @@ if (command === "new") {
     dir = newStandalone(name, { displayName: await askDisplayName(displayNameFlag, name) });
   } catch (error) {
     console.error((error as Error).message);
-    process.exit(1);
+    await exitFlushed(1);
   }
   console.log(`Made ./${name}/ from the café example. ${namedLine(dir)} Next:
   1. cd ${name} && npm install
 ${nextSteps()}`);
-  process.exit(0);
+  await exitFlushed(0);
 }
 
 if (command === "init") {
@@ -321,13 +342,13 @@ if (command === "init") {
     name = initHere(process.cwd(), { name: nameFlag, displayName: await askDisplayName(displayNameFlag, nameFlag ?? folderName(process.cwd())) });
   } catch (error) {
     console.error((error as Error).message);
-    process.exit(1);
+    await exitFlushed(1);
   }
   loadEnv(undefined); // a .env already here may hold a model key
   console.log(`Made ${name}, started from the café example, in this folder. ${namedLine(process.cwd())} Next:
   1. npm install
 ${nextSteps()}`);
-  process.exit(0);
+  await exitFlushed(0);
 }
 
 /** Every human line of `flow test`: stdout, or stderr with --json, where stdout is the report. */
@@ -435,8 +456,8 @@ function forUrl(files: ReturnType<typeof loadSuite>) {
   if (toolFiles.length) console.warn(`Not sent: ${toolFiles.map((f) => f.path).join(", ")}. Tool simulators play a Flow Framework agent's tools; your agent's own tools run for real.`);
   for (const f of files.filter((f) => f.path.startsWith("scenarios/"))) {
     const scenario = parseScenario(f); // checkSuite has read it already
-    if (scenario.world || scenario.expect.outcome?.length) {
-      console.warn(`${scenario.id}: its world and outcome checks are for simulated tools; your agent's tools run on its side, so the judge sees no tool calls. Running it anyway.`);
+    if (scenario.world || scenario.given || scenario.expect.outcome?.length || scenario.expect.state) {
+      console.warn(`${scenario.id}: its world, given, outcome and state checks are for simulated tools; your agent's tools run on its side, so the judge sees no tool calls. Running it anyway.`);
     }
   }
   return files.filter((f) => !f.path.startsWith("tools/"));
@@ -456,6 +477,15 @@ const suite = loadSuite(join(dir, "tests"));
 picked = values.failed ? failedLastTime(suite) : values.only ? new Set(values.only.split(",").map((s) => s.trim())) : undefined;
 const chosen = only(suite, picked);
 checkSuite(chosen);
+// The fakes are loaded before anything is sent; a file that does not load is named like a test file that does not parse.
+let fakes: string[] = [];
+if (!agentUrl) {
+  try {
+    fakes = [...(await loadFakes(join(dir, "tests"))).keys()];
+  } catch (error) {
+    invalid(`${(error as Error).message}\n\nNothing was sent: fix the test files above.`);
+  }
+}
 files = forUrl(chosen);
 if (agentUrl) await checkAgentReachable(agentUrl);
 perScenario = runs;
@@ -548,6 +578,8 @@ if (flaky.length) {
   for (const r of flaky) say(`  ${r.scenario} #${r.run} (${r.channel}): ${r.watch}${r.rerun ? ` then ${r.rerun.watch}` : ""}`);
 }
 for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m) => ({ scenario: m.scenario, invalid: m.summary?.invalid }))))) say(line);
+const byModel = modelPlayedLine(summary.runs, fakes);
+if (byModel) say(byModel);
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
 say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
 if (mergedRuns(summary.runs).some((m) => m.verdict === "not_played")) endedEarly(summary.runs, "the cloud finished the session without playing every run", say);
@@ -715,6 +747,7 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       rerun: m.summary?.rerun ?? null,
       label: m.summary?.label ?? null,
       replayed: m.summary?.replayed ?? null,
+      toolsPlayedBy: m.summary?.toolsPlayedBy ?? null,
     })) : [];
     const count = (verdict: Verdict) => runs.filter((r) => r.verdict === verdict).length;
     const rate = passRate(runs, values.strict);
@@ -767,7 +800,7 @@ async function withPeers<T>(command: string, load: () => Promise<T>): Promise<T>
     const peers = JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).peerDependencies as Record<string, string>;
     if ((error as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND" || !missing || !(missing in peers)) throw error;
     console.error(`flow ${command} needs ${missing}: run it from your agent's folder (npx @flow-engineer/flow ${command}), or npm install ${missing}.`);
-    process.exit(1);
+    return exitFlushed(1);
   }
 }
 
@@ -858,14 +891,21 @@ function checkRuns(runs: string): number {
 /** Every scenario and tool file read as the cloud reads it, before anything is sent; exits 1 with each problem at its line. */
 function checkSuite(sent: ReturnType<typeof loadSuite>): void {
   const problems: string[] = [];
+  const toolFiles: ToolFile[] = [];
+  const scenarios: Array<{ path: string; scenario: ReturnType<typeof parseScenario> }> = [];
   for (const file of sent) {
     const named = { path: join("tests", file.path), content: file.content };
     try {
-      if (file.path.startsWith("scenarios/")) parseScenario(named);
-      else if (!agentUrl) parseToolFile(named);
+      if (file.path.startsWith("scenarios/")) scenarios.push({ path: named.path, scenario: parseScenario(named) });
+      else if (!agentUrl) toolFiles.push(parseToolFile(named));
     } catch (error) {
       problems.push((error as Error).message);
     }
+  }
+  // given.tools names the agent's tools (its own, and the built-in profile the tests play), and down or flaky needs an error to play.
+  if (!agentUrl) {
+    const tools = [...agent.tools.map((t) => t.name), PROFILE_TOOL];
+    for (const { path, scenario } of scenarios) for (const problem of givenProblems(scenario, tools, toolFiles)) problems.push(`${path}: ${problem}`);
   }
   if (!problems.length) return;
   invalid(`${problems.join("\n")}\n\nNothing was sent: fix the test files above.`);

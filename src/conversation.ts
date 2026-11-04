@@ -50,7 +50,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, numbered, type ContentRefusal } from "./channels.ts";
 import type { FlowEvents } from "./business-events/engine.ts";
-import type { FlowEvent, Emit, EventSink } from "./events.ts";
+import { log, logFields, type FlowEvent, type Emit, type EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { recordsUntil, type Records } from "./records.ts";
 import { addWakeUp, scheduleTools, wakeUpsOf, wakeUpsSection, wakeUpTools, type WakeUps } from "./schedules.ts";
@@ -436,7 +436,7 @@ export class Conversation {
     this.builtins = new Map(builtins.map((t) => [t.name, t]));
     this.builtinSpecs = builtins.map(toSpec);
     this.loaded = settings.ready.then(() => (existing ? this.claimAndLoad() : settings.store.createConversation(id, personKey)));
-    this.writes = this.loaded.catch((error) => console.warn("flow: conversation %s did not load:", id, error));
+    this.writes = this.loaded.catch((error) => log("WARNING", "flow: conversation %s did not load:", id, error));
   }
 
   /** Their time zone, as the business set it or they said it: schedules, quiet hours and the time line use it from now on. */
@@ -543,7 +543,7 @@ export class Conversation {
         const files = await this.readFiles(incoming.attachments ?? []);
         if (!this.closed) this.arrive(incoming, id, channel, options.messageId !== undefined, files);
       })
-      .catch((error) => console.warn("flow: a message in conversation %s could not be read:", this.id, error));
+      .catch((error) => log("WARNING", "flow: a message in conversation %s could not be read:", this.id, error));
     this.preparing = ready;
     void ready.finally(() => {
       if (this.preparing !== ready) return;
@@ -888,7 +888,7 @@ export class Conversation {
     if (this.closed) return this.writes;
     const next = this.writes.then(work).then(
       () => undefined,
-      (error) => console.warn("flow: could not save conversation %s:", this.id, error),
+      (error) => log("WARNING", "flow: could not save conversation %s:", this.id, error),
     );
     this.writes = next;
     return next;
@@ -913,7 +913,7 @@ export class Conversation {
     try {
       epoch = await this.settings.store.claimConversation(this.id, this.settings.runner, now, now + LEASE_MS);
     } catch (error) {
-      if (!leaseWarned) console.warn("flow: runner %s could not take conversation %s's lease; going on without it (later failures are not logged):", this.settings.runner, this.id, error);
+      if (!leaseWarned) log("WARNING", "flow: runner %s could not take conversation %s's lease; going on without it (later failures are not logged):", this.settings.runner, this.id, error);
       leaseWarned = true;
       return "mine";
     }
@@ -939,7 +939,7 @@ export class Conversation {
     if (!this.renewal) return;
     if ((await this.claim()) === "mine") return;
     // This runner stalled past its lease and another took the conversation: it stops here.
-    console.warn("flow: runner %s lost conversation %s to another runner; it stops working on it", this.settings.runner, this.id);
+    log("WARNING", "flow: runner %s lost conversation %s to another runner; it stops working on it", this.settings.runner, this.id);
     this.close("another runner took the conversation while the tool ran");
     this.leave(false);
   }
@@ -973,7 +973,7 @@ export class Conversation {
     try {
       rows = await this.settings.store.openInbox(this.id);
     } catch (error) {
-      console.warn("flow: runner %s could not read conversation %s's inbox:", this.settings.runner, this.id, error);
+      log("WARNING", "flow: runner %s could not read conversation %s's inbox:", this.settings.runner, this.id, error);
       return false;
     }
     for (const row of rows) {
@@ -1300,7 +1300,7 @@ export class Conversation {
         try {
           sink(event);
         } catch (error) {
-          console.warn("flow: an event sink failed:", error);
+          log("WARNING", "flow: an event sink failed:", error);
         }
       }
     }
@@ -1689,10 +1689,10 @@ export class Conversation {
     this.typingOn.delete(channel);
     if (failure.startsWith("outside_window")) {
       kept.held = "window";
-      console.debug("flow: typing on %s in conversation %s: outside_window; tried again after the agent's next message", channel, this.id);
+      log("DEBUG", "flow: typing on %s in conversation %s: outside_window; tried again after the agent's next message", channel, this.id);
     } else {
       kept.held = "failed";
-      console.warn("flow: typing on %s in conversation %s failed, so no more typing this turn: %s", channel, this.id, failure);
+      log("WARNING", "flow: typing on %s in conversation %s failed, so no more typing this turn: %s", channel, this.id, failure);
     }
   }
 
@@ -1996,15 +1996,15 @@ export class Conversation {
   /** Start one tool call; the model's input is checked first (a refusal is the call's result). */
   private start(call: ToolCall): Running | string {
     const tool = this.builtins.get(call.name) ?? this.settings.tools.get(call.name);
-    if (!tool) return `There is no tool named ${call.name}.`;
+    if (!tool) return toolFailed(this.id, call, 0, { refused: "unknown_tool" }), `There is no tool named ${call.name}.`;
     let raw: unknown;
     try {
       raw = JSON.parse(call.arguments || "{}");
     } catch {
-      return "The arguments were not valid JSON.";
+      return toolFailed(this.id, call, 0, { refused: "invalid_json" }), "The arguments were not valid JSON.";
     }
     const parsed = tool.input.safeParse(raw);
-    if (!parsed.success) return `Invalid input: ${parsed.error.message}`;
+    if (!parsed.success) return toolFailed(this.id, call, 0, { refused: "invalid_input" }), `Invalid input: ${parsed.error.message}`;
 
     // The same call while it is still running in the background is not run again: its result is coming.
     const input = stableJson(parsed.data);
@@ -2071,7 +2071,10 @@ export class Conversation {
           // turn, and whether the next call still finds its ids) before chats use it. Here the
           // output is not checked against `output`, which `format` relies on.
           (output) => ({ ok: true, text: render(output) }),
-          (error) => ({ ok: false, text: `Failed: ${error instanceof Error ? error.message : String(error)}` }),
+          (error) => {
+            toolFailed(this.id, call, Date.now() - r.startedAt, { thrown: error });
+            return { ok: false, text: `Failed: ${error instanceof Error ? error.message : String(error)}` };
+          },
         ),
     };
     void r.outcome.then((result) => (r.result = result));
@@ -2373,6 +2376,25 @@ function errorText(error: unknown): string {
 }
 
 /** A model.error event's details: the error, and the code and HTTP status it carries (Flow's typed errors, a provider's APIError). */
+/** JavaScript's own errors for code that is wrong (as against a failure the tool ran into): an ERROR, not a WARNING. */
+const BUG_ERRORS = new Set(["TypeError", "ReferenceError", "SyntaxError", "RangeError", "EvalError", "URIError"]);
+
+/**
+ * One log line for a tool call that failed, in every environment: the model's call refused before
+ * it ran (`kind` says why), or the tool threw (its error's name, code and status). Ids, kinds and ms
+ * only: never the call's input or output, nor the error's message, which may quote either.
+ */
+function toolFailed(conversationId: string, call: ToolCall, ms: number, failure: { refused: "unknown_tool" | "invalid_json" | "invalid_input" } | { thrown: unknown }): void {
+  const thrown = "thrown" in failure ? failure.thrown : undefined;
+  const kind = "refused" in failure ? failure.refused : thrown instanceof Error ? thrown.name : typeof thrown;
+  const { code: own, cause, status: rawStatus } = (thrown ?? {}) as { code?: unknown; cause?: { code?: unknown }; status?: unknown };
+  const idLike = (v: unknown) => (typeof v === "string" && /^[\w.:-]{1,64}$/.test(v)) || typeof v === "number" ? v : undefined;
+  const code = idLike(own) ?? idLike(cause?.code);
+  const status = typeof rawStatus === "number" ? rawStatus : undefined;
+  const what = "refused" in failure ? `was refused (${kind})` : `failed after ${ms} ms (${[kind, code, status].filter((v) => v !== undefined).join(", ")})`;
+  logFields("thrown" in failure && BUG_ERRORS.has(kind) ? "ERROR" : "WARNING", { tool: call.name, kind, ...(code !== undefined ? { code } : {}), ...(status !== undefined ? { status } : {}), conversation: conversationId, callId: call.id, ms }, `flow: tool ${call.name} ${what} in conversation ${conversationId}`);
+}
+
 function modelError(error: unknown): { error: string; code?: string; status?: number } {
   const { code, status } = (error ?? {}) as { code?: unknown; status?: unknown };
   return { error: String(error), ...(typeof code === "string" && code ? { code } : {}), ...(typeof status === "number" ? { status } : {}) };
