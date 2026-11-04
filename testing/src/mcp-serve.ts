@@ -1,4 +1,4 @@
-// `flow mcp serve`: what `flow conversations`, `issues`, `templates`, `logs` and `deploy status` read,
+// `flow mcp serve`: what `flow conversations`, `issues`, `insights`, `templates`, `logs` and `deploy status` read,
 // as an MCP server on stdio for the coding agent working in the agent's folder:
 //   claude mcp add flow -- npx @flow-engineer/flow mcp serve
 // Read-only tools on the same functions the commands use (testing/src/conversations.ts,
@@ -17,7 +17,7 @@ import { ProtocolError, ProtocolErrorCode, Server, type CallToolResult } from "@
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RUN } from "../../src/names.ts";
 import { NetworkError, type FoundKey } from "./cloud-call.ts";
-import { Failed, get, listConversations, listIssues, showConversation, sinceTime, type Access } from "./conversations.ts";
+import { Failed, get, insightConversations, listConversations, listInsights, listIssues, showConversation, sinceTime, type Access } from "./conversations.ts";
 import { cloudOf, deployStatus, logsPage, NotAvailable, Refused, SEVERITIES, type LogsQuery } from "./deploy.ts";
 import { packageRoot } from "./new.ts";
 
@@ -32,9 +32,10 @@ Add it to Claude Code from the agent's folder:
 Any other MCP host: the command npx, the arguments @flow-engineer/flow mcp serve, run in the
 agent's folder (or add --dir <folder>).
 
-Tools (all read-only): list_conversations, show_conversation, list_issues, list_templates,
-read_logs, deploy_status. They read what flow conversations, flow issues, flow templates,
-flow logs and flow deploy status print, as JSON.
+Tools (all read-only): list_conversations, show_conversation, list_issues, list_insights,
+insight_conversations, list_templates, read_logs, deploy_status. They read what flow
+conversations, flow issues, flow insights, flow templates, flow logs and flow deploy status
+print, as JSON.
 
   --dir <folder>   The agent's folder, whose .env holds the keys (default: .)
   --cloud <url>    Flow's address (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)
@@ -42,8 +43,9 @@ flow logs and flow deploy status print, as JSON.
 
 Keys: each call reads them again, the environment the server started with first, then the
 folder's .env, so a key fixed in .env works on the next call without a restart.
-  FLOW_KEY                  list_conversations, show_conversation, list_issues, list_templates.
-                            flow_test_... reads staging only; production needs a flow_live_ key
+  FLOW_KEY                  list_conversations, show_conversation, list_issues, list_insights,
+                            insight_conversations, list_templates. flow_test_... reads staging
+                            only; production and Insights need a flow_live_ key
                             with the traces scope, which flow setup does not make: ask Flow for one
   FLOW_FRAMEWORK_CLOUD_KEY  read_logs, deploy_status: the CI key (oci_...), staging and production
 Nothing goes to stdout but the protocol; waits and retries are said on stderr.`;
@@ -52,8 +54,8 @@ Nothing goes to stdout but the protocol; waits and retries are said on stderr.`;
 export const INSTRUCTIONS = [
   "Flow's own record of this agent once it is hosted: its conversations and the grades of its replies, its issues, its WhatsApp templates, its deploys and its log lines. Every tool only reads.",
   "Did a tool call fail, or was a reply delivered? list_conversations (grade: wrong finds badly graded replies), then show_conversation: each agent reply carries its tool calls (name, ms, ok, error) and its delivery (queued, sent, delivered, read, or failed with the channel's code).",
-  "What is live? deploy_status. Why did it error? read_logs with severity ERROR (grep narrows it), then show_conversation for the conversation involved. Recurring problems with a suggested fix: list_issues.",
-  "Conversations, issues and templates read FLOW_KEY: a flow_test_ key reads staging only; production needs a flow_live_ key with the traces scope (flow setup makes only flow_test_). Logs and deploys read the CI key FLOW_FRAMEWORK_CLOUD_KEY (oci_), both environments.",
+  "What is live? deploy_status. Why did it error? read_logs with severity ERROR (grep narrows it), then show_conversation for the conversation involved. Recurring problems: list_issues (graded replies, with a suggested fix) and list_insights (what real people ran into in production).",
+  "Conversations, issues, insights and templates read FLOW_KEY: a flow_test_ key reads staging only; production and Insights need a flow_live_ key with the traces scope (flow setup makes only flow_test_). Logs and deploys read the CI key FLOW_FRAMEWORK_CLOUD_KEY (oci_), both environments.",
 ].join("\n");
 
 const ENVIRONMENT = z.enum(["staging", "production"]);
@@ -124,6 +126,34 @@ export const TOOLS: ServeTool[] = [
       const { body } = await listIssues("list_issues", reads.flow(), status);
       const n = ((body.issues as unknown[] | undefined) ?? []).length;
       return { data: body, summary: `${n} ${status === "all" ? "" : `${status} `}issue${n === 1 ? "" : "s"}.` };
+    },
+  }),
+  tool({
+    name: "list_insights",
+    title: "List Insights findings",
+    description: "Flow Insights' findings over closed production conversations (24 h quiet), ranked as the dashboard ranks them: id, signal (no reply, send failed, repeated question, loop, ...), status, topic, and conversations in the window with the window before's. Use it to see what keeps going wrong with real people, or, a window after a fix is deployed, whether a finding's count dropped; insight_conversations reads one finding's conversations. Needs a flow_live_ FLOW_KEY: Insights reads production only, so a flow_test_ key is refused.",
+    input: z.object({
+      days: z.union([z.literal(7), z.literal(30)]).default(7).describe("The window: 7 or 30 days"),
+      status: z.enum(["open", "fixed", "muted", "all"]).default("open").describe("Which findings"),
+    }),
+    async run({ days, status }, reads) {
+      const { body } = await listInsights("list_insights", reads.flow(), { days, status });
+      const n = ((body.findings as unknown[] | undefined) ?? []).length;
+      return { data: body, summary: `${n} ${status === "all" ? "" : `${status} `}finding${n === 1 ? "" : "s"} over ${days} days${typeof body.state === "string" ? ` (state: ${body.state})` : ""}. Read one: insight_conversations.` };
+    },
+  }),
+  tool({
+    name: "insight_conversations",
+    title: "Insight conversations",
+    description: "One Insights finding's conversations in the window: conversation id, time, why it was flagged and, when the account shows them, the person's words. Use it after list_insights to see the cases behind a finding, then show_conversation with an id for the whole conversation. Needs a flow_live_ FLOW_KEY: Insights reads production only.",
+    input: z.object({
+      finding: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/).describe("A finding id from list_insights"),
+      days: z.union([z.literal(7), z.literal(30)]).default(7).describe("The window: 7 or 30 days"),
+    }),
+    async run({ finding, days }, reads) {
+      const { body } = await insightConversations("insight_conversations", reads.flow(), finding, days);
+      const n = Array.isArray(body.data) ? body.data.length : 0;
+      return { data: body, summary: `Finding ${finding}: ${n} conversation${n === 1 ? "" : "s"} over ${days} days. Read one: show_conversation.` };
     },
   }),
   tool({
