@@ -201,6 +201,23 @@ test("the backoff starts again only once a connection delivers an event or stays
   s.reconnectsAfter(500);
 });
 
+// Flow drops a healthy stream about hourly (1006); logged as a warning each time, it buried the real ones.
+test("a healthy stream that closes reconnects with an INFO line; a refusal, or a close right after another, is a WARNING", (t) => {
+  const s = timedStream(t);
+  const infos: string[] = [];
+  t.mock.method(console, "info", (line: string) => void infos.push(line));
+  s.sockets.at(-1)!.open();
+  t.mock.timers.tick(30_000);
+  s.sockets.at(-1)!.closed(1006);
+  s.reconnectsAfter(500);
+  assert.deepEqual([infos, s.warnings], [["@flow-engineer/flow/flow-messaging: the stream closed (1006); reconnecting in 0.5 s"], []]);
+  s.sockets.at(-1)!.closed(1006); // never healthy: a close in a row
+  s.reconnectsAfter(1_000);
+  s.refuse(4500, { type: "api_error" });
+  assert.equal(infos.length, 1);
+  assert.deepEqual(s.warnings, ["@flow-engineer/flow/flow-messaging: the stream closed (1006); reconnecting in 1.0 s", "@flow-engineer/flow/flow-messaging: the stream closed (4500 api_error); reconnecting in 2.0 s"]);
+});
+
 test("a stream stopped because the plan ended says why and Flow's hint, for the developer to show rather than retry", async (t) => {
   const s = timedStream(t);
   const hint = "Choose a plan at https://flow.engineer/dashboard/plans?plan=shared; this key works again once the plan is active.";
