@@ -74,7 +74,7 @@
     "test:conformance": "node --test --test-timeout=60000 --test-force-exit \"conformance/**/*.test.ts\"",
     "bench:load": "node --expose-gc bench/load.ts",
     "new": "node scripts/new-agent.ts",
-    "typecheck": "tsc --noEmit && tsc -p widget/tsconfig.json --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.build.json --noEmit && tsc -p widget/tsconfig.json --noEmit"
   },
   "dependencies": {
     "openai": "^7.32.0",
