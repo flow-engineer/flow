@@ -498,8 +498,10 @@ comes from, the words to include or avoid): write a scenario from them and `flow
 Flow Insights reads what the people did, not single replies: in the hosted agent's closed
 production conversations (quiet 24 h, on a live key; test keys, `flow chat`, the playground and
 `flow test` are never graded) it finds where they gave up, asked again or got annoyed, by topic.
-It reads with the agent's live Flow key (`flow_live_`); with the test key `flow setup` writes it
-says so: ask the owner for the live key rather than changing anything. To work a finding through:
+It reads with the agent's live Flow key, `FLOW_LIVE_KEY` (else a `flow_live_` `FLOW_KEY`); with only
+the test key `flow setup` writes it says so: ask the workspace's owner to run
+`npx @flow-engineer/flow setup --live` rather than changing anything. Text then reads de-identified
+(the `Text:` line, `text_mode` in `--json`). To work a finding through:
 
 1. `flow insights` lists the open findings, ranked, each with its count and the window before's
    ("4 (was 9)"); `--days 30` for a longer window.
