@@ -25,7 +25,8 @@
 // (testing/src/deploy.ts). `flow conversations` and `flow issues` read the hosted agent's
 // conversations and the grades of its replies (testing/src/conversations.ts); `flow templates` the
 // project's approved WhatsApp templates (testing/src/templates.ts), which `flow test` compares with
-// the declared ones.
+// the declared ones. `flow test pull` writes the test drafts Flow made from the hosted agent's
+// conversations into tests/drafts/, which flow test never reads (testing/src/pull.ts).
 
 import { mkdirSync, existsSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -47,14 +48,16 @@ import { CHAT_LINE, chatCli } from "./chat.ts";
 import { RECORDS_LINE, recordsCli } from "./records.ts";
 import { CONVERSATIONS_LINES, conversationsCli, issuesCli } from "./conversations.ts";
 import { TEMPLATES_LINE, templatesCli, templateWarnings } from "./templates.ts";
+import { PULL_LINE, pullCli } from "./pull.ts";
 import type { TemplateDefinition } from "../../src/types.ts";
 import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
-import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
+import { PROFILE_TOOL } from "../../src/conversation.ts";
+import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, modelPlayedLine, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
-import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
+import { givenProblems, loadFakes, loadSuite, parseScenario, parseToolFile, suiteHash, type ToolFile } from "./suite.ts";
 import type { RunOutcome, RunSummary } from "./protocol.ts";
 
 const NEW_LINE = `  flow new <name> [--display-name <name>]
@@ -69,7 +72,8 @@ const NEW_LINE = `  flow new <name> [--display-name <name>]
                             the folder's name)`;
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
-                            the tests are in tests/scenarios and tests/tools)`;
+                            the tests are in tests/scenarios and tests/tools)
+${PULL_LINE}`;
 const CHECK_LINE = `  flow check-endpoint <url> [--token-env NAME] [--json]
                             Check an agent's HTTP endpoint against the contract, for --agent-url
                             (flow check-endpoint --help)`;
@@ -225,6 +229,7 @@ if (process.argv[2] === "projects") process.exit(await projectsCli(process.argv.
 if (process.argv[2] === "conversations") process.exit(await conversationsCli(process.argv.slice(3)));
 if (process.argv[2] === "issues") process.exit(await issuesCli(process.argv.slice(3)));
 if (process.argv[2] === "templates") process.exit(await templatesCli(process.argv.slice(3)));
+if (process.argv[2] === "test" && process.argv[3] === "pull") process.exit(await pullCli(process.argv.slice(4)));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) process.exit(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
 const TEST_FLAGS = {
@@ -418,8 +423,8 @@ function forUrl(files: ReturnType<typeof loadSuite>) {
   if (toolFiles.length) console.warn(`Not sent: ${toolFiles.map((f) => f.path).join(", ")}. Tool simulators play a Flow Framework agent's tools; your agent's own tools run for real.`);
   for (const f of files.filter((f) => f.path.startsWith("scenarios/"))) {
     const scenario = parseScenario(f); // checkSuite has read it already
-    if (scenario.world || scenario.expect.outcome?.length) {
-      console.warn(`${scenario.id}: its world and outcome checks are for simulated tools; your agent's tools run on its side, so the judge sees no tool calls. Running it anyway.`);
+    if (scenario.world || scenario.given || scenario.expect.outcome?.length || scenario.expect.state) {
+      console.warn(`${scenario.id}: its world, given, outcome and state checks are for simulated tools; your agent's tools run on its side, so the judge sees no tool calls. Running it anyway.`);
     }
   }
   return files.filter((f) => !f.path.startsWith("tools/"));
@@ -439,6 +444,15 @@ const suite = loadSuite(join(dir, "tests"));
 picked = values.failed ? failedLastTime(suite) : values.only ? new Set(values.only.split(",").map((s) => s.trim())) : undefined;
 const chosen = only(suite, picked);
 checkSuite(chosen);
+// The fakes are loaded before anything is sent; a file that does not load is named like a test file that does not parse.
+let fakes: string[] = [];
+if (!agentUrl) {
+  try {
+    fakes = [...(await loadFakes(join(dir, "tests"))).keys()];
+  } catch (error) {
+    invalid(`${(error as Error).message}\n\nNothing was sent: fix the test files above.`);
+  }
+}
 files = forUrl(chosen);
 if (agentUrl) await checkAgentReachable(agentUrl);
 perScenario = runs;
@@ -531,6 +545,8 @@ if (flaky.length) {
   for (const r of flaky) say(`  ${r.scenario} #${r.run} (${r.channel}): ${r.watch}${r.rerun ? ` then ${r.rerun.watch}` : ""}`);
 }
 for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m) => ({ scenario: m.scenario, invalid: m.summary?.invalid }))))) say(line);
+const byModel = modelPlayedLine(summary.runs, fakes);
+if (byModel) say(byModel);
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
 say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
 if (mergedRuns(summary.runs).some((m) => m.verdict === "not_played")) endedEarly(summary.runs, "the cloud finished the session without playing every run", say);
@@ -695,6 +711,7 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       rerun: m.summary?.rerun ?? null,
       label: m.summary?.label ?? null,
       replayed: m.summary?.replayed ?? null,
+      toolsPlayedBy: m.summary?.toolsPlayedBy ?? null,
     })) : [];
     const count = (verdict: Verdict) => runs.filter((r) => r.verdict === verdict).length;
     const rate = passRate(runs, values.strict);
@@ -831,14 +848,21 @@ function checkRuns(runs: string): number {
 /** Every scenario and tool file read as the cloud reads it, before anything is sent; exits 1 with each problem at its line. */
 function checkSuite(sent: ReturnType<typeof loadSuite>): void {
   const problems: string[] = [];
+  const toolFiles: ToolFile[] = [];
+  const scenarios: Array<{ path: string; scenario: ReturnType<typeof parseScenario> }> = [];
   for (const file of sent) {
     const named = { path: join("tests", file.path), content: file.content };
     try {
-      if (file.path.startsWith("scenarios/")) parseScenario(named);
-      else if (!agentUrl) parseToolFile(named);
+      if (file.path.startsWith("scenarios/")) scenarios.push({ path: named.path, scenario: parseScenario(named) });
+      else if (!agentUrl) toolFiles.push(parseToolFile(named));
     } catch (error) {
       problems.push((error as Error).message);
     }
+  }
+  // given.tools names the agent's tools (its own, and the built-in profile the tests play), and down or flaky needs an error to play.
+  if (!agentUrl) {
+    const tools = [...agent.tools.map((t) => t.name), PROFILE_TOOL];
+    for (const { path, scenario } of scenarios) for (const problem of givenProblems(scenario, tools, toolFiles)) problems.push(`${path}: ${problem}`);
   }
   if (!problems.length) return;
   invalid(`${problems.join("\n")}\n\nNothing was sent: fix the test files above.`);

@@ -44,7 +44,7 @@ const TSCONFIG = {
     skipLibCheck: true,
     types: ["node"],
   },
-  include: ["src"],
+  include: ["src", "tests"],
 };
 
 const ENV_EXAMPLE = `# The model key. The first line with a value is the one used. npx @flow-engineer/flow setup writes
@@ -205,10 +205,13 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
   for (const part of ["agent", "src", "tests"]) cpSync(join(cafe, part), join(dir, part), { recursive: true });
   renameInPrompt(dir, [TEMPLATE_NAME], displayName);
 
-  for (const file of readdirSync(join(dir, "src"), { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts"))) {
-    const path = join(dir, "src", file);
+  // The code, and the tests' fakes (tests/tools/*.fake.ts), import Flow Framework by its public entries.
+  const code = ["src", "tests"].flatMap((part) => readdirSync(join(dir, part), { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts")).map((f) => join(part, f)));
+  for (const file of code) {
+    const path = join(dir, file);
     const source = readFileSync(path, "utf8")
       .replace(/(["'])(\.\.\/)+src\/index\.ts\1/g, '"@flow-engineer/flow"')
+      .replace(/(["'])(\.\.\/)+testing\/src\/index\.ts\1/g, '"@flow-engineer/flow/testing"')
       .replace(/(["'])(\.\.\/)+simulators\/src\/index\.ts\1/g, '"@flow-engineer/flow/simulators"')
       .replace(/(["'])(\.\.\/)+flow-messaging\/src\/index\.ts\1/g, '"@flow-engineer/flow/flow-messaging"')
       .replace(/(["'])(\.\.\/)+mcp\/src\/index\.ts\1/g, '"@flow-engineer/flow/mcp"')
