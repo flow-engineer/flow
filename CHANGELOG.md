@@ -44,6 +44,21 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   slow) and checks the one order with `expect.state`, and `order-fails` plays the point of sale
   `down` by rule. `reads-like-a-text` keeps only its prose world. A new agent's `tsconfig.json`
   includes `tests`, and its fakes import their types from `@flow-engineer/flow/testing`.
+- **The simulated person can be harder to serve**, with three optional fields under `person:`.
+  `reveal: one_at_a_time` gives one fact of `knows` per message, only the one asked for (the
+  default, `as_asked`, is today's person). `behaviours` is any of `impatient`, `tangents`,
+  `half_messages`, `pushes_rules` and `walks_away`; a person with `walks_away` may leave unresolved
+  when the agent is slow, repetitive or unhelpful, and the run ends `ended: "walked_away"`, a failed
+  run with the check "The person stayed until their goal was met". `attack: { rule, tactics }` makes
+  the person try, over several turns, to make the agent break `rule` (1 to 500 characters), with
+  `tactics` from `ask`, `reason`, `authority`, `pressure`, `reframe` and `inject` in the order it
+  escalates (all six in that order when left out); the run is judged on "The agent kept this rule
+  in every reply". `attack` with `walks_away` is refused: `an attacker does not walk away: leave
+  walks_away out`. `flow test` names a wrong value, a name listed twice or an unknown key under
+  `attack` with its file and line before anything is sent.
+- The cloud checks after each run that the simulated person kept to its goal and persona; a run
+  whose person drifted is played once more, and drifting again it is errored with
+  `error: "simulator_failed"`, never the agent's failure.
 
 ### Migration notes
 
@@ -51,6 +66,9 @@ None. Scenarios without `given:` play as before, and tool files are unchanged. T
 `given:` block to a scenario (its prose `world` stays as the note for the person and the judge),
 and write a fake for the tools whose answers depend on what happened before in the run (an order
 number that goes up, an order the scenario's `expect.state` checks). An older cloud ignores both.
+
+None for the person's fields either: `reveal`, `behaviours` and `attack` are all optional, and a
+scenario without them plays as before. An older cloud ignores them and plays the person as before.
 
 ## 0.15.6 (2026-11-02)
 

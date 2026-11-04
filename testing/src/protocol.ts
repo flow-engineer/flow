@@ -327,7 +327,8 @@ export interface RunSummary {
   /** Every check passed. */
   passed: boolean;
   checks: Check[];
-  /** Why the person stopped: goal met, gave up, max turns, or the agent went quiet. */
+  /** Why the person stopped: goal met, gave up, max turns, the agent went quiet, or walked_away (a person with
+   * `behaviours: [walks_away]` left with its goal unmet: a failed run, with a failed check that says why). */
   ended: string;
   turns: number;
   messagesIn: number;
@@ -344,7 +345,8 @@ export interface RunSummary {
   /** The first try never reached the agent, so this run is the second try. */
   retried?: boolean;
   /** The cloud's code when it could not play or judge the run (judge_failed, spend_cap, simulator_failed, ...).
-   * The run then says nothing about the agent, whatever `passed` and `ended` say. */
+   * The run then says nothing about the agent, whatever `passed` and `ended` say. simulator_failed is also a
+   * run whose simulated person drifted from its goal or persona twice (the cloud plays a drifted run once more). */
   error?: string;
   /** What the run came to, from the cloud; an older cloud sends none and the client works it out (report.ts runOutcome). */
   outcome?: RunOutcome;
