@@ -133,18 +133,21 @@ export function access(name: string, values: { cloud?: string; dotenv?: string }
 /** What to print when a read did not work; status is the server's, when it answered. */
 export class Failed extends Error {
   status?: number;
+  /** The server's error code and its message as it wrote them, when it sent them. */
+  code?: string;
+  said?: string;
 }
 
 /** The most conversations the server answers in one page. */
 const PAGE_LIMIT = 100;
 
-/** GET path; the body's text and its JSON, or Failed with what to print. */
-export async function get(name: string, cloud: string, key: string, path: string): Promise<{ text: string; body: Record<string, unknown> }> {
+/** GET path (or POST it with no body); the body's text and its JSON ({} for a 204), or Failed with what to print. */
+export async function get(name: string, cloud: string, key: string, path: string, method: "GET" | "POST" = "GET"): Promise<{ text: string; body: Record<string, unknown> }> {
   let status: number;
   let text: string;
   let retryAfter: string | null;
   try {
-    const response = await fetch(`${cloud}${path}`, { headers: { authorization: `Bearer ${key}`, accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
+    const response = await fetch(`${cloud}${path}`, { method, headers: { authorization: `Bearer ${key}`, accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
     status = response.status;
     retryAfter = response.headers.get("retry-after");
     text = await response.text();
@@ -163,8 +166,10 @@ export async function get(name: string, cloud: string, key: string, path: string
       ? new Failed(`${name}: ${error.message}${error.code ? ` (${error.code}, ${status})` : ` (${status})`}${again}${error.hint ? `\n${error.hint}` : ""}`)
       : new Failed(`${name}: ${cloud} answered ${status}${said ? `: ${said}` : ""}${status === 404 ? " (this Flow may not have this command's route yet)" : ""}.`);
     failed.status = status;
+    if (error && typeof error === "object") Object.assign(failed, { code: error.code, said: error.message });
     throw failed;
   }
+  if (status === 204) return { text: "", body: {} };
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Failed(`${name}: ${cloud} answered ${status} with something that is not JSON.`);
   return { text, body: body as Record<string, unknown> };
 }

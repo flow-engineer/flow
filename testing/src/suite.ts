@@ -1,7 +1,8 @@
 // A test suite on disk: tests/scenarios/*.yaml and tests/tools/*.yaml, each file hashed by its
 // content so the cloud stores it once and a run records exactly which tests it ran. Beside them,
 // tests/tools/<tool>.fake.ts: the developer's own code that plays a tool when the cloud asks
-// (loadFakes); it runs on this machine and is never uploaded.
+// (loadFakes); it runs on this machine and is never uploaded. tests/drafts/ (flow test pull,
+// testing/src/pull.ts) is never part of the suite: a draft runs once it is moved into scenarios/.
 
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -264,6 +265,18 @@ const attackRule = z.string().superRefine((rule, ctx) => {
   else if (length > 500) ctx.addIssue({ code: "custom", message: `${length} characters, at most 500: one rule, in a sentence` });
 });
 
+/** Where a scenario came from, for the people and tools that read the suite; a run never reads it. */
+const origin = z.object({
+  /** code: written from the agent's code and prompts; chat: made by Flow from a conversation that went wrong, its people made up. */
+  from: z.enum(["code", "chat"], { error: "code or chat" }),
+  /** Who wrote it, such as a coding agent. */
+  by: z.string().min(1).optional(),
+  /** The ids of what it covers (a prompt's rule, a tool, a code path), as a coverage plan names them. */
+  covers: z.array(z.string().min(1)).optional(),
+  /** Whether it was seen to fail on the agent that went wrong (reproduces_on_bad) or to pass on the fixed one (passes_on_fixed). */
+  check: z.enum(["not_checked", "passes_on_fixed", "reproduces_on_bad"], { error: "not_checked, passes_on_fixed or reproduces_on_bad" }).optional(),
+});
+
 const scenarioSchema = z.object({
   id: z.string().min(1),
   /** A short name for the scenario, such as "Milk corrected to oat"; the test itself is in `about` and the rest. */
@@ -272,6 +285,8 @@ const scenarioSchema = z.object({
   about: z.string().optional(),
   /** The area of the agent it tests, such as "Ordering": scenarios are grouped by it. */
   theme: shortName(THEME_MAX, "a theme is the area of the agent the scenario tests, in a word or two, such as Ordering.").optional(),
+  /** Where it came from: metadata, never read by a run. */
+  origin: origin.optional(),
   /** Every platform it runs on; each is a run of its own, with its own result. */
   channels: z.array(z.enum(["sms", "whatsapp", "imessage", "telegram", "web"])).min(1),
   /** The IANA time zone of the test's clock; UTC when left out. */
