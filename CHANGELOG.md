@@ -59,6 +59,23 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - The cloud checks after each run that the simulated person kept to its goal and persona; a run
   whose person drifted is played once more, and drifting again it is errored with
   `error: "simulator_failed"`, never the agent's failure.
+- **`flow test pull`** writes the test drafts Flow made from the hosted agent's conversations that
+  went wrong (made-up people, the business kept) into `tests/drafts/<file>`, from the agent's folder,
+  with the agent's CI key (`FLOW_FRAMEWORK_CLOUD_KEY`) and the cloud `flow test` uses
+  (`GET /v1/agent/test-drafts`, then `POST /v1/agent/test-drafts/{id}/pulled` for each file written).
+  Each draft is parsed as a scenario first; one that does not parse is named with its line and not
+  written. A file already there with other content is kept, and a draft pulled before is not
+  written again, unless `--force`; `--dry-run` lists what it would write and writes nothing;
+  `--json` reports each draft's `id`, `file`, `title`, `check` and `done` (`written`,
+  `would_write`, `unchanged`, `exists`, `pulled_before`, `invalid`). Where the workspace's drafts may
+  not leave Flow, the server's `export_blocked` message is printed as it is and nothing is written.
+  Exit status 0 when every draft was written or left as told, 1 otherwise. Drafts never run or
+  gate: `flow test` reads only `tests/scenarios` and `tests/tools`; move a draft into
+  `tests/scenarios/` to keep it.
+- **`origin`**, an optional field on a scenario, says where it came from: `from` (`code` or
+  `chat`), `by`, `covers` (the ids a coverage plan names) and `check` (`not_checked`,
+  `passes_on_fixed` or `reproduces_on_bad`). It is metadata: no run reads it. `flow test` names a
+  wrong `from` or `check` with its file and line.
 
 ### Migration notes
 
@@ -69,6 +86,11 @@ number that goes up, an order the scenario's `expect.state` checks). An older cl
 
 None for the person's fields either: `reveal`, `behaviours` and `attack` are all optional, and a
 scenario without them plays as before. An older cloud ignores them and plays the person as before.
+
+`origin` was an unknown key until now, dropped unread; a scenario that already has one is now
+checked: `from` must be `code` or `chat` (and is required under `origin`), `check` one of the three
+values. A scenario without `origin` is unchanged. `flow test pull` is new, and `tests/drafts/` was
+never read by `flow test`.
 
 ## 0.15.6 (2026-11-02)
 

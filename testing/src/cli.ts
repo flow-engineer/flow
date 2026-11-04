@@ -25,7 +25,8 @@
 // (testing/src/deploy.ts). `flow conversations` and `flow issues` read the hosted agent's
 // conversations and the grades of its replies (testing/src/conversations.ts); `flow templates` the
 // project's approved WhatsApp templates (testing/src/templates.ts), which `flow test` compares with
-// the declared ones.
+// the declared ones. `flow test pull` writes the test drafts Flow made from the hosted agent's
+// conversations into tests/drafts/, which flow test never reads (testing/src/pull.ts).
 
 import { mkdirSync, existsSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -47,6 +48,7 @@ import { CHAT_LINE, chatCli } from "./chat.ts";
 import { RECORDS_LINE, recordsCli } from "./records.ts";
 import { CONVERSATIONS_LINES, conversationsCli, issuesCli } from "./conversations.ts";
 import { TEMPLATES_LINE, templatesCli, templateWarnings } from "./templates.ts";
+import { PULL_LINE, pullCli } from "./pull.ts";
 import type { TemplateDefinition } from "../../src/types.ts";
 import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
@@ -70,7 +72,8 @@ const NEW_LINE = `  flow new <name> [--display-name <name>]
                             the folder's name)`;
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
-                            the tests are in tests/scenarios and tests/tools)`;
+                            the tests are in tests/scenarios and tests/tools)
+${PULL_LINE}`;
 const CHECK_LINE = `  flow check-endpoint <url> [--token-env NAME] [--json]
                             Check an agent's HTTP endpoint against the contract, for --agent-url
                             (flow check-endpoint --help)`;
@@ -226,6 +229,7 @@ if (process.argv[2] === "projects") process.exit(await projectsCli(process.argv.
 if (process.argv[2] === "conversations") process.exit(await conversationsCli(process.argv.slice(3)));
 if (process.argv[2] === "issues") process.exit(await issuesCli(process.argv.slice(3)));
 if (process.argv[2] === "templates") process.exit(await templatesCli(process.argv.slice(3)));
+if (process.argv[2] === "test" && process.argv[3] === "pull") process.exit(await pullCli(process.argv.slice(4)));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) process.exit(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
 const TEST_FLAGS = {
