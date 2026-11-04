@@ -1,9 +1,12 @@
 // A test suite on disk: tests/scenarios/*.yaml and tests/tools/*.yaml, each file hashed by its
-// content so the cloud stores it once and a run records exactly which tests it ran.
+// content so the cloud stores it once and a run records exactly which tests it ran. Beside them,
+// tests/tools/<tool>.fake.ts: the developer's own code that plays a tool when the cloud asks
+// (loadFakes); it runs on this machine and is never uploaded.
 
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { extname, isAbsolute, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { isMap, isSeq, LineCounter, parseDocument, type Node } from "yaml";
 import { z } from "../../src/index.ts";
 
@@ -217,6 +220,27 @@ const shortName = (max: number, fix: string) =>
     if (length > max) ctx.addIssue({ code: "custom", message: `${length} characters, at most ${max}: ${fix}` });
   });
 
+/** How a tool behaves in a scenario (`given.tools`): usual, slow, down, or flaky N% (N a whole number from 0 to 100). */
+const toolMode = z.string().refine(
+  (mode) => /^(?:usual|slow|down)$/.test(mode) || flakyPercent(mode) !== null,
+  "usual, slow, down, or flaky N% with N a whole number from 0 to 100, such as flaky 30%",
+);
+
+/** The N of `flaky N%`, or null when `mode` is not one. */
+export function flakyPercent(mode: string): number | null {
+  const m = /^flaky (\d{1,3})%$/.exec(mode);
+  return m && Number(m[1]) <= 100 ? Number(m[1]) : null;
+}
+
+/** The world as data: how each tool behaves (`tools`), flaky's dice (`seed`), and any other value for the fakes;
+ * a tool file's name there (get_menu.yaml) is that tool's usual output. */
+const given = z
+  .object({
+    tools: z.record(z.string().min(1), toolMode).optional(),
+    seed: z.number().int().optional(),
+  })
+  .catchall(withClock(z.unknown()));
+
 const scenarioSchema = z.object({
   id: z.string().min(1),
   /** A short name for the scenario, such as "Milk corrected to oat"; the test itself is in `about` and the rest. */
@@ -246,7 +270,10 @@ const scenarioSchema = z.object({
   opening: z.array(openingStep).min(1),
   /** Tools whose own code runs in this scenario, in place of the cloud's simulation (state the agent keeps itself). */
   tools: z.strictObject({ real: z.array(z.string().min(1)).min(1) }).optional(),
+  /** In prose: a note for the person, the judge, and the model that plays a call no rule of `given` plays. */
   world: withClock(z.string()).optional(),
+  /** The world as data: each tool call is played by rule (its mode, its fake, a recorded response) before a model. */
+  given: given.optional(),
   max_turns: z.number().int().min(1).max(50).default(8),
   expect: z
     .object({
@@ -260,6 +287,9 @@ const scenarioSchema = z.object({
       sent: z.array(sentItem).optional(),
       /** None of these was sent; `{}` is anything at all. */
       not_sent: z.array(sentItem).optional(),
+      /** What the fakes' state holds when the run ends, each key one check in code: objects match in part, arrays
+       * have the same length with each expected element matched in part (any order), other values are equal. */
+      state: z.record(z.string(), z.unknown()).optional(),
     })
     .default({}),
 });
@@ -301,6 +331,63 @@ export function isBusiness(scenario: Scenario): boolean {
 }
 export type ToolFile = z.infer<typeof toolFileSchema>;
 export type ExpectedCall = z.infer<typeof expectedCall>;
+
+/** What is wrong with a scenario's `given.tools` for this agent: a tool it does not have, or down or flaky for a
+ * tool whose file has no response with an error (the cloud refuses that scenario with the same reason). */
+export function givenProblems(scenario: Scenario, tools: string[], toolFiles: ToolFile[]): string[] {
+  const problems: string[] = [];
+  for (const [tool, mode] of Object.entries(scenario.given?.tools ?? {})) {
+    if (!tools.includes(tool)) {
+      problems.push(`given.tools.${tool}: the agent has no tool ${tool}`);
+      continue;
+    }
+    const fails = mode === "down" || flakyPercent(mode) !== null;
+    if (fails && !toolFiles.some((f) => f.tool === tool && f.responses.some((r) => r.error !== undefined))) {
+      problems.push(`given.tools.${tool}: ${mode} needs a response with an error in tools/${tool}.yaml`);
+    }
+  }
+  return problems;
+}
+
+/** What a fake is given for one call. */
+export interface FakeCall<I = any> {
+  input: I;
+  /** The scenario's given: without tools and seed; a tool file's name there is that tool's usual output. */
+  world: Record<string, unknown>;
+  /** One object per run, shared by every fake of the run: change it in place. Plain JSON. */
+  state: Record<string, any>;
+  /** The test's clock at this call, ISO 8601 (UTC). */
+  now: string;
+  /** This tool's calls in the run so far, this one included (1 for the first). */
+  call: number;
+  /** The tool file's responses, placeholders filled (empty when it has no file). */
+  responses: ToolFile["responses"];
+}
+
+/** What the tool answered, and what it changed, in plain words. `{{now ...}}` placeholders in it are filled by the cloud. */
+export type FakeAnswer = { output: unknown; changes?: string[] } | { error: string; changes?: string[] };
+
+/** A tool played by the developer's own code in tests: the default export of tests/tools/<tool>.fake.ts. */
+export type Fake<I = any> = (call: FakeCall<I>) => FakeAnswer | Promise<FakeAnswer>;
+
+/** Every tests/tools/*.fake.ts under `testsDir`, by tool (the file name before .fake.ts). A file that does not
+ * import, or whose default export is not a function, throws `tests/tools/<file>: ...`. */
+export async function loadFakes(testsDir: string): Promise<Map<string, Fake>> {
+  const fakes = new Map<string, Fake>();
+  const dir = join(testsDir, "tools");
+  if (!existsSync(dir)) return fakes;
+  for (const name of readdirSync(dir).filter((n) => n.endsWith(".fake.ts")).sort()) {
+    let module: { default?: unknown };
+    try {
+      module = await import(pathToFileURL(join(dir, name)).href);
+    } catch (error) {
+      throw new Error(`tests/tools/${name}: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`);
+    }
+    if (typeof module.default !== "function") throw new Error(`tests/tools/${name}: its default export must be the fake, a function (export default placeOrder)`);
+    fakes.set(name.slice(0, -".fake.ts".length), module.default as Fake);
+  }
+  return fakes;
+}
 
 /** Parse and check a scenario. The error has one line per problem: `file:line: field: what is wrong`. */
 export function parseScenario(file: Pick<SuiteFile, "path" | "content">): Scenario {
