@@ -5,7 +5,7 @@
 //                                                                                pack, send .env's new or changed values as secrets, upload, build, go live
 //   flow deploy promote [--no-secrets] [--no-cli] [--json]                       staging's live version to production
 //   flow deploy status [--env staging|production] [--json]                       what is live, its version, when, its URL
-//   flow logs [--env staging|production] [--since 1h] [--until] [--severity] [--grep] [--follow] [--json]
+//   flow logs [--env staging|production] [--since 1h] [--until] [--severity] [--grep] [--limit] [--follow] [--json]
 //                                                                                the hosted agent's log lines
 //   flow deploy secret <NAME> [--env staging|production] [--apply] [--json]      a secret, its value read from stdin
 //   flow deploy secret --unset <NAME> [--env staging|production] [--apply]       a secret taken away
@@ -44,11 +44,11 @@ const DEFAULT_CLOUD = CLOUDS.us;
 export const DEPLOY_LINE = `  flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--no-cli] [--json]
                             Put this agent on Flow's hosting, so it answers while this machine
                             sleeps (flow deploy --help: status, promote, secret, secrets)
-  flow logs [--env staging|production] [--since 1h] [--until <when>] [--severity <min>] [--grep <text>] [--follow] [--json]
+  flow logs [--env staging|production] [--since 1h] [--until <when>] [--severity <min>] [--grep <text>] [--limit <n>] [--follow] [--json]
                             The hosted agent's log lines (flow logs --help)`;
 
 export const LOGS_USAGE = `Usage:
-  flow logs [--env staging|production] [--since 1h] [--until <when>] [--severity <min>] [--grep <text>] [--follow] [--json]
+  flow logs [--env staging|production] [--since 1h] [--until <when>] [--severity <min>] [--grep <text>] [--limit <n>] [--follow] [--json]
 
   --env        Which (default: staging); --environment works too.
   --since      How far back: 30s, 15m, 1h (the default), 3d, at most 30d, or a time such as
@@ -56,6 +56,8 @@ export const LOGS_USAGE = `Usage:
   --until      Up to when: a duration back from now (2h) or a time. Not with --follow.
   --severity   Only lines at this severity or above: DEFAULT, INFO, WARNING or ERROR.
   --grep       Only lines that hold this text (any case).
+  --limit      The most lines printed (default 10000, at most 100000): the newest are kept, and
+               stderr says where the kept lines start and the --since/--until for the older ones.
   --follow     Keep printing new lines until Ctrl-C.
   --json       One JSON object per line on stdout: { time, severity, text }; nothing else goes there
                (a failure is one { ok: false, error, next } line).
@@ -64,7 +66,8 @@ export const LOGS_USAGE = `Usage:
 Flow sends only the lines that match --until, --severity and --grep; an older Flow that does not
 filter gets them filtered here, so the lines are the same either way. Flow keeps an agent's logs
 for a while (30 days, older hosts 24 hours): when the lines start later than --since asked, stderr
-says "Logs start at <time>: this Flow keeps <N> back".`;
+says "Logs start at <time>: this Flow keeps <N> back". Flow answers in pages (500 lines); every
+page up to --until (else now) is read before anything is printed, oldest line first.`;
 
 export const DEPLOY_USAGE = `Usage:
   flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--no-cli] [--json]
@@ -128,8 +131,13 @@ Environment (or the agent folder's .env):
 
 ${KEYS_HELP}`;
 
-/** The CLI's own settings in a .env: never sent as secrets. */
-const CLI_NAMES = new Set(["FLOW_FRAMEWORK_CLOUD_KEY", "CHINWAG_CLOUD_KEY", "FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD"]);
+/**
+ * The CLI's own settings in a .env: never sent as secrets. Beside the test cloud's, what `flow
+ * setup` and `flow link` write for the CLI alone: the join code and phone page they print, and the
+ * workspace they put the agent in. The sender ids they write are sent: the hosted agent starts
+ * conversations from them (FLOW_MESSAGING_<CHANNEL>_SENDER).
+ */
+const CLI_NAMES = new Set(["FLOW_FRAMEWORK_CLOUD_KEY", "CHINWAG_CLOUD_KEY", "FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD", "FLOW_FRAMEWORK_JOIN_CODE", "FLOW_FRAMEWORK_TRY_URL", "FLOW_FRAMEWORK_WORKSPACE"]);
 /** Names the host sets on the agent's service itself, which it refuses as secrets. */
 export const HOST_NAMES = /^(FLOW_AGENT_ID|FLOW_AGENT_NAME|FLOW_ENVIRONMENT|FLOW_STORE_URL|FLOW_STORE_TOKEN|FLOW_STORE_FRAMEWORK|FLOW_STORE_CHINWAG|FLOW_API_TOKEN|FLOW_PLAYGROUND_TOKEN|FLOW_CLI_BUCKET|FLOW_WEB_CHAT_SESSION_KEY|FLOW_TRUST_PROXY|AGENT_VERSION|AGENT_DIR|PORT)$|^(FLOW_STORE_|CHINWAG_TRACES_|FLOW_FRAMEWORK_TRACES_|K_)/;
 const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
@@ -272,6 +280,7 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
         until: { type: "string" },
         severity: { type: "string" },
         grep: { type: "string" },
+        limit: { type: "string" },
         follow: { type: "boolean", short: "f" },
         json: { type: "boolean" },
         help: { type: "boolean", short: "h" },
@@ -294,7 +303,7 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
   if (values.env !== undefined && values.environment !== undefined && values.env !== values.environment) return fail("usage", `--env and --environment name different environments (${values.env}, ${values.environment}): give one\n\n${usage}`, 2);
   const given = values.env ?? values.environment;
   if (given !== undefined && given !== "staging" && given !== "production") return fail("usage", `--env is staging or production\n\n${usage}`, 2);
-  if (command !== "logs" && (values.since !== undefined || values.follow || values.until !== undefined || values.severity !== undefined || values.grep !== undefined)) return fail("usage", `--since, --until, --severity, --grep and --follow go with flow logs\n\n${usage}`, 2);
+  if (command !== "logs" && (values.since !== undefined || values.follow || values.until !== undefined || values.severity !== undefined || values.grep !== undefined || values.limit !== undefined)) return fail("usage", `--since, --until, --severity, --grep, --limit and --follow go with flow logs\n\n${usage}`, 2);
   if (command !== "secret" && (values.unset || values.apply)) return fail("usage", `--unset and --apply go with deploy secret\n\n${usage}`, 2);
   const environment: "staging" | "production" = given ?? "staging";
   const dir = resolve(values.dir!);
@@ -307,7 +316,7 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
     for (const flag of ["no-secrets", "no-cli"] as const) if (values[flag] && command !== undefined && command !== "promote") throw new Usage(`--${flag} goes with flow deploy and deploy promote\n\n${usage}`);
     if (command === "logs") {
       if (name !== undefined) throw new Usage(`flow logs takes no arguments.\n\n${usage}`);
-      return await logs(ctx, environment, { since: values.since ?? "1h", until: values.until, severity: values.severity, grep: values.grep }, Boolean(values.follow));
+      return await logs(ctx, environment, { since: values.since ?? "1h", until: values.until, severity: values.severity, grep: values.grep, limit: values.limit }, Boolean(values.follow));
     }
     if (extra !== undefined || (name !== undefined && command !== "secret" && command !== "secrets")) throw new Usage(`Too many arguments.\n\n${usage}`);
     if (command === "promote") return await promote(ctx, !values["no-secrets"], !values["no-cli"]);
@@ -861,6 +870,11 @@ function remember(dir: string, environment: string, id: string): void {
   }
 }
 
+/** The environments this folder has deployed to (staging before production), for `flow status`'s next step. */
+export function deployedFrom(dir: string): string[] {
+  return ["staging", "production"].filter((environment) => remembered(dir, environment) !== undefined);
+}
+
 function remembered(dir: string, environment: string): string | undefined {
   try {
     const id = (JSON.parse(readFileSync(join(dir, STATE), "utf8")) as Record<string, { id?: unknown }>)[environment]?.id;
@@ -999,8 +1013,13 @@ export function sinceSeconds(since: string): number | undefined {
 /** The severities --severity takes, lowest first, as Cloud Logging orders them. */
 export const SEVERITIES = ["DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY"] as const;
 
-/** The most lines asked for in one page; a full page is followed by the next. */
+/** The most lines asked for in one page (the host answers at most 500). */
 const LOGS_PAGE = 1000;
+/** The lines `flow logs` prints by default, and at most (--limit): the newest are kept. */
+const LOGS_LIMIT = 10_000;
+const LOGS_LIMIT_MAX = 100_000;
+/** The most pages one `flow logs` reads before it stops and says where. */
+const LOGS_PAGES = 1000;
 
 /** What `flow logs` asks for: RFC 3339 times, a minimum severity, a text to find. */
 export interface LogsQuery {
@@ -1058,7 +1077,7 @@ function span(ms: number): string {
  * which keeps 24 hours). When the lines start later than --since asked, one notice on stderr says
  * where they start. A Flow without that route says so and exits 1.
  */
-async function logs(ctx: Ctx, environment: string, asked: { since: string; until?: string; severity?: string; grep?: string }, followLines: boolean): Promise<number> {
+async function logs(ctx: Ctx, environment: string, asked: { since: string; until?: string; severity?: string; grep?: string; limit?: string }, followLines: boolean): Promise<number> {
   const now = ctx.now();
   const since = logsTime(asked.since, now);
   if (since === undefined || now - since > 30 * 86400_000) throw new Usage(`--since is a duration such as 30s, 15m, 1h or 3d (at most 30d), or a time such as 2026-11-03T09:00:00Z.\n\n${LOGS_USAGE}`);
@@ -1068,27 +1087,62 @@ async function logs(ctx: Ctx, environment: string, asked: { since: string; until
   const severity = asked.severity?.toUpperCase();
   if (severity !== undefined && !(SEVERITIES as readonly string[]).includes(severity)) throw new Usage(`--severity is DEFAULT, INFO, WARNING or ERROR (the lines at it or above).\n\n${LOGS_USAGE}`);
   if (asked.grep !== undefined && (!asked.grep || asked.grep.length > 200)) throw new Usage(`--grep is the text to find, 1 to 200 characters.\n\n${LOGS_USAGE}`);
+  const limit = asked.limit === undefined ? LOGS_LIMIT : /^\d{1,6}$/.test(asked.limit) ? Number(asked.limit) : NaN;
+  if (!(limit >= 1 && limit <= LOGS_LIMIT_MAX)) throw new Usage(`--limit is the most lines to print, 1 to ${LOGS_LIMIT_MAX}.\n\n${LOGS_USAGE}`);
   const query: LogsQuery = { environment, since: new Date(since).toISOString(), ...(until !== undefined ? { until: new Date(until).toISOString() } : {}), ...(severity ? { severity } : {}), ...(asked.grep ? { grep: asked.grep } : {}) };
+  const print = (line: LogLine) => {
+    if (ctx.json) console.log(JSON.stringify({ time: line.time, severity: line.severity ?? null, text: line.text }));
+    else console.log(`${line.time} ${(line.severity ?? "").padEnd(7)} ${line.text}`);
+  };
+  // First every page up to --until (else now), the newest `limit` lines kept; the host answers 500 a
+  // page, oldest first, and a page whose cursor does not move is the end.
+  let kept: LogLine[] = [];
+  let dropped = 0;
+  let lastDropped: string | undefined;
   let polls = 0;
-  let noticed = false;
+  let stoppedAt: string | undefined;
   for (;;) {
     const page = await logsPage(ctx.api, query);
-    if (!noticed && polls === 0) {
-      noticed = true;
+    polls++;
+    if (polls === 1) {
       // Where the logs start, when later than asked: the host's from, else (an older host) its 24 hours.
       const starts = page.from ? Date.parse(page.from) : now - since > 86400_000 ? now - 86400_000 : undefined;
       if (starts !== undefined && starts - since > 60_000) console.error(`Logs start at ${new Date(starts).toISOString()}: this Flow keeps ${span(now - starts)} back.`);
     }
-    for (const line of page.lines) {
-      if (ctx.json) console.log(JSON.stringify({ time: line.time, severity: line.severity ?? null, text: line.text }));
-      else console.log(`${line.time} ${(line.severity ?? "").padEnd(7)} ${line.text}`);
+    const moved = Boolean(page.next) && page.next !== query.after;
+    if (moved || polls === 1) kept.push(...page.lines);
+    if (kept.length > limit) {
+      const cut = kept.length - limit;
+      dropped += cut;
+      lastDropped = kept[cut - 1]!.time;
+      kept = kept.slice(cut);
     }
-    if (page.next) query.after = page.next;
+    if (moved) query.after = page.next!;
+    if (!moved || (ctx.maxPolls !== undefined && polls >= ctx.maxPolls)) break;
+    if (polls >= LOGS_PAGES) {
+      stoppedAt = kept.at(-1)?.time;
+      break;
+    }
+  }
+  if (dropped) {
+    const rest = `${RUN} logs${environment === "production" ? " --env production" : ""} --since ${query.since} --until ${lastDropped}`;
+    console.error(`Printed the newest ${kept.length} of ${kept.length + dropped} lines, from ${kept[0]?.time ?? lastDropped} (--limit ${limit}). The ${dropped} older ones: ${rest}`);
+  }
+  for (const line of kept) print(line);
+  if (stoppedAt !== undefined) {
+    console.error(`Stopped after ${LOGS_PAGES} pages at ${stoppedAt}: newer lines were not read. For them: ${RUN} logs${environment === "production" ? " --env production" : ""} --since ${stoppedAt}${query.until ? ` --until ${query.until}` : ""}`);
+  }
+  if (!followLines || (ctx.maxPolls !== undefined && polls >= ctx.maxPolls)) return 0;
+  // --follow: a look every pollMs until Ctrl-C, each new line printed as it comes.
+  for (;;) {
+    await new Promise((r) => setTimeout(r, ctx.pollMs));
+    const page = await logsPage(ctx.api, query);
     polls++;
-    // Without --follow, the pages up to now; with it, a look every pollMs until Ctrl-C.
-    if (!followLines && (!page.next || !page.full || polls >= 100)) return 0;
+    if (page.next && page.next !== query.after) {
+      for (const line of page.lines) print(line);
+      query.after = page.next;
+    }
     if (ctx.maxPolls !== undefined && polls >= ctx.maxPolls) return 0;
-    if (followLines) await new Promise((r) => setTimeout(r, ctx.pollMs));
   }
 }
 

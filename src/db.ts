@@ -23,11 +23,29 @@ export interface Database {
 }
 
 /**
+ * node:sqlite without Node 22's "SQLite is an experimental feature" warning, which a hosted agent
+ * printed as two log lines on every start (its start check opens one); any other warning while it
+ * loads is printed as usual.
+ */
+function loadSqlite(): typeof import("node:sqlite") {
+  const emit = process.emitWarning;
+  process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
+    if (/^SQLite is an experimental feature/.test(typeof warning === "string" ? warning : String(warning?.message))) return;
+    (emit as (...args: unknown[]) => void).call(process, warning, ...rest);
+  }) as typeof process.emitWarning;
+  try {
+    return process.getBuiltinModule("node:sqlite");
+  } finally {
+    process.emitWarning = emit;
+  }
+}
+
+/**
  * SQLite in a file (one process may use it at a time) or, by default, in memory. Statements run
  * one at a time per connection: a transaction holds the connection until it ends.
  */
 export function sqlite(path = ":memory:"): Database {
-  const { DatabaseSync: Sqlite } = process.getBuiltinModule("node:sqlite");
+  const { DatabaseSync: Sqlite } = loadSqlite();
   const db = new Sqlite(path);
   if (path !== ":memory:") db.exec("PRAGMA journal_mode = WAL");
   let lock: Promise<unknown> = Promise.resolve();

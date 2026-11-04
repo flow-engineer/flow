@@ -2,6 +2,7 @@
 // dashboard, a test); they must never throw into the conversation.
 
 import { appendFileSync } from "node:fs";
+import { format } from "node:util";
 
 export interface FlowEvent {
   type:
@@ -66,10 +67,33 @@ export function emitter(sinks: EventSink[], runner?: string) {
       try {
         sink(event);
       } catch (error) {
-        console.warn("flow: an event sink failed:", error);
+        log("WARNING", "flow: an event sink failed:", error);
       }
     }
   };
 }
 
 export type Emit = ReturnType<typeof emitter>;
+
+/** How much one of Flow Framework's own log lines matters, in Cloud Logging's names. */
+export type Severity = "DEBUG" | "INFO" | "WARNING" | "ERROR";
+
+const CONSOLE = { DEBUG: "debug", INFO: "info", WARNING: "warn", ERROR: "error" } as const;
+
+/**
+ * One of Flow Framework's own log lines (never the agent's), written with console's method for its
+ * severity, as `console.warn(...)` takes its arguments. On Cloud Run (Flow's hosting included:
+ * K_SERVICE, or CLOUD_RUN_JOB for a job) it is one JSON line Cloud Logging reads: `severity`,
+ * `message` (an Error's stack inside it, so a stack is one entry) and `fields`. Elsewhere it is the
+ * text console prints, as before; with no text, `fields` as JSON.
+ */
+export function log(severity: Severity, ...args: unknown[]): void {
+  logFields(severity, {}, ...args);
+}
+
+/** {@link log} with fields of its own: ids, counts and kinds, never a message's text. */
+export function logFields(severity: Severity, fields: Record<string, unknown>, ...args: unknown[]): void {
+  const method = CONSOLE[severity];
+  if (!process.env.K_SERVICE && !process.env.CLOUD_RUN_JOB) return void console[method](...(args.length ? args : [JSON.stringify(fields)]));
+  console[method](JSON.stringify({ severity, ...(args.length ? { message: format(...args) } : {}), ...fields }));
+}

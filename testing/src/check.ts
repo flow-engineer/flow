@@ -8,7 +8,7 @@ import { pluginProblems } from "./plugin.ts";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { cliProblems, type CliConfig } from "../../cli/src/commands.ts";
-import { CHAT_ONLY, describe, toolsProblems } from "../../mcp/src/describe.ts";
+import { CHAT_ONLY, describe, FULL_CATALOG_META, toolsProblems } from "../../mcp/src/describe.ts";
 import { loadSkills, readAgentFolder } from "../../src/skills.ts";
 import type { Tool } from "../../src/tools.ts";
 
@@ -22,6 +22,59 @@ async function load(file: string): Promise<Record<string, unknown> | undefined> 
     if ((error as { code?: string }).code !== "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX") throw error;
     console.error(`${(error as Error).message.split("\n")[0]}\nNode runs .ts files by stripping types only: no parameter properties (constructor(readonly x)), enums or namespaces. Write them as plain fields and objects.`);
     return undefined;
+  }
+}
+
+/**
+ * The names of the tools src/mcp.ts's server lists to a CLI, asked in-process as the CLI asks it
+ * (tools/list, the full catalog), so check says what `<cli> <command>` really reaches. undefined
+ * when there is no src/mcp.ts, it exports no `mcp`, or it will not answer here (sign-in, another
+ * path); null when it cannot be imported (said already). A src/mcp.ts that throws is an error.
+ */
+async function servedTools(dir: string, errors: string[]): Promise<Set<string> | undefined | null> {
+  const file = join(dir, "src/mcp.ts");
+  if (!existsSync(file)) return undefined;
+  let mcp: { fetch?: unknown } | undefined;
+  try {
+    const loaded = await load(file);
+    if (!loaded) return null;
+    mcp = loaded.mcp as typeof mcp;
+  } catch (error) {
+    errors.push(`src/mcp.ts: ${(error as Error).message.split("\n")[0]}`);
+    return undefined;
+  }
+  if (typeof mcp?.fetch !== "function") return undefined;
+  const serve = mcp.fetch as (request: Request) => Promise<Response>;
+  // Every request goes to the handle in this process, never the network; as from 127.0.0.1, which
+  // mcpServer's Host check lets in.
+  const here = (url: string | URL, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("host", "127.0.0.1");
+    return serve(new Request(url, { ...init, headers }));
+  };
+  // An optional peer dependency, as the CLI's own (cli/src/run.ts): imported only here.
+  let sdk: typeof import("@modelcontextprotocol/client");
+  try {
+    sdk = await import("@modelcontextprotocol/client");
+  } catch {
+    return undefined;
+  }
+  const { Client, StreamableHTTPClientTransport } = sdk;
+  const client = new Client({ name: "flow-check", version: "1" });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL("http://127.0.0.1/mcp"), { fetch: here }));
+    const names = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const page = await client.listTools({ ...(cursor ? { cursor } : {}), _meta: { [FULL_CATALOG_META]: true } });
+      for (const t of page.tools) names.add(t.name);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return names;
+  } catch {
+    return undefined;
+  } finally {
+    await client.close().catch(() => {});
   }
 }
 
@@ -58,14 +111,18 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
     const cli = loaded.cli as CliConfig | undefined;
     if (!cli) errors.push("src/cli.ts exports no cli (export const cli = defineCli({ ... }))");
     else {
-      const described = tools.flatMap((t) => {
+      // The CLI's commands are the tools its MCP server lists: src/mcp.ts's, when it can be asked.
+      const served = await servedTools(dir, errors);
+      if (served === null) return 1;
+      // A tool kept to the CLI (mcp.clients) is listed only to a signed-in CLI, never here: it counts as served.
+      const described = tools.filter((t) => !served || served.has(t.name) || t.mcp?.clients?.includes("cli")).flatMap((t) => {
         try {
           return [describe(t)];
         } catch {
           return [];
         }
       });
-      const found = cliProblems(cli, described);
+      const found = cliProblems(cli, described, served !== undefined);
       errors.push(...found.errors.map((e) => `src/cli.ts: ${e}`));
       warnings.push(...found.warnings.map((w) => `src/cli.ts: ${w}`));
     }
