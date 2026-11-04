@@ -63,6 +63,32 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - `testing/src/cloud-call.ts` is new: the one call, key and failure helpers these commands share.
   `listConversations`, `showConversation`, `listIssues`, `logsPage` and `deployStatus` return data
   for callers other than the CLI.
+- **`flow insights`: Flow Insights from the terminal.** `flow insights [--days 7|30] [--status
+  open|fixed|muted|all]` lists the findings the dashboard shows (where people gave up, asked again or
+  got annoyed in the agent's closed production conversations), ranked as Flow ranks them: id,
+  status, conversations with the window before's ("4 (was 9)"), topic, and what happened in the
+  dashboard's words. Low-confidence tags are named under the table, not in it. Under it, the
+  window's closed sessions and people, and what a state means: `collecting` shows counts only until
+  20 closed sessions; `no_data` says Insights grades only closed (24 h quiet) production
+  conversations on a live key, never test keys, `flow chat`, the playground or `flow test`.
+  `flow insights show <finding> [--days 7|30]` lists the finding's conversations, each with why it
+  was flagged, the person's words when the account's data allows, and `flow conversations show
+  <id>` to read it. `--json` prints the server's JSON. Until Insights is open to the workspace,
+  both print "Insights is not open to this workspace yet" with the server's hint and exit 1.
+  Insights is production traffic, so it reads with the agent's live Flow key (`flow_live_`): a
+  test key (`flow_test_`, what `flow setup` writes) is refused, and both print why and exit 1.
+- **`flow issues test-case <id>`** prints the test case Flow proposes for an issue: its rule, the
+  reply it comes from, and the words to include or avoid and the sentences to judge by, to write a
+  scenario from (stdout only; it writes no file). `--json` prints the server's JSON.
+- **`flow conversations` shows each conversation's kind** (a KIND column: `test` or
+  `production`), and `flow conversations show` says under the reply counts when a conversation is
+  a test one (`flow chat`, the playground or `flow test`: never graded, never in Insights), or on a
+  test key (staging: never in Insights), so zero counts no longer read as graded and fine.
+- The build-agent skill teaches the loop: `flow insights`, `flow insights show`, `flow
+  conversations show`, fix, a scenario, `flow test`, `flow deploy`, then `flow insights` again
+  after the window.
+- `listInsights` and `insightConversations` (testing/src/conversations.ts) return Insights'
+  answers for callers other than the CLI, refusals as `Failed` with the server's code and hint.
 
 ### Migration notes
 
@@ -79,6 +105,7 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   stdin failure's is `stdin` (both were `network`).
 - `templateWarnings` (testing/src/templates.ts, not exported from the package) takes the key with
   where it was found.
+- `flow conversations`' table has a KIND column after CHANNEL; `--json` is unchanged.
 
 ## 0.15.6 (2026-11-02)
 

@@ -23,7 +23,8 @@
 // keys and its phone link (testing/src/account.ts); `flow projects list | delete` lists and deletes
 // that account's projects (testing/src/projects.ts). `flow deploy` puts the agent on Flow's hosting
 // (testing/src/deploy.ts). `flow conversations` and `flow issues` read the hosted agent's
-// conversations and the grades of its replies (testing/src/conversations.ts); `flow templates` the
+// conversations and the grades of its replies, and `flow insights` Flow Insights' findings
+// (testing/src/conversations.ts); `flow templates` the
 // project's approved WhatsApp templates (testing/src/templates.ts), which `flow test` compares with
 // the declared ones.
 
@@ -45,7 +46,7 @@ import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
 import { PROJECTS_LINE, projectsCli } from "./projects.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
 import { RECORDS_LINE, recordsCli } from "./records.ts";
-import { CONVERSATIONS_LINES, conversationsCli, issuesCli } from "./conversations.ts";
+import { CONVERSATIONS_LINES, conversationsCli, INSIGHTS_LINES, insightsCli, issuesCli } from "./conversations.ts";
 import { TEMPLATES_LINE, templatesCli, templateWarnings } from "./templates.ts";
 import { KEYS_HELP } from "./cloud-call.ts";
 import type { TemplateDefinition } from "../../src/types.ts";
@@ -176,7 +177,7 @@ the CHINWAG_ names from before the rename still work):
 ${KEYS_HELP}`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
 const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${RECORDS_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${CLI_RELEASE_LINE}\n${INSPECT_LINE}
-${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${PROJECTS_LINE}\n${DEPLOY_LINE}\n${CONVERSATIONS_LINES}\n${TEMPLATES_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
+${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${PROJECTS_LINE}\n${DEPLOY_LINE}\n${CONVERSATIONS_LINES}\n${INSIGHTS_LINES}\n${TEMPLATES_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
 
 /** What to do after new or init, from step 2; a model key comes first when none is set here. */
 function nextSteps(): string {
@@ -228,6 +229,7 @@ if (process.argv[2] === "records") await exitFlushed(await recordsCli(process.ar
 if (process.argv[2] === "projects") await exitFlushed(await projectsCli(process.argv.slice(3)));
 if (process.argv[2] === "conversations") await exitFlushed(await conversationsCli(process.argv.slice(3)));
 if (process.argv[2] === "issues") await exitFlushed(await issuesCli(process.argv.slice(3)));
+if (process.argv[2] === "insights") await exitFlushed(await insightsCli(process.argv.slice(3)));
 if (process.argv[2] === "templates") await exitFlushed(await templatesCli(process.argv.slice(3)));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) await exitFlushed(await accountCli(process.argv[2]!, process.argv.slice(3)));
 

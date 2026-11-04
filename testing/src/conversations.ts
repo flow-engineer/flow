@@ -5,12 +5,19 @@
 //   GET {cloud}/v1/agent/conversations?environment=&grade=&since=&limit=&cursor=
 //   GET {cloud}/v1/agent/conversations/{id}
 //   GET {cloud}/v1/agent/issues?status=
+//   GET {cloud}/v1/agent/issues/{issue}/test-case (the test case Flow proposes for an issue)
 //   GET {cloud}/v1/agent/feedback?days=30 (the team's feedback, printed under the issues)
+// `flow insights` reads Flow Insights, what the dashboard shows of people's closed production
+// conversations (where they gave up, asked again or got annoyed, by topic), and the conversations
+// behind one finding:
+//   GET {cloud}/v1/agent/insights?days=7|30
+//   GET {cloud}/v1/agent/insights/findings/{finding}/conversations?days=7|30
 // Errors are { error: { code, message, hint } }. The reads wait out a 429 and try once more after a
 // network error or a 5xx (testing/src/cloud-call.ts). With --json, stdout is one JSON document: the
 // server's, or { ok: false, error: { code, message, hint? }, next } when it did not work.
 // Exit status: 0 printed, 1 the server refused or could not be reached, or no key, 2 a wrong flag.
-// listConversations, showConversation and listIssues return the data, for callers other than the CLI.
+// listConversations, showConversation, listIssues, listInsights and insightConversations return the
+// data, for callers other than the CLI.
 
 import { parseArgs } from "node:util";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
@@ -27,7 +34,10 @@ export const CONVERSATIONS_LINES = `  flow conversations [--env staging|producti
                             and delivery when Flow has them
   flow issues [--status open|resolved|ignored|all] [--json]
                             The problems the grades add up to, each with its conversations and a
-                            suggested fix`;
+                            suggested fix
+  flow issues test-case <id> [--json]
+                            The test case Flow proposes for an issue: its rule, the reply it
+                            comes from and the checks, to write a scenario from`;
 
 const COMMON = `  --json                   One JSON document on stdout: the server's (pages of conversations
                            merged into one), or { ok: false, error: { code, message, hint }, next }
@@ -69,11 +79,13 @@ ${COMMON}`;
 
 const ISSUES_USAGE = `Usage:
   flow issues [--status open|resolved|ignored|all] [--json]
+  flow issues test-case <id> [--json]
 
 The problems the grades of the agent's replies add up to: id, status, conversations, last seen,
 title, and the suggested fix. flow conversations show <id> reads one of the conversations.
 Then your team's feedback: checks marked out of date (change them in the scenario file) and reply
-grades marked wrong.
+grades marked wrong. test-case prints the test case Flow proposes for one issue (on stdout only; it
+writes no file): write a scenario in tests/scenarios from it, then flow test --only <that scenario>.
 
 Options:
   --status <status>        open (the default), resolved, ignored or all
@@ -99,6 +111,8 @@ export interface Conversation {
   version_source?: string | null;
   /** Its replies came from more than one version. */
   version_changed?: boolean;
+  /** test for a conversation of flow test, flow chat or the playground (never graded), else production. */
+  run_kind?: string;
 }
 /** rule, reason and quote are null when the account's data keeps them back. */
 interface Grade { label?: string; verdict?: string | null; rule?: string | null; reason?: string | null; quote?: string | null; graded_at?: string }
@@ -352,7 +366,8 @@ export async function issuesCli(args: string[]): Promise<number> {
   const { values, positionals } = parsed;
   const json = values.json === true;
   if (values.help) return console.log(ISSUES_USAGE), 0;
-  if (positionals.length) return usageFailed(json, `${name} takes no arguments.`, ISSUES_USAGE);
+  if (positionals[0] === "test-case" && positionals.length === 2 && !values.status) return issueTestCase(name, positionals[1]!, values);
+  if (positionals.length) return usageFailed(json, `${name} takes no arguments, or test-case <id>.`, ISSUES_USAGE);
   const status = values.status ?? "open";
   if (!["open", "resolved", "ignored", "all"].includes(status)) return usageFailed(json, `--status is open, resolved, ignored or all (got "${status}").`);
   const where = access(name, values);
@@ -375,6 +390,41 @@ export async function issuesCli(args: string[]): Promise<number> {
       if (!(error instanceof Failed)) throw error; // an older Flow without the route: nothing more to print
     }
     if (feedback.length) console.log(["", `Feedback from your team (last 30 days): ${feedback.length}`, ...feedback.flatMap(feedbackLines)].join("\n"));
+    return 0;
+  } catch (error) {
+    if (error instanceof Failed) return failed(json, error);
+    throw error;
+  }
+}
+
+/** rule_id, from and expectations are the server's; from is null when no stored reply is behind it. */
+interface TestCase {
+  issue?: string; rule_id?: string; from?: { conversation?: string; message?: string } | null;
+  expectations?: { includes?: string[]; must_not?: string[]; expect?: string[]; rubrics?: string[] };
+}
+
+/** `flow issues test-case <id>`: the proposed test case's fields as the server sends them. A scenario also needs the
+ * person, the opening and the channels, which the test case does not carry, so it is not printed as a scenario file. */
+async function issueTestCase(name: string, id: string, values: { json?: boolean; cloud?: string; dotenv?: string }): Promise<number> {
+  const json = values.json === true;
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) return usageFailed(json, `"${id}" is not an issue id: use one from flow issues.`);
+  const where = access(name, values);
+  if (where instanceof Failed) return failed(json, where);
+  try {
+    const { text, body } = await get(name, where, `/v1/agent/issues/${id}/test-case`);
+    if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;
+    const tc = (body.test_case ?? {}) as TestCase;
+    const e = tc.expectations ?? {};
+    const list = (label: string, items: string[] | undefined) => (items?.length ? [`${label}:`, ...items.map((item) => `  - ${JSON.stringify(item)}`)] : []);
+    console.log([
+      `issue: ${tc.issue ?? id}`,
+      `rule: ${tc.rule_id ?? "-"}`,
+      tc.from ? `from: conversation ${tc.from.conversation ?? "?"}, reply ${tc.from.message ?? "?"}` : "from: none of the agent's stored replies",
+      ...list("includes", e.includes), ...list("must_not", e.must_not), ...list("expect", e.expect), ...list("rubrics", e.rubrics),
+      "",
+      "These are Flow's fields, not a scenario file: a scenario also needs the person, the opening and the channels.",
+      `Write tests/scenarios/<name>.yaml from them${tc.from?.conversation ? ` and flow conversations show ${tc.from.conversation}` : ""} (expect as its expect.judge), then run flow test --only <name>.`,
+    ].join("\n"));
     return 0;
   } catch (error) {
     if (error instanceof Failed) return failed(json, error);
@@ -414,9 +464,9 @@ export function table(header: string[], rows: string[][]): string[] {
 
 function list(conversations: Conversation[], more: boolean): string[] {
   if (!conversations.length) return ["No conversations."];
-  const rows = conversations.map((c) => [c.id, when(c.last_message_at ?? c.started_at), channels(c), c.version || "-", c.contact ?? "", String(c.messages ?? ""), c.grades ? String(c.grades.wrong ?? 0) : "-", c.grades ? String(c.grades.unhelpful ?? 0) : "-"]);
+  const rows = conversations.map((c) => [c.id, when(c.last_message_at ?? c.started_at), channels(c), c.run_kind || "-", c.version || "-", c.contact ?? "", String(c.messages ?? ""), c.grades ? String(c.grades.wrong ?? 0) : "-", c.grades ? String(c.grades.unhelpful ?? 0) : "-"]);
   return [
-    ...table(["ID", "LAST MESSAGE", "CHANNEL", "VERSION", "CONTACT", "MESSAGES", "WRONG", "UNHELPFUL"], rows),
+    ...table(["ID", "LAST MESSAGE", "CHANNEL", "KIND", "VERSION", "CONTACT", "MESSAGES", "WRONG", "UNHELPFUL"], rows),
     "",
     `${conversations.length} conversation${conversations.length === 1 ? "" : "s"}${more ? " (more: raise --limit)" : ""}${conversations.some((c) => !c.grades) ? "; - is grades unavailable" : ""}. Read one: flow conversations show <id>`,
   ];
@@ -485,6 +535,8 @@ function transcript(body: Record<string, unknown>): string[] {
     `  started ${when(c.started_at)}, last message ${when(c.last_message_at)}, ${c.messages ?? "?"} messages`,
     `  version ${version(c)}`,
     g ? `  replies: ${g.wrong ?? 0} wrong, ${g.unhelpful ?? 0} unhelpful, ${g.good ?? 0} good, ${g.not_graded ?? 0} not graded` : "  replies: grades unavailable",
+    ...(c.run_kind === "test" ? ["  A test conversation (flow chat, the playground or flow test): never graded, never in Insights"]
+      : c.environment === "staging" ? ["  On a test key (staging): never in Insights, which reads production conversations on a live key"] : []),
     "",
   ];
   for (const m of (body.messages as Message[] | undefined) ?? []) {
@@ -515,4 +567,178 @@ function transcript(body: Record<string, unknown>): string[] {
 /** Text over several lines: the first after `first`, the rest after `rest`. */
 function indent(text: string, first: string, rest = first): string[] {
   return text.split("\n").map((line, i) => `${i === 0 ? first : rest}${line}`);
+}
+
+export const INSIGHTS_LINES = `  flow insights [--days 7|30] [--status open|fixed|muted|all] [--json]
+                            Flow Insights' findings: where people gave up, asked again or got
+                            annoyed in the agent's closed production conversations, by topic
+  flow insights show <finding> [--days 7|30] [--json]
+                            One finding's conversations, each with why it was flagged`;
+
+const INSIGHTS_USAGE = `Usage:
+  flow insights [--days 7|30] [--status open|fixed|muted|all] [--json]
+  flow insights show <finding> [--days 7|30] [--json]
+
+Lists Flow Insights' findings as the dashboard ranks them: id, status, conversations in the window
+(with the window before's: "4 (was 9)"), topic, and what happened. show prints one finding's
+conversations: id, time, why it was flagged and the person's words. Insights reads only closed
+production conversations (quiet for 24 h), so it needs the agent's live Flow key (flow_live_). To check
+a finding: flow insights show <finding>, then flow conversations show <id>; once a fix is deployed
+and a window has passed, flow insights again to see its count drop.
+
+Options:
+  --days <n>               The window: 7 (the default) or 30 days
+  --status <status>        open (the default), fixed, muted or all
+${COMMON}`;
+
+/** Each signal in the dashboard's words (observe's web/src/flow/insights.ts); another is its name in words. */
+const SIGNALS: Record<string, string> = {
+  no_reply: "No reply",
+  failed_send: "Send failed",
+  re_ask: "Repeated question",
+  agent_loop: "Loop",
+  canned_fallback: "Fallback reply",
+  couldnt_answer: "Unanswered",
+  deflected: "Deflected",
+  wants_person: "Handoff requested",
+  thumbs_down: "Thumbs down",
+  stopped: "Opted out",
+  left_mid_task: "Drop-off",
+  came_back: "Repeat contact",
+  frustrated: "Frustrated",
+  annoyed_re_asked_detail: "Got annoyed when the agent re-asked for a detail they had given",
+  annoyed_canned_or_off_topic: "Got annoyed when the agent sent a canned or off-topic reply",
+  annoyed_wrong_fact: "Got annoyed when the agent got a fact wrong",
+  annoyed_slow_or_no_reply: "Got annoyed when the agent was slow or did not reply",
+  annoyed_refused: "Got annoyed when the agent refused",
+  annoyed_loop: "Got annoyed when the agent repeated itself",
+  annoyed_service_problem: "Got annoyed about the service itself (not the agent)",
+  annoyed_other: "Got annoyed (other reason)",
+};
+
+function signalTitle(signal: string): string {
+  const words = signal.replace(/[_-]+/g, " ").trim();
+  return SIGNALS[signal] ?? (words ? words[0]!.toUpperCase() + words.slice(1) : "Finding");
+}
+
+export interface Finding {
+  id: string; signal: string; status?: string; topic?: { id: string; name: string } | null;
+  conversations?: number; previous?: number | null; tag_only?: boolean;
+}
+/** quote is the person's words, null unless the account's data lets them be shown. */
+interface FindingConversation { conversation: string; at?: string; annoyed?: boolean; cause?: string | null; quote?: string | null }
+
+/** "4 (was 9)": the window's conversations, and the window before's when the server sent it. */
+function counted(f: Finding): string {
+  return `${f.conversations ?? 0}${typeof f.previous === "number" ? ` (was ${f.previous})` : ""}`;
+}
+
+/** An Insights read: the server's text and JSON, or Failed; a workspace Insights is not open to (not_found) and a test
+ * key (403 scope: Insights is production traffic) say so in words, with the server's code and hint kept. */
+async function insightsGet(name: string, where: Access, path: string, finding: boolean): Promise<{ text: string; body: Record<string, unknown> }> {
+  try {
+    return await get(name, where, path);
+  } catch (error) {
+    if (!(error instanceof Failed)) throw error;
+    const words = error.status === 403 && error.code === "scope"
+      ? "Insights reads production conversations, so it needs the agent's live Flow key (flow_live_); flow setup writes a test key (flow_test_)."
+      // Both routes answer not_found until Insights is open to the workspace; a finding's also for one not the agent's.
+      : error.code === "not_found" && !finding ? "Insights is not open to this workspace yet." : undefined;
+    const message = words ? `${name}: ${words}${error.hint ? `\n${error.hint}` : ""}`
+      : `${error.message}${error.code === "not_found" ? "\nflow insights lists the findings, or says Insights is not open to this workspace yet." : ""}`;
+    const said = new Failed(message, error.code, error.hint, error.next);
+    said.status = error.status;
+    throw said;
+  }
+}
+
+/** Insights over the last `days` (7 or 30), as the server answers; with a status other than all, body's findings are only
+ * those (text stays the server's whole answer). */
+export async function listInsights(name: string, where: Access, query: { days: 7 | 30; status?: "open" | "fixed" | "muted" | "all" }): Promise<{ text: string; body: Record<string, unknown> }> {
+  const { text, body } = await insightsGet(name, where, `/v1/agent/insights?days=${query.days}`, false);
+  const status = query.status ?? "all";
+  if (status === "all" || !Array.isArray(body.findings)) return { text, body };
+  return { text, body: { ...body, findings: (body.findings as Finding[]).filter((f) => f.status === status) } };
+}
+
+/** One finding's conversations over the last `days`, as the server answers them: { finding, data }. */
+export function insightConversations(name: string, where: Access, finding: string, days: 7 | 30): Promise<{ text: string; body: Record<string, unknown> }> {
+  return insightsGet(name, where, `/v1/agent/insights/findings/${encodeURIComponent(finding)}/conversations?days=${days}`, true);
+}
+
+/** Runs `flow insights ...`; resolves to the exit status. */
+export async function insightsCli(args: string[]): Promise<number> {
+  const name = "flow insights";
+  const parsed = parse(name, args, { days: { type: "string" }, status: { type: "string" } }, INSIGHTS_USAGE);
+  if (!parsed) return USAGE_EXIT;
+  const { values, positionals } = parsed;
+  const json = values.json === true;
+  if (values.help) return console.log(INSIGHTS_USAGE), 0;
+  const show = positionals[0] === "show";
+  if (show ? positionals.length !== 2 : positionals.length !== 0) return usageFailed(json, `${name} takes no arguments, or show <finding>.`, INSIGHTS_USAGE);
+  if (show && values.status) return usageFailed(json, `${name} show takes a finding, --days and --json.`, INSIGHTS_USAGE);
+  const days = values.days ?? "7";
+  if (days !== "7" && days !== "30") return usageFailed(json, `--days is 7 or 30 (got "${days}").`);
+  const status = values.status ?? "open";
+  if (!["open", "fixed", "muted", "all"].includes(status)) return usageFailed(json, `--status is open, fixed, muted or all (got "${status}").`);
+  const id = positionals[1];
+  if (show && !/^[A-Za-z0-9_-]{1,100}$/.test(id!)) return usageFailed(json, `"${id}" is not a finding id: use one from flow insights.`);
+  const where = access(name, values);
+  if (where instanceof Failed) return failed(json, where);
+  try {
+    const { text, body } = show
+      ? await insightConversations(name, where, id!, Number(days) as 7 | 30)
+      : await listInsights(name, where, { days: Number(days) as 7 | 30, status: status as "open" });
+    if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;
+    console.log((show ? findingLines(body, days) : insightsLines(body, status)).join("\n"));
+    return 0;
+  } catch (error) {
+    if (error instanceof Failed) return failed(json, error);
+    throw error;
+  }
+}
+
+/** The findings' table (tag-only ones named under it), the window's line and what its state means; findings already of the status. */
+function insightsLines(body: Record<string, unknown>, status: string): string[] {
+  const state = String(body.state ?? "");
+  const window = Number(body.window_days ?? 7);
+  const note = typeof body.note === "string" && body.note ? [body.note] : [];
+  if (state === "off_health") return note.length ? note : ["Insights is off for this workspace."];
+  const findings = (body.findings as Finding[] | undefined) ?? [];
+  const rows = findings.filter((f) => !f.tag_only);
+  const tags = findings.filter((f) => f.tag_only);
+  const out = state === "no_data" ? [] : rows.length
+    ? [...table(["ID", "STATUS", "CONVERSATIONS", "TOPIC", "FINDING"], rows.map((f) => [f.id, f.status ?? "", counted(f), f.topic?.name ?? "-", signalTitle(f.signal)])), ""]
+    : [`No ${status === "all" ? "" : `${status} `}findings in the last ${window} days.`, ""];
+  out.push(`Last ${window} days: ${body.closed_sessions ?? 0} closed sessions from ${body.people ?? 0} people.`);
+  const min = (body.small_numbers as { rates_min_sessions?: number } | undefined)?.rates_min_sessions ?? 20;
+  if (state === "collecting") out.push(`Collecting: counts only, no rates or topics, until ${min} closed sessions.`);
+  if (state === "no_data") {
+    out.push("Nothing graded yet: Insights grades only closed (24 h quiet) production conversations on a live key.",
+      "Test-key traffic, flow chat, the playground and flow test conversations are never graded.");
+  }
+  out.push(...note);
+  const noText = Number(body.messages_without_text ?? 0);
+  if (noText > 0) out.push(`${noText} messages came without their text (trace content off): Insights reads none of them.`);
+  if (tags.length) out.push(`Low-confidence tags, left out above: ${tags.map((f) => `${f.id} ${signalTitle(f.signal)} (${f.conversations ?? 0})`).join(", ")}.`);
+  if (rows.length || tags.length) out.push("Read one: flow insights show <finding>");
+  return out;
+}
+
+/** One finding's head line, then each conversation: id, time, why, the person's words and the next step. */
+function findingLines(body: Record<string, unknown>, days: string): string[] {
+  const f = (body.finding ?? {}) as Finding;
+  const title = `${signalTitle(f.signal ?? "")}${f.topic ? ` · ${f.topic.name}` : ""}`;
+  const out = [`${f.id ?? "?"}  ${f.status ?? ""}  ${title}: ${counted(f)} conversations in the last ${days} days`, ""];
+  const data = (body.data as FindingConversation[] | undefined) ?? [];
+  if (!data.length) out.push("No conversations in this window.");
+  // An annoyed_ finding's cause is its signal; another finding's conversation may also say why the person got annoyed.
+  const signal = (f.signal ?? "").startsWith("annoyed_") ? [] : [signalTitle(f.signal ?? "")];
+  for (const c of data) {
+    const why = [...signal, ...(c.cause ? [signalTitle(`annoyed_${c.cause}`)] : c.annoyed ? ["Got annoyed"] : [])];
+    out.push(`${c.conversation}  ${when(c.at)}  ${why.join("; ") || signalTitle(f.signal ?? "")}`);
+    if (typeof c.quote === "string" && c.quote) out.push(`    "${c.quote}"`);
+    out.push(`    next: flow conversations show ${c.conversation}`);
+  }
+  return out;
 }
