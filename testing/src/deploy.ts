@@ -131,8 +131,13 @@ Environment (or the agent folder's .env):
 
 ${KEYS_HELP}`;
 
-/** The CLI's own settings in a .env: never sent as secrets. */
-const CLI_NAMES = new Set(["FLOW_FRAMEWORK_CLOUD_KEY", "CHINWAG_CLOUD_KEY", "FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD"]);
+/**
+ * The CLI's own settings in a .env: never sent as secrets. Beside the test cloud's, what `flow
+ * setup` and `flow link` write for the CLI alone: the join code and phone page they print, and the
+ * workspace they put the agent in. The sender ids they write are sent: the hosted agent starts
+ * conversations from them (FLOW_MESSAGING_<CHANNEL>_SENDER).
+ */
+const CLI_NAMES = new Set(["FLOW_FRAMEWORK_CLOUD_KEY", "CHINWAG_CLOUD_KEY", "FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD", "FLOW_FRAMEWORK_JOIN_CODE", "FLOW_FRAMEWORK_TRY_URL", "FLOW_FRAMEWORK_WORKSPACE"]);
 /** Names the host sets on the agent's service itself, which it refuses as secrets. */
 export const HOST_NAMES = /^(FLOW_AGENT_ID|FLOW_AGENT_NAME|FLOW_ENVIRONMENT|FLOW_STORE_URL|FLOW_STORE_TOKEN|FLOW_STORE_FRAMEWORK|FLOW_STORE_CHINWAG|FLOW_API_TOKEN|FLOW_PLAYGROUND_TOKEN|FLOW_CLI_BUCKET|FLOW_WEB_CHAT_SESSION_KEY|FLOW_TRUST_PROXY|AGENT_VERSION|AGENT_DIR|PORT)$|^(FLOW_STORE_|CHINWAG_TRACES_|FLOW_FRAMEWORK_TRACES_|K_)/;
 const SECRET_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;

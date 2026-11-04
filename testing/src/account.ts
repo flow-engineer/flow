@@ -54,7 +54,8 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
   flow status [--json]      What this folder has and lacks: FLOW_KEY and the model key (never their
                             values) with the trial credit left, the workspace, the
                             sign-in, each channel's sender in .env, and, signed in, which channels
-                            are open now and their free-trial counts. setup, link and status name
+                            are open now and their free-trial counts (the account's, across all
+                            its agents; --json's account_trial). setup, link and status name
                             the paid plans (https://flow.engineer/dashboard/plans) once a channel's
                             trial has 80% of its people or holds new ones`;
 
@@ -535,6 +536,25 @@ function namedPage(url: string, name: string): string {
   return parsed.toString();
 }
 
+/**
+ * A channel link from setup's answer (wa.me's `text`, sms:'s `body`) with its join message naming the
+ * agent as people call it, as the /try page's direct link does: flow.engineer's answer names it by
+ * its package name, the name setup sends. A link with no "Join <name> (ref <code>)" in it is kept.
+ */
+function withJoinName(link: string | undefined, name: string): string | null {
+  if (!link) return null;
+  return link.replace(/([?&](?:text|body)=)([^&#]*)/, (whole, key: string, value: string) => {
+    let message: string;
+    try {
+      message = decodeURIComponent(value.replace(/\+/g, " "));
+    } catch {
+      return whole;
+    }
+    const ref = /^Join .+ \(ref (\S+)\)$/.exec(message)?.[1];
+    return ref ? `${key}${encodeURIComponent(`Join ${name} (ref ${ref})`).replace(/\(/g, "%28").replace(/\)/g, "%29")}` : whole;
+  });
+}
+
 /** A channel's direct link (t.me, wa.me or sms:), the message it fills in, and its /try page for a computer. */
 interface DirectLink {
   link: string;
@@ -702,9 +722,12 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
     out({
       agent: answer.agent_id, join_code: answer.join_code, env_written: { ".env": written }, minted: answer.minted ?? [],
       dashboard_url: answer.dashboard_url ?? null, try_url: answer.try_url ?? null, telegram_link: answer.telegram_link ?? null,
-      whatsapp_link: answer.whatsapp_link ?? null, imessage_link: answer.imessage_link ?? null, try_urls: links,
+      // Named as direct_links and join_message name it (the display name), never the package name.
+      whatsapp_link: direct.whatsapp?.link ?? withJoinName(answer.whatsapp_link, displayName), imessage_link: direct.imessage?.link ?? withJoinName(answer.imessage_link, displayName), try_urls: links,
       direct_links: Object.fromEntries(Object.entries(direct).map(([c, d]) => [c, d.link])), join_message: Object.values(direct)[0]?.message ?? null,
-      trial, model_key: model.report,
+      // The account's free trial, shared by all its agents: not this agent's own counts. `trial` is
+      // the older name of the same object, kept for a release.
+      account_trial: trial, trial, model_key: model.report,
       workspace: typeof answer.workspace_id === "string" && answer.workspace_id ? { id: answer.workspace_id, name: answer.workspace_name ?? null } : null,
       // FLOW_KEY's state, never its value: made in this call, with its id, mode and scopes.
       flow_key: { set: Boolean(before.get(FLOW_KEY) || process.env[FLOW_KEY]?.trim()), minted: flowKey?.minted === true,
@@ -736,7 +759,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
 /** iMessage's count of the people it may reach on the trial (an older answer's `contacts`), as a line; undefined when the answer had none. */
 function peopleLine(t: { contacts?: { limit: number; used: number } } | undefined): string | undefined {
   const people = t?.contacts;
-  return people && typeof people.used === "number" && typeof people.limit === "number" ? `iMessage: ${people.used} of ${people.limit} people` : undefined;
+  return people && typeof people.used === "number" && typeof people.limit === "number" ? `iMessage (${TRIAL_SCOPE}): ${people.used} of ${people.limit} people` : undefined;
 }
 
 /**
@@ -749,9 +772,15 @@ function trialCount(t: { limit: number | null; used: number; held?: number } | u
   return `${t.used} of ${t.limit} people${t.held > 0 ? `, ${t.held} waiting for a place` : ""}`;
 }
 
+/**
+ * Whose free-trial counts they are: Flow Messaging counts the people per account and channel, so a
+ * brand-new agent shows the people its account's other agents reached.
+ */
+const TRIAL_SCOPE = "your account's free trial, across all its agents";
+
 const trialNote = (t: { limit: number | null; used: number; held?: number } | undefined) => {
   const count = trialCount(t);
-  return count ? ` (free trial: ${count})` : "";
+  return count ? ` (${TRIAL_SCOPE}: ${count})` : "";
 };
 
 /**
@@ -883,11 +912,16 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     }
   }
   const fields = (server ?? {}) as Record<string, unknown>;
-  const channels = Object.fromEntries(CHANNELS.map((c) => [c, {
-    sender: Boolean(c === "telegram" ? value(SETUP_ENV.messaging_key) : value(SENDER_ENV[c]!)),
-    open: server ? typeof fields[`${c}_sender`] === "string" : null,
-    trial: server && typeof fields[`${c}_sender`] === "string" ? server.trial?.[c] ?? null : null,
-  }]));
+  const channels = Object.fromEntries(CHANNELS.map((c) => {
+    // The account's free trial on this channel, shared by all its agents; `trial` is its older name, kept for a release.
+    const trial = server && typeof fields[`${c}_sender`] === "string" ? server.trial?.[c] ?? null : null;
+    return [c, {
+      sender: Boolean(c === "telegram" ? value(SETUP_ENV.messaging_key) : value(SENDER_ENV[c]!)),
+      open: server ? typeof fields[`${c}_sender`] === "string" : null,
+      account_trial: trial,
+      trial,
+    }];
+  }));
   // The playground (npm start) before the phone, as setup's next. Once this folder has deployed, the
   // hosted agent answers the phone, so status points at it instead of npm start and deploy.
   const deployed = deployedFrom(process.cwd());
@@ -1056,7 +1090,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
   const counts = trial?.[channel];
   if (counts) {
     const count = trialCount(counts);
-    if (count) say(`${CHANNEL_NAME[channel]} free trial: ${count}`); // "Telegram free trial: 3 of 25 people, 2 waiting for a place"
+    if (count) say(`${CHANNEL_NAME[channel]} (${TRIAL_SCOPE}): ${count}`); // "WhatsApp (your account's free trial, across all its agents): 3 of 25 people, 2 waiting for a place"
     if (channel === "imessage") {
       const people = peopleLine(counts);
       if (people) say(people);
