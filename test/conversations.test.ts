@@ -1,4 +1,4 @@
-// covers: testing/src/conversations.ts testing/src/cli.ts
+// covers: testing/src/conversations.ts testing/src/cli.ts testing/src/cloud-call.ts
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -44,6 +44,21 @@ const detail = {
   ],
   issues: [{ id: "iss_1", title: "Claims actions it did not take" }],
 };
+/** A newer server's conversation: each tool call's time, outcome, input and output, each reply's delivery, and a message whose text was not sent. */
+const withToolsAndDelivery = {
+  conversation: conversation("cnv_2", 0),
+  messages: [
+    { id: "m1", role: "person", at: "2026-10-29T09:00:00Z", text: null, text_state: "not_sent", tools: [], delivery: null, grade: null },
+    { id: "m2", role: "agent", at: "2026-10-29T09:00:04Z", text: "Booked for 6pm.", text_state: "shown", grade: null,
+      tools: [
+        { name: "find_slot", ms: 120, ok: true, input: { day: "today" }, output: { slots: ["18:00"] } },
+        { name: "book", ms: 3400, ok: false, error: { code: "timeout", message: "the booking API did not answer" }, truncated: true },
+      ],
+      delivery: { state: "failed", code: "131042", error_type: "permission", at: "2026-10-29T09:00:06Z" } },
+    { id: "m3", role: "agent", at: "2026-10-29T09:00:10Z", text: "Sorry, try again?", text_state: "shown", grade: null, tools: [], delivery: { state: "queued", at: "2026-10-29T09:00:10Z" } },
+  ],
+  issues: [],
+};
 const issues = { issues: [
   { id: "iss_1", title: "Claims actions it did not take", status: "open", conversations: 3, first_seen: "2026-10-27T10:00:00Z", last_seen: "2026-10-29T09:00:04Z", suggested_fix: "Only say a refund is done after refund_order returns ok." },
   { id: "iss_2", title: "Answers in English to Hindi", status: "open", conversations: 1, first_seen: "2026-10-28T10:00:00Z", last_seen: "2026-10-28T10:00:00Z", suggested_fix: null },
@@ -71,10 +86,17 @@ async function server(options: { feedback?: unknown } = {}) {
       const cursor = url.searchParams.get("cursor");
       if (cursor === "c3") return json(200, { conversations: [], next_cursor: null });
       return cursor === "c2"
-        ? json(200, { conversations: [{ ...conversation("cnv_3", 0, null), grades: null }], next_cursor: "c3" })
+        ? json(200, { conversations: [{ ...conversation("cnv_3", 0, null), grades: null, contact: "Contact 9e35" }], next_cursor: "c3" })
         : json(200, { conversations: [conversation("cnv_1", 1), conversation("cnv_2", 2)], next_cursor: "c2" });
     }
     if (url.pathname === "/v1/agent/conversations/cnv_1") return json(200, detail);
+    if (url.pathname === "/v1/agent/conversations/cnv_2") return json(200, withToolsAndDelivery);
+    // Rate limited once, as Flow's 60 reads a minute per key: the CLI waits Retry-After and asks again.
+    if (url.pathname === "/v1/agent/conversations/cnv_limited" && asked.filter((a) => a.url === req.url).length === 1) {
+      res.setHeader("retry-after", "0");
+      return json(429, { error: { code: "rate_limited", message: "too many reads", hint: "retry after the Retry-After seconds" } });
+    }
+    if (url.pathname === "/v1/agent/conversations/cnv_limited") return json(200, detail);
     if (url.pathname === "/v1/agent/issues") return json(200, url.searchParams.get("status") === "resolved" ? { issues: [] } : issues);
     if (url.pathname === "/v1/agent/feedback" && options.feedback) return json(200, options.feedback);
     if (url.pathname === "/v1/agent/conversations/cnv_busy") {
@@ -107,7 +129,7 @@ test("flow conversations lists with the .env's FLOW_KEY, following next_cursor u
       "ID     LAST MESSAGE          CHANNEL   VERSION  CONTACT       MESSAGES  WRONG  UNHELPFUL",
       "cnv_1  2026-10-29 09:05:00Z  whatsapp  5f056b6  Contact 0100  4         1      0",
       "cnv_2  2026-10-29 09:05:00Z  whatsapp  5f056b6  Contact 0100  4         2      0",
-      "cnv_3  2026-10-29 09:05:00Z  whatsapp  -        Contact 0100  4         -      -",
+      "cnv_3  2026-10-29 09:05:00Z  whatsapp  -        Contact 9e35  4         -      -",
       "",
       "3 conversations (more: raise --limit); - is grades unavailable. Read one: flow conversations show <id>",
       "",
@@ -163,7 +185,7 @@ test("flow conversations show prints the transcript with each graded reply's lab
       "",
     ].join("\n"));
     const json = await flow(["conversations", "show", "cnv_1", "--json", "--cloud", fake.url], dir);
-    assert.equal(json.stdout, JSON.stringify(detail));
+    assert.equal(json.stdout, `${JSON.stringify(detail)}\n`);
   } finally { fake.close(); }
 });
 
@@ -210,22 +232,85 @@ test("flow issues prints the team's feedback under the issues, and when there ar
     assert.equal(none.stdout, ["No resolved issues.", ...team].join("\n"));
     const asked = fake.asked.length;
     const json = await flow(["issues", "--json", "--cloud", fake.url], dir);
-    assert.equal(json.stdout, JSON.stringify(issues));
+    assert.equal(json.stdout, `${JSON.stringify(issues)}\n`);
     assert.equal(fake.asked.length, asked + 1);
   } finally { fake.close(); }
 });
 
-test("a refusal prints the server's message, Retry-After and hint and exits 1; no FLOW_KEY says how to get one", { timeout: 15_000 }, async () => {
+test("a refusal prints the server's message, Retry-After and hint and exits 1; no FLOW_KEY says how to get one", { timeout: 30_000 }, async () => {
   const fake = await server();
   try {
     const missing = await flow(["conversations", "show", "cnv_bad", "--cloud", fake.url], agentDir());
     assert.deepEqual(missing, { code: 1, stdout: "", stderr: "flow conversations: No conversation cnv_bad for this agent. (not_found, 404)\nList them with flow conversations.\n" });
     const busy = await flow(["conversations", "show", "cnv_busy", "--cloud", fake.url], agentDir());
     assert.deepEqual(busy, { code: 1, stdout: "", stderr: "flow conversations: Grades cannot be read right now. (insights_unavailable, 503) Try again in 30 s.\nTry again shortly.\n" });
-    const badKey = await flow(["issues", "--cloud", fake.url], agentDir("flow_test_wrong"));
-    assert.deepEqual(badKey, { code: 1, stdout: "", stderr: "flow issues: That key is not a Flow key. (bad_key, 401)\nRun flow setup --rotate key.\n" });
+    const badKey = await flow(["issues", "--cloud", fake.url], agentDir("flow_test_wrongkey1"));
+    assert.deepEqual({ code: badKey.code, stdout: badKey.stdout }, { code: 1, stdout: "" });
+    assert.equal(badKey.stderr, [
+      "flow issues: That key is not a Flow key. (bad_key, 401)",
+      "Run flow setup --rotate key.",
+      "flow issues reads with the agent's Flow key, FLOW_KEY (flow_test_... reads staging; flow_live_... reads staging and production).",
+      "It found FLOW_KEY=flow_test_…key1 in .env in this folder.",
+      "Get the right one: npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).",
+      "",
+    ].join("\n"));
     const noKey = await flow(["conversations", "--cloud", fake.url], mkdtempSync(join(tmpdir(), "flow-conversations-")));
     assert.equal(noKey.code, 1);
     assert.match(noKey.stderr, /set FLOW_KEY \(flow setup writes it into \.env\)/);
+  } finally { fake.close(); }
+});
+
+test("show prints each tool call's time, outcome, input and output, each reply's delivery, and why a text was not sent; --json passes them through", { timeout: 15_000 }, async () => {
+  const fake = await server();
+  try {
+    const dir = agentDir();
+    const shown = await flow(["conversations", "show", "cnv_2", "--env", "staging", "--cloud", fake.url], dir);
+    assert.equal(shown.code, 0, shown.stderr);
+    assert.equal(shown.stdout.split("\n").slice(5).join("\n"), [
+      "2026-10-29 09:00:00Z  person: (text not sent to Flow)",
+      "                                its trace carried no text: the agent traced metadata only (FLOW_FRAMEWORK_TRACES_CONTENT off), or the message had none (a photo, video or voice note without a caption); never graded",
+      "2026-10-29 09:00:04Z  agent: Booked for 6pm.",
+      "                             tool find_slot 120 ms ok",
+      '                               input: {"day":"today"}',
+      '                               output: {"slots":["18:00"]}',
+      "                             tool book 3400 ms FAILED: timeout: the booking API did not answer (cut by Flow)",
+      "                             delivery: FAILED 131042 (permission) at 2026-10-29 09:00:06Z",
+      "2026-10-29 09:00:10Z  agent: Sorry, try again?",
+      "                             delivery: queued (Flow took it; the channel has not said it was sent) at 2026-10-29 09:00:10Z",
+      "",
+    ].join("\n"));
+    const json = await flow(["conversations", "show", "cnv_2", "--json", "--cloud", fake.url], dir);
+    assert.deepEqual(JSON.parse(json.stdout), withToolsAndDelivery);
+  } finally { fake.close(); }
+});
+
+test("--contact keeps one contact's conversations, by its label or its code, over every page; --environment is --env", { timeout: 15_000 }, async () => {
+  const fake = await server();
+  try {
+    const dir = agentDir();
+    for (const label of ["Contact 9e35", "9E35"]) {
+      const found = await flow(["conversations", "--contact", label, "--environment", "production", "--json", "--cloud", fake.url], dir);
+      assert.equal(found.code, 0, found.stderr);
+      assert.deepEqual(JSON.parse(found.stdout).conversations.map((c: { id: string }) => c.id), ["cnv_3"]);
+    }
+    assert.deepEqual(fake.asked.slice(0, 3).map((a) => a.url), [
+      "/v1/agent/conversations?environment=production&limit=100",
+      "/v1/agent/conversations?environment=production&limit=100&cursor=c2",
+      "/v1/agent/conversations?environment=production&limit=100&cursor=c3",
+    ]);
+    const both = await flow(["conversations", "--env", "staging", "--environment", "production", "--json", "--cloud", fake.url], dir);
+    assert.equal(both.code, 2);
+    assert.equal(JSON.parse(both.stdout).error.code, "usage");
+  } finally { fake.close(); }
+});
+
+test("a read Flow rate limits (429) is waited out for its Retry-After and asked again, said on stderr", { timeout: 15_000 }, async () => {
+  const fake = await server();
+  try {
+    const shown = await flow(["conversations", "show", "cnv_limited", "--json", "--cloud", fake.url], agentDir());
+    assert.equal(shown.code, 0, shown.stderr);
+    assert.deepEqual(JSON.parse(shown.stdout), detail);
+    assert.equal(fake.asked.filter((a) => a.url === "/v1/agent/conversations/cnv_limited").length, 2);
+    assert.match(shown.stderr, /rate limiting this key \(429\): waiting 0 s, then trying again/);
   } finally { fake.close(); }
 });

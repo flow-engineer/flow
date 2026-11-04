@@ -301,10 +301,13 @@ async function login(options: LoginOptions, json: boolean, out: Out, say: Say): 
   if (options.noWait) throw new Pending(pending, null, waitNext, options.resume?.then);
 
   let interval = pending.interval;
+  /** A 429's Retry-After, for the next poll only. */
+  let asked = 0;
   const startedAt = Date.now();
   const stopAt = startedAt + options.timeoutSeconds * 1000;
   for (;;) {
-    await delay(Math.max(0, Math.min(interval * 1000, stopAt - Date.now())));
+    await delay(Math.max(0, Math.min(Math.max(interval, asked) * 1000, stopAt - Date.now())));
+    asked = 0;
     let answer;
     try {
       // Each poll gets what is left of --timeout (at least POLL_MIN_MS, so --timeout 0 still asks once).
@@ -313,7 +316,10 @@ async function login(options: LoginOptions, json: boolean, out: Out, say: Say): 
       if (error instanceof TimedOut && Date.now() >= stopAt) throw new Pending(pending, options.timeoutSeconds, waitNext, options.resume?.then);
       throw error;
     }
-    if (answer.status === "slow_down") interval += 5; // RFC 8628: each slow_down adds 5 seconds for good
+    if (answer.status === "slow_down") {
+      interval += 5; // RFC 8628: each slow_down adds 5 seconds for good
+      asked = answer.retryAfter ?? 0;
+    }
     if (answer.status === "authorization_pending" || answer.status === "slow_down") {
       if (Date.now() >= stopAt) throw new Pending(pending, options.timeoutSeconds, waitNext, options.resume?.then);
       continue;

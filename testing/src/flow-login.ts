@@ -38,6 +38,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { configDir, configFile, RUN, setting } from "../../src/names.ts";
 
 export const LOGIN_URL = "https://flow.engineer";
@@ -157,7 +158,9 @@ export interface DeviceStart {
 
 export type TokenAnswer =
   | { status: "signed_in"; token: string; expires_at?: string; account?: Account }
-  | { status: "authorization_pending" | "slow_down" | "expired_token" | "access_denied" };
+  | { status: "authorization_pending" | "expired_token" | "access_denied" }
+  /** retryAfter: the seconds a 429 asked to wait before the next poll. */
+  | { status: "slow_down"; retryAfter?: number };
 
 export interface Account {
   email: string;
@@ -313,9 +316,20 @@ function refused(path: string, given: Answer, url: string): LoginRefused {
   return new LoginRefused(answer.status, code, `${path} answered ${answer.status} ${code}${sentence ? `: ${sentence}` : ""}.`, next, answer.body, answer.retryAfter);
 }
 
-/** `clientName` and `hostname` are shown on the approval page. */
-export async function startDevice(url: string, clientName: string, hostname: string): Promise<DeviceStart> {
-  const answer = await call(url, "/cli/device", { body: { client_name: clientName, hostname } });
+/** The longest 429 wait a sign-in waits out by itself; a longer one is printed for the person. */
+const MAX_LOGIN_WAIT_S = 30;
+
+/** The error code of an answer, flat ({ error: "slow_down" }) or nested ({ error: { code } }). */
+const errorCode = (body: Record<string, unknown>) => (typeof body.error === "string" ? body.error : body.error && typeof body.error === "object" ? (body.error as { code?: unknown }).code : undefined);
+
+/** `clientName` and `hostname` are shown on the approval page. A 429 that asks for 30 s or less is waited out once. */
+export async function startDevice(url: string, clientName: string, hostname: string, wait: (ms: number) => Promise<unknown> = delay): Promise<DeviceStart> {
+  let answer = await call(url, "/cli/device", { body: { client_name: clientName, hostname } });
+  if (answer.status === 429 && answer.retryAfter !== undefined && answer.retryAfter <= MAX_LOGIN_WAIT_S) {
+    process.stderr.write(`flow.engineer asked to wait ${answer.retryAfter} s before a new sign-in (429 ${errorCode(answer.body) ?? "slow_down"}); waiting.\n`);
+    await wait(answer.retryAfter * 1000);
+    answer = await call(url, "/cli/device", { body: { client_name: clientName, hostname } });
+  }
   if (answer.status !== 200 || typeof answer.body.device_code !== "string") throw refused("/cli/device", answer, url);
   return answer.body as unknown as DeviceStart;
 }
@@ -329,7 +343,9 @@ export async function pollToken(url: string, deviceCode: string, timeoutMs?: num
   if (answer.status === 200 && typeof token === "string") {
     return { status: "signed_in", token, expires_at: answer.body.expires_at as string | undefined, account: answer.body.account as Account | undefined };
   }
-  const error = answer.body.error;
+  const error = errorCode(answer.body);
+  // A 429 slow_down is RFC 8628's slow_down with a wait: polling goes on, after it.
+  if (error === "slow_down" || (answer.status === 429 && error === undefined)) return { status: "slow_down", ...(answer.retryAfter !== undefined ? { retryAfter: answer.retryAfter } : {}) };
   if (typeof error === "string" && WAITING.has(error)) return { status: error as "authorization_pending" };
   throw refused("/cli/token", answer, url);
 }

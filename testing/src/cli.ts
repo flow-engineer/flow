@@ -48,6 +48,7 @@ import { CHAT_LINE, chatCli } from "./chat.ts";
 import { RECORDS_LINE, recordsCli } from "./records.ts";
 import { CONVERSATIONS_LINES, conversationsCli, issuesCli } from "./conversations.ts";
 import { TEMPLATES_LINE, templatesCli, templateWarnings } from "./templates.ts";
+import { KEYS_HELP } from "./cloud-call.ts";
 import { PULL_LINE, pullCli } from "./pull.ts";
 import type { TemplateDefinition } from "../../src/types.ts";
 import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
@@ -108,7 +109,7 @@ const TEST_OPTIONS = `Options for test:
                            commit, or package.json's version)
   --ref <ref>              Kept with the session (default: the CI's branch, else the folder's git
                            branch), with the repository's default branch when git knows it
-  --environment <name>     staging or production, kept with the session
+  --env <name>             staging or production, kept with the session; --environment works too
   --agent-url <url>        Test an agent you already have, on any framework, through its HTTP
                            endpoint (it may be http://localhost): each message is a POST to it from
                            this machine, and no src/agent.ts is loaded
@@ -165,7 +166,8 @@ with the judge's reasons (and, for a scenario the cloud could not play, its file
 
 Environment (also read from the agent folder's .env, or --dotenv; variables already set win;
 the CHINWAG_ names from before the rename still work):
-  FLOW_FRAMEWORK_CLOUD     The test cloud, when --cloud is not given
+  FLOW_FRAMEWORK_CLOUD     The test cloud, when --cloud is not given: https://flow.engineer/observe
+                           (US) or https://flow.engineer/dashboard/in (an agent in the India cell)
   FLOW_TEST_MIN_PASS       The pass rate the session needs, when --min-pass is not given
   FLOW_FRAMEWORK_CLOUD_KEY The agent's CI key, for a hosted cloud (oci_...: flow setup
                            writes it, or make one at https://flow.engineer/observe, your agent, Developers)
@@ -173,7 +175,9 @@ the CHINWAG_ names from before the rename still work):
                            With --agent-url: sent to it as authorization: Bearer <token>
   OPENROUTER_API_KEY       The agent's model key, or OPENAI_API_KEY, ANTHROPIC_API_KEY or
                            GEMINI_API_KEY: the first with a value is used, else FLOW_KEY
-                           (the agent's Flow key, on its trial credit; flow setup writes it)`;
+                           (the agent's Flow key, on its trial credit; flow setup writes it)
+
+${KEYS_HELP}`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
 const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${RECORDS_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${CLI_RELEASE_LINE}\n${INSPECT_LINE}
 ${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${PROJECTS_LINE}\n${DEPLOY_LINE}\n${CONVERSATIONS_LINES}\n${TEMPLATES_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
@@ -192,15 +196,15 @@ function nextSteps(): string {
 
 checkNode(process.versions.node);
 
-if (process.argv[2] === "plugin") process.exit(pluginCli(process.argv.slice(3)));
+if (process.argv[2] === "plugin") await exitFlushed(pluginCli(process.argv.slice(3)));
 
 if (process.argv[2] === "check-endpoint") {
   // Its token may be in the agent folder's .env; no value is ever printed.
   loadEnv(undefined);
-  process.exit(await checkEndpointCli(process.argv.slice(3)));
+  await exitFlushed(await checkEndpointCli(process.argv.slice(3)));
 }
-if (process.argv[2] === "show") process.exit(await showCli(process.argv.slice(3)));
-if (process.argv[2] === "check") process.exit(await checkCli(process.argv.slice(3)));
+if (process.argv[2] === "show") await exitFlushed(await showCli(process.argv.slice(3)));
+if (process.argv[2] === "check") await exitFlushed(await checkCli(process.argv.slice(3)));
 if (process.argv[2] === "mcp") {
   if (process.argv[3] !== "update") {
     console.error(MCP_LINE.trim());
@@ -210,27 +214,27 @@ if (process.argv[2] === "mcp") {
   await withPeers("mcp update", () => import("../../mcp/src/client.ts"));
   process.exit(await mcpUpdateCli());
 }
-if (process.argv[2] === "cli" && ["pack", "publish", "rollback", "status"].includes(process.argv[3] ?? "")) process.exit(await cliReleaseCli(process.argv.slice(3)));
+if (process.argv[2] === "cli" && ["pack", "publish", "rollback", "status"].includes(process.argv[3] ?? "")) await exitFlushed(await cliReleaseCli(process.argv.slice(3)));
 if (process.argv[2] === "cli") {
   // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client and @stricli/core, optional peers.
   const { defineCli, runCli } = await withPeers("cli", () => import("../../cli/src/index.ts"));
-  process.exit(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
+  await exitFlushed(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
 }
 if (process.argv[2] === "inspect") {
   // Loaded only here: it needs @modelcontextprotocol/client, an optional peer.
   const { inspectCli } = await withPeers("inspect", () => import("./inspect.ts"));
-  process.exit(await inspectCli(process.argv.slice(3)));
+  await exitFlushed(await inspectCli(process.argv.slice(3)));
 }
-if (process.argv[2] === "deploy") process.exit(await deployCli(process.argv.slice(3)));
-if (process.argv[2] === "logs") process.exit(await logsCli(process.argv.slice(3)));
-if (process.argv[2] === "chat") process.exit(await chatCli(process.argv.slice(3)));
-if (process.argv[2] === "records") process.exit(await recordsCli(process.argv.slice(3)));
-if (process.argv[2] === "projects") process.exit(await projectsCli(process.argv.slice(3)));
-if (process.argv[2] === "conversations") process.exit(await conversationsCli(process.argv.slice(3)));
-if (process.argv[2] === "issues") process.exit(await issuesCli(process.argv.slice(3)));
-if (process.argv[2] === "templates") process.exit(await templatesCli(process.argv.slice(3)));
-if (process.argv[2] === "test" && process.argv[3] === "pull") process.exit(await pullCli(process.argv.slice(4)));
-if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) process.exit(await accountCli(process.argv[2]!, process.argv.slice(3)));
+if (process.argv[2] === "deploy") await exitFlushed(await deployCli(process.argv.slice(3)));
+if (process.argv[2] === "logs") await exitFlushed(await logsCli(process.argv.slice(3)));
+if (process.argv[2] === "chat") await exitFlushed(await chatCli(process.argv.slice(3)));
+if (process.argv[2] === "records") await exitFlushed(await recordsCli(process.argv.slice(3)));
+if (process.argv[2] === "projects") await exitFlushed(await projectsCli(process.argv.slice(3)));
+if (process.argv[2] === "conversations") await exitFlushed(await conversationsCli(process.argv.slice(3)));
+if (process.argv[2] === "issues") await exitFlushed(await issuesCli(process.argv.slice(3)));
+if (process.argv[2] === "templates") await exitFlushed(await templatesCli(process.argv.slice(3)));
+if (process.argv[2] === "test" && process.argv[3] === "pull") await exitFlushed(await pullCli(process.argv.slice(4)));
+if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) await exitFlushed(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
 const TEST_FLAGS = {
   cloud: { type: "string" },
@@ -252,6 +256,8 @@ const TEST_FLAGS = {
   "agent-version": { type: "string" },
   ref: { type: "string" },
   environment: { type: "string" },
+  /** --environment's other spelling, as the other cloud commands take it. */
+  env: { type: "string" },
   "agent-url": { type: "string" },
   channel: { type: "string" },
   "agent-timeout": { type: "string", default: "60" },
@@ -261,14 +267,19 @@ const TEST_FLAGS = {
 
 const { values, positionals } = parseCommandLine();
 const [command, ...rest] = positionals;
+if (values.env !== undefined && values.environment !== undefined && values.env !== values.environment) {
+  console.error(`flow: --env and --environment name different environments (${values.env}, ${values.environment}): give one.\n\n${TEST_USAGE}`);
+  await exitFlushed(1);
+}
+values.environment ??= values.env;
 
 if (values.version) {
   console.log(JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).version);
-  process.exit(0);
+  await exitFlushed(0);
 }
 if (values.help || process.argv.length <= 2) {
   console.log(command === "new" || command === "init" ? NEW_USAGE : command === "test" ? TEST_USAGE : USAGE);
-  process.exit(0);
+  await exitFlushed(0);
 }
 
 /** --display-name, else asked for in a terminal (Enter takes the folder's name in words), else that default. */
@@ -299,12 +310,12 @@ if (command === "new") {
     dir = newStandalone(name, { displayName: await askDisplayName(displayNameFlag, name) });
   } catch (error) {
     console.error((error as Error).message);
-    process.exit(1);
+    await exitFlushed(1);
   }
   console.log(`Made ./${name}/ from the café example. ${namedLine(dir)} Next:
   1. cd ${name} && npm install
 ${nextSteps()}`);
-  process.exit(0);
+  await exitFlushed(0);
 }
 
 if (command === "init") {
@@ -315,13 +326,13 @@ if (command === "init") {
     name = initHere(process.cwd(), { name: nameFlag, displayName: await askDisplayName(displayNameFlag, nameFlag ?? folderName(process.cwd())) });
   } catch (error) {
     console.error((error as Error).message);
-    process.exit(1);
+    await exitFlushed(1);
   }
   loadEnv(undefined); // a .env already here may hold a model key
   console.log(`Made ${name}, started from the café example, in this folder. ${namedLine(process.cwd())} Next:
   1. npm install
 ${nextSteps()}`);
-  process.exit(0);
+  await exitFlushed(0);
 }
 
 /** Every human line of `flow test`: stdout, or stderr with --json, where stdout is the report. */
@@ -401,15 +412,21 @@ if (agentUrl) {
   }
   // Flow Framework runs the agent here, so its traces are marked as a test's (src/traces.ts).
   process.env.FLOW_FRAMEWORK_RUN_KIND = "test";
-  const module = await import(pathToFileURL(join(dir, "src/agent.ts")).href);
+  let module: Record<string, unknown>;
+  try {
+    module = await import(pathToFileURL(join(dir, "src/agent.ts")).href);
+  } catch (error) {
+    // Said as the run's failure (with --json, in its report), not a stack on stderr and nothing on stdout.
+    invalid(`src/agent.ts could not be loaded: ${(error as Error).message.split("\n")[0]}`);
+  }
   if (typeof module.buildAgent !== "function" || !Array.isArray(module.tools)) {
     invalid("src/agent.ts must export buildAgent({ model, events, tools }) and tools, or pass --agent-url to test an agent by its HTTP endpoint.");
   }
   // A business run's agent also gets its channels and clock (testing/src/business.ts); buildAgent passes them on to createAgent.
   agent = {
-    tools: module.tools,
+    tools: module.tools as ConnectOptions["tools"],
     build: ({ tools, events, channels, testing }) => {
-      const built = module.buildAgent({ tools, events, ...(channels ? { channels, testing } : {}) });
+      const built = (module.buildAgent as (options: Record<string, unknown>) => ReturnType<ConnectOptions["build"]> & { templates?: () => TemplateDefinition[] })({ tools, events, ...(channels ? { channels, testing } : {}) });
       if (!declaredTemplates.length && typeof built?.templates === "function") declaredTemplates = built.templates();
       return built;
     },
@@ -556,7 +573,10 @@ if (sendPath.length) {
   for (const p of sendPath) say(`  ${p.conversationId}: ${p.delivered} reached the cloud through the agent's channels, ${p.announced} the agent says it sent (message.out)`);
 }
 // Warned, never failed: a declared template that is not the approved one fails only when it is sent.
-for (const line of await templateWarnings(declaredTemplates, cloud, process.env.FLOW_KEY?.trim() || ciKey)) say(line);
+const templateKey = process.env.FLOW_KEY?.trim()
+  ? { kind: "flow_key" as const, name: "FLOW_KEY", where: "the environment or .env", value: process.env.FLOW_KEY.trim() }
+  : ciKey ? { kind: "ci_key" as const, name: "FLOW_FRAMEWORK_CLOUD_KEY", where: "the environment or .env", value: ciKey } : undefined;
+for (const line of await templateWarnings(declaredTemplates, cloud, templateKey)) say(line);
 sessionId = summary.sessionId || sessionId;
 dashboard = summary.dashboard || dashboard;
 saveSession("finished", summary.runs, dashboard, say);
@@ -747,6 +767,13 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
   process.exit(exitCode);
 }
 
+/** Exits once stdout and stderr have taken everything written: a pipe is written asynchronously on
+ * macOS, and process.exit would cut off a long --json answer, leaving a reader an empty or broken document. */
+async function exitFlushed(code: number): Promise<never> {
+  await Promise.all([process.stdout, process.stderr].map((stream) => new Promise<void>((done) => stream.write("", () => done()))));
+  process.exit(code);
+}
+
 /** A command's module, or exits 1 with one line when an optional peer it needs is not installed where
  * flow runs from (npx's cache, say, rather than the agent's folder). */
 async function withPeers<T>(command: string, load: () => Promise<T>): Promise<T> {
@@ -757,7 +784,7 @@ async function withPeers<T>(command: string, load: () => Promise<T>): Promise<T>
     const peers = JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).peerDependencies as Record<string, string>;
     if ((error as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND" || !missing || !(missing in peers)) throw error;
     console.error(`flow ${command} needs ${missing}: run it from your agent's folder (npx @flow-engineer/flow ${command}), or npm install ${missing}.`);
-    process.exit(1);
+    return exitFlushed(1);
   }
 }
 

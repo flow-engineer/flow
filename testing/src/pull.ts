@@ -9,6 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
+import type { Access } from "./conversations.ts";
 import { Failed, get, parse, table } from "./conversations.ts";
 import { loadEnv } from "./report.ts";
 import { parseScenario } from "./suite.ts";
@@ -62,11 +63,12 @@ export async function pullCli(args: string[]): Promise<number> {
   const key = setting("CLOUD_KEY")?.trim();
   if (!key) return console.error(`${name} reads with the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY (flow setup writes it into .env).`), 1;
   const cloud = (values.cloud || setting("CLOUD") || OBSERVE_URL).replace(/\/+$/, "");
+  const where: Access = { cloud, key: { kind: "ci_key", name: "FLOW_FRAMEWORK_CLOUD_KEY", where: values.dotenv ?? ".env in this folder", value: key } };
   const say = values.json ? (line: string) => console.error(line) : (line: string) => console.log(line);
 
   let drafts: Draft[];
   try {
-    const { body } = await get(name, cloud, key, "/v1/agent/test-drafts");
+    const { body } = await get(name, where, "/v1/agent/test-drafts");
     if (!Array.isArray(body.drafts)) throw new Failed(`${name}: ${cloud} answered without a list of drafts.`);
     drafts = body.drafts as Draft[];
   } catch (error) {
@@ -107,7 +109,7 @@ export async function pullCli(args: string[]): Promise<number> {
     }
     if (draft.pulled === true) continue;
     try {
-      await get(name, cloud, key, `/v1/agent/test-drafts/${id}/pulled`, "POST");
+      await get(name, where, `/v1/agent/test-drafts/${id}/pulled`, "POST");
     } catch (error) {
       row.problem = `written, but Flow was not told it was pulled: ${refusal(name, error)}`;
       failed = true;
