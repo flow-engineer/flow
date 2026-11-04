@@ -21,7 +21,7 @@ import { ATTACH_EVENTS, NUDGE_TRIGGER, type FlowEvents } from "./business-events
 import { checkTemplate, declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
 import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Elsewhere, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
-import { emitter, type EventSink } from "./events.ts";
+import { emitter, log, type EventSink } from "./events.ts";
 import { indexDeclared, recordsOf, type RecordCollection, type Records } from "./records.ts";
 import { addWakeUp, businessSchedule, claimDue, summary, wakeUpsOf, type WakeUp, type WakeUpInput, type WakeUpResult } from "./schedules.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
@@ -450,7 +450,7 @@ export class Agent {
     // One line per process, so two runs can be told apart from their logs; `flow test` prints it itself, and an agent's own tests stay quiet.
     if (version && !versionLogged && !process.env.NODE_TEST_CONTEXT && setting("RUN_KIND") !== "test") {
       versionLogged = true;
-      console.warn(`flow: agent version ${version.version} (from ${version.from})`);
+      log("INFO", `flow: agent version ${version.version} (from ${version.from})`);
     }
     this.traces = tracing ? traces({ ...tracing, version: this.version }, { service: options.id ?? "flow", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind, viaOf: (id, channel) => this.viaOf(id, channel) }) : null;
     const sinks = [...(options.events ?? []), ...(this.traces ? [this.traces.sink] : [])];
@@ -520,7 +520,7 @@ export class Agent {
       get tagChannels() { return channels.size > 1; },
       links: (id) => this.links(id),
       // What the person said on their other channels is extra context: a store that fails it leaves the turn without it.
-      elsewhere: (id) => this.elsewhere(id).catch((error) => (console.warn("flow: the person's other conversations could not be read:", error instanceof Error ? error.message : error), [])),
+      elsewhere: (id) => this.elsewhere(id).catch((error) => (log("WARNING", "flow: the person's other conversations could not be read:", error instanceof Error ? error.message : error), [])),
       settle: (target, status, reason, messageId) => this.settle(target, status, reason, messageId),
     };
     for (const channel of this.channelsByName.values()) {
@@ -540,7 +540,7 @@ export class Agent {
       this.served.push(served);
     }
     const every = options.scheduleCheckMs ?? 5_000;
-    if (every > 0) setInterval(() => void this.runDue().catch((error) => console.warn("flow: scheduled messages:", error)), every).unref();
+    if (every > 0) setInterval(() => void this.runDue().catch((error) => log("WARNING", "flow: scheduled messages:", error)), every).unref();
   }
 
   /**
@@ -890,7 +890,7 @@ export class Agent {
     try {
       return this.options.intercept?.(conversationId, text, message) ?? null;
     } catch (error) {
-      console.warn(`flow: intercept threw on a ${message.keyword.toUpperCase()} keyword; Flow Framework handled it as usual:`, error);
+      log("WARNING", `flow: intercept threw on a ${message.keyword.toUpperCase()} keyword; Flow Framework handled it as usual:`, error);
       return null;
     }
   }
@@ -1092,7 +1092,7 @@ export class Agent {
       if (!row) return;
       this.rows.set(conversationId, row);
       act(this.open(conversationId));
-    })().catch((error) => console.warn("flow: conversation %s could not be loaded for a report:", conversationId, error));
+    })().catch((error) => log("WARNING", "flow: conversation %s could not be loaded for a report:", conversationId, error));
   }
 
   conversation(conversationId: string): Conversation | undefined {
@@ -1536,8 +1536,8 @@ export class Agent {
     await Promise.all(queued.map((q) => this.wake(q.conversationId, q.inbox)));
     await this.lookAgain();
     await this.releaseHeld(now);
-    if (this.options.onTick) await Promise.resolve().then(() => this.options.onTick!(now)).catch((error) => console.warn("flow: onTick:", error));
-    await this.pruneMessageIds(now).catch((error) => console.warn("flow: pruning message ids:", error));
+    if (this.options.onTick) await Promise.resolve().then(() => this.options.onTick!(now)).catch((error) => log("WARNING", "flow: onTick:", error));
+    await this.pruneMessageIds(now).catch((error) => log("WARNING", "flow: pruning message ids:", error));
     return queued.length;
   }
 
@@ -1598,7 +1598,7 @@ export class Agent {
         if (row) this.rows.set(id, row);
         if (!this.conversations.has(id)) this.open(id);
       })
-      .catch((error) => console.warn("flow: runner %s could not read conversation %s again:", this.runner, id, error));
+      .catch((error) => log("WARNING", "flow: runner %s could not read conversation %s again:", this.runner, id, error));
   }
 
   /**

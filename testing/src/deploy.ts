@@ -865,6 +865,11 @@ function remember(dir: string, environment: string, id: string): void {
   }
 }
 
+/** The environments this folder has deployed to (staging before production), for `flow status`'s next step. */
+export function deployedFrom(dir: string): string[] {
+  return ["staging", "production"].filter((environment) => remembered(dir, environment) !== undefined);
+}
+
 function remembered(dir: string, environment: string): string | undefined {
   try {
     const id = (JSON.parse(readFileSync(join(dir, STATE), "utf8")) as Record<string, { id?: unknown }>)[environment]?.id;

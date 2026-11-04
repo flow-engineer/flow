@@ -19,7 +19,7 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   fixed in `.env` works without a restart. It needs `@modelcontextprotocol/server`, an optional
   peer (installed in an agent made by `flow new`). `flow mcp --help` lists it.
 
-### Changes (the CLI, for coding agents)
+### Changes
 
 - **`--json` is one JSON document on stdout, failures too.** `flow conversations` (and `show`),
   `issues`, `templates`, `show`, `deploy` (every subcommand), `logs` and `cli` print
@@ -104,6 +104,32 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   after the window.
 - `listInsights` and `insightConversations` (testing/src/conversations.ts) return Insights'
   answers for callers other than the CLI, refusals as `Failed` with the server's code and hint.
+- **Flow Framework's own log lines have real severities on Cloud Run.** On Cloud Run (Flow's
+  hosting included: `K_SERVICE`, or `CLOUD_RUN_JOB`) each line the framework, the `flow-messaging`
+  adapter and the playground write is one JSON entry, `{ "severity", "message", ...fields }`, which
+  Cloud Logging reads: warnings are `WARNING`, errors `ERROR`, notes `INFO` or `DEBUG`, where all of
+  them were `DEFAULT`. An Error's stack is inside the entry's `message`, so a stack is one entry, not
+  one per line. Everywhere else (a terminal, `flow dev`, tests) the lines are the same text as before.
+  What an agent's own code prints is unchanged.
+- **A failed tool call is logged**, in every environment, with no event sink needed: one line with
+  the tool's name, the kind of failure (the error's name, or `unknown_tool`, `invalid_json`,
+  `invalid_input` for a call refused before it ran), the error's `code` and `status` when it has
+  them, the conversation and call ids, and the ms it ran. Never the call's input or output, nor the
+  error's message. A `WARNING`, or an `ERROR` when the tool threw JavaScript's own error for broken
+  code (`TypeError`, `ReferenceError`, ...):
+  `flow: tool refund failed after 212 ms (Error, not_refundable, 409) in conversation p_3f2a9c1d0b4e`.
+- The `flow-messaging` adapter's stream: the first close after a healthy connection (Flow's
+  connections close about hourly, `1006`) is `INFO`; a refusal, or a close right after another, stays
+  a `WARNING`.
+- `flow: agent version ...` is an `INFO` line (`console.info`), not a warning.
+- Opening SQLite no longer prints Node 22's "SQLite is an experimental feature" warning (two log
+  lines on every start of a hosted agent, whose start check opens one); other warnings print as usual.
+- **`flow status` knows the folder has deployed.** After `flow deploy`, status no longer says
+  `Next: npm start` and "To keep it answering while this machine sleeps: flow deploy"; it says
+  `Deployed from this folder to staging: npx @flow-engineer/flow deploy status shows what is live.`
+  `status --json` adds `deployed`, the environments this folder deployed to (from `.flow/deploys.json`).
+- `flow test`'s session line says "all new to the cloud" or "the cloud already had them all" when
+  that is so, in place of "6 new to the cloud, the rest it already had" for a suite of 6.
 
 ### Migration notes
 
@@ -121,6 +147,98 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - `templateWarnings` (testing/src/templates.ts, not exported from the package) takes the key with
   where it was found.
 - `flow conversations`' table has a KIND column after CHANNEL; `--json` is unchanged.
+- A Cloud Logging query or log-based metric that matched Flow's lines in `textPayload` matches
+  `jsonPayload.message` instead (`flow logs` reads both). Nothing else changes.
+
+## 0.16.0 (2026-11-04)
+
+### Changes
+
+- **Tools in tests are played by rule, a model only as the last resort.** A scenario can now describe
+  its world as data, in a `given:` block beside its prose `world`: `tools` sets how each tool
+  behaves (`usual`, `slow`, `down` or `flaky N%`, N a whole number from 0 to 100), `seed` fixes
+  flaky's dice so the same calls fail on every run (default 1), and any other value is plain data;
+  a tool file's name there (`menu: get_menu.yaml`) is that tool's usual output. In a scenario with
+  `given:`, each tool call is played by the first rule that fits: the tool's mode (`down` plays the
+  tool file's first response with an error, `flaky` fails that way when its die says so), the
+  developer's fake, a response in the tool file whose `input` equals the call's, and only then a
+  model, whose answer the cloud saves so a rerun is free. A scenario without `given:` plays exactly
+  as before.
+- **Fakes.** `tests/tools/<tool>.fake.ts` is the developer's own code for a tool in tests: its
+  default export (`Fake`, from `@flow-engineer/flow/testing`) gets the call's input, the scenario's
+  `given:` data (`world`), one `state` object per run that every fake changes in place, the test's
+  clock (`now`), the call's number for that tool and the tool file's responses, and answers
+  `{ output }` or `{ error }`, with `changes` in plain words. Fakes run on the developer's machine,
+  beside the agent, and are never uploaded: the open names the tools that have one, and the cloud
+  asks for the fake when its rule comes up. A fake that throws, or answers neither output nor
+  error, or something that is not plain JSON, makes the run an infrastructure error (`fake_failed`),
+  not a failure of the agent. `flow test` loads every fake before anything is sent; one that does
+  not load, or whose default export is not a function, stops it with `tests/tools/<file>: ...`.
+  `loadFakes(testsDir)` and the types `Fake`, `FakeCall` and `FakeAnswer` are exported.
+- **`expect.state`** checks in code what the fakes kept: each top-level key is one check; objects
+  match in part, arrays have the same length with each expected element matched in part (any
+  order), other values are equal.
+- `flow test` checks `given:` before sending: a mode other than the four, a `given.tools` key the
+  agent has no tool for, and `down` or `flaky` for a tool whose file has no response with an error
+  are named with their file, and nothing is sent.
+- After a session, one line says how many tool calls a model played and of which tools (and how
+  many of those answers were saved from an earlier run), naming a tool that has a fake on this
+  machine but was played by a model in a scenario without `given:`. `flow test --json` carries each
+  run's `toolsPlayedBy` (`rule`, `fake`, `recorded`, `model`, `byModel`), null from an older cloud.
+- A cloud older than this release ignores the fakes and plays every tool by a model, as before;
+  `flow test` then says once: `This cloud does not play fakes: a model plays every tool (tests/tools/*.fake.ts unused).`
+- The café example (and so `flow new` and `flow init`) has `tests/tools/get_menu.fake.ts` and
+  `tests/tools/place_order.fake.ts`; `latte-correction` has a `given:` block (the point of sale
+  slow) and checks the one order with `expect.state`, and `order-fails` plays the point of sale
+  `down` by rule. `reads-like-a-text` keeps only its prose world. A new agent's `tsconfig.json`
+  includes `tests`, and its fakes import their types from `@flow-engineer/flow/testing`.
+- **The simulated person can be harder to serve**, with three optional fields under `person:`.
+  `reveal: one_at_a_time` gives one fact of `knows` per message, only the one asked for (the
+  default, `as_asked`, is today's person). `behaviours` is any of `impatient`, `tangents`,
+  `half_messages`, `pushes_rules` and `walks_away`; a person with `walks_away` may leave unresolved
+  when the agent is slow, repetitive or unhelpful, and the run ends `ended: "walked_away"`, a failed
+  run with the check "The person stayed until their goal was met". `attack: { rule, tactics }` makes
+  the person try, over several turns, to make the agent break `rule` (1 to 500 characters), with
+  `tactics` from `ask`, `reason`, `authority`, `pressure`, `reframe` and `inject` in the order it
+  escalates (all six in that order when left out); the run is judged on "The agent kept this rule
+  in every reply". `attack` with `walks_away` is refused: `an attacker does not walk away: leave
+  walks_away out`. `flow test` names a wrong value, a name listed twice or an unknown key under
+  `attack` with its file and line before anything is sent.
+- The cloud checks after each run that the simulated person kept to its goal and persona; a run
+  whose person drifted is played once more, and drifting again it is errored with
+  `error: "simulator_failed"`, never the agent's failure.
+- **`flow test pull`** writes the test drafts Flow made from the hosted agent's conversations that
+  went wrong (made-up people, the business kept) into `tests/drafts/<file>`, from the agent's folder,
+  with the agent's CI key (`FLOW_FRAMEWORK_CLOUD_KEY`) and the cloud `flow test` uses
+  (`GET /v1/agent/test-drafts`, then `POST /v1/agent/test-drafts/{id}/pulled` for each file written).
+  Each draft is parsed as a scenario first; one that does not parse is named with its line and not
+  written. A file already there with other content is kept, and a draft pulled before is not
+  written again, unless `--force`; `--dry-run` lists what it would write and writes nothing;
+  `--json` reports each draft's `id`, `file`, `title`, `check` and `done` (`written`,
+  `would_write`, `unchanged`, `exists`, `pulled_before`, `invalid`). Where the workspace's drafts may
+  not leave Flow, the server's `export_blocked` message is printed as it is and nothing is written.
+  Exit status 0 when every draft was written or left as told, 1 otherwise. Drafts never run or
+  gate: `flow test` reads only `tests/scenarios` and `tests/tools`; move a draft into
+  `tests/scenarios/` to keep it.
+- **`origin`**, an optional field on a scenario, says where it came from: `from` (`code` or
+  `chat`), `by`, `covers` (the ids a coverage plan names) and `check` (`not_checked`,
+  `passes_on_fixed` or `reproduces_on_bad`). It is metadata: no run reads it. `flow test` names a
+  wrong `from` or `check` with its file and line.
+
+### Migration notes
+
+None. Scenarios without `given:` play as before, and tool files are unchanged. To adopt: add a
+`given:` block to a scenario (its prose `world` stays as the note for the person and the judge),
+and write a fake for the tools whose answers depend on what happened before in the run (an order
+number that goes up, an order the scenario's `expect.state` checks). An older cloud ignores both.
+
+None for the person's fields either: `reveal`, `behaviours` and `attack` are all optional, and a
+scenario without them plays as before. An older cloud ignores them and plays the person as before.
+
+`origin` was an unknown key until now, dropped unread; a scenario that already has one is now
+checked: `from` must be `code` or `chat` (and is required under `origin`), `check` one of the three
+values. A scenario without `origin` is unchanged. `flow test pull` is new, and `tests/drafts/` was
+never read by `flow test`.
 
 ## 0.15.6 (2026-11-02)
 
