@@ -32,13 +32,21 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - **`expect.state`** checks in code what the fakes kept: each top-level key is one check; objects
   match in part, arrays have the same length with each expected element matched in part (any
   order), other values are equal.
+- **`flow test fake <tool>`** writes a starter `tests/tools/<tool>.fake.ts` from the tool's file: it
+  answers as the file's responses do (the one whose `input` is the call's, else the usual one),
+  with comments on `given:` and `state`, and never writes over a file already there (`--json`:
+  `{ ok, tool, file, from }`). Fakes stay optional.
 - `flow test` checks `given:` before sending: a mode other than the four, a `given.tools` key the
   agent has no tool for, and `down` or `flaky` for a tool whose file has no response with an error
   are named with their file, and nothing is sent.
 - After a session, one line says how many tool calls a model played and of which tools (and how
   many of those answers were saved from an earlier run), naming a tool that has a fake on this
-  machine but was played by a model in a scenario without `given:`. `flow test --json` carries each
-  run's `toolsPlayedBy` (`rule`, `fake`, `recorded`, `model`, `byModel`), null from an older cloud.
+  machine but was played by a model in a scenario without `given:`. For the tools with no fake it
+  suggests, once, that a fake would make them free and repeatable and names `flow test fake <tool>`;
+  a suggestion, not a warning: a test without fakes passes, runs and costs as before.
+  `FLOW_FRAMEWORK_FAKE_HINT=0` (environment or `.env`) leaves it out. `flow test --json` carries each
+  run's `toolsPlayedBy` (`rule`, `fake`, `recorded`, `model`, `byModel`), null from an older cloud,
+  and `toolsWithoutFake`, those tools by name.
 - A cloud older than this release ignores the fakes and plays every tool by a model, as before;
   `flow test` then says once: `This cloud does not play fakes: a model plays every tool (tests/tools/*.fake.ts unused).`
 - The café example (and so `flow new` and `flow init`) has `tests/tools/get_menu.fake.ts` and
