@@ -463,6 +463,9 @@ npx @flow-engineer/flow logs --since 15m                        # the hosted age
 npx @flow-engineer/flow conversations --grade wrong --since 7d  # its conversations with a reply graded wrong
 npx @flow-engineer/flow conversations show <id>                 # one of them: each reply's grade, rule, reason and quote
 npx @flow-engineer/flow issues                                  # the problems the grades add up to, with a suggested fix
+npx @flow-engineer/flow issues test-case <id>                   # the test case Flow proposes for one: rule, reply, checks
+npx @flow-engineer/flow insights                                # Flow Insights: where people gave up or got annoyed, by topic
+npx @flow-engineer/flow insights show <finding>                 # one finding's conversations, each with why it was flagged
 npx @flow-engineer/flow templates --declare                     # the approved WhatsApp templates, to paste into createAgent
 printf '%s' "$VALUE" | npx @flow-engineer/flow deploy secret NAME --env production   # one secret by hand, from stdin
 ```
@@ -489,6 +492,23 @@ the reason and the words it was graded on. Fix the instructions, skill or tool t
 at, add a scenario that plays that conversation, run `flow test`, and deploy. `flow issues` groups
 the same grades into problems with a suggested fix. They read with `FLOW_KEY` from `.env`.
 After `flow issues`, act on its team feedback: "check out of date" means update that scenario check; "grade marked wrong" means do not change the agent for it.
+`flow issues test-case <id>` prints the checks Flow proposes for an issue (its rule, the reply it
+comes from, the words to include or avoid): write a scenario from them and `flow test --only` it.
+
+Flow Insights reads what the people did, not single replies: in the hosted agent's closed
+production conversations (quiet 24 h, on a live key; test keys, `flow chat`, the playground and
+`flow test` are never graded) it finds where they gave up, asked again or got annoyed, by topic.
+It reads with the agent's live Flow key (`flow_live_`); with the test key `flow setup` writes it
+says so: ask the owner for the live key rather than changing anything. To work a finding through:
+
+1. `flow insights` lists the open findings, ranked, each with its count and the window before's
+   ("4 (was 9)"); `--days 30` for a longer window.
+2. `flow insights show <finding>` lists its conversations, each with why it was flagged and the
+   person's words.
+3. `flow conversations show <id>` reads one, to tell whether the issue is real and what caused it.
+4. Fix the instructions, skill or tool behind it, and add a scenario that plays the conversation.
+5. `flow test`, then `flow deploy` (production only when the owner says so).
+6. Once a window has passed, `flow insights` again: the finding's count should drop.
 
 On the owner's own servers: one instance, kept warm, CPU always on, a durable `database`
 (`postgres(pool)`), `await agent.resume()` at start, the secrets from the platform's secret store

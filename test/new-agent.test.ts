@@ -23,7 +23,7 @@ test("npm run new copies the café under its name, renamed, and refuses bad or t
   for (const bad of ["", "My-Agent", "my_agent", "../up", "-x", "a--b"]) assert.throws(() => newAgent(bad, { agents }), /not a usable name/, bad);
 });
 
-test("flow new makes an agent of its own: @flow-engineer/flow imports, a package on this version that npm refuses to install on an older Node, and the skills", () => {
+test("flow new makes an agent of its own: @flow-engineer/flow imports, a package pinned to this exact version that npm refuses to install on an older Node, and the skills", () => {
   const into = mkdtempSync(join(tmpdir(), "flow-new-"));
   const dir = newStandalone("my-agent", { into });
   assert.equal(dir, join(into, "my-agent"));
@@ -37,8 +37,11 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
   const own = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(pkg.name, "my-agent");
-  assert.equal(pkg.dependencies["@flow-engineer/flow"], `^${own.version}`);
-  assert.equal(pkg.dependencies["@modelcontextprotocol/server"], own.peerDependencies["@modelcontextprotocol/server"], "the MCP SDK at the version chinwag pins");
+  assert.equal(pkg.dependencies["@flow-engineer/flow"], own.version, "pinned exactly, as the docs say for production");
+  assert.equal(pkg.dependencies["@modelcontextprotocol/client"], own.peerDependencies["@modelcontextprotocol/client"], "the MCP client SDK at the version Flow Framework pins");
+  // flow mcp serve and src/mcp.ts run on the MCP server SDK, a dependency of Flow Framework itself: an agent folder made on 0.15 without it still serves.
+  assert.equal(own.dependencies["@modelcontextprotocol/server"], "2.3.1");
+  assert.equal(pkg.dependencies["@modelcontextprotocol/server"], undefined);
   assert.equal(pkg.scripts.test, "flow test");
   assert.deepEqual(pkg.bin, { "my-agent": "src/cli.ts" }, "installed, the CLI is a command of its own");
   assert.equal(pkg.engines.node, own.engines.node);
@@ -48,11 +51,15 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   assert.equal(JSON.parse(readFileSync(join(dir, "tsconfig.json"), "utf8")).extends, undefined);
   for (const skill of ["flow-framework", "flow-framework-build-agent", "flow-framework-mcp", "flow-framework-cli-design", "flow-framework-tools", "flow-framework-tests", "flow-framework-context", "flow-framework-auth"]) assert.ok(existsSync(join(dir, ".claude", "skills", skill, "SKILL.md")), skill);
   assert.equal(readFileSync(join(dir, "CLAUDE.md"), "utf8"), "@AGENTS.md\n");
+  // `npx flow` on its own fetches another npm package: every command names this one.
+  assert.doesNotMatch(readFileSync(join(dir, "AGENTS.md"), "utf8"), /npx flow\b/);
   assert.ok(existsSync(join(dir, "tests", "scenarios")));
   // The tests' fakes import their types from the public entry, and the agent's typecheck reads them.
   for (const fake of ["get_menu.fake.ts", "place_order.fake.ts"]) assert.match(readFileSync(join(dir, "tests", "tools", fake), "utf8"), /^import type \{ Fake \} from "@flow-engineer\/flow\/testing";$/m, fake);
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "tsconfig.json"), "utf8")).include, ["src", "tests"]);
   const env = readFileSync(join(dir, ".env.example"), "utf8");
+  assert.doesNotMatch(env, /npx flow\b/);
+  assert.match(env, /sign in at https:\/\/flow\.engineer\/dashboard,/, "the dashboard, not the API's address, is where to sign in");
   for (const key of ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "FLOW_KEY", "FLOW_FRAMEWORK_CLOUD_KEY", "FLOW_FRAMEWORK_TRACES_KEY"]) assert.match(env, new RegExp(`^${key}=$`, "m"), key);
   assert.match(env, /^FLOW_FRAMEWORK_CLOUD=https:\/\/flow\.engineer\/observe$/m);
   assert.match(env, /^FLOW_FRAMEWORK_TRACES_URL=https:\/\/flow\.engineer\/observe$/m);

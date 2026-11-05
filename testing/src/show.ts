@@ -9,6 +9,7 @@ import { parseArgs } from "node:util";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import { RESULTS_DIR, resultsFile } from "../../src/names.ts";
 import { loadEnv, type SessionInvalid } from "./report.ts";
+import { cloudCall, failureDocument, keyHelp, NetworkError } from "./cloud-call.ts";
 
 /** Where every session's results go, in the agent's folder; `flow new` git-ignores .flow/. */
 export const LAST_SESSION = join(RESULTS_DIR, "last-session.json");
@@ -109,8 +110,35 @@ type Line =
   | { kind: "edit"; messageId?: string; text?: string; at?: number }
   | { kind: "unsend"; messageId?: string; at?: number };
 
-/** `flow show`: returns the exit status. */
+/**
+ * `flow show`: returns the exit status. With --json, stdout is one JSON document whatever the exit:
+ * the record, or { ok: false, error: { code, message }, next } with what stderr says.
+ */
 export async function showCli(args: string[]): Promise<number> {
+  if (!args.includes("--json")) return show(args);
+  const said: string[] = [];
+  const error = console.error;
+  console.error = (...parts: unknown[]) => { said.push(parts.join(" ")); error(...parts); };
+  const written = { any: false };
+  const write = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => { written.any = true; return (write as (...a: unknown[]) => boolean)(chunk, ...rest); }) as typeof process.stdout.write;
+  try {
+    const code = await show(args);
+    if (code !== 0 && !written.any) {
+      const message = said.filter((line) => !/^Showing |^ {2}also did not pass/.test(line)).join("\n").split("\n\nUsage:")[0]!.trim();
+      write(failureDocument(SHOW_CODES[code] ?? "failed", message || `flow show exited ${code}`));
+    }
+    return code;
+  } finally {
+    console.error = error;
+    process.stdout.write = write as typeof process.stdout.write;
+  }
+}
+
+/** --json's error code for each exit status. */
+const SHOW_CODES: Record<number, string> = { 1: "not_shown", 2: "unreachable", 3: "refused" };
+
+async function show(args: string[]): Promise<number> {
   let parsed;
   try {
     parsed = parseArgs({ args, allowPositionals: true, strict: true, options: {
@@ -139,6 +167,7 @@ export async function showCli(args: string[]): Promise<number> {
     console.error(`--scenario picks a run of the last session: flow show last --scenario ${values.scenario || "<id>"}.`);
     return 1;
   }
+  const fromEnvironment = Boolean(setting("CLOUD_KEY"));
   const envProblem = loadEnv(values.dotenv);
   if (envProblem) {
     console.error(envProblem);
@@ -188,16 +217,17 @@ export async function showCli(args: string[]): Promise<number> {
   let status: number;
   let text: string;
   try {
-    const response = await fetch(url, { headers: { authorization: `Bearer ${key}`, accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
-    status = response.status;
-    text = await response.text();
+    ({ status, text } = await cloudCall(url, { headers: { authorization: `Bearer ${key}`, accept: "application/json" }, timeoutMs: 30_000 }));
   } catch (error) {
-    const cause = (error as Error).cause as NodeJS.ErrnoException | undefined;
-    const why = (error as Error).name === "TimeoutError" ? "no answer in 30 s" : cause?.code ?? (error as Error).message;
-    console.error(`Could not reach ${cloud}: ${why}.`);
+    if (!(error instanceof NetworkError)) throw error;
+    console.error(`Could not reach the test cloud: ${error.message}.`);
     return 2;
   }
-  if (status < 200 || status >= 300) return refused(status, text, runId);
+  if (status < 200 || status >= 300) {
+    const exit = refused(status, text, runId);
+    if (status === 401 || status === 403) console.error(keyHelp("flow show", { kind: "ci_key", name: process.env.FLOW_FRAMEWORK_CLOUD_KEY !== undefined ? "FLOW_FRAMEWORK_CLOUD_KEY" : "CHINWAG_CLOUD_KEY", where: fromEnvironment ? "the environment" : values.dotenv ?? ".env in this folder", value: key }, { status }));
+    return exit;
+  }
   let record: RunRecord;
   try {
     record = JSON.parse(text) as RunRecord;

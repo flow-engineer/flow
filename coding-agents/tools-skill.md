@@ -154,9 +154,11 @@ export const tools = [
 
 ## The tool's test file
 
-In tests no real tool runs: a model plays each tool from the scenario's world. `tests/tools/<tool>.yaml`
-tells it how the tool behaves: every kind of response it gives, each with an example and how long
-it takes. Write one per tool.
+In tests no real tool runs. `tests/tools/<tool>.yaml` says how the tool behaves: every kind of
+response it gives, each with an example and how long it takes. Write one per tool. Each call is
+then played by rule from it and the scenario's `given` block, by the tool's fake
+(`tests/tools/<tool>.fake.ts`, written from `behaviour`), or, when nothing else covers the call, by
+a model from the scenario's world (the `flow-framework-tests` skill, "Tools played by rule").
 
 ```yaml
 tool: place_order
@@ -179,17 +181,20 @@ responses:
 - `behaviour`: what the tool does beyond its description, in plain words (ids, ordering, limits,
   when it fails).
 - `responses`: one entry per kind of outcome, the usual one first, then slow ones and each error
-  the real system can give. `when` says when it happens; `latency_ms` is how long it takes;
-  then `output` (what `run` returns) or `error` (what it throws). `input` is optional, as an
-  example of a call.
+  the real system can give, the "down" one first among the errors: a scenario's `down` and
+  `flaky N%` play the first response with an error, and `slow` the slowest with an output.
+  `when` says when it happens; `latency_ms` is how long it takes; then `output` (what `run`
+  returns) or `error` (what it throws). `input` is optional, as an example of a call; a call with
+  exactly that input gets that response, with no model.
 - Use real responses when you have them (copy them from the agent's recorded tool calls, with
   personal data removed); otherwise write realistic ones in exactly the shape `run` returns.
 - Examples show the shape, not the answer: the simulator takes ids, names and dates from the
   scenario's world, the call's input and what the agent already said. Write dates as placeholders
   for the test's clock (`{{now + 10m}}`, `{{now + 2d | date}}`; see the `flow-framework-tests` skill),
   never as written dates, which go stale.
-- Latency lives only here. Scenarios describe situations ("the point of sale is slow this
-  morning"); the simulator picks the matching response and latency on each call.
+- Latency lives only here. A scenario picks a kind by name in `given.tools` (`slow`, `down`,
+  `flaky 30%` with a `seed`: the same calls fail on every run, random but repeatable), or describes
+  the situation in its prose `world` ("the point of sale is slow this morning") for a model to play.
 
 ## Authenticated backend access
 

@@ -799,6 +799,20 @@ test("the person's reveal, behaviours and attack parse as written; a wrong value
   for (const [person, error] of mistakes) assert.throws(() => parseScenario(scenario(`${person}\n`)), { message: error }, person);
 });
 
+test("origin parses as metadata, in the shape a coverage plan writes (from code, by, covers) and Flow's drafts (from chat, check); a wrong value is named at its line", () => {
+  const scenario = (origin: string) => ({ path: "scenarios/o.yaml", content: `id: o\nchannels: [sms]\n${origin}person:\n  persona: a\n  goal: b\nopening:\n  - say: hi\n` });
+  assert.deepEqual(parseScenario(scenario("origin:\n  from: code\n  by: coding agent, from the plan's gaps\n  covers: [tool:order_status, code:beforeSend]\n")).origin, {
+    from: "code", by: "coding agent, from the plan's gaps", covers: ["tool:order_status", "code:beforeSend"],
+  });
+  for (const check of ["not_checked", "passes_on_fixed", "reproduces_on_bad"]) assert.deepEqual(parseScenario(scenario(`origin: { from: chat, check: ${check} }\n`)).origin, { from: "chat", check });
+  const mistakes: Array<[string, string]> = [
+    ["origin: { from: support }", "scenarios/o.yaml:3: origin.from: code or chat"],
+    ["origin:\n  from: chat\n  check: checked", "scenarios/o.yaml:5: origin.check: not_checked, passes_on_fixed or reproduces_on_bad"],
+    ["origin: { check: not_checked }", "scenarios/o.yaml:3: origin.from: code or chat"],
+  ];
+  for (const [origin, error] of mistakes) assert.throws(() => parseScenario(scenario(`${origin}\n`)), { message: error }, origin);
+});
+
 test("the café's fakes play its tools from given: the menu it names, orders numbered up from BL-1040 and kept in state, an item not on the menu refused", async () => {
   const tests = fileURLToPath(new URL("../examples/cafe/tests", import.meta.url));
   const fakes = await loadFakes(tests);
