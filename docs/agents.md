@@ -490,6 +490,8 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
 - `logs` prints the hosted agent's log lines from `--since` (30s, 15m, 1h, 2d, up to 30d, or an RFC
   3339 time; default 1h) to `--until` (the same forms; not with `--follow`), and with `--follow`
   keeps printing new ones. `--severity DEFAULT|INFO|WARNING|ERROR` keeps that severity and above;
+  a `DEFAULT` line that is plainly an uncaught error (`Error:`, `DOMException`, a stack: how
+  runtimes before 0.16 wrote Flow's own errors) counts as `ERROR`.
   `--grep <text>` keeps lines containing it (case-insensitive, at most 200 characters). The cloud
   filters; the CLI filters again, so an older cloud's answer is right too. When the lines start later
   than `--since` asked, stderr says `Logs start at <time>: this Flow keeps <N> back`. Every page
