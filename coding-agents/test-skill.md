@@ -155,9 +155,11 @@ The rules, in order:
 
 `slow` keeps the answer and takes the latency of the tool file's slowest response with an output.
 
-**Write a fake for each tool the tests call often.** A fake is a few lines of plain TypeScript next
-to the tool file, written from its `behaviour`; it runs on the developer's machine, beside the
-agent, and is never uploaded. Show it to the developer to approve before relying on it.
+**Fakes and `given` are optional.** A scenario without them plays, passes and costs exactly as
+before. You can add a fake to make a tool the tests call often free and repeatable: a few lines of
+plain TypeScript next to the tool file, written from its `behaviour`; it runs on the developer's
+machine, beside the agent, and is never uploaded. Show it to the developer to approve before
+relying on it.
 
 ```ts
 // tests/tools/place_order.fake.ts
@@ -193,8 +195,9 @@ export default placeOrder;
   many entries (in any order), each matching in part. "Exactly one order, a large oat latte for
   Sam" is the `state` above, with no judge call.
 - After a session the report says how many calls a model played ("3 tool calls were played by a
-  model (place_order 2, order_status 1) ..."). Write a fake for those tools, or add `given` to the
-  scenarios when a fake exists but was not used.
+  model (place_order 2, order_status 1) ..."). You can add a fake for those tools to make them free
+  and repeatable, or add `given` to the scenarios when a fake exists but was not used; or leave
+  them to the model.
 
 ### Scenarios the business starts
 
@@ -292,8 +295,8 @@ written in scenarios: the dashboard shows it for the whole run (average, p95, mi
   `outcome` or `judge` sentence: code checks it the same way every run.
 - Write `judge` items as facts a reader can check from the transcript, not taste ("asks Sam to
   confirm before placing the order", not "is helpful").
-- Cover the unhappy paths the tool files list (busy, down, unknown item) as their own scenarios,
-  with `given.tools` (`slow`, `down`, `flaky 30%`) so each run plays the same path.
+- Cover the unhappy paths the tool files list (busy, down, unknown item) as their own scenarios;
+  `given.tools` (`slow`, `down`, `flaky 30%`) makes each run play the same path.
 - When a real conversation went wrong, turn it into a scenario: its world is what was true then,
   its opening is what the person sent.
 
