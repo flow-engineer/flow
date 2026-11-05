@@ -524,7 +524,7 @@ test("logs asks from --since up to 30 days with --until, --severity and --grep, 
     { time: "2026-10-20T09:30:00Z", severity: "WARNING", text: "Tool book slow" },
   ]);
   const asked = new URL(older.calls[0]!.path, older.url).searchParams;
-  assert.deepEqual(Object.fromEntries(asked), { environment: "staging", since: "2026-10-17T11:00:00.000Z", limit: "500", until: "2026-10-20T10:00:00.000Z", severity: "WARNING", grep: "tool book" });
+  assert.deepEqual(Object.fromEntries(asked), { environment: "staging", since: "2026-10-17T11:00:00.000Z", limit: "500", until: "2026-10-20T10:00:00.000Z", grep: "tool book" }, "up to ERROR every line is asked for (a DEFAULT line may be read as ERROR) and filtered here");
   assert.match(printed, /Logs start at 2026-10-19T11:00:00\.000Z: this Flow keeps 24 hours back\./, "an older host keeps 24 hours and says nothing of it");
   const newer = await cloud({ logs: true });
   const kept = await run(["logs", "--since", "30d", "--dir", agentFolder()], { ...env, FLOW_FRAMEWORK_CLOUD: newer.url });
@@ -648,6 +648,44 @@ test("logs joins a stack Cloud Run split into an entry per line into the line be
   const kept = [{ time: at, severity: "DEFAULT", text: "Error: x" }];
   addLogLines(kept, [{ time: at, severity: "DEFAULT", text: "    at y" }]);
   assert.deepEqual(kept, [{ time: at, severity: "DEFAULT", text: "Error: x\n    at y" }]);
+});
+
+// A hosted 0.15.x runtime writes Flow's own errors as plain console text, which Cloud Run keeps at
+// DEFAULT, so --severity ERROR missed them (and the host, asked for ERROR, never sent them).
+test("logs --severity ERROR reads a DEFAULT line that is plainly an uncaught error as ERROR, a stack split across pages too", async () => {
+  const at = (minute: number, micros = "") => new Date(Date.parse("2026-10-18T00:00:00Z") + minute * 60_000).toISOString().replace(/Z$/, `${micros}Z`);
+  const lines: HostLogLine[] = Array.from({ length: 499 }, (_, i) => ({ time: at(i), severity: "INFO", text: `line ${i}` }));
+  lines.push(
+    // The 500th line and its stack's next one: the stack goes over the first page's end.
+    { time: at(499, "313"), severity: "DEFAULT", text: "flow: scheduled messages: Error: flow-agent-store: unfinished: HTTP 503", instance: "a" },
+    { time: at(499, "314"), severity: "DEFAULT", text: "    at Store.call (file:///app/store.js:1:2)", instance: "a" },
+    { time: at(500), severity: "DEFAULT", text: "TimeoutError: The operation was aborted due to timeout" },
+    { time: at(501), severity: "DEFAULT", text: "scheduled messages: DOMException [TimeoutError]" },
+    { time: at(502, "100"), severity: "DEFAULT", text: "something went wrong", instance: "a" },
+    { time: at(502, "101"), severity: "DEFAULT", text: "    at run (file:///app/a.js:3:4)", instance: "a" },
+    { time: at(503), severity: "DEFAULT", text: "listening on 8080: no Error: here" },
+    { time: at(504), severity: "DEFAULT", text: "    at the start, alone" },
+    { time: at(505), severity: "WARNING", text: "TypeError: kept as written" },
+  );
+  const host = await pagedLogs(0, lines);
+  try {
+    const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url };
+    const { code, stdout, printed } = await run(["logs", "--since", "3d", "--severity", "error", "--json", "--dir", agentFolder()], env, undefined, null);
+    assert.equal(code, 0, printed);
+    assert.deepEqual(stdout.split("\n").map((l) => JSON.parse(l)), [
+      { time: at(499, "313"), severity: "ERROR", text: "flow: scheduled messages: Error: flow-agent-store: unfinished: HTTP 503\n    at Store.call (file:///app/store.js:1:2)" },
+      { time: at(500), severity: "ERROR", text: "TimeoutError: The operation was aborted due to timeout" },
+      { time: at(501), severity: "ERROR", text: "scheduled messages: DOMException [TimeoutError]" },
+      { time: at(502, "100"), severity: "ERROR", text: "something went wrong\n    at run (file:///app/a.js:3:4)" },
+    ]);
+    assert.ok(host.asked.length >= 2 && host.asked.every((q) => !q.has("severity")), "the host is asked for every line, DEFAULT too");
+    host.asked.length = 0;
+    const plain = await run(["logs", "--since", "3d", "--json", "--dir", agentFolder()], env, undefined, null);
+    assert.deepEqual(plain.stdout.split("\n").slice(-3).map((l) => JSON.parse(l).severity), ["DEFAULT", "DEFAULT", "WARNING"], "without --severity too, only the errors are raised");
+    host.asked.length = 0;
+    assert.equal((await run(["logs", "--since", "3d", "--severity", "critical", "--json", "--dir", agentFolder()], env, undefined, null)).code, 0);
+    assert.ok(host.asked.every((q) => q.get("severity") === "CRITICAL"), "above ERROR the host filters");
+  } finally { host.close(); }
 });
 
 test("logsWindow, flow logs' and read_logs' one rule: durations are back from now for since and until alike, times as given, since at most 30 days back, until after since", () => {

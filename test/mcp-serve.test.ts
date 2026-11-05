@@ -1,4 +1,4 @@
-// covers: testing/src/mcp-serve.ts testing/src/cli.ts
+// covers: testing/src/mcp-serve.ts testing/src/cli.ts testing/src/deploy.ts
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage } from "node:http";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -127,6 +127,36 @@ test("read_logs takes flow logs' window, since 30d and a relative until across p
     assert.equal(data.lines.length, 601);
     assert.deepEqual([data.lines[0]!.text, data.lines.at(-1)!.text, data.truncated], ["line 0", "Error: boom\n    at run (file:///app/a.js:1:2)", false]);
     assert.ok(cloud.seen.length >= 2 && cloud.seen.every((s) => /[?&]since=/.test(s.url) && /[?&]until=/.test(s.url)), "since and until on every page");
+  } finally {
+    await client.close();
+    await cloud.close();
+  }
+});
+
+// A hosted 0.15.x runtime's own errors are plain console text at DEFAULT: read_logs with severity ERROR missed them.
+test("read_logs severity ERROR reads a DEFAULT line that is plainly an uncaught error as ERROR and asks the host for every line", async () => {
+  const start = Date.now() - 30 * 60_000;
+  const at = (minute: number) => new Date(start + minute * 60_000).toISOString();
+  const lines: HostLogLine[] = [
+    { time: at(1), severity: "INFO", text: "booted" },
+    { time: at(2), severity: "DEFAULT", text: "flow: scheduled messages: Error: flow-agent-store: unfinished: HTTP 503" },
+    { time: at(3), severity: "DEFAULT", text: "listening on 8080" },
+    { time: at(4), severity: "DEFAULT", text: "AbortError: This operation was aborted" },
+    { time: at(5), severity: "ERROR", text: "tool book failed" },
+  ];
+  const cloud = await fakeCloud((req) => hostLogs(new URL(req.url!, "http://x").searchParams, lines, Date.now()));
+  const client = await serve(cloud.url);
+  try {
+    const result = await client.callTool({ name: "read_logs", arguments: { severity: "ERROR" } });
+    assert.equal(result.isError, undefined, JSON.stringify(result.structuredContent));
+    const data = result.structuredContent as { lines: Array<{ severity: string; text: string }> };
+    assert.deepEqual(data.lines.map((l) => [l.severity, l.text]), [
+      ["ERROR", "flow: scheduled messages: Error: flow-agent-store: unfinished: HTTP 503"],
+      ["ERROR", "AbortError: This operation was aborted"],
+      ["ERROR", "tool book failed"],
+    ]);
+    assert.match((result.content as Array<{ text: string }>)[0]!.text, /^3 log lines from staging, 3 at ERROR or above\./);
+    assert.ok(cloud.seen.every((s) => !/[?&]severity=/.test(s.url)), "no severity sent: the host would leave DEFAULT out");
   } finally {
     await client.close();
     await cloud.close();

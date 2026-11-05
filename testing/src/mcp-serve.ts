@@ -19,7 +19,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RUN } from "../../src/names.ts";
 import { ADVISORY, NetworkError, textLine, type FoundKey } from "./cloud-call.ts";
 import { Failed, get, insightConversations, listConversations, listInsights, listIssues, noKey, readKey, showConversation, sinceTime, type Access } from "./conversations.ts";
-import { addLogLines, cloudOf, deployStatus, logsPage, logsWindow, NotAvailable, Refused, SEVERITIES, type LogsQuery } from "./deploy.ts";
+import { cloudOf, deployStatus, logReader, logsPage, logsWindow, NotAvailable, Refused, SEVERITIES, type LogsQuery } from "./deploy.ts";
 import { packageRoot } from "./new.ts";
 
 const MCP_SERVE_USAGE = `Usage:
@@ -197,7 +197,7 @@ export const TOOLS: ServeTool[] = [
       environment: ENVIRONMENT.default("staging").describe("staging or production"),
       since: z.string().default("1h").describe(`How far back, at most 30 days: ${WHEN}`),
       until: z.string().optional().describe(`Up to when: ${WHEN}`),
-      severity: z.enum(SEVERITIES).optional().describe("Only lines at this severity or above"),
+      severity: z.enum(SEVERITIES).optional().describe("Only lines at this severity or above; a DEFAULT line that is plainly an uncaught error (Error:, DOMException, a stack) counts as ERROR"),
       grep: z.string().min(1).max(200).optional().describe("Only lines that hold this text (any case) anywhere in the line as printed: a JSON line's every field, not only its message (text with a quote or brace is matched over every line of the window, slower)"),
       limit: z.number().int().min(1).max(1000).default(200).describe("At most this many lines, the newest"),
     }),
@@ -214,17 +214,19 @@ export const TOOLS: ServeTool[] = [
       // Every page up to until (else now), as flow logs reads them, keeping the newest: the pages end
       // when the cursor stops moving (next null, or the after just sent); a page past that is not kept.
       let complete = false;
+      const reader = logReader(input.severity);
       for (let pages = 0; pages < LOG_PAGES; pages++) {
         const page = await logsPage(api, query);
         if (pages === 0) from = page.from;
         const moved = Boolean(page.next) && page.next !== query.after;
         if (moved || pages === 0) {
-          addLogLines(lines, page.lines);
+          lines.push(...reader.add(page.lines));
           lines = lines.slice(-input.limit - 1);
         }
         if (!moved) { complete = true; break; }
         query.after = page.next!;
       }
+      lines = [...lines, ...reader.end()].slice(-input.limit - 1);
       const truncated = lines.length > input.limit || !complete;
       const kept = lines.slice(-input.limit).map((l) => ({ time: l.time, severity: l.severity ?? null, text: l.text }));
       const errors = kept.filter((l) => ["ERROR", "CRITICAL", "ALERT", "EMERGENCY"].includes(String(l.severity).toUpperCase())).length;

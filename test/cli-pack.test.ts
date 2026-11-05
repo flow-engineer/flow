@@ -72,7 +72,13 @@ function unpack(tgz: string): string {
   return join(into, "package");
 }
 
-const fresh = () => ({ ...process.env, XDG_CONFIG_HOME: mkdtempSync(join(scratch, "config-")), NO_COLOR: "1", AI_AGENT: "1" });
+// node --test sets FORCE_COLOR for its test files when its own output is a terminal; beside NO_COLOR,
+// a child's Node then warns on stderr that NO_COLOR is ignored. Plain output is NO_COLOR alone.
+const fresh = () => {
+  const env: NodeJS.ProcessEnv = { ...process.env, XDG_CONFIG_HOME: mkdtempSync(join(scratch, "config-")), NO_COLOR: "1", AI_AGENT: "1" };
+  delete env.FORCE_COLOR;
+  return env;
+};
 
 test("flow cli pack --server staging bundles the CLI for the hosted address: its server, version, update and files, beside install.sh and release.json", async () => {
   const { out, code, stdout, printed } = await packStaging();

@@ -2,6 +2,29 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.16.1 (unreleased)
+
+### Changes
+
+- **`flow logs --severity ERROR` and MCP `read_logs` with severity ERROR show a 0.15.x runtime's
+  errors.** Runtimes before 0.16 wrote Flow Framework's own errors as plain console text, which
+  Cloud Run keeps at `DEFAULT` (`flow: scheduled messages: Error: flow-agent-store: unfinished:
+  HTTP 503`, a `TimeoutError`/`DOMException` stack), so they were left out. After split stacks are
+  joined, a `DEFAULT` line is now read as `ERROR` when, by fixed rules, it is an uncaught error: its
+  first line matches `flow: ... Error:`, starts with an error's name (`Error:`, `TypeError:`) or
+  holds `DOMException`, or it is a stack (a later line `    at ...`). That holds for every
+  `--severity` and without one, in `--json` too. Since Flow's hosting keeps only the lines at the
+  asked severity or above, up to `ERROR` the CLI asks for every line and filters them itself (more
+  pages for a long window); above `ERROR` the host still filters. A stack's `at` lines now come with
+  it under `--severity`.
+- Tests: the CLI tests that want plain output (`NO_COLOR`) also drop `FORCE_COLOR`, which
+  `node --test` sets when its output is a terminal, so `npm test` passes at a terminal as in a pipe.
+
+### Migration notes
+
+None. A script that read only `ERROR` lines from `flow logs --json` now also gets those
+`DEFAULT` lines, as `ERROR`.
+
 ## 0.16.0 (2026-11-05)
 
 ### Changes

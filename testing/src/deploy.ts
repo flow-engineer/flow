@@ -54,7 +54,8 @@ export const LOGS_USAGE = `Usage:
   --since      How far back: 30s, 15m, 1h (the default), 3d, at most 30d, or a time such as
                2026-11-03T09:00:00Z.
   --until      Up to when: a duration back from now (2h) or a time. Not with --follow.
-  --severity   Only lines at this severity or above: DEFAULT, INFO, WARNING or ERROR.
+  --severity   Only lines at this severity or above: DEFAULT, INFO, WARNING or ERROR. A DEFAULT line
+               that is plainly an uncaught error (Error:, DOMException, a stack) counts as ERROR.
   --grep       Only lines that hold this text (any case) anywhere in the line as printed: a JSON
                line's every field, not only its message. Flow searches the fields' values; text
                with a quote or a brace ("step":"question", JSON as printed) is matched here
@@ -66,15 +67,16 @@ export const LOGS_USAGE = `Usage:
                (a failure is one { ok: false, error, next } line).
   --dir, --cloud, FLOW_FRAMEWORK_CLOUD_KEY: as for flow deploy (flow deploy --help).
 
-Flow sends only the lines that match --until, --severity and --grep; an older Flow that does not
-filter gets them filtered here, so the lines are the same either way. Flow keeps an agent's logs
+Flow sends only the lines that match --until, --grep and a --severity above ERROR (up to ERROR,
+every line comes and is filtered here); an older Flow that does not filter gets them filtered
+here, so the lines are the same either way. Flow keeps an agent's logs
 for a while (30 days, older hosts 24 hours): when the lines start later than --since asked, stderr
 says "Logs start at <time>: this Flow keeps <N> back". Flow answers in pages (500 lines); every
 page up to --until (else now) is read before anything is printed, oldest line first. A stack
 trace Cloud Run split into an entry per line prints as one: each line of it that starts with a
 space ("    at ..."), at the same time from the same instance, joins the line before it, which
-keeps the higher severity. With --grep or --severity, only the lines that match come, so a stack's
-"at" lines show only when they match too.`;
+keeps the higher severity. With --grep, only the lines that match come, so a stack's "at" lines
+show only when they match too.`;
 
 export const DEPLOY_USAGE = `Usage:
   flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--no-cli] [--json]
@@ -1058,12 +1060,18 @@ export interface LogsQuery {
 /** A --grep with a quote or a brace: JSON as printed, matched here rather than by Flow (logsPage). */
 const JSON_SYNTAX = /["{}]/;
 
-/** One page of log lines, filtered here too (an older Flow ignores until, severity and grep), with the cursor and where the host's logs start (from). */
+/**
+ * One page of log lines, filtered here too by until and grep (an older Flow ignores until,
+ * severity and grep), with the cursor and where the host's logs start (from). Severity is not
+ * filtered here: a line's is known only once its stack is joined (logReader).
+ */
 export async function logsPage(api: Api, query: LogsQuery): Promise<{ lines: LogLine[]; next: string | null; from: string | null }> {
   // since goes with every page, after too: the host checks until against it, and without it against 1h back.
   const params = new URLSearchParams({ environment: query.environment, since: query.since, ...(query.after ? { after: query.after } : {}), limit: String(LOGS_PAGE) });
   if (query.until) params.set("until", query.until);
-  if (query.severity) params.set("severity", query.severity);
+  // The host keeps the lines at severity or above, and a DEFAULT line may be an ERROR here
+  // (readSeverity): up to ERROR, every line is asked for and logReader filters them.
+  if (query.severity && severityRank(query.severity) > severityRank("ERROR")) params.set("severity", query.severity);
   // Flow searches every field's value; text with JSON's own characters ("step":"x", as printed) is
   // in no value, so it is not sent and every line of the window is matched here instead.
   if (query.grep && !JSON_SYNTAX.test(query.grep)) params.set("grep", query.grep);
@@ -1079,7 +1087,6 @@ export async function logsPage(api: Api, query: LogsQuery): Promise<{ lines: Log
   const until = query.until ? Date.parse(query.until) : undefined;
   const grep = query.grep?.toLowerCase();
   const lines = (page.lines ?? []).filter((line) =>
-    (query.severity === undefined || severityRank(line.severity) >= severityRank(query.severity)) &&
     (until === undefined || !(Date.parse(line.time) > until)) &&
     (grep === undefined || line.text.toLowerCase().includes(grep)));
   return { lines, next: page.next ?? null, from: typeof page.from === "string" ? page.from : null };
@@ -1134,6 +1141,44 @@ export function addLogLines(kept: LogLine[], lines: LogLine[]): void {
   }
 }
 
+/**
+ * A line's severity as `flow logs` and read_logs read it: its own, except that a DEFAULT one
+ * (a runtime before 0.16 wrote Flow's own errors as plain console text, which Cloud Run keeps at
+ * DEFAULT) is ERROR when, by fixed rules, it is an uncaught error: its first line is Flow's
+ * ("flow: ... Error:"), starts with an error's name ("Error:", "TypeError:") or holds
+ * "DOMException", or it is a stack (a later line "    at ...").
+ */
+export function readSeverity(line: LogLine): LogLine {
+  if ((line.severity ?? "DEFAULT").toUpperCase() !== "DEFAULT") return line;
+  const first = line.text.split("\n", 1)[0]!;
+  const error = /^flow: .*\bError:/.test(first) || /^([A-Z][\w$]*)?Error:/.test(first) || first.includes("DOMException") || /\n[ \t]+at /.test(line.text);
+  return error ? { ...line, severity: "ERROR" } : line;
+}
+
+/**
+ * Reads pages of log lines into whole ones, oldest first: each split stack joined (addLogLines),
+ * then each line's severity read (readSeverity), then only those at `severity` or above kept.
+ * The last line may still be joined by the next page's first, so `add` hands back the lines
+ * before it and `end` the rest.
+ */
+export function logReader(severity?: string): { add(lines: LogLine[]): LogLine[]; end(): LogLine[] } {
+  let open: LogLine[] = [];
+  const keep = (lines: LogLine[]) => lines.map(readSeverity).filter((line) => severity === undefined || severityRank(line.severity) >= severityRank(severity));
+  return {
+    add(lines) {
+      addLogLines(open, lines);
+      const done = open.slice(0, -1);
+      open = open.slice(-1);
+      return keep(done);
+    },
+    end() {
+      const done = open;
+      open = [];
+      return keep(done);
+    },
+  };
+}
+
 /** "3 days", "24 hours": how far back a host keeps logs, as said in the notice. */
 function span(ms: number): string {
   const hours = Math.round(ms / 3_600_000);
@@ -1170,6 +1215,15 @@ async function logs(ctx: Ctx, environment: string, asked: { since: string; until
   let kept: LogLine[] = [];
   let dropped = 0;
   let lastDropped: string | undefined;
+  const keep = (lines: LogLine[]) => {
+    kept.push(...lines);
+    if (kept.length <= limit) return;
+    const cut = kept.length - limit;
+    dropped += cut;
+    lastDropped = kept[cut - 1]!.time;
+    kept = kept.slice(cut);
+  };
+  const reader = logReader(severity);
   let polls = 0;
   let stoppedAt: string | undefined;
   for (;;) {
@@ -1181,20 +1235,16 @@ async function logs(ctx: Ctx, environment: string, asked: { since: string; until
       if (starts !== undefined && starts - since > 60_000) console.error(`Logs start at ${new Date(starts).toISOString()}: this Flow keeps ${span(now - starts)} back.`);
     }
     const moved = Boolean(page.next) && page.next !== query.after;
-    if (moved || polls === 1) addLogLines(kept, page.lines);
-    if (kept.length > limit) {
-      const cut = kept.length - limit;
-      dropped += cut;
-      lastDropped = kept[cut - 1]!.time;
-      kept = kept.slice(cut);
-    }
+    if (moved || polls === 1) keep(reader.add(page.lines));
     if (moved) query.after = page.next!;
     if (!moved || (ctx.maxPolls !== undefined && polls >= ctx.maxPolls)) break;
     if (polls >= LOGS_PAGES) {
+      keep(reader.end());
       stoppedAt = kept.at(-1)?.time;
       break;
     }
   }
+  keep(reader.end());
   if (dropped) {
     const rest = `${RUN} logs${environment === "production" ? " --env production" : ""} --since ${query.since} --until ${lastDropped}`;
     console.error(`Printed the newest ${kept.length} of ${kept.length + dropped} lines, from ${kept[0]?.time ?? lastDropped} (--limit ${limit}). The ${dropped} older ones: ${rest}`);
@@ -1210,9 +1260,7 @@ async function logs(ctx: Ctx, environment: string, asked: { since: string; until
     const page = await logsPage(ctx.api, query);
     polls++;
     if (page.next && page.next !== query.after) {
-      const lines: LogLine[] = [];
-      addLogLines(lines, page.lines);
-      for (const line of lines) print(line);
+      for (const line of [...reader.add(page.lines), ...reader.end()]) print(line);
       query.after = page.next;
     }
     if (ctx.maxPolls !== undefined && polls >= ctx.maxPolls) return 0;
