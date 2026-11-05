@@ -198,7 +198,7 @@ export const TOOLS: ServeTool[] = [
       since: z.string().default("1h").describe(`How far back, at most 30 days: ${WHEN}`),
       until: z.string().optional().describe(`Up to when: ${WHEN}`),
       severity: z.enum(SEVERITIES).optional().describe("Only lines at this severity or above"),
-      grep: z.string().min(1).max(200).optional().describe("Only lines that hold this text (any case) anywhere in the line: a JSON line's every field, not only its message"),
+      grep: z.string().min(1).max(200).optional().describe("Only lines that hold this text (any case) anywhere in the line as printed: a JSON line's every field, not only its message (text with a quote or brace is matched over every line of the window, slower)"),
       limit: z.number().int().min(1).max(1000).default(200).describe("At most this many lines, the newest"),
     }),
     async run(input, reads) {

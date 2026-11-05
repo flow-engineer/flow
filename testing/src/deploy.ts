@@ -56,7 +56,9 @@ export const LOGS_USAGE = `Usage:
   --until      Up to when: a duration back from now (2h) or a time. Not with --follow.
   --severity   Only lines at this severity or above: DEFAULT, INFO, WARNING or ERROR.
   --grep       Only lines that hold this text (any case) anywhere in the line as printed: a JSON
-               line's every field and value, not only its message.
+               line's every field, not only its message. Flow searches the fields' values; text
+               with a quote or a brace ("step":"question", JSON as printed) is matched here
+               instead, over every line of the window, which reads more pages.
   --limit      The most lines printed (default 10000, at most 100000): the newest are kept, and
                stderr says where the kept lines start and the --since/--until for the older ones.
   --follow     Keep printing new lines until Ctrl-C.
@@ -1053,13 +1055,18 @@ export interface LogsQuery {
   after?: string;
 }
 
+/** A --grep with a quote or a brace: JSON as printed, matched here rather than by Flow (logsPage). */
+const JSON_SYNTAX = /["{}]/;
+
 /** One page of log lines, filtered here too (an older Flow ignores until, severity and grep), with the cursor and where the host's logs start (from). */
 export async function logsPage(api: Api, query: LogsQuery): Promise<{ lines: LogLine[]; next: string | null; from: string | null }> {
   // since goes with every page, after too: the host checks until against it, and without it against 1h back.
   const params = new URLSearchParams({ environment: query.environment, since: query.since, ...(query.after ? { after: query.after } : {}), limit: String(LOGS_PAGE) });
   if (query.until) params.set("until", query.until);
   if (query.severity) params.set("severity", query.severity);
-  if (query.grep) params.set("grep", query.grep);
+  // Flow searches every field's value; text with JSON's own characters ("step":"x", as printed) is
+  // in no value, so it is not sent and every line of the window is matched here instead.
+  if (query.grep && !JSON_SYNTAX.test(query.grep)) params.set("grep", query.grep);
   let page: { lines?: LogLine[]; next?: string | null; from?: string | null };
   try {
     page = await api("GET", `/v1/hosting/logs?${params}`);
@@ -1105,14 +1112,22 @@ export function logsWindow(since: string, until: string | undefined, now: number
 const severityRank = (s: string | undefined) => Math.max(0, SEVERITIES.indexOf((s ?? "DEFAULT").toUpperCase() as (typeof SEVERITIES)[number]));
 
 /**
+ * How far apart in time one write's lines may be: Cloud Run stamps each line of a stack it splits
+ * on its own, microseconds apart (06:45:13.313942Z, then .313968Z ...), so "the same time" is
+ * within this many milliseconds of the line it joins.
+ */
+const SAME_WRITE_MS = 2;
+
+/**
  * Adds `lines` to `kept`, oldest first, each line of a stack Cloud Run kept as an entry of its own
- * (one that starts with whitespace, such as "    at ...", at the same time from the same instance)
- * joined into the line before it, which keeps the higher severity.
+ * (one that starts with whitespace, such as "    at ...", at the same time, within SAME_WRITE_MS,
+ * from the same instance) joined into the line before it, which keeps the higher severity. Any
+ * runtime's lines: it reads only what the host answers.
  */
 export function addLogLines(kept: LogLine[], lines: LogLine[]): void {
   for (const line of lines) {
     const before = kept.at(-1);
-    if (before && /^\s/.test(line.text) && line.time === before.time && line.instance === before.instance) {
+    if (before && /^\s/.test(line.text) && Math.abs(Date.parse(line.time) - Date.parse(before.time)) <= SAME_WRITE_MS && line.instance === before.instance) {
       const severity = severityRank(line.severity) > severityRank(before.severity) ? line.severity : before.severity;
       kept[kept.length - 1] = { ...before, text: `${before.text}\n${line.text}`, ...(severity !== undefined ? { severity } : {}) };
     } else kept.push(line);
