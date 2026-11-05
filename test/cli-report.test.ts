@@ -315,6 +315,7 @@ test("with --json, every exit prints one report on stdout and every other line o
     invalid: [],
     sessionInvalid: null,
     limits: null,
+    toolsWithoutFake: [],
   });
   // A cloud that sends no limits gets no limits line.
   assert.doesNotMatch(result.stderr, /at once/);
@@ -465,8 +466,18 @@ test("after a session whose tool calls a model played, one line says how many an
   try {
     const result = await cliStreams(["test", "--cloud", local.url, "--json"], dir);
     assert.equal(result.code, 0, result.out);
-    assert.match(result.stderr, /^3 tool calls were played by a model \(place_order 2, order_status 1; 1 saved from an earlier run, free\)\. Write a fake \(tests\/tools\/<tool>\.fake\.ts\) to make them free and repeatable\. place_order has a fake: add a given: block to its scenarios to use it\.$/m);
-    assert.deepEqual(JSON.parse(result.stdout).runs.map((r: { toolsPlayedBy: unknown }) => r.toolsPlayedBy), [bee, hello]);
+    // A suggestion, once, for the tool with no fake, with the command and the switch that hides it.
+    assert.match(result.stderr, /^3 tool calls were played by a model \(place_order 2, order_status 1; 1 saved from an earlier run, free\)\. If you like, a fake makes order_status free and repeatable: npx @flow-engineer\/flow test fake order_status writes a starter\. Optional: tests pass without one \(FLOW_FRAMEWORK_FAKE_HINT=0 hides this\)\. place_order has a fake: add a given: block to its scenarios to use it\.$/m);
+    assert.equal(result.stderr.match(/test fake/g)?.length, 1);
+    const report = JSON.parse(result.stdout);
+    assert.deepEqual(report.runs.map((r: { toolsPlayedBy: unknown }) => r.toolsPlayedBy), [bee, hello]);
+    assert.deepEqual(report.toolsWithoutFake, ["order_status"]);
+    assert.doesNotMatch(result.stdout, /test fake/, "the suggestion is never in the document, only its field");
+    const quiet = await cliStreams(["test", "--cloud", local.url, "--json"], dir, { FLOW_FRAMEWORK_FAKE_HINT: "0" });
+    assert.equal(quiet.code, 0, quiet.out);
+    assert.match(quiet.stderr, /^3 tool calls were played by a model \(place_order 2, order_status 1; 1 saved from an earlier run, free\)\. place_order has a fake/m);
+    assert.doesNotMatch(quiet.stderr, /test fake/);
+    assert.deepEqual(JSON.parse(quiet.stdout).toolsWithoutFake, ["order_status"]);
   } finally { local.close(); }
   // Every call played by rule, fake or recording: no line.
   const ruled = await cloud(false, session([runOf({ runId: "trn_1", passed: true, toolsPlayedBy: { ...hello, model: 0, byModel: {} } })]), "s1", { fakes: true });

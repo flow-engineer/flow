@@ -2,6 +2,7 @@
 // outcome and an exit status, and the pieces `flow test` and `flow show` share.
 
 import { existsSync } from "node:fs";
+import { RUN } from "../../src/names.ts";
 import { CloudEnded, isTransportFailure, PostError, SessionStopped, type SendPathProblem } from "./client.ts";
 import type { RunOutcome, RunSummary, ScenarioSummary, SessionLimits, ToolsPlayedBy } from "./protocol.ts";
 
@@ -99,6 +100,8 @@ export interface JsonReport {
   sessionInvalid: SessionInvalid | null;
   /** The cloud's limits for the workspace (runs and sessions at once, the daily test budget); null when it sent none. */
   limits: SessionLimits | null;
+  /** The tools a model played in this session that have no fake (tests/tools/<tool>.fake.ts) on this machine, the most played first. */
+  toolsWithoutFake: string[];
 }
 
 /** Error codes that mean a model or the workspace's test budget was out of credit. */
@@ -140,9 +143,22 @@ export function scenarioRates(runs: Array<{ scenario: string; path?: string; cha
   return [...out.values()].map(({ mixed, ...s }) => (mixed || (s.passedRuns > 0 && s.passedRuns < s.runs) ? { ...s, label: "flaky" as const } : s));
 }
 
+/** The switch that leaves the fake suggestion out of the line after a session (in the environment or .env). */
+export const FAKE_HINT_OFF = "FLOW_FRAMEWORK_FAKE_HINT=0";
+
+/** The tools a model played in these runs that have no fake on this machine (`fakes`), the most played first. */
+export function toolsWithoutFake(runs: Array<Pick<RunSummary, "toolsPlayedBy">>, fakes: Iterable<string>): string[] {
+  const byTool = new Map<string, number>();
+  for (const r of runs) for (const [tool, n] of Object.entries(r.toolsPlayedBy?.byModel ?? {})) byTool.set(tool, (byTool.get(tool) ?? 0) + n);
+  const have = new Set(fakes);
+  return [...byTool].filter(([tool, n]) => n > 0 && !have.has(tool)).sort(([a, m], [b, n]) => n - m || a.localeCompare(b)).map(([tool]) => tool);
+}
+
 /** The line after a session whose tool calls a model played (from the runs' toolsPlayedBy, every play counted, as it cost),
- * naming each tool that has a fake on this machine (`fakes`) yet was played by a model; null when a model played none. */
-export function modelPlayedLine(runs: Array<Pick<RunSummary, "toolsPlayedBy" | "replayed">>, fakes: Iterable<string>): string | null {
+ * naming each tool that has a fake on this machine (`fakes`) yet was played by a model; null when a model played none.
+ * Unless `suggest` is false (FLOW_FRAMEWORK_FAKE_HINT=0), it also says, once, that a fake would make the tools that have
+ * none free and repeatable, with the command that writes one: a suggestion, never a warning, and tests pass without. */
+export function modelPlayedLine(runs: Array<Pick<RunSummary, "toolsPlayedBy" | "replayed">>, fakes: Iterable<string>, suggest = true): string | null {
   const byTool = new Map<string, number>();
   let total = 0;
   let saved = 0;
@@ -156,8 +172,12 @@ export function modelPlayedLine(runs: Array<Pick<RunSummary, "toolsPlayedBy" | "
   const tools = [...byTool].sort(([a, m], [b, n]) => n - m || a.localeCompare(b));
   const free = saved ? `; ${saved} saved from ${saved === 1 ? "an earlier run" : "earlier runs"}, free` : "";
   const have = new Set(fakes);
+  const without = toolsWithoutFake(runs, have);
+  const offer = suggest && without.length
+    ? ` If you like, a fake makes ${without.length === 1 ? without[0] : `${without.slice(0, -1).join(", ")} and ${without.at(-1)}`} free and repeatable: ${RUN} test fake ${without[0]} writes a starter${without.length > 1 ? " (one per tool)" : ""}. Optional: tests pass without one (${FAKE_HINT_OFF} hides this).`
+    : "";
   const hints = tools.filter(([tool]) => have.has(tool)).map(([tool]) => ` ${tool} has a fake: add a given: block to its scenarios to use it.`);
-  return `${total} tool ${total === 1 ? "call was" : "calls were"} played by a model (${tools.map(([tool, n]) => `${tool} ${n}`).join(", ")}${free}). Write a fake (tests/tools/<tool>.fake.ts) to make them free and repeatable.${hints.join("")}`;
+  return `${total} tool ${total === 1 ? "call was" : "calls were"} played by a model (${tools.map(([tool, n]) => `${tool} ${n}`).join(", ")}${free}).${offer}${hints.join("")}`;
 }
 
 /** A run's verdict: errored when the cloud names an error for it or ended it run_failed, since the cloud
