@@ -71,6 +71,7 @@ import {
   type TranscriptEntry,
 } from "../../src/index.ts";
 import type { Agent } from "../../src/agent.ts";
+import { log, logFields } from "../../src/events.ts";
 import { signInWords, type CliConfig } from "../../cli/src/commands.ts";
 import type { CliIO } from "../../cli/src/run.ts";
 import { requireToken, sameSecret, serveNode, wrongTries } from "../../src/http.ts";
@@ -691,7 +692,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
   const guarded = (work: (req: IncomingMessage, res: ServerResponse) => Promise<void>): Handler => (req, res) =>
     work(req, res).catch((error) => {
-      console.warn("flow simulators:", error);
+      log("WARNING", "flow simulators:", error);
       if (!res.headersSent) res.writeHead(500).end();
     });
 
@@ -869,7 +870,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     const known = people.get(event.conversationId);
     const person = known?.values().next().value;
     // A failed turn (a wrong or expired model key, say) on the terminal too, also for no known person.
-    if (event.type === "model.error") console.error(`flow: model error${person ? ` (${person.name})` : ""}: ${String(event.error)}`);
+    if (event.type === "model.error") log("ERROR", `flow: model error${person ? ` (${person.name})` : ""}: ${String(event.error)}`);
     if (!known || !playing) return;
     for (const person of known.values()) for (const c of playing.channels()) show(threadKey(c.name, person), event);
   };
@@ -1115,7 +1116,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       const text = typeof body?.text === "string" ? body.text.trim().slice(0, 4_000) : "";
       if (!text && !filesOf(body).length) return json(res, 400, { error: "text or a file is required" });
       const { incoming, line } = incomingOf(k, body, text, Boolean(p.replies));
-      console.info(JSON.stringify({ chinwag: "playground.message", person: person.name, channel: channel.name, at: new Date(line.at).toISOString() }));
+      logFields("INFO", { chinwag: "playground.message", person: person.name, channel: channel.name, at: new Date(line.at).toISOString() });
       emitLine(k, line);
       carrier(p, k, text);
       const taken = person.key || person.visitor ? await agent.simulateVisitor!({ key: person.key, address: visitorAddress, channel: channel.name, message: incoming })

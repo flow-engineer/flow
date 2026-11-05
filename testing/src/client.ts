@@ -11,8 +11,8 @@ import { basename, relative, resolve } from "node:path";
 import { toSpec, type Agent, type Incoming, type EventSink, type Outbound, type SendReceipt, type FlowEvent, type Tool } from "../../src/index.ts";
 import { PROFILE_TOOL, profileTool } from "../../src/conversation.ts";
 import { STAND_IN } from "../../src/tools.ts";
-import { outboundReceipt, type Command, type Opened, type WireIncoming, type OpenSession, type Receipt, type RunKey, type RunSummary, type SessionLimits, type SessionSummary, type ToolCallRequest, type ToolCallResult } from "./protocol.ts";
-import { mimeOf, parseScenario, parseToolFile, suiteHash, type SuiteFile } from "./suite.ts";
+import { outboundReceipt, type Command, type Faked, type FakeRequest, type Opened, type WireIncoming, type OpenSession, type Receipt, type RunKey, type RunSummary, type SessionLimits, type SessionSummary, type ToolCallRequest, type ToolCallResult } from "./protocol.ts";
+import { loadFakes, mimeOf, parseScenario, parseToolFile, suiteHash, type Fake, type SuiteFile, type ToolFile } from "./suite.ts";
 import { businessRuns, type BusinessAgent, type BusinessBuild } from "./business.ts";
 
 export interface ConnectOptions {
@@ -28,7 +28,8 @@ export interface ConnectOptions {
    * A business run (protocol.ts) builds one more per run, with its own channels and clock (`BusinessBuild`); that needs a Flow Framework Agent. */
   build: (options: { tools: Tool[]; events: EventSink[] } & Partial<BusinessBuild>) => AgentUnderTest;
   files: SuiteFile[];
-  /** The tests folder: files a scenario attaches are read from here, and never leave this machine. */
+  /** The tests folder: files a scenario attaches are read from here, and the fakes (tools/*.fake.ts) run from here
+   * when the cloud asks; neither leaves this machine. */
   testsDir?: string;
   runs?: number;
   /** Ask the cloud to replay no stored person, tool or judge answers (`flow test --fresh`). */
@@ -138,8 +139,12 @@ export class TimeoutError extends Error {
  * or one of {@link CLOUD_TOOL_ERRORS} when the cloud could not play the call. */
 class ToolFailed extends Error {}
 
-/** A tool call's codes for the cloud's own failure, not the tool's: its simulator failed, or the run had already ended. */
-const CLOUD_TOOL_ERRORS = new Set(["simulator_failed", "run_finished"]);
+/** A tool call's codes for the cloud's own failure, not the tool's: its simulator failed, the run had already ended,
+ * or the developer's fake failed (the test's code, not the agent). */
+const CLOUD_TOOL_ERRORS = new Set(["simulator_failed", "run_finished", "fake_failed"]);
+
+/** Said once a session opens when the client has fakes and the cloud does not play them. */
+const FAKES_UNUSED = "This cloud does not play fakes: a model plays every tool (tests/tools/*.fake.ts unused).";
 
 /** The stream stopped carrying bytes: the idle watch fired, or the cloud closed it before finished. */
 export class StreamLost extends Error {
@@ -286,8 +291,10 @@ function isLoopback(cloud: string): boolean {
 /** Plays the suite in the cloud. If the cloud loses the session (session_gone, on a cloud whose open said
  * reopen), one new session plays only the runs that have no result yet, and the two reports are merged. */
 export async function runInCloud(options: ConnectOptions): Promise<CloudSummary> {
+  // A fake that does not load stops the session before it opens, like a scenario that does not parse.
+  const fakes = options.testsDir ? await loadFakes(options.testsDir) : new Map<string, Fake>();
   try {
-    return await playSession(options);
+    return await playSession(options, fakes);
   } catch (error) {
     if (!(error instanceof SessionGone)) throw error;
     const log = options.log ?? ((line: string) => console.log(line));
@@ -299,7 +306,7 @@ export async function runInCloud(options: ConnectOptions): Promise<CloudSummary>
     try {
       // With nothing finished, the whole suite plays again without `only`: the cloud takes `only` just
       // for files it already stored, and the first session may have been lost before its uploads.
-      second = await playSession(options, error.runs.length ? unfinished : undefined);
+      second = await playSession(options, fakes, error.runs.length ? unfinished : undefined);
     } catch (again) {
       // Never a third session: a second loss stops with what both sessions finished.
       if (again instanceof SessionStopped) throw new SessionStopped(again.message, [...error.runs, ...again.runs], again.dashboard);
@@ -325,8 +332,8 @@ function unfinishedRuns(files: SuiteFile[], runs: number, done: RunSummary[]): R
   return out;
 }
 
-/** One session, start to finish. `only`: the runs a re-open plays. */
-async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<CloudSummary> {
+/** One session, start to finish. `fakes`: the tools the developer's code plays when the cloud asks; `only`: the runs a re-open plays. */
+async function playSession(options: ConnectOptions, fakes: Map<string, Fake>, only?: RunKey[]): Promise<CloudSummary> {
   const log = options.log ?? ((line: string) => console.log(line));
   const postTimeoutMs = options.postTimeoutMs ?? POST_TIMEOUT_MS;
   const streamIdleMs = options.streamIdleMs ?? STREAM_IDLE_MS;
@@ -390,9 +397,17 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     run: (input: unknown, context: { conversationId: string }) => {
       const call = (async () => {
         const request: ToolCallRequest = { conversationId: context.conversationId, tool: t.name, input };
-        const result = await tunnelPost<ToolCallResult>(`${session}/tool-calls`, request, toolWait.get(t.name) ?? postTimeoutMs, {
+        const ask = (body: ToolCallRequest) => tunnelPost<ToolCallResult>(`${session}/tool-calls`, body, toolWait.get(t.name) ?? postTimeoutMs, {
           mode: idempotent ? "idempotent" : "never", key: `tool:${randomUUID()}`, budgetMs: retryBudgetMs, what: "tool call",
         });
+        let result = await ask(request);
+        // The cloud asks for the developer's fake: it runs here, and its answer goes back for the cloud to record and time.
+        if ("play" in result) {
+          const faked = await runFake(fakes.get(t.name), t.name, result, input);
+          if ("failed" in faked) log(`${context.conversationId}: tests/tools/${t.name}.fake.ts failed: ${faked.failed}`);
+          result = await ask({ ...request, ticket: result.ticket, faked });
+          if ("play" in result) throw new Error("the cloud asked for the fake again after its answer");
+        }
         if (!result.ok) throw new ToolFailed(result.error);
         return result.output;
       })();
@@ -481,6 +496,8 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   // A restart starts the run's next agent and resumes it on the run's store.
   const canRestart = canBusiness && typeof (agent as Partial<BusinessAgent>).resume === "function";
 
+  // Only the agent's own tools played through the tunnel can be faked (with --agent-url its tools run for real).
+  const faked = [...fakes.keys()].filter((name) => toolWait.has(name));
   const open: OpenSession = {
     agent: { name: options.name, title: options.title, tools: [...options.tools, ...(agent.hasProfile?.() ? standIn : [])].map(toSpec), channels: agent.channels() },
     files: options.files.map(({ path, hash }) => ({ path, hash })),
@@ -492,6 +509,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     ...(canBusiness ? { business: true } : {}),
     ...(canRestart ? { restart: true } : {}),
     ...(typeof agent.seedHistory === "function" ? { history: true } : {}),
+    ...(faked.length ? { fakes: faked } : {}),
     flaky: true,
     ...(options.fresh ? { fresh: true } : {}),
     ...(only ? { only } : {}),
@@ -512,7 +530,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       what: "file upload",
     });
   }
-  log(`Session ${opened.sessionId}: suite ${suiteHash(options.files).slice(0, 12)}, ${options.files.length} files (${uploads.length} new to the cloud, the rest it already had).`);
+  log(`Session ${opened.sessionId}: suite ${suiteHash(options.files).slice(0, 12)}, ${options.files.length} files (${uploads.length === options.files.length ? "all new to the cloud" : uploads.length ? `${uploads.length} new to the cloud, the rest it already had` : "the cloud already had them all"}).`);
   const limits = sessionLimits(opened.limits);
   if (limits) {
     const line = limitsLine(limits);
@@ -521,6 +539,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   }
   dashboard = opened.dashboard;
   options.onDashboard?.(dashboard, opened.sessionId, typeof opened.agent === "string" && opened.agent ? opened.agent : undefined);
+  if (faked.length && opened.fakes !== true) log(FAKES_UNUSED);
   if (opened.replay === true) log("The cloud replays stored person, tool and judge answers where a scenario has not changed (--fresh plays them all anew).");
   log(`Watch it: ${opened.dashboard}`);
   session = `${tunnel}/api/sessions/${opened.sessionId}`;
@@ -1066,6 +1085,36 @@ async function post<T = unknown>(url: string, body: unknown, headers: Record<str
     throw new PostError(url, status, text, retryAfterOf(responseHeaders));
   }
   return (text ? JSON.parse(text) : {}) as T;
+}
+
+/** The developer's fake run on a copy of the run's state, as the cloud asked: what it answered, with the state as it
+ * left it, or why it failed (it threw, answered neither output nor error, or answered something that is not plain JSON). */
+async function runFake(fake: Fake | undefined, tool: string, ask: FakeRequest, input: unknown): Promise<Faked> {
+  if (!fake) return { failed: `there is no tests/tools/${tool}.fake.ts on this machine` };
+  const state = structuredClone(ask.state ?? {});
+  let answer: unknown;
+  try {
+    answer = await fake({ input: structuredClone(input), world: ask.world ?? {}, state, now: ask.now, call: ask.call, responses: (ask.responses ?? []) as ToolFile["responses"] });
+  } catch (error) {
+    return { failed: `it threw: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  const a = (answer && typeof answer === "object" ? answer : {}) as { output?: unknown; error?: unknown; changes?: unknown };
+  const changes = a.changes === undefined || (Array.isArray(a.changes) && a.changes.every((c) => typeof c === "string")) ? (a.changes as string[] | undefined) : null;
+  if (changes === null) return { failed: "its changes are not a list of strings" };
+  const failed = typeof a.error === "string" ? undefined : a.output === undefined ? "it answered neither { output } nor { error: <string> }" : !plainJson(a.output) ? "its output is not plain JSON" : undefined;
+  if (failed) return { failed };
+  if (!plainJson(state)) return { failed: "it left state that is not plain JSON" };
+  return { ...(typeof a.error === "string" ? { error: a.error } : { output: a.output }), ...(changes ? { changes } : {}), state };
+}
+
+/** null, booleans, strings, finite numbers, and arrays and plain objects of them: what JSON carries unchanged. */
+function plainJson(value: unknown): boolean {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(plainJson);
+  if (typeof value !== "object") return false;
+  const proto = Object.getPrototypeOf(value);
+  return (proto === Object.prototype || proto === null) && Object.values(value).every(plainJson);
 }
 
 /** The person's message with the files it names read from the tests folder, and only from there. */

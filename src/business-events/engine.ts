@@ -25,6 +25,7 @@
 // app: `catalog` names every type it accepts, `rules` and `onEvent` decide the rest.
 
 import type { NudgeInput, NudgeResult } from "../agent.ts";
+import { log } from "../events.ts";
 import type { EventStateStore } from "../store.ts";
 import type { Template } from "../types.ts";
 import { createPhrasing, type Phrasing } from "./phrasing.ts";
@@ -339,7 +340,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
   let sender: EventSender | null = null;
   let chain: Promise<unknown> = Promise.resolve();
   const later = (work: () => Promise<unknown>) => {
-    chain = chain.then(work).catch((error) => console.error(`${logName}:`, error));
+    chain = chain.then(work).catch((error) => log("ERROR", `${logName}:`, error));
     return chain;
   };
 
@@ -361,7 +362,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
       saved = await kept.loadEventState();
     } catch (error) {
       // Saving over a state that could not be read would lose it: this run stays in memory.
-      console.error(`${logName}: the saved state could not be loaded; kept in memory only:`, error);
+      log("ERROR", `${logName}: the saved state could not be loaded; kept in memory only:`, error);
       return;
     }
     for (const id of saved.seen) {
@@ -747,7 +748,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
       // Not recorded: forgotten, so the business's retry is taken (with a database that works again).
       state.seen.delete((body as BusinessEvent).id);
       if (key) state.seen.delete(`key:${key}`);
-      console.error(`${logName}: the event could not be recorded:`, error);
+      log("ERROR", `${logName}: the event could not be recorded:`, error);
       return json(503, { error: "the event could not be recorded; try again" });
     }
     return json(202, { status: fresh ? "accepted" : "duplicate" });
@@ -756,7 +757,7 @@ export function flowEvents<W extends Watch = Watch>(options: FlowEventsOptions<W
   /** Records an event (false: a duplicate id, already taken) and processes it in order, in the background. */
   function accept(e: BusinessEvent): boolean {
     const { fresh, written } = take(e);
-    written.catch((error) => console.error(`${logName}: the event could not be recorded; processed in memory only:`, error));
+    written.catch((error) => log("ERROR", `${logName}: the event could not be recorded; processed in memory only:`, error));
     return fresh;
   }
 

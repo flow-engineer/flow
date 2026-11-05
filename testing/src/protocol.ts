@@ -7,8 +7,17 @@
 //        Last-Event-ID: N                                    a resume: the commands after N
 //   POST /api/sessions/:id/outbound    { conversationId, outbound } → { ok, messageId? } | 409 { error }
 //        messageId: the simulator's id for the message (a1, a2, ...), which an edit or unsend outbound names
-//   POST /api/sessions/:id/tool-calls  ToolCallRequest → ToolCallResult   held open while the tool is simulated
+//   POST /api/sessions/:id/tool-calls  ToolCallRequest → ToolCallResult   held open while the tool is played
 //   POST /api/sessions/:id/events      { seq, events: FlowEvent[] }
+//
+// A tool call in a scenario with `given:` is played by the first rule that fits: its mode (down, flaky),
+// the developer's fake, a recorded response whose input equals the call's, else a model, whose answer the
+// cloud saves so a rerun replays it. Fakes (tests/tools/<tool>.fake.ts) are the developer's code and run
+// on this machine only: the open names the tools that have one (`fakes`), and a cloud that plays them
+// (Opened.fakes) answers such a call at once with `play: "fake"` and a ticket. The client runs the fake on
+// a copy of the run's state and POSTs a second time to the same route, with the ticket and what the fake
+// answered (`faked`), under its own Idempotency-Key; that answer is the call's ToolCallResult, given once
+// the rest of the call's latency has passed. An older cloud ignores `fakes` and a model plays every call.
 //
 // Every POST after the open sends Idempotency-Key. An older cloud ignores it. When Opened
 // says idempotency, a repeat of a key is the stored answer and the client may send it again.
@@ -104,6 +113,8 @@ export interface OpenSession {
   fresh?: boolean;
   /** The client seeds a run's earlier conversation (`history` on a run's first message or open). */
   history?: boolean;
+  /** The tools this client has a fake for (tests/tools/<tool>.fake.ts). Sent only when there is one. */
+  fakes?: string[];
   /** Play only these runs, numbered as given: a re-open after session_gone. Sent only to a cloud whose Opened said reopen,
    * and only when some run finished: the cloud checks it against the suite's files it already stores. */
   only?: RunKey[];
@@ -149,6 +160,8 @@ export interface Opened {
   replay?: boolean;
   /** This cloud sends a scenario's `history`; the client sent `history`. Absent on an older cloud. */
   history?: boolean;
+  /** This cloud plays `given:` by rule and asks for the fakes the client named (`play: "fake"`). Absent on an older cloud. */
+  fakes?: boolean;
   /** What this workspace may do, printed when the session opens. Absent on an older cloud. */
   limits?: SessionLimits;
 }
@@ -269,9 +282,42 @@ export interface ToolCallRequest {
   conversationId: string;
   tool: string;
   input: unknown;
+  /** The second POST of a call the cloud asked a fake for: its ticket, and what the fake answered. */
+  ticket?: string;
+  faked?: Faked;
 }
 
-export type ToolCallResult = { ok: true; output: unknown } | { ok: false; error: string };
+/** What the fake answered, with the run's state as it left it; or why it failed (it threw, or answered neither output nor error, or not plain JSON). */
+export type Faked = { output?: unknown; error?: string; changes?: string[]; state: Record<string, unknown> } | { failed: string };
+
+/** The cloud asks the client to run its fake for this call (sent only for a tool named in OpenSession.fakes, on a cloud whose Opened said fakes). */
+export interface FakeRequest {
+  play: "fake";
+  ticket: string;
+  /** The scenario's given: without tools and seed, a tool file's name there replaced by that tool's usual output. */
+  world: Record<string, unknown>;
+  /** The run's fake state so far. */
+  state: Record<string, unknown>;
+  /** The run's clock, ISO 8601 (UTC). */
+  now: string;
+  /** This tool's calls in the run, this one included. */
+  call: number;
+  /** The tool file's responses, placeholders filled. */
+  responses: unknown[];
+}
+
+/** `fake_failed`: the fake failed, an infrastructure error for the run (the test's code, not the agent). */
+export type ToolCallResult = { ok: true; output: unknown } | { ok: false; error: string } | FakeRequest;
+
+/** How a run's tool calls were played: by a mode (rule), the developer's fake, a recorded response, or a model. */
+export interface ToolsPlayedBy {
+  rule: number;
+  fake: number;
+  recorded: number;
+  model: number;
+  /** The model-played calls per tool (RunSummary.replayed.tools counts those whose answer came from the store). */
+  byModel: Record<string, number>;
+}
 
 export interface RunSummary {
   runId: string;
@@ -281,7 +327,8 @@ export interface RunSummary {
   /** Every check passed. */
   passed: boolean;
   checks: Check[];
-  /** Why the person stopped: goal met, gave up, max turns, or the agent went quiet. */
+  /** Why the person stopped: goal met, gave up, max turns, the agent went quiet, or walked_away (a person with
+   * `behaviours: [walks_away]` left with its goal unmet: a failed run, with a failed check that says why). */
   ended: string;
   turns: number;
   messagesIn: number;
@@ -298,7 +345,8 @@ export interface RunSummary {
   /** The first try never reached the agent, so this run is the second try. */
   retried?: boolean;
   /** The cloud's code when it could not play or judge the run (judge_failed, spend_cap, simulator_failed, ...).
-   * The run then says nothing about the agent, whatever `passed` and `ended` say. */
+   * The run then says nothing about the agent, whatever `passed` and `ended` say. simulator_failed is also a
+   * run whose simulated person drifted from its goal or persona twice (the cloud plays a drifted run once more). */
   error?: string;
   /** What the run came to, from the cloud; an older cloud sends none and the client works it out (report.ts runOutcome). */
   outcome?: RunOutcome;
@@ -316,6 +364,8 @@ export interface RunSummary {
   label?: "flaky" | "failing";
   /** How many simulator answers this run replayed from stored ones (person, tool simulator, judge). */
   replayed?: { person: number; tools: number; judge: number };
+  /** How this run's tool calls were played, from a cloud that plays `given:` by rule (absent on an older cloud). */
+  toolsPlayedBy?: ToolsPlayedBy;
 }
 
 export interface SessionSummary {

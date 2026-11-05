@@ -3,8 +3,8 @@
 // alone does it all: it signs in and runs setup first when this folder has not been set up.
 // The calls to flow.engineer are in testing/src/flow-login.ts. Every command takes --json: one JSON
 // object per line on stdout (login prints a "pending" line first, so a coding agent can show the
-// link while it waits), every human line on stderr. Errors are {"error":{code,message,next}}, the
-// next step the server's when it gave one. Every next step names the package (npx @flow-engineer/flow).
+// link while it waits), every human line on stderr. Errors, a wrong flag included, are {"ok":false,"error":{code,message,next},"next"},
+// the next step the server's when it gave one. Every next step names the package (npx @flow-engineer/flow).
 // Nothing reads stdin or needs a terminal, so a coding agent can run every command. login opens the
 // browser itself and waits at most --timeout seconds; a code not approved by then stays in
 // ~/.config/flow-framework/pending.json for `login --wait`, which polls the same code again.
@@ -21,9 +21,12 @@ import { parseArgs } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   currentToken, deleteCredentials, deletePending, LoginRefused, loginUrl, pollToken, readPending, REQUEST_TIMEOUT_MS, revoke, saveCredentials, savePending,
-  modelCredit, SETUP_ENV, setup, startDevice, TimedOut, tryLink, warningsOf, whoami, type Account, type ModelCredit, type PendingLogin, type SetupAnswer,
+  grantKey, grantStatus, listKeys, modelCredit, revokeKey, SETUP_ENV, setup, setupLive, startDevice, TimedOut, tryLink, warningsOf, whoami,
+  type Account, type ChecklistLine, type GrantAnswer, type GrantedKey, type ListedKey, type LiveKey, type LiveSetupAnswer, type ModelCredit, type PendingLogin, type SetupAnswer,
 } from "./flow-login.ts";
+import { ADVISORY, advisoryLines, checklistLines, liveKid, textLine } from "./cloud-call.ts";
 import { packageRoot, setDisplayName } from "./new.ts";
+import { deployedFrom } from "./deploy.ts";
 import { flowModelURL, hasModelKey, MODEL_KEY_NAMES, NO_MODEL_KEY } from "../../src/model.ts";
 import { RUN } from "../../src/names.ts";
 import { runningAgent } from "../../src/local.ts";
@@ -45,6 +48,27 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
                             more; --now ends it at once). --workspace (here and on link) puts the
                             agent in that observe workspace of yours, kept in .env as
                             FLOW_FRAMEWORK_WORKSPACE; a new one makes the cloud and traces keys again
+  flow setup --live [--content] [--workspace <name|acc_id>] [--json]
+                            Write the agent's live Flow key, FLOW_LIVE_KEY, into ./.env with safe
+                            defaults: it reads production conversations, traces and Insights
+                            (which flow conversations and flow insights then use), runs tests,
+                            writes traces and uses the model; it messages no customer and deploys
+                            nothing live (flow keys grant send|deploy). The workspace's owner
+                            only; a health workspace gets none. Text is de-identified unless
+                            --content. It replaces the agent's earlier live key at once, lasts 30
+                            days and ends after 7 days unused. It prints what the key can do
+  flow keys [list] [--all | --agent <name>] [--json]
+                            This folder's agent's live keys (--all: every agent's on your account),
+                            never their values: agent, mode, last 4, when it expires
+  flow keys show <kid> [--json]
+                            One key's checklist (✓/✗ what it can do) and its grants
+  flow keys grant <read|tests|traces|model|content|send|deploy> [--key <kid>] [--wait] [--json]
+                            Let a live key do one more thing (the FLOW_LIVE_KEY in .env unless
+                            --key). ${ADVISORY.default}
+                            ${ADVISORY.ask_user}
+                            ${ADVISORY.critical}
+  flow keys revoke <kid> [--json]
+                            End one of them at once
   flow link [--channel telegram|whatsapp|imessage] [--workspace <name|acc_id>] [--display-name <name>] [--timeout <s>] [--no-browser] [--json]
                             Print the link that opens a chat with this agent from a phone; signs in
                             and runs setup first when this folder is not set up yet. --display-name
@@ -53,7 +77,8 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
   flow status [--json]      What this folder has and lacks: FLOW_KEY and the model key (never their
                             values) with the trial credit left, the workspace, the
                             sign-in, each channel's sender in .env, and, signed in, which channels
-                            are open now and their free-trial counts. setup, link and status name
+                            are open now and their free-trial counts (the account's, across all
+                            its agents; --json's account_trial). setup, link and status name
                             the paid plans (https://flow.engineer/dashboard/plans) once a channel's
                             trial has 80% of its people or holds new ones`;
 
@@ -74,6 +99,21 @@ const CHANNELS = ["telegram", "whatsapp", "imessage"];
 /** After link and status: the step that keeps the agent answering once this machine sleeps. */
 const DEPLOY_HINT = `To keep it answering while this machine sleeps: ${RUN} deploy (Flow's hosting, staging first).`;
 export const EXIT = { ok: 0, usage: 1, network: 2, refused: 3, pending: 4 } as const;
+
+/**
+ * --json's failure document, as every command's: { ok: false, error: { code, message, next, ...extra },
+ * next }; error.next is kept as it was before 0.16.0.
+ */
+export function errorReport(code: string, message: string, next: string | null | undefined, extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { ok: false, error: { code, message, next: next ?? null, ...extra }, next: next ?? null };
+}
+
+/** A wrong flag or value: the line and the usage on stderr, and with --json among the arguments the failure document on stdout; exit 1. */
+export function usageExit(args: string[], message: string, usage: string): number {
+  if (args.includes("--json")) writeAll(1, `${JSON.stringify(errorReport("usage", message, null))}\n`);
+  writeAll(2, `${message}\n\n${usage}\n`);
+  return EXIT.usage;
+}
 
 /** A command's end: what to print, its next step and the exit status (projects.ts too). */
 export class Stop extends Error {
@@ -101,6 +141,8 @@ const isCommand = (next: string) => /^(?:npx|npm|flow|gh) |^https?:\/\//.test(ne
 /** Runs one account command; resolves to the exit status. */
 export async function accountCli(command: string, args: string[]): Promise<number> {
   let values: Record<string, boolean | string | undefined>;
+  // With --live, --rotate takes no value: it makes the live key again.
+  if (command === "setup" && args.includes("--live")) args = args.map((a, i) => (a === "--rotate" && (args[i + 1] ?? "-").startsWith("-") ? "--rotate=live" : a));
   try {
     ({ values } = parseArgs({
       args,
@@ -116,14 +158,13 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
               force: { type: "boolean", default: false },
             }
           : {}),
-        ...(command === "setup" ? { replace: { type: "boolean", default: false }, rotate: { type: "string" }, now: { type: "boolean", default: false }, ci: { type: "boolean", default: false } } : {}),
+        ...(command === "setup" ? { replace: { type: "boolean", default: false }, rotate: { type: "string" }, now: { type: "boolean", default: false }, ci: { type: "boolean", default: false }, live: { type: "boolean", default: false }, content: { type: "boolean", default: false } } : {}),
         ...(command === "link" ? { channel: { type: "string", default: "telegram" } } : {}),
         ...(command === "link" || command === "setup" ? { "display-name": { type: "string" }, workspace: { type: "string" } } : {}),
       },
     }));
   } catch (error) {
-    console.error(`flow ${command}: ${(error as Error).message.split(". ")[0]}\n\n${USAGE}`);
-    return EXIT.usage;
+    return usageExit(args, `flow ${command}: ${(error as Error).message.split(". ")[0]}`, USAGE);
   }
   if (values.help) {
     console.log(USAGE);
@@ -131,28 +172,31 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
   }
   const timeoutSeconds = Number(values.timeout);
   if ((command === "login" || command === "link") && (values.wait && values["no-wait"] || !(values.timeout !== "" && timeoutSeconds >= 0))) {
-    console.error(`flow ${command}: ${values.wait && values["no-wait"] ? "--wait and --no-wait cannot go together" : "--timeout is a number of seconds, 0 or more"}.\n\n${USAGE}`);
-    return EXIT.usage;
+    return usageExit(args, `flow ${command}: ${values.wait && values["no-wait"] ? "--wait and --no-wait cannot go together" : "--timeout is a number of seconds, 0 or more"}.`, USAGE);
   }
   const channel = String(values.channel);
   if (command === "link" && !CHANNELS.includes(channel)) {
-    console.error(`flow link: --channel takes ${CHANNELS.join(", ")}.\n\n${USAGE}`);
-    return EXIT.usage;
+    return usageExit(args, `flow link: --channel takes ${CHANNELS.join(", ")}.`, USAGE);
   }
   const rotate = values.rotate === undefined ? [] : String(values.rotate).split(",").map((k) => k.trim());
-  if (rotate.some((k) => !(k in ROTATE)) || (rotate.includes("all") && rotate.length > 1)) {
-    console.error(`flow setup: --rotate takes ${Object.keys(ROTATE).filter((k) => k !== "all").join(", ")} (comma-separated), or all.\n\n${USAGE}`);
-    return EXIT.usage;
+  const live = values.live === true;
+  if (values.content === true && !live) {
+    return usageExit(args, `flow setup: --content goes with --live: it makes the live key with message text as people wrote it.`, USAGE);
+  }
+  const notLive = ["replace", "now", "ci", "display-name"].filter((n) => values[n] !== undefined && values[n] !== false);
+  if (live && (notLive.length || rotate.some((k) => k !== "live"))) {
+    return usageExit(args, `flow setup --live takes --content, --workspace, --rotate (with no value) and --json${notLive.length ? `, not --${notLive.join(", --")}` : ""}.`, USAGE);
+  }
+  if (!live && (rotate.some((k) => !(k in ROTATE)) || (rotate.includes("all") && rotate.length > 1))) {
+    return usageExit(args, `flow setup: --rotate takes ${Object.keys(ROTATE).filter((k) => k !== "all").join(", ")} (comma-separated), or all.`, USAGE);
   }
   if (values.now === true && !rotate.includes("key") && !rotate.includes("all")) {
-    console.error(`flow setup: --now goes with --rotate key (or all): it ends the old FLOW_KEY at once.\n\n${USAGE}`);
-    return EXIT.usage;
+    return usageExit(args, `flow setup: --now goes with --rotate key (or all): it ends the old FLOW_KEY at once.`, USAGE);
   }
   const workspace = typeof values.workspace === "string" ? values.workspace.trim() : undefined;
   // flow.engineer takes a workspace's acc_ id or its name: 1 to 100 characters, no control characters.
   if (workspace !== undefined && (!workspace || workspace.length > 100 || /[\u0000-\u001f\u007f]/.test(workspace))) {
-    console.error(`flow ${command}: --workspace takes a workspace's name or its acc_ id, 1 to 100 characters.\n\n${USAGE}`);
-    return EXIT.usage;
+    return usageExit(args, `flow ${command}: --workspace takes a workspace's name or its acc_ id, 1 to 100 characters.`, USAGE);
   }
   const json = values.json === true;
   // Straight to the file descriptors, never buffered: a coding agent's cut-off command keeps every line.
@@ -179,6 +223,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     else if (command === "logout") await logout(json, out, say);
     else if (command === "whoami") await showAccount(json, out, say);
     else if (command === "status") await status(json, out, say);
+    else if (command === "setup" && live) await setupLiveKey({ content: values.content === true, rotate: rotate.length > 0, workspace }, json, out, say);
     else if (command === "setup") await setupEnv({ replace: values.replace === true, rotate, now: values.now === true, ci: values.ci === true, workspace }, json, out, say);
     else await link({ channel, noBrowser: values["no-browser"] === true, timeoutSeconds, renamed, workspace }, json, out, say);
     return EXIT.ok;
@@ -188,7 +233,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     writeAll(2, `${!stop.next ? stop.message : isCommand(stop.next) ? `${stop.message} Next: ${stop.next}` : `${stop.message}\n${stop.next}`}\n`);
     if (json) {
       out(stop instanceof Pending ? stop.report : {
-        error: { code: stop.code, message: stop.message, next: stop.next ?? null, ...(stop.retryAfter !== undefined ? { retry_after: stop.retryAfter } : {}) },
+        ...errorReport(stop.code, stop.message, stop.next, stop.retryAfter !== undefined ? { retry_after: stop.retryAfter } : {}),
         ...(stop.warnings.length ? { warnings: stop.warnings } : {}),
       });
     }
@@ -300,10 +345,13 @@ async function login(options: LoginOptions, json: boolean, out: Out, say: Say): 
   if (options.noWait) throw new Pending(pending, null, waitNext, options.resume?.then);
 
   let interval = pending.interval;
+  /** A 429's Retry-After, for the next poll only. */
+  let asked = 0;
   const startedAt = Date.now();
   const stopAt = startedAt + options.timeoutSeconds * 1000;
   for (;;) {
-    await delay(Math.max(0, Math.min(interval * 1000, stopAt - Date.now())));
+    await delay(Math.max(0, Math.min(Math.max(interval, asked) * 1000, stopAt - Date.now())));
+    asked = 0;
     let answer;
     try {
       // Each poll gets what is left of --timeout (at least POLL_MIN_MS, so --timeout 0 still asks once).
@@ -312,7 +360,10 @@ async function login(options: LoginOptions, json: boolean, out: Out, say: Say): 
       if (error instanceof TimedOut && Date.now() >= stopAt) throw new Pending(pending, options.timeoutSeconds, waitNext, options.resume?.then);
       throw error;
     }
-    if (answer.status === "slow_down") interval += 5; // RFC 8628: each slow_down adds 5 seconds for good
+    if (answer.status === "slow_down") {
+      interval += 5; // RFC 8628: each slow_down adds 5 seconds for good
+      asked = answer.retryAfter ?? 0;
+    }
     if (answer.status === "authorization_pending" || answer.status === "slow_down") {
       if (Date.now() >= stopAt) throw new Pending(pending, options.timeoutSeconds, waitNext, options.resume?.then);
       continue;
@@ -413,7 +464,9 @@ async function showAccount(json: boolean, out: Out, say: Say): Promise<void> {
   say(`Signed in to flow.engineer as ${account.email} (account ${account.account}).`);
 }
 
-const SECRET = new Set<string>([SETUP_ENV.cloud_key, SETUP_ENV.traces_key, SETUP_ENV.messaging_key, ...MODEL_KEY_NAMES]);
+/** The live Flow key's name in .env (setup --live). */
+const LIVE_ENV = "FLOW_LIVE_KEY";
+const SECRET = new Set<string>([SETUP_ENV.cloud_key, SETUP_ENV.traces_key, SETUP_ENV.messaging_key, LIVE_ENV, ...MODEL_KEY_NAMES]);
 const masked = (name: string, value: string) => (SECRET.has(name) ? `${/^[a-z]+_(?:test_|live_)?/.exec(value)?.[0] ?? ""}…${value.slice(-4)}` : value);
 const ENV_LINE = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/;
 /** The setting that sends what was written with traces, and its older name (src/names.ts). */
@@ -528,6 +581,25 @@ function namedPage(url: string, name: string): string {
   return parsed.toString();
 }
 
+/**
+ * A channel link from setup's answer (wa.me's `text`, sms:'s `body`) with its join message naming the
+ * agent as people call it, as the /try page's direct link does: flow.engineer's answer names it by
+ * its package name, the name setup sends. A link with no "Join <name> (ref <code>)" in it is kept.
+ */
+function withJoinName(link: string | undefined, name: string): string | null {
+  if (!link) return null;
+  return link.replace(/([?&](?:text|body)=)([^&#]*)/, (whole, key: string, value: string) => {
+    let message: string;
+    try {
+      message = decodeURIComponent(value.replace(/\+/g, " "));
+    } catch {
+      return whole;
+    }
+    const ref = /^Join .+ \(ref (\S+)\)$/.exec(message)?.[1];
+    return ref ? `${key}${encodeURIComponent(`Join ${name} (ref ${ref})`).replace(/\(/g, "%28").replace(/\)/g, "%29")}` : whole;
+  });
+}
+
 /** A channel's direct link (t.me, wa.me or sms:), the message it fills in, and its /try page for a computer. */
 interface DirectLink {
   link: string;
@@ -566,6 +638,317 @@ interface SetupOptions {
   workspace?: string;
 }
 
+/** The agent's name as setup sends it: the server takes 1 to 64 letters, digits, spaces, -, _ and ., so a package's scope and other characters go. */
+function agentName(dir: string): string {
+  const named = (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { name?: string }).name ?? basename(dir);
+  return named.replace(/^@[^/]*\//, "").replace(/[^A-Za-z0-9 ._-]/g, "-").slice(0, 64) || "my-agent";
+}
+
+/** The folder's .env: its path, its lines (no trailing empty one) and the values they set. */
+function dotenvFile(dir: string): { file: string; lines: string[]; before: Map<string, string> } {
+  const file = join(dir, ".env");
+  const text = existsSync(file) ? readFileSync(file, "utf8") : "";
+  const lines = text ? text.split("\n") : [];
+  if (lines.at(-1) === "") lines.pop();
+  return { file, lines, before: envValues(lines) };
+}
+
+/** What production reads to run once the live key is in .env, when the server names none. */
+const LIVE_NEXT = [`${RUN} insights`, `${RUN} conversations --environment production`];
+
+/**
+ * `flow setup --live`: the agent's live Flow key, FLOW_LIVE_KEY, made by flow.engineer (its
+ * workspace's owner only) with safe defaults and written into .env, always over an older one (its
+ * value is shown only now), then what it can do (the server's checklist, ✓/✗) and the advisory tiers. Every key is named as had and no channel asked for, so an older flow.engineer that ignores
+ * `live` makes nothing; its 400 to rotate ["flow_live_key"], or a 200 with no flow_live_key, says
+ * it makes no live keys yet. Refusals (owner_only, health_workspace, content_not_allowed,
+ * not_set_up) pass through with their next step; a 502 (observe_failed) exits as a network failure.
+ */
+async function setupLiveKey(options: { content: boolean; rotate: boolean; workspace?: string }, json: boolean, out: Out, say: Say): Promise<void> {
+  const dir = process.cwd();
+  agentFolder(dir);
+  const { token, url } = signedIn();
+  const { file, lines, before } = dotenvFile(dir);
+  const workspace = options.workspace ?? (before.get(WORKSPACE_ENV) || undefined);
+  const unsupported = (warnings: string[], said = "") => {
+    const stop = new Stop("live_unsupported", `flow.engineer does not make live keys yet, so none was made${said ? ` (${said.replace(/\.$/, "")})` : ""}.`, undefined, EXIT.refused);
+    stop.warnings = warnings;
+    return stop;
+  };
+  let answer: LiveSetupAnswer;
+  try {
+    answer = await setupLive(url, token, {
+      live: true, content: options.content, name: agentName(dir), ...(workspace ? { workspace } : {}), rotate: options.rotate ? ["flow_live_key"] : false,
+      hostname: hostname(), channels: [], have: [...Object.values(SETUP_ENV), ...MODEL_KEY_NAMES],
+    });
+  } catch (error) {
+    if (error instanceof LoginRefused && error.status === 400 && error.code === "invalid_request" && options.rotate) throw unsupported(warningsOf(error.fields), error.message);
+    if (error instanceof LoginRefused && error.status === 502) {
+      const stop = new Stop(error.code, `${error.message} No key was made; try again in a minute.`, error.next, EXIT.network);
+      stop.warnings = warningsOf(error.fields);
+      throw stop;
+    }
+    throw error;
+  }
+  const fields = answer as Record<string, unknown>;
+  const warnings = warningsOf(fields);
+  const key = objectField<LiveKey>(fields, "flow_live_key");
+  if (typeof key?.value !== "string" || !key.value) throw unsupported(warnings);
+  const written = writeEnv(file, lines, before, [[LIVE_ENV, key.value]], () => true);
+  printWarnings(warnings);
+  const textMode = key.text ?? (key.content ? "raw" : "deidentified");
+  const idle = typeof key.idle_days === "number" ? key.idle_days : 7;
+  const revoke = key.kid ? `${RUN} keys revoke ${key.kid}` : `${RUN} keys`;
+  const next = answer.next?.length ? answer.next : LIVE_NEXT;
+  const space = typeof answer.workspace_id === "string" && answer.workspace_id ? { id: answer.workspace_id, name: answer.workspace_name ?? null } : null;
+  const checklist = Array.isArray(key.checklist) ? key.checklist : [];
+  const stopped = Array.isArray(answer.stopped) ? answer.stopped.filter((k): k is string => typeof k === "string") : [];
+  const advisory = advisoryLines(answer.advisory);
+  if (json) {
+    out({
+      flow_live_key: {
+        env: LIVE_ENV, kid: key.kid ?? null, mode: key.mode ?? null, scopes: key.scopes ?? [], content: key.content === true, expires_at: key.expires_at ?? null, idle_days: idle,
+        checklist,
+      },
+      text_mode: textMode, env_written: { ".env": written }, rotated: options.rotate, stopped, workspace: space, agent: answer.agent_id ?? null, flow_agent_id: answer.flow_agent_id ?? null,
+      minted: answer.minted ?? [], advisory: { default: advisory[0], ask_user: advisory[1], critical: advisory[2] }, revoke, next, warnings,
+    });
+  }
+  say("In .env:");
+  for (const w of written) say(`  ${w.name}=${w.value}  ${w.action}`);
+  if (space) say(`Workspace: ${space.name ? `${space.name} (${space.id})` : space.id}`);
+  say(textLine(textMode));
+  // An answer with no checklist (a flow.engineer before it) names the key's scopes instead.
+  if (checklist.length) {
+    say("What it can do:");
+    for (const line of checklistLines(checklist)) say(line);
+  } else if (key.scopes?.length) say(`Scopes: ${key.scopes.join(", ")}`);
+  say(`Production reads (${RUN} conversations --environment production, ${RUN} insights) use it.`);
+  say(`It stops working ${key.expires_at ? `at ${key.expires_at}, 30 days after it was made,` : "30 days after it was made"} or after ${idle} days unused: then run ${RUN} setup --live again.`);
+  if (stopped.length) say(`It replaced the agent's earlier live ${stopped.length === 1 ? "key" : "keys"} ${stopped.join(", ")}: ${stopped.length === 1 ? "it" : "they"} stopped working now.`);
+  else if (options.rotate) say("The agent's earlier live keys stopped working now.");
+  say(`Revoke it: ${revoke}`);
+  for (const line of advisory) say(line);
+  say(`Next: ${next.join(", then ")}`);
+}
+
+export const KEYS_USAGE = `Usage:
+  flow keys [list] [--all | --agent <name>] [--json]
+  flow keys show <kid> [--json]
+  flow keys grant <read|tests|traces|model|content|send|deploy> [--key <kid>] [--wait] [--no-browser] [--json]
+  flow keys revoke <kid> [--json]
+
+list: this folder's agent's live keys, never their values (expired and revoked ones are left out):
+its Flow keys (FLOW_KEY, and FLOW_LIVE_KEY from ${RUN} setup --live) and its hosted runtime keys,
+one row each with its id, agent, mode, last 4 and when it expires. The folder's agent is the one
+its FLOW_KEY or FLOW_LIVE_KEY belongs to, else its package.json name; outside an agent's folder,
+every agent's. --agent <name> lists that agent's, --all every agent's on your account.
+show: one key's checklist, the same lines in the same order for every key (✓ it can, ✗ it cannot,
+with the command that grants it), and what was granted to it, when and by whom.
+grant: lets a live key do one more thing, in place (its value stays): the FLOW_LIVE_KEY in the
+environment or ./.env, or --key <kid>. By tier:
+  ${ADVISORY.default}
+  ${ADVISORY.ask_user}
+  ${ADVISORY.critical}
+  send and deploy print the approval page (and open it unless --no-browser) and exit 4 while it
+  waits; --wait asks again until the owner approves (exit 0), denies or it expires (exit 3).
+revoke: ends one at once (a new FLOW_KEY: ${RUN} setup --rotate key; a new FLOW_LIVE_KEY:
+${RUN} setup --live).
+Sign in first with ${RUN} login. --json: one JSON object per line on stdout ({"keys": [...], "agent",
+"all"}, {"key": {...}}, the grant's answer, {"kid", "revoked"}, or {"ok": false, "error": {code,
+message, next}, "next"}; grant --wait prints its pending answer first); list and show print nothing
+else, the other commands' lines go to stderr.
+
+Exit status: 0 done, 1 usage or not signed in, 2 network, 3 refused (no such key, a grant denied or
+expired, or the sign-in has ended), 4 a grant waiting for the owner's approval.`;
+
+/** What `flow keys grant` takes, as POST /cli/keys/grant names them. */
+const GRANTS = ["read", "tests", "traces", "model", "content", "send", "deploy"];
+const KID = /^[0-9A-Za-z]{10}$/;
+
+/** Runs `flow keys [list]`, `keys show <kid>`, `keys grant <name>` and `keys revoke <kid>`; resolves to the exit status. */
+export async function keysCli(args: string[]): Promise<number> {
+  let values: { json?: boolean; help?: boolean; key?: string; wait?: boolean; "no-browser"?: boolean; all?: boolean; agent?: string };
+  let positionals: string[];
+  try {
+    ({ values, positionals } = parseArgs({
+      args, strict: true, allowPositionals: true,
+      options: { json: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false }, key: { type: "string" }, wait: { type: "boolean", default: false }, "no-browser": { type: "boolean", default: false }, all: { type: "boolean", default: false }, agent: { type: "string" } },
+    }));
+  } catch (error) {
+    return usageExit(args, `flow keys: ${(error as Error).message.split(". ")[0]}`, KEYS_USAGE);
+  }
+  if (values.help) return console.log(KEYS_USAGE), EXIT.ok;
+  const [sub = "list", arg, ...extra] = positionals;
+  const json = values.json === true;
+  const out = (report: unknown) => writeAll(1, `${JSON.stringify(report)}\n`);
+  const say = (line: string) => writeAll(json ? 2 : 1, `${line}\n`);
+  const usage = (problem: string) => usageExit(args, `flow keys: ${problem}`, KEYS_USAGE);
+  if (!["list", "show", "grant", "revoke"].includes(sub)) return usage(`unknown command "${sub}": flow keys list, show <kid>, grant <name> or revoke <kid>`);
+  if (sub !== "grant" && (values.key !== undefined || values.wait || values["no-browser"])) return usage("--key, --wait and --no-browser go with grant");
+  if (sub === "list" && arg !== undefined) return usage("list takes no key id: flow keys show <kid> shows one");
+  if (sub !== "list" && (values.all || values.agent !== undefined)) return usage("--all and --agent go with list");
+  if (values.all && values.agent !== undefined) return usage("--all and --agent do not go together: --agent <name> lists one agent's keys, --all every agent's");
+  if (values.agent !== undefined && !values.agent.trim()) return usage("--agent takes an agent's name, as flow keys --all lists it");
+  if ((sub === "show" || sub === "revoke") && (arg === undefined || extra.length || !KID.test(arg))) return usage(`${sub} takes one key id, 10 letters and digits, as flow keys lists it`);
+  if (sub === "grant" && (arg === undefined || extra.length || !GRANTS.includes(arg))) return usage(`grant takes one of ${GRANTS.join(", ")}`);
+  if (sub === "grant" && values.key !== undefined && !KID.test(values.key)) return usage("--key takes a key id, 10 letters and digits, as flow keys lists it");
+  try {
+    if (sub === "grant") {
+      // The kid is the FLOW_LIVE_KEY's own (its 10 characters after flow_live_), found before signing in.
+      const kid = values.key ?? liveKid(dotenvValue()(LIVE_ENV) ?? "");
+      if (!kid) throw new Stop("no_live_key", `flow keys grant changes a live key: there is no ${LIVE_ENV} in the environment or ./.env to change, and no --key <kid>.`, `${RUN} setup --live`, EXIT.usage);
+      await grant({ kid, name: arg!, wait: values.wait === true, noBrowser: values["no-browser"] === true }, json, out, say);
+      return EXIT.ok;
+    }
+    const { token, url } = signedIn();
+    if (sub === "list") {
+      const all = await listKeys(url, token);
+      const { keys, agent } = values.all ? { keys: all, agent: null } : agentKeys(all, values.agent?.trim());
+      // --json: the document alone, no table on stderr.
+      if (json) return out({ keys, agent: agent ?? null, all: agent === null }), EXIT.ok;
+      if (agent !== null && !keys.length) say(`No live keys for ${agent}.${all.length ? ` This account has ${all.length} for other agents: ${RUN} keys list --all` : ""}`);
+      else if (!keys.length) say("No live keys.");
+      else for (const line of keyTable(keys)) say(line);
+      if (agent !== null && keys.length && all.length > keys.length) say(`${keys.length} of this account's ${all.length} live keys: the ones of ${agent}. Every agent's: ${RUN} keys list --all`);
+      return EXIT.ok;
+    }
+    if (sub === "show") {
+      const key = (await listKeys(url, token)).find((k) => k.kid === arg);
+      if (!key) throw new Stop("not_found", `This account has no live key ${arg} (expired and revoked keys are left out).`, `${RUN} keys list --all`, EXIT.refused);
+      if (json) return out({ key }), EXIT.ok;
+      for (const line of keyDetail(key)) say(line);
+      return EXIT.ok;
+    }
+    const done = await revokeKey(url, token, arg!);
+    if (json) out({ kid: done.kid ?? arg, revoked: done.revoked !== false });
+    say(`Revoked ${arg}: it stopped working now.`);
+    return EXIT.ok;
+  } catch (error) {
+    const stop = asStop(error);
+    writeAll(2, `${stop.next && isCommand(stop.next) ? `${stop.message} Next: ${stop.next}` : stop.next ? `${stop.message}\n${stop.next}` : stop.message}\n`);
+    if (json && !(stop instanceof Printed)) out(errorReport(stop.code, stop.message, stop.next));
+    return stop.exit;
+  }
+}
+
+/**
+ * Whose keys `flow keys list` shows: --agent's, else this folder's agent (the agent of the key in
+ * FLOW_KEY or FLOW_LIVE_KEY here, else the package.json name setup sends), else every agent's
+ * (agent null: not in an agent's folder, or none of the account's keys is its).
+ */
+function agentKeys(keys: ListedKey[], named: string | undefined): { keys: ListedKey[]; agent: string | null } {
+  if (named !== undefined) return { keys: keys.filter((k) => k.agent === named), agent: named };
+  const value = dotenvValue();
+  const kids = [value("FLOW_KEY"), value(LIVE_ENV)].map((v) => /^flow_(?:test|live)_([0-9A-Za-z]{10})_/.exec(v ?? "")?.[1]).filter(Boolean);
+  const own = keys.find((k) => kids.includes(k.kid) && k.flow_agent_id);
+  if (own) return { keys: keys.filter((k) => k.flow_agent_id === own.flow_agent_id), agent: own.agent ?? own.flow_agent_id! };
+  if (!existsSync(join(process.cwd(), "package.json"))) return { keys, agent: null };
+  const name = agentName(process.cwd());
+  return keys.some((k) => k.agent === name) ? { keys: keys.filter((k) => k.agent === name), agent: name } : { keys, agent: null };
+}
+
+/** The longest a `keys grant --wait` asks again past the approval's own expiry, for a server that never says expired. */
+const GRANT_GRACE_MS = 60_000;
+
+/**
+ * `flow keys grant <name>`: 200 is granted now (or had it already), and the key's new checklist is
+ * printed; 202 (send, deploy) waits for the key's owner to approve once in the browser: its page is
+ * printed (and opened unless --no-browser), then without --wait exit 4, with --wait GET
+ * /cli/keys/grant/<id> every `interval` seconds until approved (its checklist), denied or expired (exit 3).
+ */
+async function grant(options: { kid: string; name: string; wait: boolean; noBrowser: boolean }, json: boolean, out: Out, say: Say): Promise<void> {
+  const { token, url } = signedIn();
+  const answer = await grantKey(url, token, options.kid, options.name);
+  const advisory = advisoryLines(answer.advisory);
+  if (answer.granted) {
+    if (json) out({ ...grantReport(answer, options), status: "granted" });
+    say(answer.already ? `${options.kid} could already: ${options.name}.` : `Granted ${options.name} to ${options.kid}.`);
+    sayKey(answer.key, say);
+    return;
+  }
+  const page = answer.approve_url ?? "";
+  const opened = page && !options.noBrowser ? await openBrowser(page) : false;
+  const again = `${RUN} keys grant ${options.name}${keyFlag(options.kid)}`;
+  const pendingReport = { ...grantReport(answer, options), status: "pending", opened_browser: opened };
+  if (json) out(pendingReport);
+  say(answer.message ?? `${options.name} on ${options.kid} needs the owner's yes in the browser.`);
+  say(advisory[2]!);
+  if (page) say(opened ? `Opened your browser at ${page}` : `${options.noBrowser ? "Open" : "Could not open a browser here; open"} ${page}`);
+  if (answer.expires_at) say(`The approval page works until ${answer.expires_at}.`);
+  if (!options.wait) {
+    const stop = new Stop("pending", `Waiting for the owner to approve ${options.name} on ${options.kid}.`, `${again} --wait`, EXIT.pending);
+    // Already printed above as the pending answer: --json gets no second document.
+    throw json ? new Printed(stop) : stop;
+  }
+  let interval = typeof answer.interval === "number" && answer.interval >= 0 ? answer.interval : 5;
+  const stopAt = answer.expires_at && !Number.isNaN(Date.parse(answer.expires_at)) ? Date.parse(answer.expires_at) + GRANT_GRACE_MS : Number.POSITIVE_INFINITY;
+  for (;;) {
+    await delay(interval * 1000);
+    const now = await grantStatus(url, token, answer.grant_id!);
+    if (typeof now.interval === "number" && now.interval >= 0) interval = now.interval;
+    if (now.status === "approved") {
+      if (json) out({ ...grantReport({ ...answer, key: now.key ?? answer.key }, options), status: "approved" });
+      say(`Approved: ${options.kid} has ${options.name} now.`);
+      sayKey(now.key, say);
+      return;
+    }
+    if (now.status === "denied") throw new Stop("grant_denied", `The owner denied ${options.name} on ${options.kid}.`, undefined, EXIT.refused);
+    if (now.status === "expired" || Date.now() > stopAt) throw new Stop("grant_expired", `The approval for ${options.name} on ${options.kid} expired before the owner approved it.`, again, EXIT.refused);
+  }
+}
+
+/** --key for a next step, when the grant named a key other than the FLOW_LIVE_KEY's. */
+const keyFlag = (kid: string) => (kid !== liveKid(dotenvValue()(LIVE_ENV) ?? "") ? ` --key ${kid}` : "");
+
+/** A Stop whose --json document went out already. */
+class Printed extends Stop {
+  constructor(stop: Stop) {
+    super(stop.code, stop.message, stop.next, stop.exit);
+  }
+}
+
+/** A grant's --json document: what was asked and the server's answer, the advisory always all three tiers. */
+function grantReport(answer: GrantAnswer, options: { kid: string; name: string }): Record<string, unknown> {
+  const advisory = advisoryLines(answer.advisory);
+  return {
+    kid: options.kid, grant: options.name, granted: answer.granted, already: answer.already === true, tier: answer.tier ?? null,
+    ...(answer.grant_id ? { grant_id: answer.grant_id, approve_url: answer.approve_url ?? null, expires_at: answer.expires_at ?? null, message: answer.message ?? null } : {}),
+    key: answer.key ?? null, advisory: { default: advisory[0], ask_user: advisory[1], critical: advisory[2] },
+  };
+}
+
+/** The key's checklist after a grant; when the server gave none, where to see it. */
+function sayKey(key: GrantedKey | undefined, say: Say): void {
+  const checklist: ChecklistLine[] = Array.isArray(key?.checklist) ? key!.checklist! : [];
+  if (!checklist.length) return say(`${RUN} keys show${key?.kid ? ` ${key.kid}` : ""} says what it can do now.`);
+  say("What it can do now:");
+  for (const line of checklistLines(checklist)) say(line);
+}
+
+const at = (time: string | null | undefined) => (time ? time.slice(0, 16).replace("T", " ") : "-");
+
+/** The keys as aligned columns, a header first: id, agent, mode, last 4, expiry ("2026-12-04 10:00"); flow keys show <kid> says what one can do. */
+function keyTable(keys: ListedKey[]): string[] {
+  const rows = [["KID", "AGENT", "MODE", "KEY", "EXPIRES"],
+    ...keys.map((k) => [k.kid, k.agent ?? k.flow_agent_id ?? "-", k.mode ?? "-", k.last4 ? `…${k.last4}` : "-", at(k.expires_at)])];
+  const widths = rows[0]!.map((_, i) => Math.max(...rows.map((r) => r[i]!.length)));
+  return rows.map((r) => r.map((cell, i) => (i === r.length - 1 ? cell : cell.padEnd(widths[i]!))).join("  "));
+}
+
+/** `flow keys show`: the key's row, its checklist (✓/✗, the server's order) and its grants. */
+function keyDetail(k: ListedKey): string[] {
+  const lines = [`${k.kid}  ${k.agent ?? k.flow_agent_id ?? "-"}  ${k.mode ?? "-"}${k.last4 ? `  …${k.last4}` : ""}${k.kind ? `  ${k.kind}` : ""}${k.environment ? `  ${k.environment}` : ""}`];
+  lines.push(`Expires: ${at(k.expires_at)}   Last used: ${at(k.last_used_at)}`);
+  const checklist = Array.isArray(k.checklist) ? k.checklist : [];
+  if (checklist.length) {
+    lines.push("What it can do:", ...checklistLines(checklist));
+  } else lines.push(`Scopes: ${k.scopes?.join(", ") || "-"}`);
+  const grants = Array.isArray(k.grants) ? k.grants : [];
+  if (grants.length) lines.push("Granted:", ...grants.map((g) => `  ${g.scope}  ${at(g.at)}${g.by ? `  by ${g.by}` : ""}`));
+  return lines;
+}
+
 async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say, forLink?: { channel: string }): Promise<{ answer: SetupAnswer; warnings: string[] }> {
   if (options.ci) {
     const steps = [
@@ -581,14 +964,8 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const dir = process.cwd();
   agentFolder(dir);
   const { token, url } = signedIn();
-  const file = join(dir, ".env");
-  const text = existsSync(file) ? readFileSync(file, "utf8") : "";
-  const lines = text ? text.split("\n") : [];
-  if (lines.at(-1) === "") lines.pop();
-  const before = envValues(lines);
-  const named = (JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { name?: string }).name ?? basename(dir);
-  // The server takes 1 to 64 letters, digits, spaces, -, _ and .: a package's scope and other characters go.
-  const name = named.replace(/^@[^/]*\//, "").replace(/[^A-Za-z0-9 ._-]/g, "-").slice(0, 64) || "my-agent";
+  const { file, lines, before } = dotenvFile(dir);
+  const name = agentName(dir);
   const all = options.rotate.includes("all");
   const rotated = new Set(all ? Object.values(ROTATE).filter(Boolean) : options.rotate.map((k) => ROTATE[k]!));
   // The workspace asked for: --workspace, else the one an earlier --workspace kept in .env.
@@ -695,9 +1072,12 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
     out({
       agent: answer.agent_id, join_code: answer.join_code, env_written: { ".env": written }, minted: answer.minted ?? [],
       dashboard_url: answer.dashboard_url ?? null, try_url: answer.try_url ?? null, telegram_link: answer.telegram_link ?? null,
-      whatsapp_link: answer.whatsapp_link ?? null, imessage_link: answer.imessage_link ?? null, try_urls: links,
+      // Named as direct_links and join_message name it (the display name), never the package name.
+      whatsapp_link: direct.whatsapp?.link ?? withJoinName(answer.whatsapp_link, displayName), imessage_link: direct.imessage?.link ?? withJoinName(answer.imessage_link, displayName), try_urls: links,
       direct_links: Object.fromEntries(Object.entries(direct).map(([c, d]) => [c, d.link])), join_message: Object.values(direct)[0]?.message ?? null,
-      trial, model_key: model.report,
+      // The account's free trial, shared by all its agents: not this agent's own counts. `trial` is
+      // the older name of the same object, kept for a release.
+      account_trial: trial, trial, model_key: model.report,
       workspace: typeof answer.workspace_id === "string" && answer.workspace_id ? { id: answer.workspace_id, name: answer.workspace_name ?? null } : null,
       // FLOW_KEY's state, never its value: made in this call, with its id, mode and scopes.
       flow_key: { set: Boolean(before.get(FLOW_KEY) || process.env[FLOW_KEY]?.trim()), minted: flowKey?.minted === true,
@@ -729,7 +1109,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
 /** iMessage's count of the people it may reach on the trial (an older answer's `contacts`), as a line; undefined when the answer had none. */
 function peopleLine(t: { contacts?: { limit: number; used: number } } | undefined): string | undefined {
   const people = t?.contacts;
-  return people && typeof people.used === "number" && typeof people.limit === "number" ? `iMessage: ${people.used} of ${people.limit} people` : undefined;
+  return people && typeof people.used === "number" && typeof people.limit === "number" ? `iMessage (${TRIAL_SCOPE}): ${people.used} of ${people.limit} people` : undefined;
 }
 
 /**
@@ -742,9 +1122,15 @@ function trialCount(t: { limit: number | null; used: number; held?: number } | u
   return `${t.used} of ${t.limit} people${t.held > 0 ? `, ${t.held} waiting for a place` : ""}`;
 }
 
+/**
+ * Whose free-trial counts they are: Flow Messaging counts the people per account and channel, so a
+ * brand-new agent shows the people its account's other agents reached.
+ */
+const TRIAL_SCOPE = "your account's free trial, across all its agents";
+
 const trialNote = (t: { limit: number | null; used: number; held?: number } | undefined) => {
   const count = trialCount(t);
-  return count ? ` (free trial: ${count})` : "";
+  return count ? ` (${TRIAL_SCOPE}: ${count})` : "";
 };
 
 /**
@@ -865,8 +1251,7 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     try {
       account = await whoami(url, current.token);
       if (joinCode && existsSync(join(process.cwd(), "package.json"))) {
-        const named = (JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as { name?: string }).name ?? basename(process.cwd());
-        const name = named.replace(/^@[^/]*\//, "").replace(/[^A-Za-z0-9 ._-]/g, "-").slice(0, 64) || "my-agent";
+        const name = agentName(process.cwd());
         const have = [...Object.values(SETUP_ENV).filter((n) => n !== SETUP_ENV.try_url), ...MODEL_KEY_NAMES];
         const workspace = value(WORKSPACE_ENV);
         server = await setup(url, current.token, { name, hostname: hostname(), channels: [...CHANNELS], have, ...(workspace ? { workspace } : {}) });
@@ -876,20 +1261,27 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     }
   }
   const fields = (server ?? {}) as Record<string, unknown>;
-  const channels = Object.fromEntries(CHANNELS.map((c) => [c, {
-    sender: Boolean(c === "telegram" ? value(SETUP_ENV.messaging_key) : value(SENDER_ENV[c]!)),
-    open: server ? typeof fields[`${c}_sender`] === "string" : null,
-    trial: server && typeof fields[`${c}_sender`] === "string" ? server.trial?.[c] ?? null : null,
-  }]));
-  // The playground (npm start) before the phone, as setup's next.
+  const channels = Object.fromEntries(CHANNELS.map((c) => {
+    // The account's free trial on this channel, shared by all its agents; `trial` is its older name, kept for a release.
+    const trial = server && typeof fields[`${c}_sender`] === "string" ? server.trial?.[c] ?? null : null;
+    return [c, {
+      sender: Boolean(c === "telegram" ? value(SETUP_ENV.messaging_key) : value(SENDER_ENV[c]!)),
+      open: server ? typeof fields[`${c}_sender`] === "string" : null,
+      account_trial: trial,
+      trial,
+    }];
+  }));
+  // The playground (npm start) before the phone, as setup's next. Once this folder has deployed, the
+  // hosted agent answers the phone, so status points at it instead of npm start and deploy.
+  const deployed = deployedFrom(process.cwd());
   const next = [
     ...(model.next ? [model.next] : []),
-    ...(model.report.set && !model.next ? ["npm start"] : []),
+    ...(model.report.set && !model.next && !deployed.length ? ["npm start"] : []),
     ...(!joinCode || !value(SETUP_ENV.messaging_key) ? [NEXT.link] : CHANNELS.filter((c) => channels[c]!.open && !channels[c]!.sender).map((c) => `${NEXT.link} --channel ${c}`)),
   ];
   const workspace = value(WORKSPACE_ENV) || "personal";
   const plans = plansNext(Object.fromEntries(CHANNELS.map((c) => [c, channels[c]!.trial])));
-  if (json) out({ model_key: model.report, flow_key: { set: Boolean(value(FLOW_KEY)) }, workspace, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, next, plans: plans ?? null });
+  if (json) out({ model_key: model.report, flow_key: { set: Boolean(value(FLOW_KEY)) }, workspace, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, deployed, next, plans: plans ?? null });
   if (model.report.env && model.report.env !== FLOW_KEY) say(value(FLOW_KEY) ? `${FLOW_KEY} is set.` : `${FLOW_KEY}: not set yet (${RUN} setup writes it).`);
   say(model.line);
   say(`Workspace: ${workspace}`);
@@ -902,7 +1294,7 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
   }
   if (next.length) say(`Next: ${next.join(", then ")}`);
   if (plans) say(`Next: ${plans.message}`);
-  say(DEPLOY_HINT);
+  say(deployed.length ? `Deployed from this folder to ${deployed.join(" and ")}: ${RUN} deploy status shows what is live.` : DEPLOY_HINT);
 }
 
 /**
@@ -1047,7 +1439,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
   const counts = trial?.[channel];
   if (counts) {
     const count = trialCount(counts);
-    if (count) say(`${CHANNEL_NAME[channel]} free trial: ${count}`); // "Telegram free trial: 3 of 25 people, 2 waiting for a place"
+    if (count) say(`${CHANNEL_NAME[channel]} (${TRIAL_SCOPE}): ${count}`); // "WhatsApp (your account's free trial, across all its agents): 3 of 25 people, 2 waiting for a place"
     if (channel === "imessage") {
       const people = peopleLine(counts);
       if (people) say(people);

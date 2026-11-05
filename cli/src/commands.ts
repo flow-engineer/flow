@@ -551,8 +551,12 @@ export function logoProblem(logo: string): string | undefined {
   return /^https:\/\/[^\s"'<>]+$|^data:image\/[a-z0-9.+-]+(;[^,\s"'<>]*)?,[^\s"'<>]+$/i.test(logo) && URL.canParse(logo) ? undefined : "brand.logo must be an https URL or a data:image URL";
 }
 
-/** What is wrong in a CLI file against the server's tools, one sentence each; warnings apart. */
-export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: string[]; warnings: string[] } {
+/**
+ * What is wrong in a CLI file against the server's tools, one sentence each; warnings apart.
+ * `listed`: the tools are what the server lists (the default). false: they are the agent's tools,
+ * and whether the server serves each is not known, so a command is "reachable" only if it does.
+ */
+export function cliProblems(config: CliConfig, tools: ToolInfo[], listed = true): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
   const warnings: string[] = [];
   const { accent, logo } = brandOf(config);
@@ -637,7 +641,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
     if (commandEntries(config).some(([w, c]) => w.trim() === derivedName(t.name) && isCustom(c))) continue;
     if (derivedName(t.name) === "update" && updatesItself(config)) errors.push(`tool ${t.name} would be the command "update", which is the CLI's own while update is set; give it another name in commands`);
     claim(derivedName(t.name), `tool ${t.name}`);
-    if (config.commands) warnings.push(`tool ${t.name} has no command in the CLI file; it is reachable as "${derivedName(t.name)}"`);
+    if (config.commands) warnings.push(`tool ${t.name} has no command in the CLI file; it is reachable as "${derivedName(t.name)}"${listed ? "" : " if the CLI's MCP server serves it"}`);
   }
   for (const [group, sub] of Object.entries(config.defaultCommands ?? {})) {
     const key = group.trim().split(/\s+/).join(" ");

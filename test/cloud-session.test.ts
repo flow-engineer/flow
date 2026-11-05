@@ -1,8 +1,9 @@
-// covers: testing/src/client.ts testing/src/protocol.ts testing/src/cli.ts
+// covers: testing/src/client.ts testing/src/protocol.ts testing/src/cli.ts testing/src/suite.ts
 // The CLI against a hosted cloud: the open carries the CI key and the synthetic attestation, and the
 // session is played at the tunnel the open answers, which never sees the key; the agent's posts reach
 // the cloud while the stream is open, also over HTTPS with HTTP/2 as a hosted cloud speaks it, and a
-// tool call the cloud has not answered does not hold the later ones.
+// tool call the cloud has not answered does not hold the later ones. The developer's fakes run on
+// this machine when the cloud asks for them, and only then.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { generateKeyPairSync, sign, X509Certificate } from "node:crypto";
@@ -16,8 +17,10 @@ import { test } from "node:test";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { z } from "zod";
 import { cloudHeaders, gitBranch, gitDefaultBranch, runInCloud, tunnelBase } from "../testing/src/client.ts";
-import type { Agent, Incoming } from "../src/index.ts";
+import type { OpenSession, ToolCallRequest } from "../testing/src/protocol.ts";
+import type { Agent, Incoming, Tool } from "../src/index.ts";
 import { unavailableRecords } from "../src/records.ts";
+import { gate } from "./helpers.ts";
 
 test("a hosted cloud needs the CI key and --synthetic; a local one needs neither", () => {
   const hosted = "https://tests.example.com";
@@ -298,6 +301,106 @@ test("a tool call the cloud has not answered does not hold later posts, over HTT
     close();
   }
   assert.deepEqual(arrived.filter((p) => p === "events" || p === "outbound").sort(), ["events", "outbound"]);
+});
+
+/** A tests folder whose tools/place_order.fake.ts is `source`. */
+function fakeTests(source: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "flow-fakes-"));
+  mkdirSync(join(dir, "tools"));
+  writeFileSync(join(dir, "tools", "place_order.fake.ts"), source);
+  return dir;
+}
+
+/** A cloud whose open says fakes when `plays`, answers each tool call with `answer`, and ends the session once the agent's
+ * one call has settled; then plays it with an agent whose one message calls place_order. What each side saw comes back. */
+async function playFakes(testsDir: string, plays: boolean, answer: (body: ToolCallRequest) => unknown) {
+  const opens: OpenSession[] = [];
+  const calls: Array<{ body: ToolCallRequest; key: string }> = [];
+  const logs: string[] = [];
+  const settled = gate<{ output?: unknown; error?: unknown }>();
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      const json = (value: unknown) => void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(value));
+      if (req.url === "/api/sessions") {
+        opens.push(JSON.parse(body));
+        return json({ sessionId: "s", token: "t", missing: [], dashboard: "d", ...(plays ? { fakes: true } : {}) });
+      }
+      if (req.url!.endsWith("/tool-calls")) {
+        calls.push({ body: JSON.parse(body), key: String(req.headers["idempotency-key"]) });
+        return json(answer(JSON.parse(body)));
+      }
+      if (!req.url!.endsWith("/stream")) return json({});
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ type: "message", conversationId: "c", messageId: "m1", channel: { reactions: false, status: false }, incoming: { text: "a large oat latte, Sam" } })}\n\n`);
+      void settled.promise.then(() => res.end(`data: ${JSON.stringify({ type: "finished", summary: { runs: [] } })}\n\n`));
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const placeOrder: Tool = { name: "place_order", description: "Place an order", input: z.object({ name: z.string() }), run: () => null };
+  try {
+    await runInCloud({
+      cloud: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+      name: "cafe",
+      tools: [placeOrder],
+      build: ({ tools }) => ({
+        channels: () => [],
+        receive: (id: string) => {
+          const context = { conversationId: id, person: "p", key: null, channel: "sms", callId: "c1", idempotencyKey: "k1", signal: new AbortController().signal, records: unavailableRecords("a test") };
+          Promise.resolve(tools[0]!.run({ name: "Sam" }, context)).then((output) => settled.open({ output }), (error: unknown) => settled.open({ error }));
+          return "m1";
+        },
+      }) as unknown as Agent,
+      files: [],
+      testsDir,
+      log: (line) => logs.push(line),
+    });
+  } finally {
+    server.close();
+  }
+  return { opens, calls, logs, agentGot: await settled.promise };
+}
+
+test("when the cloud asks for a fake, it runs here on the run's state and its answer goes back on its own key; the agent gets the cloud's answer", { timeout: 10_000 }, async () => {
+  const tests = fakeTests(`export default ({ input, world, state, now, call }) => {
+  state.orders.push({ name: input.name, menu: world.menu, now, call });
+  return { output: { order_id: "BL-1040", ready_by: "{{now + 10m}}" }, changes: ["order BL-1040 for " + input.name] };
+};
+`);
+  const ask = { play: "fake", ticket: "tk_1", world: { menu: ["Latte"] }, state: { orders: [] }, now: "2026-11-04T09:00:00Z", call: 1, responses: [] };
+  const seen = await playFakes(tests, true, (body) => (body.ticket ? { ok: true, output: { order_id: "BL-1040", ready_by: "2026-11-04T09:10:00Z" } } : ask));
+  assert.deepEqual(seen.opens[0]!.fakes, ["place_order"]);
+  assert.deepEqual(seen.calls.map((c) => c.body), [
+    { conversationId: "c", tool: "place_order", input: { name: "Sam" } },
+    {
+      conversationId: "c", tool: "place_order", input: { name: "Sam" }, ticket: "tk_1",
+      faked: { output: { order_id: "BL-1040", ready_by: "{{now + 10m}}" }, changes: ["order BL-1040 for Sam"], state: { orders: [{ name: "Sam", menu: ["Latte"], now: "2026-11-04T09:00:00Z", call: 1 }] } },
+    },
+  ]);
+  assert.match(seen.calls[1]!.key, /^tool:/);
+  assert.notEqual(seen.calls[0]!.key, seen.calls[1]!.key);
+  assert.deepEqual(seen.agentGot, { output: { order_id: "BL-1040", ready_by: "2026-11-04T09:10:00Z" } }, "the cloud's answer, its placeholders filled");
+  assert.deepEqual(seen.logs.filter((l) => /fake/.test(l)), []);
+});
+
+test("an older cloud, whose open does not say fakes, is never sent a faked call, and the client says once that its fakes go unused", { timeout: 10_000 }, async () => {
+  const tests = fakeTests(`export default () => ({ output: "from the fake" });\n`);
+  const seen = await playFakes(tests, false, () => ({ ok: true, output: "from the model" }));
+  assert.deepEqual(seen.opens[0]!.fakes, ["place_order"], "the open names the fakes; an older cloud ignores it");
+  assert.deepEqual(seen.calls.map((c) => c.body), [{ conversationId: "c", tool: "place_order", input: { name: "Sam" } }]);
+  assert.deepEqual(seen.agentGot, { output: "from the model" });
+  assert.deepEqual(seen.logs.filter((l) => /fake/.test(l)), ["This cloud does not play fakes: a model plays every tool (tests/tools/*.fake.ts unused)."]);
+});
+
+test("a fake that throws posts why it failed, and the agent sees fake_failed as the cloud's failure, not the tool's", { timeout: 10_000 }, async () => {
+  const tests = fakeTests(`export default () => { throw new Error("no menu in given"); };\n`);
+  const ask = { play: "fake", ticket: "tk_1", world: {}, state: {}, now: "2026-11-04T09:00:00Z", call: 1, responses: [] };
+  const seen = await playFakes(tests, true, (body) => (body.ticket ? { ok: false, error: "fake_failed" } : ask));
+  assert.deepEqual(seen.calls[1]!.body.faked, { failed: "it threw: no menu in given" });
+  assert.equal((seen.agentGot.error as Error).message, "fake_failed");
+  assert.ok(seen.logs.includes("c: tests/tools/place_order.fake.ts failed: it threw: no menu in given"));
+  assert.ok(seen.logs.includes("c: the cloud failed the tool call place_order (fake_failed): an infrastructure error for this run, not the agent's; the session plays on."));
 });
 
 /** One certificate for both HTTPS tests. Two with the same subject and serial can be mixed up when
