@@ -236,6 +236,8 @@ export class Failed extends Error {
   readonly code: string;
   readonly hint?: string;
   readonly next?: string;
+  /** The server's error message as it wrote it, when it sent one. */
+  said?: string;
   constructor(message: string, code = "failed", hint?: string, next?: string) {
     super(message);
     this.code = code;
@@ -257,14 +259,15 @@ const PAGE_LIMIT = 100;
 const CONTACT_PAGES = 100;
 
 /**
- * GET path; the body's text and its JSON, or Failed with what to print. The text mode (the answer's
- * text_mode, else its Flow-Text header) is `textMode`, put in the body as text_mode when only the header said it.
+ * GET path (or POST it with no body); the body's text and its JSON ({} for a 204), or Failed with what
+ * to print. The text mode (the answer's text_mode, else its Flow-Text header) is `textMode`, put in
+ * the body as text_mode when only the header said it.
  */
-export async function get(name: string, where: Access, path: string): Promise<{ text: string; body: Record<string, unknown>; textMode?: string }> {
+export async function get(name: string, where: Access, path: string, method: "GET" | "POST" = "GET"): Promise<{ text: string; body: Record<string, unknown>; textMode?: string }> {
   const { cloud, key } = where;
   let answer;
   try {
-    answer = await cloudCall(`${cloud}${path}`, { headers: { authorization: `Bearer ${key.value}`, accept: "application/json" }, timeoutMs: 30_000 }, where.waits);
+    answer = await cloudCall(`${cloud}${path}`, { method, headers: { authorization: `Bearer ${key.value}`, accept: "application/json" }, timeoutMs: 30_000 }, where.waits);
   } catch (error) {
     if (error instanceof NetworkError) throw new Failed(`${name}: ${error.message}.`, "network");
     throw error;
@@ -278,13 +281,15 @@ export async function get(name: string, where: Access, path: string): Promise<{ 
     const again = answer.retryAfter !== undefined ? ` Try again in ${answer.retryAfter} s.` : "";
     const said = text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
     const code = (error && typeof error === "object" && error.code) || (status === 404 ? "not_found" : `http_${status}`);
-    const keyLines = keyRefused(status, error?.code) ? `\n${keyHelp(name, key, { status, code: error?.code })}` : "";
+    const keyLines = keyRefused(status, error?.code) ? `\n${keyHelp(name, key, { status, code: error?.code, hint: error?.hint })}` : "";
     const failed = error && typeof error === "object" && error.message
       ? new Failed(`${name}: ${error.message}${error.code ? ` (${error.code}, ${status})` : ` (${status})`}${again}${error.hint ? `\n${error.hint}` : ""}${keyLines}`, code, error.hint)
       : new Failed(`${name}: ${cloud} answered ${status}${said ? `: ${said}` : ""}${status === 404 ? " (this Flow may not have this command's route yet)" : ""}.${keyLines}`, code);
     failed.status = status;
+    if (error && typeof error === "object" && error.message) failed.said = error.message;
     throw failed;
   }
+  if (status === 204) return { text: "", body: {} };
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Failed(`${name}: ${cloud} answered ${status} with something that is not JSON.`, "bad_answer");
   const said = (body as { text_mode?: unknown }).text_mode;
   const textMode = typeof said === "string" && said ? said : answer.textMode;
@@ -706,7 +711,8 @@ async function insightsGet(name: string, where: Access, path: string, finding: b
     return await get(name, where, path);
   } catch (error) {
     if (!(error instanceof Failed)) throw error;
-    const words = error.status === 403 && error.code === "scope"
+    // A live key refused for a scope is the right key without that grant: its own message (Flow's hint, the grant) stands.
+    const words = error.status === 403 && error.code === "scope" && where.key.kind !== "live_key"
       ? `Insights reads production conversations, so it needs a live key: ${SETUP_LIVE} writes the live key FLOW_LIVE_KEY, which Insights then reads with (flow setup writes only a test key, flow_test_).`
       // Both routes answer not_found until Insights is open to the workspace; a finding's also for one not the agent's.
       : error.code === "not_found" && !finding ? "Insights is not open to this workspace yet." : undefined;

@@ -47,6 +47,22 @@ function killable(db: Database): Database & { kill(): void } {
   return { ...on(db), transaction: (work) => (guard(), db.transaction((tx) => work(on(tx)))), kill: () => (dead = true) };
 }
 
+// Node 22 (Flow's hosting) warns once a process when node:sqlite loads: two DEFAULT log lines per start. A later Node does not, so its load is scripted here.
+test("opening SQLite drops Node's experimental-feature warning for it, and only that one", async (t) => {
+  const printed: unknown[] = [];
+  const shown = t.mock.method(process, "emitWarning", (warning: unknown) => void printed.push(warning));
+  const real = process.getBuiltinModule("node:sqlite");
+  t.mock.method(process, "getBuiltinModule", () => {
+    process.emitWarning("SQLite is an experimental feature and might change at any time", "ExperimentalWarning");
+    process.emitWarning("something else", "Warning");
+    return real;
+  });
+  const db = sqlite();
+  assert.equal((await db.query("SELECT 1 AS one"))[0]?.one, 1);
+  assert.deepEqual(printed, ["something else"]);
+  assert.equal(process.emitWarning, shown, "put back as it was");
+});
+
 test("while a deploy runs the old and new runner side by side, each message is answered once, and the new runner carries on the conversation", async () => {
   const path = file();
   const old = multi({ channels: CHANNELS, database: sqlite(path) });

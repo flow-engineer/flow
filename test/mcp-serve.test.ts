@@ -28,7 +28,7 @@ async function fakeCloud(answer: (req: IncomingMessage) => { status: number; bod
 /** `flow mcp serve` in an agent folder whose .env points at the cloud (and has `more` lines), with a connected client. */
 async function serve(cloud: string, more = "") {
   const dir = mkdtempSync(join(tmpdir(), "flow-mcp-serve-"));
-  writeFileSync(join(dir, ".env"), `FLOW_KEY=${KEY}\nFLOW_FRAMEWORK_CLOUD=${cloud}\n${more}`);
+  writeFileSync(join(dir, ".env"), `FLOW_KEY=${KEY}\nFLOW_FRAMEWORK_CLOUD_KEY=oci_ci_secretvalue\nFLOW_FRAMEWORK_CLOUD=${cloud}\n${more}`);
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(process.env)) if (value !== undefined && !/^(FLOW_|CHINWAG_)/.test(name)) env[name] = value;
   const client = new Client({ name: "test", version: "1" });
@@ -49,6 +49,25 @@ test("flow mcp serve lists its tools, every one read-only, and says what it is f
   }
 });
 
+test("the instructions and every Flow-key tool's description say the live key's three tiers in flow.engineer's words", async () => {
+  const tiers = [
+    "Fine by default, granted at once: de-identified reads, Insights, tests, traces, the model.",
+    "Only when the user asked for it: raw message text (npx @flow-engineer/flow keys grant content).",
+    "Only with the user's explicit yes: messaging customers and deploying live (npx @flow-engineer/flow keys grant send | deploy); the owner confirms once in the browser.",
+  ];
+  const client = await serve("http://127.0.0.1:9");
+  try {
+    const { tools } = await client.listTools();
+    const flowKeyTools = tools.filter((t) => !/^(read_logs|deploy_status)$/.test(t.name));
+    assert.equal(flowKeyTools.length, 6);
+    for (const text of [client.getInstructions() ?? "", ...flowKeyTools.map((t) => t.description!)]) {
+      for (const tier of tiers) assert.ok(text.includes(tier), `${text.slice(0, 40)}: ${tier}`);
+    }
+  } finally {
+    await client.close();
+  }
+});
+
 test("list_conversations reads the cloud with FLOW_KEY and returns the conversations as structured data", async () => {
   const conversation = { id: "cnv_1", environment: "staging", channel: "whatsapp", contact: "Contact 0100", messages: 4, grades: { good: 1, unhelpful: 0, wrong: 2, not_graded: 1 } };
   const cloud = await fakeCloud(() => ({ status: 200, body: { conversations: [conversation], next_cursor: null } }));
@@ -59,6 +78,31 @@ test("list_conversations reads the cloud with FLOW_KEY and returns the conversat
     assert.deepEqual(result.structuredContent, { conversations: [conversation], next_cursor: null });
     assert.match((result.content as Array<{ text: string }>)[0]!.text, /^1 conversation, 2 replies graded wrong\./);
     assert.deepEqual(cloud.seen, [{ url: "/v1/agent/conversations?environment=staging&grade=wrong&limit=20", authorization: `Bearer ${KEY}` }]);
+  } finally {
+    await client.close();
+    await cloud.close();
+  }
+});
+
+test("read_logs follows the cursor until it stops moving and keeps the newest lines under its limit", async () => {
+  const line = (n: number) => ({ time: `2026-11-04T09:00:0${n}Z`, severity: "INFO", text: `line ${n}` });
+  // Page 1 (no after), page 2 (after c1), then the host answers its last cursor again: the end.
+  const pages: Record<string, { lines: unknown[]; next: string | null }> = { "": { lines: [line(1), line(2)], next: "c1" }, c1: { lines: [line(3), line(4)], next: "c2" }, c2: { lines: [line(4)], next: "c2" } };
+  // As observe's logs route: a limit outside 1 to 500 is refused (0.16.0's release candidate asked for 1000).
+  const cloud = await fakeCloud((req) => {
+    const asked = new URL(req.url!, "http://x").searchParams;
+    const limit = Number(asked.get("limit") ?? 500);
+    if (!(limit >= 1 && limit <= 500)) return { status: 400, body: { error: { code: "invalid_request", message: "limit must be 1 to 500" } } };
+    return { status: 200, body: pages[asked.get("after") ?? ""] };
+  });
+  const client = await serve(cloud.url);
+  try {
+    const result = await client.callTool({ name: "read_logs", arguments: { limit: 3 } });
+    assert.equal(result.isError, undefined, JSON.stringify(result.structuredContent));
+    const data = result.structuredContent as { lines: Array<{ text: string }>; truncated: boolean };
+    assert.deepEqual(data.lines.map((l) => l.text), ["line 2", "line 3", "line 4"]);
+    assert.equal(data.truncated, true);
+    assert.equal(cloud.seen.length, 3);
   } finally {
     await client.close();
     await cloud.close();

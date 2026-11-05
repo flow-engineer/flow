@@ -44,7 +44,7 @@ const TSCONFIG = {
     skipLibCheck: true,
     types: ["node"],
   },
-  include: ["src"],
+  include: ["src", "tests"],
 };
 
 const ENV_EXAMPLE = `# The model key. The first line with a value is the one used. npx @flow-engineer/flow setup writes
@@ -64,9 +64,10 @@ FLOW_KEY=
 # Optional. The model id for that provider; empty is that provider's default.
 # MODEL=
 
-# The test cloud (npx @flow-engineer/flow test --synthetic) and traces. Sign in at https://flow.engineer/observe,
-# add the agent, and on its Developers page make a CI key (oci_..., shown once); the trace key is
-# from the same site.
+# The test cloud (npx @flow-engineer/flow test --synthetic) and traces. npx @flow-engineer/flow setup
+# writes both keys; or sign in at https://flow.engineer/dashboard, open the agent, and on its
+# Developers page make a CI key (oci_..., shown once); the trace key is from the same page. The two
+# addresses below are the cloud's API, not pages to open.
 FLOW_FRAMEWORK_CLOUD=https://flow.engineer/observe
 FLOW_FRAMEWORK_CLOUD_KEY=
 FLOW_FRAMEWORK_TRACES_URL=https://flow.engineer/observe
@@ -111,7 +112,7 @@ MCP server and a CLI. It starts as the café example; replace the café with the
   (\`npx @flow-engineer/flow --help\`).
 - The guide for coding agents, with exit codes and next steps: https://github.com/flow-engineer/flow/blob/main/docs/agents.md
 - \`npm run mcp\` serves the same tools as an MCP server (src/mcp.ts) and \`npm run cli -- --help\` is
-  its command line (src/cli.ts). \`npx flow check\` checks the tools and the CLI file for both.
+  its command line (src/cli.ts). \`npx @flow-engineer/flow check\` checks the tools and the CLI file for both.
 `;
 
 /** The longest display name: the join message carries it (flow.engineer's /try cuts it there too). */
@@ -205,10 +206,13 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
   for (const part of ["agent", "src", "tests"]) cpSync(join(cafe, part), join(dir, part), { recursive: true });
   renameInPrompt(dir, [TEMPLATE_NAME], displayName);
 
-  for (const file of readdirSync(join(dir, "src"), { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts"))) {
-    const path = join(dir, "src", file);
+  // The code, and the tests' fakes (tests/tools/*.fake.ts), import Flow Framework by its public entries.
+  const code = ["src", "tests"].flatMap((part) => readdirSync(join(dir, part), { recursive: true, encoding: "utf8" }).filter((f) => f.endsWith(".ts")).map((f) => join(part, f)));
+  for (const file of code) {
+    const path = join(dir, file);
     const source = readFileSync(path, "utf8")
       .replace(/(["'])(\.\.\/)+src\/index\.ts\1/g, '"@flow-engineer/flow"')
+      .replace(/(["'])(\.\.\/)+testing\/src\/index\.ts\1/g, '"@flow-engineer/flow/testing"')
       .replace(/(["'])(\.\.\/)+simulators\/src\/index\.ts\1/g, '"@flow-engineer/flow/simulators"')
       .replace(/(["'])(\.\.\/)+flow-messaging\/src\/index\.ts\1/g, '"@flow-engineer/flow/flow-messaging"')
       .replace(/(["'])(\.\.\/)+mcp\/src\/index\.ts\1/g, '"@flow-engineer/flow/mcp"')
@@ -233,7 +237,8 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
     engines: own.engines,
     scripts: { start: "node --env-file-if-exists=.env src/main.ts", mcp: "node --env-file-if-exists=.env src/mcp.ts", cli: "node --env-file-if-exists=.env src/cli.ts", test: "flow test", typecheck: "tsc --noEmit" },
     // The café serves its tools over MCP (src/mcp.ts) and as a CLI (src/cli.ts): their SDKs, pinned as Flow Framework pins them.
-    dependencies: { "@flow-engineer/flow": `^${own.version}`, ...peers },
+    // Flow Framework pinned exactly, as the docs say for production: an upgrade is a change you make and test.
+    dependencies: { "@flow-engineer/flow": own.version, ...peers },
     devDependencies: { "@types/node": own.devDependencies["@types/node"], typescript: own.devDependencies.typescript, esbuild },
   };
   writeFileSync(join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);

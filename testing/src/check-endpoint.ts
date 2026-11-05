@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { WHATSAPP, z } from "../../src/index.ts";
 import { setting } from "../../src/traces.ts";
+import { failureDocument } from "./cloud-call.ts";
 import { checkReply, postMessage, TurnError, type HttpAgentRequest } from "./http-agent.ts";
 import { packageRoot } from "./new.ts";
 
@@ -144,30 +145,26 @@ export async function checkEndpointCli(args: string[], env: Record<string, strin
   try {
     parsed = parseArgs({ args, allowPositionals: true, options: { "token-env": { type: "string" }, "agent-timeout": { type: "string", default: "60" }, json: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false } } });
   } catch (error) {
-    printError(`${(error as Error).message}\n\n${USAGE}`);
-    return 1;
+    return refuse(args.includes("--json"), "usage", (error as Error).message, `\n\n${USAGE}`);
   }
   const { values, positionals } = parsed;
   if (values.help) {
     print(USAGE);
     return 0;
   }
+  // With --json every refusal is also one { ok: false, error, next } document on stdout.
+  function refuse(json: boolean, code: string, message: string, more = ""): number {
+    if (json) print(failureDocument(code, message).trimEnd());
+    printError(`${message}${more}`);
+    return 1;
+  }
   const url = positionals.length === 1 ? positionals[0]! : "";
-  if (!/^https?:\/\/[^/]/.test(url) || !URL.canParse(url)) {
-    printError(`check-endpoint takes one http:// or https:// URL, such as http://localhost:3000/flow.\n\n${USAGE}`);
-    return 1;
-  }
+  if (!/^https?:\/\/[^/]/.test(url) || !URL.canParse(url)) return refuse(values.json, "usage", "check-endpoint takes one http:// or https:// URL, such as http://localhost:3000/flow.", `\n\n${USAGE}`);
   const timeout = Number(values["agent-timeout"]);
-  if (!(timeout > 0)) {
-    printError("--agent-timeout must be a number of seconds above 0.");
-    return 1;
-  }
+  if (!(timeout > 0)) return refuse(values.json, "usage", "--agent-timeout must be a number of seconds above 0.");
   const tokenEnv = values["token-env"];
   const token = (tokenEnv ? env[tokenEnv] : setting("AGENT_TOKEN", env)) || undefined;
-  if (tokenEnv && !token) {
-    printError(`${tokenEnv} is not set.`);
-    return 1;
-  }
+  if (tokenEnv && !token) return refuse(values.json, "no_token", `${tokenEnv} is not set.`);
   const results = await checkEndpoint({ url, token, timeoutMs: timeout * 1000 });
   const passed = results.filter((r) => r.pass).length;
   if (values.json) print(JSON.stringify({ url, passed: passed === results.length, cases: results }, null, 2));

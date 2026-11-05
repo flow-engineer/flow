@@ -1,4 +1,4 @@
-// covers: testing/src/account.ts testing/src/flow-login.ts testing/src/cli.ts
+// covers: testing/src/account.ts testing/src/flow-login.ts testing/src/cli.ts testing/src/deploy.ts
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer, type IncomingMessage } from "node:http";
@@ -22,15 +22,17 @@ const CONTENT_LINES = "# The test traces key sends message text to the Staging d
 const setupCall = (flow: { seen: Seen[] }) => flow.seen.filter((r) => r.path === "/cli/setup").at(-1)!;
 
 interface Seen { method: string; path: string; auth?: string; accept?: string; body: Record<string, unknown> }
+interface Given { status: number; body: Record<string, unknown> }
 
 /**
  * A flow.engineer as its CLI sign-in contract has it, that answers /cli/token from `tokenAnswers`
  * in turn (or from the function: null holds the request unanswered), /cli/setup with `setupStatus`
  * (a 502 carries what worked, as the real one does) and `options.setup` merged into its 200, the
  * try page (as JSON, with its direct link) as open for `options.tryOpen` (default Telegram), the model API's
- * GET /credit with `options.credit` (default 404), any signed-in route in `options.answers` by its path as given, and records every request.
+ * GET /credit with `options.credit` (default 404), any signed-in route in `options.answers` by its path as given
+ * (a list answers in turn, its last one again and again), and records every request.
  */
-async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = [], setupStatus = 200, options: { setup?: Record<string, unknown>; tryOpen?: string[]; setupError?: { status: number; body: Record<string, unknown>; headers?: Record<string, string> }; credit?: { status: number; body: Record<string, unknown> }; deviceBusyOnce?: boolean; answers?: Record<string, { status: number; body: Record<string, unknown> }> } = {}) {
+async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = [], setupStatus = 200, options: { setup?: Record<string, unknown>; tryOpen?: string[]; setupError?: { status: number; body: Record<string, unknown>; headers?: Record<string, string> }; credit?: { status: number; body: Record<string, unknown> }; deviceBusyOnce?: boolean; answers?: Record<string, Given | Given[]> } = {}) {
   const seen: Seen[] = [];
   const read = (req: IncomingMessage) => new Promise<string>((done) => { let b = ""; req.on("data", (c) => { b += c; }); req.on("end", () => done(b)); });
   const server = createServer(async (req, res) => {
@@ -65,7 +67,8 @@ async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => 
       return a ? send(a.access_token ? 200 : 400, a) : undefined;
     }
     if (!bearer) return send(401, { error: "invalid_token", error_description: "Sign in again.", next: "npx @flow-engineer/flow login" });
-    const given = options.answers?.[req.url!];
+    const listed = options.answers?.[req.url!];
+    const given = Array.isArray(listed) ? (listed.length > 1 ? listed.shift() : listed[0]) : listed;
     if (given) return send(given.status, given.body);
     if (req.url === "/cli/whoami") return send(200, { email: "dev@example.com", account: "uid_1" });
     if (req.url === "/cli/revoke") return send(200, {});
@@ -262,7 +265,7 @@ test("whoami uses FLOW_FRAMEWORK_TOKEN over the file, and without either says to
   const config = temp();
   const none = await run(["whoami", "--json"], { url: flow.url, config, cwd: temp() });
   assert.equal(none.code, 1);
-  assert.deepEqual(none.lines[0], { error: { code: "not_signed_in", message: "Not signed in to flow.engineer.", next: "npx @flow-engineer/flow login" } });
+  assert.deepEqual(none.lines[0], { ok: false, error: { code: "not_signed_in", message: "Not signed in to flow.engineer.", next: "npx @flow-engineer/flow login" }, next: "npx @flow-engineer/flow login" });
   const result = await run(["whoami", "--json"], { url: flow.url, config, cwd: temp(), env: { FLOW_FRAMEWORK_TOKEN: "fcli_from_env" } });
   assert.equal(result.code, 0, result.err);
   assert.deepEqual(result.lines[0], { email: "dev@example.com", account: "uid_1" });
@@ -375,7 +378,7 @@ test("link in a folder set up already needs no sign-in: it prints the server's t
   writeFileSync(join(cwd, ".env"), `FLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_MESSAGING_WHATSAPP_SENDER=snd_wa\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\n`);
   const refused = await run(["link", "--channel", "whatsapp", "--json"], { url: nothing.url, config: temp(), cwd });
   assert.equal(refused.code, 3, "with no channel open at all it is still a refusal");
-  assert.deepEqual(refused.lines[0], { error: { code: "channel_not_open", message: "WhatsApp is not open on the sandbox yet.", next: "npx @flow-engineer/flow link --channel telegram" } });
+  assert.deepEqual(refused.lines[0], { ok: false, error: { code: "channel_not_open", message: "WhatsApp is not open on the sandbox yet.", next: "npx @flow-engineer/flow link --channel telegram" }, next: "npx @flow-engineer/flow link --channel telegram" });
   assert.equal((await run(["link", "--channel", "sms"], { url: flow.url, config: temp(), cwd })).code, 1, "an unknown channel is a usage error");
 });
 
@@ -405,7 +408,7 @@ test("link goes on when only observe's part of setup failed: the phone link, the
   assert.equal(result.code, 0, result.err);
   assert.equal(result.err.split("\n").filter((l) => l === warning).length, 1, "one warning line, with the server's own fix");
   assert.match(result.out, /^https:\/\/wa\.me\/15550100001\?text=/m, "the phone link");
-  assert.match(result.out, /^WhatsApp free trial: 3 of 300 messages used$/m);
+  assert.match(result.out, /^WhatsApp \(your account's free trial, across all its agents\): 3 of 300 messages used$/m);
   assert.match(result.out, /^Next: .*npm start, then send the link above\.$/m);
   assert.match(result.out, /that phone chats with this agent/, "FLOW_KEY came with Messaging's part, so the agent answers");
   assert.doesNotMatch(result.out + result.err, /undefined/);
@@ -597,15 +600,26 @@ test("setup saves each open channel's sender and prints its link; link --channel
   const dotenv = readFileSync(join(cwd, ".env"), "utf8");
   assert.match(dotenv, /^FLOW_MESSAGING_WHATSAPP_SENDER=snd_wa$/m);
   assert.match(dotenv, /^FLOW_MESSAGING_IMESSAGE_SENDER=snd_im$/m);
-  assert.equal(set.lines[0]!.imessage_link, channels.imessage_link);
+  // flow.engineer names the agent by its package name ("my agent" here); every link setup prints
+  // names it as people call it (package.json's displayName, "cafe"), as join_message does.
+  assert.equal(set.lines[0]!.imessage_link, "sms:+15550100002?&body=Join%20cafe%20%28ref%20brave-otter-1%29");
+  assert.equal(set.lines[0]!.whatsapp_link, "https://wa.me/15550100001?text=Join%20cafe%20%28ref%20brave-otter-1%29");
   assert.equal(set.lines[0]!.try_urls.imessage, `${flow.url}/try/brave-otter-1?c=imessage&n=cafe`);
   assert.equal(set.lines[0]!.direct_links.imessage, "sms:+15550100002?&body=Join%20cafe%20%28ref%20brave-otter-1%29", "the iMessage link itself, named");
   assert.equal(set.lines[0]!.join_message, "Join cafe (ref brave-otter-1)");
-  assert.deepEqual(set.lines[0]!.trial, channels.trial);
-  assert.match(set.err, /^On WhatsApp: https:\/\/wa\.me\/15550100001\?text=Join%20cafe%20%28ref%20brave-otter-1%29 \(on a computer: .*\?c=whatsapp&n=cafe\) \(free trial: 12 of 300 messages used\)$/m);
-  assert.match(set.err, /^On iMessage: sms:\+15550100002\?&body=Join%20cafe%20%28ref%20brave-otter-1%29 \(on a computer: .*\?c=imessage&n=cafe\) \(free trial: 0 of 100 messages used\)$/m);
+  assert.deepEqual(set.lines[0]!.account_trial, channels.trial, "the account's counts, under a name that says so");
+  assert.deepEqual(set.lines[0]!.trial, channels.trial, "the older name, kept for a release");
+  assert.match(set.err, /^On WhatsApp: https:\/\/wa\.me\/15550100001\?text=Join%20cafe%20%28ref%20brave-otter-1%29 \(on a computer: .*\?c=whatsapp&n=cafe\) \(your account's free trial, across all its agents: 12 of 300 messages used\)$/m);
+  assert.match(set.err, /^On iMessage: sms:\+15550100002\?&body=Join%20cafe%20%28ref%20brave-otter-1%29 \(on a computer: .*\?c=imessage&n=cafe\) \(your account's free trial, across all its agents: 0 of 100 messages used\)$/m);
+  // A try page that gives no direct link: the answer's own links, renamed.
+  const pageless = await flowServer([], 200, { setup: { ...channels, try_urls: undefined }, tryOpen: ["telegram"] });
+  t.after(pageless.close);
+  const renamed = await run(["setup", "--json"], { url: pageless.url, config: temp(), cwd: agentDir(), env });
+  assert.equal(renamed.code, 0, renamed.err);
+  assert.equal(renamed.lines[0]!.whatsapp_link, "https://wa.me/15550100001?text=Join%20cafe%20%28ref%20brave-otter-1%29");
+  assert.equal(renamed.lines[0]!.imessage_link, "sms:+15550100002?&body=Join%20cafe%20%28ref%20brave-otter-1%29");
 
-  const imessage = await run(["link", "--channel", "imessage", "--json"], { url: flow.url, config: temp(), cwd });
+  const imessage =await run(["link", "--channel", "imessage", "--json"], { url: flow.url, config: temp(), cwd });
   assert.equal(imessage.code, 0, imessage.err);
   assert.equal(imessage.lines[0]!.reply_only, true);
   assert.match(imessage.lines[0]!.say_to_person, /can reply after you write to it first, any time later/);
@@ -663,7 +677,9 @@ test("a setup the server asks to wait on (429 slow_down) prints the wait and nex
   const result = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
   assert.equal(result.code, 4, result.err);
   assert.deepEqual(result.lines.at(-1), {
+    ok: false,
     error: { code: "slow_down", message: "/cli/setup answered 429 slow_down: Too many setups from this account. Wait 30 s before trying again.", next: "npx @flow-engineer/flow setup", retry_after: 30 },
+    next: "npx @flow-engineer/flow setup",
     warnings: ["Setup was run 6 times in a minute."],
   });
   assert.match(result.err, /^Setup was run 6 times in a minute\.$/m);
@@ -707,13 +723,13 @@ test("setup prints each of the server's warnings on stderr (at most 20, strings 
   assert.deepEqual(result.lines[0]!.trial.imessage.contacts, { limit: 2, used: 1 });
   for (const w of warnings.slice(0, 20)) assert.ok(result.err.split("\n").includes(w), w);
   assert.ok(!result.err.includes("Warning 21."));
-  assert.match(result.err, /^iMessage: 1 of 2 people$/m);
+  assert.match(result.err, /^iMessage \(your account's free trial, across all its agents\): 1 of 2 people$/m);
 
   const human = await run(["setup"], { url: flow.url, config: temp(), cwd: agentDir(), env });
   assert.equal(human.code, 0, human.err);
   assert.match(human.err, /^Warning 1\.$/m, "warnings go to stderr");
   assert.ok(!human.out.includes("Warning 1."));
-  assert.match(human.out, /^iMessage: 1 of 2 people$/m);
+  assert.match(human.out, /^iMessage \(your account's free trial, across all its agents\): 1 of 2 people$/m);
 
   const none = await flowServer();
   t.after(none.close);
@@ -878,12 +894,12 @@ test("status says what the folder has and lacks, never a key's value; signed in,
   assert.equal(out.lines[0]!.signed_in, false);
   assert.deepEqual(out.lines[0]!.model_key, { set: true, env: "OPENROUTER_API_KEY", flow_credit: null });
   assert.deepEqual(out.lines[0]!.flow_key, { set: false });
-  assert.deepEqual(out.lines[0]!.channels.whatsapp, { sender: false, open: null, trial: null });
+  assert.deepEqual(out.lines[0]!.channels.whatsapp, { sender: false, open: null, account_trial: null, trial: null });
 
   const signed = await run(["status", "--json"], { url: flow.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
   assert.equal(signed.code, 0, signed.err);
   assert.deepEqual(signed.lines[0]!.signed_in, { email: "dev@example.com", account: "uid_1" });
-  assert.deepEqual(signed.lines[0]!.channels.whatsapp, { sender: false, open: true, trial: { limit: 300, used: 12 } });
+  assert.deepEqual(signed.lines[0]!.channels.whatsapp, { sender: false, open: true, account_trial: { limit: 300, used: 12 }, trial: { limit: 300, used: 12 } });
   assert.equal(signed.lines[0]!.channels.imessage.open, false);
   assert.deepEqual(signed.lines[0]!.next, ["npm start", "npx @flow-engineer/flow link --channel whatsapp"]);
   const asked = flow.seen.find((r) => r.path === "/cli/setup")!;
@@ -895,6 +911,23 @@ test("status says what the folder has and lacks, never a key's value; signed in,
   assert.equal(human.code, 0, human.err);
   assert.ok(human.out.split("\n").includes(NO_KEY));
   assert.match(human.out, /^Next: run npx @flow-engineer\/flow setup to get Flow's free trial credit, or add your own key, then npx @flow-engineer\/flow link$/m);
+});
+
+test("status in a folder that has deployed names the hosted agent, not npm start and a first deploy", async (t) => {
+  const flow = await flowServer();
+  t.after(flow.close);
+  const cwd = agentDir();
+  writeFileSync(join(cwd, ".env"), `OPENROUTER_API_KEY=${OWN}\n`);
+  mkdirSync(join(cwd, ".flow"));
+  writeFileSync(join(cwd, ".flow", "deploys.json"), JSON.stringify({ staging: { id: "hdp_1" } }));
+
+  const out = await run(["status", "--json"], { url: flow.url, config: temp(), cwd });
+  assert.equal(out.code, 0, out.err);
+  assert.deepEqual(out.lines[0]!.deployed, ["staging"]);
+  assert.ok(!(out.lines[0]!.next as string[]).includes("npm start"));
+  const human = await run(["status"], { url: flow.url, config: temp(), cwd });
+  assert.match(human.out, /^Deployed from this folder to staging: npx @flow-engineer\/flow deploy status shows what is live\.$/m);
+  assert.doesNotMatch(human.out, /To keep it answering while this machine sleeps/);
 });
 
 test("status with FLOW_KEY the model's key asks Flow's GET /credit for what is left; a key Flow does not know gets --rotate key, and Flow not reachable never fails status", async (t) => {
@@ -978,8 +1011,8 @@ test("link --channel whatsapp writes WhatsApp's page as FLOW_FRAMEWORK_TRY_URL a
   const result = await run(["link", "--channel", "whatsapp"], { url: signed.url, config: temp(), cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
   assert.equal(result.code, 0, result.err);
   assert.ok(readFileSync(join(cwd, ".env"), "utf8").split("\n").includes(`FLOW_FRAMEWORK_TRY_URL=${signed.url}/try/brave-otter-1?c=whatsapp&from=setup`), "the server's page for the chosen channel");
-  assert.match(result.out, /^WhatsApp free trial: 3 of 300 messages used$/m);
-  assert.ok(!/iMessage: 1 of 2 people/.test(result.out), "no other channel's trial line");
+  assert.match(result.out, /^WhatsApp \(your account's free trial, across all its agents\): 3 of 300 messages used$/m);
+  assert.ok(!/1 of 2 people/.test(result.out), "no other channel's trial line");
   assert.match(result.out, /^Next: .*npm start, then send the link above\.$/m);
 
   // Without the server's try_urls, the page is built for the chosen channel the same way.
@@ -987,8 +1020,8 @@ test("link --channel whatsapp writes WhatsApp's page as FLOW_FRAMEWORK_TRY_URL a
   const plain = await run(["link", "--channel", "imessage"], { url: flow.url, config: temp(), cwd: built, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
   assert.equal(plain.code, 0, plain.err);
   assert.match(readFileSync(join(built, ".env"), "utf8"), /^FLOW_FRAMEWORK_TRY_URL=\S+\/try\/brave-otter-1\?c=imessage$/m);
-  assert.match(plain.out, /^iMessage free trial: 3 of 100 messages used$/m);
-  assert.match(plain.out, /^iMessage: 1 of 2 people$/m, "iMessage's own people count, on iMessage's link");
+  assert.match(plain.out, /^iMessage \(your account's free trial, across all its agents\): 3 of 100 messages used$/m);
+  assert.match(plain.out, /^iMessage \(your account's free trial, across all its agents\): 1 of 2 people$/m, "iMessage's own people count, on iMessage's link");
 });
 
 test("a trial answer with held counts people (Flow Messaging since Oct 2026): setup, link and status say who waits for a place, with no messages line", async (t) => {
@@ -999,17 +1032,17 @@ test("a trial answer with held counts people (Flow Messaging since Oct 2026): se
   const cwd = agentDir();
   const set = await run(["setup"], { url: flow.url, config: temp(), cwd, env });
   assert.equal(set.code, 0, set.err);
-  assert.match(set.out, /^On Telegram: .* \(free trial: 25 of 25 people, 2 waiting for a place\)$/m);
-  assert.match(set.out, /^On WhatsApp: .* \(free trial: 3 of 25 people\)$/m);
+  assert.match(set.out, /^On Telegram: .* \(your account's free trial, across all its agents: 25 of 25 people, 2 waiting for a place\)$/m);
+  assert.match(set.out, /^On WhatsApp: .* \(your account's free trial, across all its agents: 3 of 25 people\)$/m);
   assert.ok(!/messages used|iMessage: \d+ of \d+ people/.test(set.out), set.out);
 
   const link = await run(["link", "--channel", "telegram"], { url: flow.url, config: temp(), cwd: agentDir(), env });
   assert.equal(link.code, 0, link.err);
-  assert.match(link.out, /^Telegram free trial: 25 of 25 people, 2 waiting for a place$/m);
+  assert.match(link.out, /^Telegram \(your account's free trial, across all its agents\): 25 of 25 people, 2 waiting for a place$/m);
 
   const status = await run(["status"], { url: flow.url, config: temp(), cwd, env });
   assert.equal(status.code, 0, status.err);
-  assert.match(status.out, /^iMessage: sender in \.env; open now \(free trial: 1 of 25 people\)$/m);
+  assert.match(status.out, /^iMessage: sender in \.env; open now \(your account's free trial, across all its agents: 1 of 25 people\)$/m);
   // A full trial names the plans and where the owner buys one, on each.
   for (const said of [set, link, status]) assert.ok(said.out.split("\n").includes(PLANS_FULL), said.out);
 });
@@ -1152,15 +1185,45 @@ test("setup --workspace refused (403 not_a_member, 409 workspace_ambiguous) show
 });
 
 const LIVE_KEY = "flow_live_FAKElive00_0000FAKE0000live0000R3ad";
-const LIVE_SCOPES = [...SCOPES, "read"];
-/** /cli/setup's answer to {live: true}: the live key and the workspace, nothing else. */
+/** A key setup --live makes: safe defaults, no messaging and no deploy. */
+const LIVE_SCOPES = ["traces", "cloud", "model", "read"];
+const GRANT = (name: string) => `npx @flow-engineer/flow keys grant ${name}`;
+/** The server's checklist for that key, in its fixed order. */
+const CHECKLIST = [
+  { capability: "read_conversations", label: "Read conversations (names and numbers hidden)", allowed: true, grant: null },
+  { capability: "read_raw_text", label: "Read raw message text", allowed: false, grant: GRANT("content") },
+  { capability: "read_insights", label: "Read Insights", allowed: true, grant: null },
+  { capability: "run_tests", label: "Run tests", allowed: true, grant: null },
+  { capability: "message_customers", label: "Message customers", allowed: false, grant: GRANT("send") },
+  { capability: "deploy_live", label: "Deploy live", allowed: false, grant: GRANT("deploy") },
+  { capability: "write_traces", label: "Write traces", allowed: true, grant: null },
+  { capability: "use_model", label: "Use Flow's model", allowed: true, grant: null },
+];
+const ADVISORY = {
+  default: "Fine by default, granted at once: de-identified reads, Insights, tests, traces, the model.",
+  ask_user: "Only when the user asked for it: raw message text (npx @flow-engineer/flow keys grant content).",
+  critical: "Only with the user's explicit yes: messaging customers and deploying live (npx @flow-engineer/flow keys grant send | deploy); the owner confirms once in the browser.",
+};
+/** The checklist as the CLI prints it: ✓/✗ in the server's order, the grant commands in one column. */
+const CHECKLIST_LINES = [
+  "  ✓ Read conversations (names and numbers hidden)",
+  `  ✗ Read raw message text  ${GRANT("content")}`,
+  "  ✓ Read Insights",
+  "  ✓ Run tests",
+  `  ✗ Message customers      ${GRANT("send")}`,
+  `  ✗ Deploy live            ${GRANT("deploy")}`,
+  "  ✓ Write traces",
+  "  ✓ Use Flow's model",
+];
+/** /cli/setup's answer to {live: true}: the live key, its checklist, the advisory and the workspace, nothing else. */
 const LIVE = {
-  flow_live_key: { env: "FLOW_LIVE_KEY", value: LIVE_KEY, kid: "FAKElive00", mode: "live", scopes: LIVE_SCOPES, content: false, text: "deidentified", expires_at: "2026-12-04T10:00:00Z", idle_days: 7 },
+  flow_live_key: { env: "FLOW_LIVE_KEY", value: LIVE_KEY, kid: "FAKElive00", mode: "live", scopes: LIVE_SCOPES, content: false, text: "deidentified", expires_at: "2026-12-04T10:00:00Z", idle_days: 7, checklist: CHECKLIST },
+  advisory: ADVISORY,
   workspace_id: "acc_team1", workspace_name: "Team", agent_id: "agt_obs1", flow_agent_id: "agt_1", account: { account: "uid_1", email: "dev@example.com" },
   minted: ["flow_live_key"], next: ["npx @flow-engineer/flow insights", "npx @flow-engineer/flow conversations --environment production"],
 };
 
-test("setup --live asks for the live key only, writes FLOW_LIVE_KEY over an older one at 0600, and prints its text mode, expiry, idle rule and revoke command, never its value; --json is one document", async (t) => {
+test("setup --live asks for the live key only, writes FLOW_LIVE_KEY over an older one at 0600, and prints its text mode, what it can do (✓/✗), expiry, idle rule, revoke command and the three advisory tiers, never its value; --json is one document", async (t) => {
   const flow = await flowServer([], 200, { setupError: { status: 200, body: LIVE } });
   t.after(flow.close);
   const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
@@ -1178,30 +1241,42 @@ test("setup --live asks for the live key only, writes FLOW_LIVE_KEY over an olde
     "  FLOW_LIVE_KEY=flow_live_…R3ad  replaced",
     "Workspace: Team (acc_team1)",
     "Text: de-identified (names, phones, emails, ids, addresses are placeholders)",
-    "It is the agent's live Flow key (messaging, traces, cloud, model, deploy, read): production reads (npx @flow-engineer/flow conversations --environment production, npx @flow-engineer/flow insights) use it.",
+    "What it can do:",
+    ...CHECKLIST_LINES,
+    "Production reads (npx @flow-engineer/flow conversations --environment production, npx @flow-engineer/flow insights) use it.",
     "It stops working at 2026-12-04T10:00:00Z, 30 days after it was made, or after 7 days unused: then run npx @flow-engineer/flow setup --live again.",
     "Revoke it: npx @flow-engineer/flow keys revoke FAKElive00",
+    ADVISORY.default,
+    ADVISORY.ask_user,
+    ADVISORY.critical,
     "Next: npx @flow-engineer/flow insights, then npx @flow-engineer/flow conversations --environment production",
     "",
   ].join("\n"));
   const json = await run(["setup", "--live", "--json"], { url: flow.url, config: temp(), cwd, env });
   assert.equal(json.code, 0, json.err);
   assert.equal(json.lines.length, 1, "one document");
-  assert.deepEqual(json.lines[0]!.flow_live_key, { env: "FLOW_LIVE_KEY", kid: "FAKElive00", mode: "live", scopes: LIVE_SCOPES, content: false, expires_at: "2026-12-04T10:00:00Z", idle_days: 7 });
+  assert.deepEqual(json.lines[0]!.flow_live_key, { env: "FLOW_LIVE_KEY", kid: "FAKElive00", mode: "live", scopes: LIVE_SCOPES, content: false, expires_at: "2026-12-04T10:00:00Z", idle_days: 7, checklist: CHECKLIST });
+  assert.deepEqual(json.lines[0]!.advisory, ADVISORY);
+  assert.deepEqual(json.lines[0]!.stopped, []);
   assert.equal(json.lines[0]!.text_mode, "deidentified");
   assert.equal(json.lines[0]!.revoke, "npx @flow-engineer/flow keys revoke FAKElive00");
   for (const r of [human, json]) assert.ok(!r.out.includes("0000FAKE0000live") && !r.err.includes("0000FAKE0000live"), "the key is never printed");
 });
 
-test("setup --live --rotate --content --workspace sends rotate [\"flow_live_key\"], content and the workspace, and says the earlier live keys stopped", async (t) => {
-  const flow = await flowServer([], 200, { setupError: { status: 200, body: { ...LIVE, flow_live_key: { ...LIVE.flow_live_key, content: true, text: "raw" } } } });
+test("setup --live names the earlier live keys the new one replaced (stopped) with no --rotate; --rotate --content --workspace still send rotate [\"flow_live_key\"], content and the workspace", async (t) => {
+  const flow = await flowServer([], 200, { setupError: { status: 200, body: { ...LIVE, stopped: ["FAKEold000"], flow_live_key: { ...LIVE.flow_live_key, content: true, text: "raw" } } } });
   t.after(flow.close);
-  const result = await run(["setup", "--live", "--rotate", "--content", "--workspace", "Team"], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  const plain = await run(["setup", "--live", "--json"], { url: flow.url, config: temp(), cwd: agentDir(), env });
+  assert.equal(plain.code, 0, plain.err);
+  assert.equal(setupCall(flow).body.rotate, false);
+  assert.deepEqual(plain.lines[0]!.stopped, ["FAKEold000"]);
+  assert.match(plain.err, /^It replaced the agent's earlier live key FAKEold000: it stopped working now\.$/m);
+  const result = await run(["setup", "--live", "--rotate", "--content", "--workspace", "Team"], { url: flow.url, config: temp(), cwd: agentDir(), env });
   assert.equal(result.code, 0, result.err);
   const { body } = setupCall(flow);
   assert.deepEqual([body.rotate, body.content, body.workspace], [["flow_live_key"], true, "Team"]);
   assert.match(result.out, /^Text: raw \(as people wrote it\)$/m);
-  assert.match(result.out, /^The agent's earlier live keys stopped working now\.$/m);
 });
 
 test("setup --live passes refusals through with their next step and writes nothing; a 502 exits 2; an older flow.engineer (no flow_live_key, or 400 to the rotate) is live_unsupported", async (t) => {
@@ -1240,27 +1315,78 @@ test("--content goes only with --live, and --live takes none of setup's other fl
   assert.ok(!flow.seen.some((r) => r.path === "/cli/setup"), "nothing asked of the server");
 });
 
-test("flow keys lists the account's keys, never a value, as a table or {keys}; keys revoke <kid> ends one; a malformed id is a usage error and an unknown one the server's refusal", async (t) => {
-  const keys = [
-    { kid: "FAKElive00", kind: "developer", mode: "live", scopes: LIVE_SCOPES, agent: "cafe", flow_agent_id: "agt_1", content: true, created_at: "2026-11-04T10:00:00Z", expires_at: "2026-12-04T10:00:00Z", last_used_at: null },
-    { kid: "FAKEkid000", kind: "developer", mode: "test", scopes: SCOPES, agent: "cafe", flow_agent_id: "agt_1", content: false, created_at: "2026-11-01T09:30:00Z", expires_at: null, last_used_at: "2026-11-04T08:00:00Z" },
-  ];
-  const flow = await flowServer([], 200, { answers: {
-    "/cli/keys": { status: 200, body: { keys } },
-    "/cli/keys/revoke": { status: 200, body: { kid: "FAKElive00", revoked: true, next: "npx @flow-engineer/flow setup --rotate" } },
-  } });
+/** GET /cli/keys's keys: the live one setup --live made, with a grant, and a test key. */
+const LISTED = [
+  { kid: "FAKElive00", kind: "developer", mode: "live", scopes: [...LIVE_SCOPES, "messaging"], agent: "cafe", flow_agent_id: "agt_1", environment: null, content: false, last4: "R3ad", created_at: "2026-11-04T10:00:00Z", expires_at: "2026-12-04T10:00:00Z", last_used_at: null,
+    checklist: CHECKLIST.map((c) => (c.capability === "message_customers" ? { ...c, allowed: true, grant: null } : c)), grants: [{ scope: "messaging", at: "2026-11-04T11:00:00Z", by: "dev@example.com" }] },
+  { kid: "FAKEkid000", kind: "developer", mode: "test", scopes: SCOPES, agent: "cafe", flow_agent_id: "agt_1", environment: null, content: false, last4: "9Zz1", created_at: "2026-11-01T09:30:00Z", expires_at: null, last_used_at: "2026-11-04T08:00:00Z", checklist: [], grants: [] },
+];
+
+test("flow keys (and keys list) lists the account's keys, never a value: id, agent, mode, last 4 and expiry as a table, or {keys}; a key id after list is a usage error", async (t) => {
+  const flow = await flowServer([], 200, { answers: { "/cli/keys": { status: 200, body: { keys: LISTED } } } });
   t.after(flow.close);
   const options = { url: flow.url, config: temp(), cwd: temp(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } };
-  const listed = await run(["keys"], options);
-  assert.equal(listed.code, 0, listed.err);
-  assert.equal(listed.out, [
-    "KID         AGENT  MODE  SCOPES                                    TEXT  EXPIRES           LAST USED",
-    "FAKElive00  cafe   live  messaging,traces,cloud,model,deploy,read  raw   2026-12-04 10:00  -",
-    "FAKEkid000  cafe   test  messaging,traces,cloud,model,deploy       -     -                 2026-11-04 08:00",
+  const table = [
+    "KID         AGENT  MODE  KEY    EXPIRES",
+    "FAKElive00  cafe   live  …R3ad  2026-12-04 10:00",
+    "FAKEkid000  cafe   test  …9Zz1  -",
+    "",
+  ].join("\n");
+  for (const args of [["keys"], ["keys", "list"]]) {
+    const listed = await run(args, options);
+    assert.equal(listed.code, 0, listed.err);
+    assert.equal(listed.out, table);
+  }
+  const json = await run(["keys", "list", "--json"], options);
+  assert.deepEqual(json.lines, [{ keys: LISTED, agent: null, all: true }]);
+  assert.equal(json.err, "", "--json prints the document alone, no table on stderr");
+  assert.equal((await run(["keys", "list", "FAKElive00"], options)).code, 1);
+});
+
+// 0.16.0's release candidate listed every agent's keys from an agent's folder (16 keys across 12 agents).
+test("flow keys list in an agent's folder lists that agent's keys (by the key in .env, else package.json's name); --agent names one, --all lists every one", async (t) => {
+  const bakery = { ...LISTED[1]!, kid: "FAKEbake00", agent: "bakery", flow_agent_id: "agt_2", last4: "B4k3" };
+  const flow = await flowServer([], 200, { answers: { "/cli/keys": { status: 200, body: { keys: [...LISTED, bakery] } } } });
+  t.after(flow.close);
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  const byKey = await run(["keys", "--json"], { url: flow.url, config: temp(), cwd: liveFolder(), env });
+  assert.deepEqual(byKey.lines, [{ keys: LISTED, agent: "cafe", all: false }]);
+  const byName = await run(["keys"], { url: flow.url, config: temp(), cwd: agentDir("bakery"), env });
+  assert.equal(byName.code, 0, byName.err);
+  assert.match(byName.out, /^KID {9}AGENT {3}MODE  KEY {4}EXPIRES\nFAKEbake00  bakery  test  …B4k3  -\n\n?1 of this account's 3 live keys: the ones of bakery\. Every agent's: npx @flow-engineer\/flow keys list --all\n$/);
+  const named = await run(["keys", "--agent", "bakery", "--json"], { url: flow.url, config: temp(), cwd: liveFolder(), env });
+  assert.deepEqual(named.lines[0]!.keys.map((k: { kid: string }) => k.kid), ["FAKEbake00"]);
+  const all = await run(["keys", "list", "--all", "--json"], { url: flow.url, config: temp(), cwd: liveFolder(), env });
+  assert.deepEqual(all.lines, [{ keys: [...LISTED, bakery], agent: null, all: true }]);
+  assert.equal((await run(["keys", "--all", "--agent", "cafe"], { url: flow.url, config: temp(), cwd: temp(), env })).code, 1);
+});
+
+test("flow keys show <kid> prints one key's ✓/✗ checklist in the server's order and its grants; a kid the list lacks is not_found (exit 3)", async (t) => {
+  const flow = await flowServer([], 200, { answers: { "/cli/keys": { status: 200, body: { keys: LISTED } } } });
+  t.after(flow.close);
+  const options = { url: flow.url, config: temp(), cwd: temp(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } };
+  const shown = await run(["keys", "show", "FAKElive00"], options);
+  assert.equal(shown.code, 0, shown.err);
+  assert.equal(shown.out, [
+    "FAKElive00  cafe  live  …R3ad  developer",
+    "Expires: 2026-12-04 10:00   Last used: -",
+    "What it can do:",
+    ...CHECKLIST_LINES.map((l) => (l.includes("Message customers") ? "  ✓ Message customers" : l)),
+    "Granted:",
+    "  messaging  2026-11-04 11:00  by dev@example.com",
     "",
   ].join("\n"));
-  const json = await run(["keys", "--json"], options);
-  assert.deepEqual(json.lines, [{ keys }]);
+  const json = await run(["keys", "show", "FAKElive00", "--json"], options);
+  assert.deepEqual(json.lines, [{ key: LISTED[0] }]);
+  const missing = await run(["keys", "show", "FAKEnone00", "--json"], options);
+  assert.equal(missing.code, 3);
+  assert.equal(missing.lines[0]!.error.code, "not_found");
+});
+
+test("flow keys revoke <kid> ends one; a malformed id is a usage error and an unknown one the server's refusal", async (t) => {
+  const flow = await flowServer([], 200, { answers: { "/cli/keys/revoke": { status: 200, body: { kid: "FAKElive00", revoked: true, next: "npx @flow-engineer/flow setup --live" } } } });
+  t.after(flow.close);
+  const options = { url: flow.url, config: temp(), cwd: temp(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } };
   const revoked = await run(["keys", "revoke", "FAKElive00", "--json"], options);
   assert.equal(revoked.code, 0, revoked.err);
   assert.deepEqual(revoked.lines, [{ kid: "FAKElive00", revoked: true }]);
@@ -1271,4 +1397,86 @@ test("flow keys lists the account's keys, never a value, as a table or {keys}; k
   const refused = await run(["keys", "revoke", "FAKElive00", "--json"], { ...options, url: unknown.url });
   assert.equal(refused.code, 3);
   assert.equal(refused.lines[0]!.error.code, "not_found");
+});
+
+/** An agent folder whose .env holds the live key, so keys grant knows its kid. */
+const liveFolder = () => {
+  const dir = agentDir();
+  writeFileSync(join(dir, ".env"), `FLOW_LIVE_KEY=${LIVE_KEY}\n`);
+  return dir;
+};
+
+test("keys grant <name> sends {kid, grant} for the FLOW_LIVE_KEY in .env (or --key), and a 200 prints the key's new checklist; with no live key and no --key it asks nothing (no_live_key, exit 1)", async (t) => {
+  const traces = CHECKLIST.map((c) => (c.capability === "read_raw_text" ? { ...c, label: "Read raw message text", allowed: true, grant: null } : c));
+  const flow = await flowServer([], 200, { answers: { "/cli/keys/grant": { status: 200, body: { granted: true, tier: "ask_user", advisory: ADVISORY, key: { kid: "FAKElive00", mode: "live", scopes: LIVE_SCOPES, checklist: traces } } } } });
+  t.after(flow.close);
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  const granted = await run(["keys", "grant", "content"], { url: flow.url, config: temp(), cwd: liveFolder(), env });
+  assert.equal(granted.code, 0, granted.err);
+  assert.deepEqual(flow.seen.filter((r) => r.path === "/cli/keys/grant").map((r) => [r.method, r.body]), [["POST", { kid: "FAKElive00", grant: "content" }]]);
+  assert.match(granted.out, /^Granted content to FAKElive00\.\nWhat it can do now:\n  ✓ Read conversations \(names and numbers hidden\)\n  ✓ Read raw message text\n/);
+  const other = await run(["keys", "grant", "tests", "--key", "FAKEkid000", "--json"], { url: flow.url, config: temp(), cwd: liveFolder(), env });
+  assert.equal(other.code, 0, other.err);
+  assert.equal(flow.seen.filter((r) => r.path === "/cli/keys/grant").at(-1)!.body.kid, "FAKEkid000");
+  assert.equal(other.lines.length, 1);
+  assert.deepEqual([other.lines[0]!.status, other.lines[0]!.granted, other.lines[0]!.advisory], ["granted", true, ADVISORY]);
+  const asked = flow.seen.length;
+  const none = await run(["keys", "grant", "read", "--json"], { url: flow.url, config: temp(), cwd: agentDir(), env });
+  assert.equal(none.code, 1);
+  assert.equal(none.lines[0]!.error.code, "no_live_key");
+  assert.equal(none.lines[0]!.error.next, "npx @flow-engineer/flow setup --live");
+  for (const args of [["keys", "grant", "everything"], ["keys", "grant"], ["keys", "grant", "read", "--key", "short"], ["keys", "show", "FAKElive00", "--wait"]]) {
+    assert.equal((await run(args, { url: flow.url, config: temp(), cwd: liveFolder(), env })).code, 1, args.join(" "));
+  }
+  assert.equal(flow.seen.length, asked, "nothing asked of the server");
+});
+
+test("keys grant send is critical: the 202's message, the critical tier and the approval page are printed (not opened with --no-browser) and it exits 4 with one --json document; nothing is polled", async (t) => {
+  const pending = { granted: false, status: "pending", tier: "critical", advisory: ADVISORY, grant_id: "kgr_1", approve_url: "https://flow.engineer/cli/keys/approve?g=kgr_1", expires_at: "2026-11-04T10:15:00Z", interval: 0, message: "Messaging customers needs the owner's yes in the browser.", next: "npx @flow-engineer/flow keys grant send --wait" };
+  const flow = await flowServer([], 200, { answers: { "/cli/keys/grant": { status: 202, body: pending } } });
+  t.after(flow.close);
+  const result = await run(["keys", "grant", "send", "--no-browser", "--json"], { url: flow.url, config: temp(), cwd: liveFolder(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(result.code, 4, result.err);
+  assert.equal(result.lines.length, 1, "one document");
+  assert.deepEqual([result.lines[0]!.status, result.lines[0]!.grant_id, result.lines[0]!.approve_url, result.lines[0]!.opened_browser], ["pending", "kgr_1", pending.approve_url, false]);
+  assert.match(result.err, /^Messaging customers needs the owner's yes in the browser\.$/m);
+  assert.ok(result.err.includes(`${ADVISORY.critical}\nOpen ${pending.approve_url}\n`));
+  assert.match(result.err, /Next: npx @flow-engineer\/flow keys grant send --wait$/m);
+  assert.ok(!flow.seen.some((r) => r.path.startsWith("/cli/keys/grant/")), "no poll without --wait");
+});
+
+test("keys grant deploy --wait asks GET /cli/keys/grant/<id> again while pending and prints the checklist once approved (exit 0); denied exits 3 grant_denied", async (t) => {
+  const pending = { granted: false, status: "pending", tier: "critical", advisory: ADVISORY, grant_id: "kgr_2", approve_url: "https://flow.engineer/cli/keys/approve?g=kgr_2", expires_at: "2099-01-01T00:00:00Z", interval: 0, message: "Deploying live needs the owner's yes in the browser." };
+  const deployed = CHECKLIST.map((c) => (c.capability === "deploy_live" ? { ...c, allowed: true, grant: null } : c));
+  const flow = await flowServer([], 200, { answers: {
+    "/cli/keys/grant": { status: 202, body: pending },
+    "/cli/keys/grant/kgr_2": [
+      { status: 200, body: { grant_id: "kgr_2", status: "pending", kid: "FAKElive00", interval: 0 } },
+      { status: 200, body: { grant_id: "kgr_2", status: "approved", kid: "FAKElive00", interval: 0, key: { kid: "FAKElive00", mode: "live", scopes: [...LIVE_SCOPES, "deploy"], checklist: deployed } } },
+    ],
+  } });
+  t.after(flow.close);
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  const approved = await run(["keys", "grant", "deploy", "--wait", "--no-browser"], { url: flow.url, config: temp(), cwd: liveFolder(), env });
+  assert.equal(approved.code, 0, approved.err);
+  assert.equal(flow.seen.filter((r) => r.path === "/cli/keys/grant/kgr_2" && r.method === "GET").length, 2);
+  assert.match(approved.out, /^Approved: FAKElive00 has deploy now\.\nWhat it can do now:\n/m);
+  assert.match(approved.out, /^  ✓ Deploy live$/m);
+  const denying = await flowServer([], 200, { answers: {
+    "/cli/keys/grant": { status: 202, body: pending },
+    "/cli/keys/grant/kgr_2": { status: 200, body: { grant_id: "kgr_2", status: "denied", kid: "FAKElive00", interval: 0 } },
+  } });
+  t.after(denying.close);
+  const denied = await run(["keys", "grant", "deploy", "--wait", "--no-browser", "--json"], { url: denying.url, config: temp(), cwd: liveFolder(), env });
+  assert.equal(denied.code, 3);
+  assert.deepEqual(denied.lines.map((l) => l.status ?? l.error.code), ["pending", "grant_denied"]);
+});
+
+test("a grant flow.engineer refuses (409 not_for_this_key: a live key not made by setup --live) prints its description and next step as given and exits 3", async (t) => {
+  const flow = await flowServer([], 200, { answers: { "/cli/keys/grant": { status: 409, body: { error: "not_for_this_key", error_description: "Only a live key made by flow setup --live takes grants.", next: "npx @flow-engineer/flow setup --live" } } } });
+  t.after(flow.close);
+  const result = await run(["keys", "grant", "read", "--json"], { url: flow.url, config: temp(), cwd: liveFolder(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(result.code, 3);
+  assert.deepEqual(result.lines, [{ ok: false, error: { code: "not_for_this_key", message: "/cli/keys/grant answered 409 not_for_this_key: Only a live key made by flow setup --live takes grants.", next: "npx @flow-engineer/flow setup --live" }, next: "npx @flow-engineer/flow setup --live" }]);
+  assert.match(result.err, /Only a live key made by flow setup --live takes grants\. Next: npx @flow-engineer\/flow setup --live/);
 });

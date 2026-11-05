@@ -121,7 +121,7 @@ test("not signed in says to run login; the server's refusals are said in plain w
   t.after(plain.close);
   const signedOut = await run(["list", "--json"], plain.url, null);
   assert.equal(signedOut.code, 1);
-  assert.deepEqual(signedOut.json, { error: { code: "not_signed_in", message: "Not signed in to flow.engineer.", next: "npx @flow-engineer/flow login" } });
+  assert.deepEqual(signedOut.json, { ok: false, error: { code: "not_signed_in", message: "Not signed in to flow.engineer.", next: "npx @flow-engineer/flow login" }, next: "npx @flow-engineer/flow login" });
   assert.equal(plain.seen.length, 0, "nothing is asked without a token");
 
   const ended = await flowServer({ listError: { status: 401, code: "signed_out" } });
@@ -134,7 +134,7 @@ test("not signed in says to run login; the server's refusals are said in plain w
   t.after(owner.close);
   const refused = await run(["delete", "cafe", "--yes", "--json"], owner.url);
   assert.equal(refused.code, 3);
-  assert.deepEqual(refused.json, { error: { code: "owner_only", message: "Only the organization's owner can delete this project.", next: null } });
+  assert.deepEqual(refused.json, { ok: false, error: { code: "owner_only", message: "Only the organization's owner can delete this project.", next: null }, next: null });
 
   const down = await flowServer({ listError: { status: 502, code: "observe_unavailable" } });
   t.after(down.close);

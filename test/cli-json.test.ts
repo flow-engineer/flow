@@ -1,4 +1,4 @@
-// covers: testing/src/cli.ts testing/src/conversations.ts testing/src/templates.ts testing/src/deploy.ts testing/src/show.ts testing/src/cloud-call.ts
+// covers: testing/src/cli.ts testing/src/conversations.ts testing/src/templates.ts testing/src/deploy.ts testing/src/show.ts testing/src/cloud-call.ts testing/src/pull.ts testing/src/account.ts testing/src/projects.ts testing/src/chat.ts testing/src/check-endpoint.ts testing/src/check.ts
 // With --json, stdout carries exactly one JSON document on every failure, as a coding agent parses it
 // (json.load(stdout)): a wrong flag, no key, a refused key, a missing route, an unreachable cloud, a
 // value that cannot be read; flow test's report too; never text, never two documents. And a long answer reaches the reader
@@ -64,7 +64,7 @@ function agentFolder(lines: string[]): string {
   return dir;
 }
 
-test("every --json failure prints exactly one JSON document on stdout, { ok: false, error: { code, message }, next }, and never a key", { timeout: 60_000 }, async () => {
+test("every --json failure prints exactly one JSON document on stdout, { ok: false, error: { code, message }, next }, and never a key", { timeout: 120_000 }, async () => {
   const fake = await cloud();
   const nowhere = await closedAddress();
   try {
@@ -76,6 +76,10 @@ test("every --json failure prints exactly one JSON document on stdout, { ok: fal
       // --env is taken, as every cloud command takes it; the key is refused.
       { args: ["conversations", "--env", "staging", "--json"], dir: keyed, exit: 1, code: "bad_key" },
       { args: ["conversations", "show", "cnv_x", "--env", "staging", "--json"], dir: keyed, exit: 1, code: "not_found" },
+      // As a coding agent asked it of 0.15.6, which answered usage text on stdout and exit 0.
+      { args: ["conversations", "show", "cnv_x", "--environment", "production", "--json"], dir: keyed, exit: 1, code: "not_found" },
+      { args: ["conversations", "show", "cnv_x", "--grade", "wrong", "--json"], dir: keyed, exit: 2, code: "usage" },
+      { args: ["conversations", "show", "--json"], dir: keyed, exit: 2, code: "usage" },
       { args: ["conversations", "--json", "--cloud", nowhere], dir: keyed, exit: 1, code: "network" },
       { args: ["issues", "--environment", "production", "--json"], dir: keyed, exit: 1, code: "bad_key" },
       { args: ["templates", "--json"], dir: keyed, exit: 1, code: "bad_key" },
@@ -89,9 +93,44 @@ test("every --json failure prints exactly one JSON document on stdout, { ok: fal
       { args: ["logs", "--since", "40d", "--json"], dir: keyed, exit: 2, code: "usage" },
       { args: ["logs", "--bogus", "--json"], dir: keyed, exit: 2, code: "usage" },
       { args: ["show", "last", "--json"], dir: keyed, exit: 1, code: "not_shown" },
+      // 0.16.0's release candidate: test pull's refusals went to stderr only, stdout empty.
+      { args: ["test", "pull", "--dry-run", "--json"], dir: keyed, exit: 1, code: "bad_key" },
+      { args: ["test", "pull", "--json"], dir: bare, exit: 1, code: "no_ci_key" },
+      { args: ["test", "pull", "extra", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["chat", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["chat", "--json"], dir: keyed, exit: 1, code: "not_built" },
+      { args: ["check", "--json"], dir: mkdtempSync(join(tmpdir(), "flow-cli-json-empty-")), exit: 1, code: "no_agent" },
+      { args: ["check-endpoint", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["check-endpoint", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["cli", "pack", "--bogus", "--json"], dir: keyed, exit: 2, code: "usage" },
+      { args: ["login", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["logout", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["whoami", "--json"], dir: keyed, exit: 1, code: "not_signed_in" },
+      { args: ["setup", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["setup", "--json"], dir: keyed, exit: 1, code: "not_signed_in" },
+      { args: ["setup", "--live", "--ci", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["link", "--channel", "fax", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["status", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["keys", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["keys", "--json"], dir: keyed, exit: 1, code: "not_signed_in" },
+      { args: ["keys", "show", "short", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["keys", "grant", "content", "--json"], dir: bare, exit: 1, code: "no_live_key" },
+      { args: ["keys", "revoke", "abcdefghij", "--json"], dir: keyed, exit: 1, code: "not_signed_in" },
+      { args: ["projects", "list", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["projects", "delete", "x", "--json"], dir: keyed, exit: 1, code: "not_signed_in" },
+      { args: ["issues", "test-case", "--json"], dir: keyed, exit: 2, code: "usage" },
+      { args: ["insights", "show", "--json"], dir: keyed, exit: 2, code: "usage" },
     ];
+    // Every command the help lists with --json has a case here, so a new one cannot skip the rule.
+    const help = await flow(["--help"], bare);
+    const listed = new Set(help.stdout.split("\n").map((line) => /^ {2}flow ((?:[a-z-]+)(?: (?:[a-z-]+|--live))?)(?= |$).*--json/.exec(line)?.[1]).filter((c): c is string => Boolean(c)));
+    assert.ok(listed.size >= 20, [...listed].join(", "));
+    for (const command of listed) assert.ok(cases.some((c) => c.args.join(" ").startsWith(`${command} `) || c.args.join(" ") === command), `no --json failure case for flow ${command}`);
+    // Eight at a time: each case is a fresh node process, and one after another passed the minute under a full run's load.
+    const runs = new Map<(typeof cases)[number], Awaited<ReturnType<typeof flow>>>();
+    for (let i = 0; i < cases.length; i += 8) await Promise.all(cases.slice(i, i + 8).map(async (c) => runs.set(c, await flow(c.args, c.dir))));
     for (const c of cases) {
-      const run = await flow(c.args, c.dir);
+      const run = runs.get(c)!;
       const what = `flow ${c.args.join(" ")}: ${JSON.stringify(run)}`;
       assert.equal(run.code, c.exit, what);
       assert.equal(run.stdout.trim().split("\n").length, 1, `one line: ${what}`);
@@ -134,7 +173,7 @@ test("a long --json answer reaches a pipe whole before the CLI exits", { timeout
   const fake = await cloud();
   try {
     const dir = agentFolder([`FLOW_KEY=${FLOW_KEY}`, `FLOW_FRAMEWORK_CLOUD=${fake.url}`]);
-    const run = await flow(["conversations", "show", "cnv_big", "--json"], dir);
+    const run = await flow(["conversations", "show", "cnv_big", "--environment", "production", "--json"], dir);
     assert.equal(run.code, 0, run.stderr);
     assert.deepEqual(JSON.parse(run.stdout), fake.big);
   } finally { fake.close(); }

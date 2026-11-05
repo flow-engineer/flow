@@ -7,7 +7,8 @@
 // .env), so a key fixed in .env works on the next call. A result is structuredContent and the same
 // data as text under a one-line summary (a host that reads only text still gets it); a failure is
 // isError with --json's failure document. No key value is ever returned, only its prefix and last 4.
-// Loaded only by `flow mcp serve`: it needs @modelcontextprotocol/server, an optional peer.
+// Loaded only by `flow mcp serve`. It runs on @modelcontextprotocol/server, a dependency of Flow
+// Framework (an optional peer until 0.16.0), so `npx @flow-engineer/flow mcp serve` works in any folder.
 
 import { join, resolve } from "node:path";
 import { readFileSync } from "node:fs";
@@ -16,7 +17,7 @@ import { z } from "zod";
 import { ProtocolError, ProtocolErrorCode, Server, type CallToolResult } from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RUN } from "../../src/names.ts";
-import { NetworkError, textLine, type FoundKey } from "./cloud-call.ts";
+import { ADVISORY, NetworkError, textLine, type FoundKey } from "./cloud-call.ts";
 import { Failed, get, insightConversations, listConversations, listInsights, listIssues, noKey, readKey, showConversation, sinceTime, type Access } from "./conversations.ts";
 import { cloudOf, deployStatus, logsPage, NotAvailable, Refused, SEVERITIES, type LogsQuery } from "./deploy.ts";
 import { packageRoot } from "./new.ts";
@@ -49,9 +50,16 @@ folder's .env, so a key fixed in .env works on the next call without a restart.
                             list_conversations and show_conversation with environment production,
                             list_insights, insight_conversations (else FLOW_KEY); show_conversation
                             tries it once when FLOW_KEY does not find the id. Text is de-identified
-                            unless it was made with --content; flow setup --live makes it
+                            unless it was made with --content; flow setup --live makes it.
+                            What it may do, by tier (flow keys grant adds one):
+                            ${ADVISORY.default}
+                            ${ADVISORY.ask_user}
+                            ${ADVISORY.critical}
   FLOW_FRAMEWORK_CLOUD_KEY  read_logs, deploy_status: the CI key (oci_...), staging and production
 Nothing goes to stdout but the protocol; waits and retries are said on stderr.`;
+
+/** The advisory tiers in flow.engineer's words, for the instructions and the tool descriptions. */
+const KEY_TIERS = `${ADVISORY.default} ${ADVISORY.ask_user} ${ADVISORY.critical}`;
 
 /** What a host is told on connecting: what the server is for, and which tool answers what. */
 export const INSTRUCTIONS = [
@@ -59,12 +67,15 @@ export const INSTRUCTIONS = [
   "Did a tool call fail, or was a reply delivered? list_conversations (grade: wrong finds badly graded replies), then show_conversation: each agent reply carries its tool calls (name, ms, ok, error) and its delivery (queued, sent, delivered, read, or failed with the channel's code).",
   "What is live? deploy_status. Why did it error? read_logs with severity ERROR (grep narrows it), then show_conversation for the conversation involved. Recurring problems: list_issues (graded replies, with a suggested fix) and list_insights (what real people ran into in production).",
   "Conversations, issues and templates read FLOW_KEY (a flow_test_ key reads staging only). Production reads (environment production, Insights) read the live Flow key FLOW_LIVE_KEY when it is set, else FLOW_KEY; without one, ask the developer to run `npx @flow-engineer/flow setup --live` (the workspace's owner), which writes it with text de-identified by default. Every result says its text_mode (raw, deidentified or withheld). Logs and deploys read the CI key FLOW_FRAMEWORK_CLOUD_KEY (oci_), both environments.",
+  `What the live key may do, by tier (\`npx @flow-engineer/flow keys show <kid>\` lists it, \`keys grant <name>\` adds one): ${KEY_TIERS}`,
 ].join("\n");
 
 const ENVIRONMENT = z.enum(["staging", "production"]);
 const WHEN = "a duration back from now (30m, 24h, 7d) or a time such as 2026-11-03T09:00:00Z";
-const FLOW_KEY_NOTE = "Reads staging with FLOW_KEY (flow_test_ reads staging only); production with FLOW_LIVE_KEY when set (flow setup --live makes it), else FLOW_KEY. The result's text_mode says whether text is raw, deidentified or withheld.";
-const INSIGHTS_KEY_NOTE = "Reads with FLOW_LIVE_KEY (flow setup --live makes it), else a flow_live_ FLOW_KEY: Insights reads production only, so a flow_test_ key is refused. The result's text_mode says whether text is raw, deidentified or withheld.";
+/** The most pages read_logs reads before it stops (truncated: newer lines were not read). */
+const LOG_PAGES = 20;
+const FLOW_KEY_NOTE = `Reads staging with FLOW_KEY (flow_test_ reads staging only); production with FLOW_LIVE_KEY when set (flow setup --live makes it), else FLOW_KEY. The result's text_mode says whether text is raw, deidentified or withheld. The live key, by tier: ${KEY_TIERS}`;
+const INSIGHTS_KEY_NOTE = `Reads with FLOW_LIVE_KEY (flow setup --live makes it), else a flow_live_ FLOW_KEY: Insights reads production only, so a flow_test_ key is refused. The result's text_mode says whether text is raw, deidentified or withheld. The live key, by tier: ${KEY_TIERS}`;
 
 interface ServeTool {
   name: string;
@@ -181,7 +192,7 @@ export const TOOLS: ServeTool[] = [
   tool({
     name: "read_logs",
     title: "Read logs",
-    description: "The hosted agent's log lines, oldest first: { time, severity, text }. Use it for why something errored or what the service did around a time: severity ERROR shows the failures, grep narrows to a tool, an id or a message. When more lines match than limit, the newest are kept and truncated is true: narrow since, severity or grep. Reads with the CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_...), staging and production.",
+    description: "The hosted agent's log lines, oldest first: { time, severity, text }. Use it for why something errored or what the service did around a time: severity ERROR shows the failures, grep narrows to a tool, an id or a message. When more lines match than limit, the newest are kept and truncated is true: narrow since, severity or grep (when it stops after 20 pages, newer_from is where the unread lines start). Reads with the CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_...), staging and production.",
     input: z.object({
       environment: ENVIRONMENT.default("staging").describe("staging or production"),
       since: z.string().default("1h").describe(`How far back, at most 30 days: ${WHEN}`),
@@ -199,33 +210,37 @@ export const TOOLS: ServeTool[] = [
       const { api } = reads.ci();
       let lines: Array<{ time: string; severity?: string; text: string }> = [];
       let from: string | null = null;
-      // Pages of 1000 up to now, as flow logs reads them; at most 10, keeping the newest.
-      for (let pages = 0; pages < 10; pages++) {
+      // Every page up to until (else now), as flow logs reads them, keeping the newest: the pages end
+      // when the cursor stops moving (next null, or the after just sent); a page past that is not kept.
+      let complete = false;
+      for (let pages = 0; pages < LOG_PAGES; pages++) {
         const page = await logsPage(api, query);
         if (pages === 0) from = page.from;
-        lines = [...lines, ...page.lines].slice(-input.limit - 1);
-        if (!page.next || !page.full) break;
-        query.after = page.next;
+        const moved = Boolean(page.next) && page.next !== query.after;
+        if (moved || pages === 0) lines = [...lines, ...page.lines].slice(-input.limit - 1);
+        if (!moved) { complete = true; break; }
+        query.after = page.next!;
       }
-      const truncated = lines.length > input.limit;
+      const truncated = lines.length > input.limit || !complete;
       const kept = lines.slice(-input.limit).map((l) => ({ time: l.time, severity: l.severity ?? null, text: l.text }));
       const errors = kept.filter((l) => ["ERROR", "CRITICAL", "ALERT", "EMERGENCY"].includes(String(l.severity).toUpperCase())).length;
       return {
-        data: { environment: input.environment, since, until: until ?? null, lines: kept, truncated, logs_start: from },
-        summary: `${kept.length} log line${kept.length === 1 ? "" : "s"} from ${input.environment}${truncated ? " (truncated: the newest kept; narrow since, severity or grep)" : ""}, ${errors} at ERROR or above.${from && Date.parse(from) - Date.parse(since) > 60_000 ? ` Logs start at ${from}.` : ""}`,
+        data: { environment: input.environment, since, until: until ?? null, lines: kept, truncated, ...(complete ? {} : { newer_from: kept.at(-1)?.time ?? null }), logs_start: from },
+        summary: `${kept.length} log line${kept.length === 1 ? "" : "s"} from ${input.environment}${!complete ? ` (stopped after ${LOG_PAGES} pages: newer lines from ${kept.at(-1)?.time ?? "?"} not read; call again with that since)` : truncated ? " (truncated: the newest kept; narrow since, severity or grep)" : ""}, ${errors} at ERROR or above.${from && Date.parse(from) - Date.parse(since) > 60_000 ? ` Logs start at ${from}.` : ""}`,
       };
     },
   }),
   tool({
     name: "deploy_status",
     title: "Deploy status",
-    description: "What is live on Flow's hosting per environment: the deploy (id, status, version, when, framework, lint findings, error), a newer one still on its way, the agent's URL, and whether its traces reach Flow. Use it to answer what is live, or whether a deploy finished. Reads with the CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_...), staging and production.",
+    description: "What is live on Flow's hosting per environment: the deploy (id, status, version, when, framework: the Flow Framework its build used, lint findings, error), a newer one still on its way, the agent's URL, and whether its traces reach Flow; agent_framework is the version this folder's package.json pins, hosting_framework the newest line Flow's hosting runs (not the agent's). Use it to answer what is live, or whether a deploy finished. Reads with the CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_...), staging and production.",
     input: z.object({ environment: ENVIRONMENT.optional().describe("One environment (default: both)") }),
     async run({ environment }, reads) {
       const { api } = reads.ci();
-      const { environments, framework } = await deployStatus({ api, dir: reads.dir }, environment ? [environment] : ["staging", "production"]);
-      const said = environments.map((e) => `${e.environment}: ${e.deploy ? `${e.deploy.status}${e.deploy.version ? ` ${e.deploy.version}` : ""}` : "no deploy known"}${e.pending ? ` (then ${e.pending.status})` : ""}`);
-      return { data: { framework, environments: Object.fromEntries(environments.map((e) => [e.environment, e])) }, summary: `${said.join("; ")}.` };
+      const { environments, hostingFramework, agentFramework } = await deployStatus({ api, dir: reads.dir }, environment ? [environment] : ["staging", "production"]);
+      const said = environments.map((e) => `${e.environment}: ${e.deploy ? `${e.deploy.status}${e.deploy.version ? ` ${e.deploy.version}` : ""}${e.deploy.framework ? `, built with ${e.deploy.framework.package} ${e.deploy.framework.version}` : ""}` : "no deploy known"}${e.pending ? ` (then ${e.pending.status})` : ""}`);
+      const versions = [agentFramework && `This agent pins Flow Framework ${agentFramework}`, hostingFramework && `Flow's hosting runs up to ${hostingFramework} (hosting's line, not the agent's)`].filter(Boolean);
+      return { data: { agent_framework: agentFramework, hosting_framework: hostingFramework, environments: Object.fromEntries(environments.map((e) => [e.environment, e])) }, summary: `${said.join("; ")}.${versions.length ? ` ${versions.join("; ")}.` : ""}` };
     },
   }),
 ];

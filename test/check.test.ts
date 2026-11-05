@@ -79,8 +79,23 @@ test("the CLI file is checked against the tools, and a tool it does not name is 
   assert.equal(clean.code, 0);
   assert.deepEqual(clean.warnings, [
     "skill orders: names send_sms, which MCP hosts and the CLI do not have",
-    `src/cli.ts: tool get_order has no command in the CLI file; it is reachable as "get-order"`,
+    `src/cli.ts: tool get_order has no command in the CLI file; it is reachable as "get-order" if the CLI's MCP server serves it`,
   ]);
+});
+
+// The CLI's commands are what its MCP server lists, not src/agent.ts's tools: a tool src/mcp.ts
+// leaves out is not called reachable (the CLI says "No command registered" for it).
+test("with a src/mcp.ts, a tool the CLI file does not name is reachable only if that server lists it", async () => {
+  const mcpModule = pathToFileURL(join(import.meta.dirname, "../mcp/src/index.ts")).href;
+  const cli = `{ name: "acme", commands: { "order list": { tool: "list_orders" } } }`;
+  // A folder each: a module once imported stays imported.
+  const serving = (filter: string) => {
+    const dir = agentFolder(`${listOrders}, ${getOrder}`, cli);
+    writeFileSync(join(dir, "src/mcp.ts"), `import { mcpServer } from ${JSON.stringify(mcpModule)};\nimport { tools } from "./agent.ts";\nexport const mcp = mcpServer({ name: "acme", version: "1", tools: tools.filter((t) => ${filter}) });\n`);
+    return dir;
+  };
+  assert.deepEqual((await check(serving(`t.name === "list_orders"`))).warnings, [], "get_order is the chat's only");
+  assert.deepEqual((await check(serving("true"))).warnings, [`src/cli.ts: tool get_order has no command in the CLI file; it is reachable as "get-order"`]);
 });
 
 // Existing checks cover warnings on chat-only skill tools, but not native package generation.
