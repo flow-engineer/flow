@@ -302,19 +302,19 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
 
 ### Ship the CLI
 
-On Flow's hosting, `npx flow deploy` ships it: with `src/cli.ts` in the folder it packs the CLI for
+On Flow's hosting, `npx @flow-engineer/flow deploy` ships it: with `src/cli.ts` in the folder it packs the CLI for
 the environment's address before anything is sent (a CLI that does not pack stops the deploy;
 `--no-cli` leaves it out), and once the deploy is live publishes it, so `curl -fsSL <the agent's
 URL> | sh` installs it and the CLIs already out there are offered it (`acme update`).
-`flow deploy promote` publishes a production build from the folder. On its own: `npx flow cli
-publish --env staging|production`, `npx flow cli status [--env]` (the version served, the last
-releases) and `npx flow cli rollback --env production <version>` (serves an earlier version again;
+`flow deploy promote` publishes a production build from the folder. On its own: `npx @flow-engineer/flow cli
+publish --env staging|production`, `npx @flow-engineer/flow cli status [--env]` (the version served, the last
+releases) and `npx @flow-engineer/flow cli rollback --env production <version>` (serves an earlier version again;
 people on the one it replaces are offered it). Show the person the install line it prints.
 Publishing refuses a build whose server differs from the one served (`server_changed`: everyone
 who installed it would sign in again); set `servers.<env>` to the served one, or pass
 `--change-server` only when the person means to sign everyone out.
 
-`npx flow cli pack --server production` (or `staging`, or an https MCP URL) bundles `src/cli.ts`
+`npx @flow-engineer/flow cli pack --server production` (or `staging`, or an https MCP URL) bundles `src/cli.ts`
 with every dependency into one package that needs only Node.js 20.19 or newer, and writes
 `release/acme.tgz`, `release/install.sh` and `release/release.json` (`{ name, display_name,
 version, sha256, size, server }`). `staging` and `production` are the hosted agent's address
