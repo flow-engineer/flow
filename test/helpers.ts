@@ -237,8 +237,10 @@ const HOST_SEVERITIES = ["DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR
  * hosting/src/host/deploys.ts, logs; observe relays the query as it comes): limit 1 to 500;
  * since and until each a duration back from `now` (15m, 3d) or an ISO time; since 1h back when
  * not sent, after or not; since clamped to 30 days back; until before since refused ("until is
- * before since"); severity the lowest a line may have; grep a substring of the line's text, any
- * case; after a previous answer's next (here the last line's index), unchanged when nothing is left.
+ * before since"); severity the lowest a line may have; grep, any case, as hosting's Cloud Logging
+ * search then its own check: a substring of one of the entry's values (a JSON line's every field's,
+ * never its keys or quotes) and of the line's text; after a previous answer's next (here the last
+ * line's index), unchanged when nothing is left.
  */
 export function hostLogs(query: URLSearchParams, lines: HostLogLine[], now: number): { status: number; body: unknown } {
   const refuse = (message: string) => ({ status: 400, body: { error: { code: "invalid_request", message } } });
@@ -269,9 +271,26 @@ export function hostLogs(query: URLSearchParams, lines: HostLogLine[], now: numb
       const at = Date.parse(line.time);
       return at >= start && (until === null || at <= until) && (after === null || index > Number(after)) &&
         (!severity || HOST_SEVERITIES.indexOf(line.severity) >= HOST_SEVERITIES.indexOf(severity)) &&
-        (!grep || line.text.toLowerCase().includes(grep));
+        (!grep || (entryValues(line.text).some((v) => v.toLowerCase().includes(grep)) && line.text.toLowerCase().includes(grep)));
     })
     .slice(0, limit);
   const next = page.length ? String(page.at(-1)!.index) : (after ?? "-1");
   return { status: 200, body: { lines: page.map((p) => p.line), next, from: after === null ? new Date(from).toISOString() : (lines[Number(after)]?.time ?? new Date(floor).toISOString()) } };
+}
+
+/** A line's values as Cloud Logging searches them: a JSON line's every value, else its text. */
+function entryValues(text: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [text];
+  }
+  const out: string[] = [];
+  const walk = (v: unknown): void => {
+    if (v && typeof v === "object") Object.values(v).forEach(walk);
+    else out.push(String(v));
+  };
+  walk(parsed);
+  return out;
 }

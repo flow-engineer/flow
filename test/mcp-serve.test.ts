@@ -115,7 +115,9 @@ test("read_logs takes flow logs' window, since 30d and a relative until across p
   const start = Date.now() - 29 * 86_400_000;
   const lines: HostLogLine[] = Array.from({ length: 600 }, (_, i) => ({ time: new Date(start + i * 60_000).toISOString(), severity: "INFO", text: `line ${i}` }));
   const at = new Date(start + 600 * 60_000).toISOString();
-  lines.push({ time: at, severity: "DEFAULT", text: "Error: boom" }, { time: at, severity: "DEFAULT", text: "    at run (file:///app/a.js:1:2)" });
+  // As Cloud Run stamps a split stack's lines: microseconds apart, no severity, no instance from an older host.
+  const later = at.replace(/Z$/, "").padEnd(23, "0") + "026Z";
+  lines.push({ time: at.replace(/Z$/, "001Z"), severity: "DEFAULT", text: "Error: boom" }, { time: later, severity: "DEFAULT", text: "    at run (file:///app/a.js:1:2)" });
   const cloud = await fakeCloud((req) => hostLogs(new URL(req.url!, "http://x").searchParams, lines, Date.now()));
   const client = await serve(cloud.url);
   try {

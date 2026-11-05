@@ -149,10 +149,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   is taken as given, and `--until` must be after `--since` (every page now carries `since`: the
   release candidate's later pages left it out and the cloud refused "until is before since").
   `--grep` matches the text anywhere in the line as printed, a JSON line's every field (needs
-  Flow's hosting of 5 Nov 2026 or later; an older one matched only `message`/`msg`).
+  Flow's hosting of 5 Nov 2026 or later; an older one matched only `message`/`msg`). Flow searches
+  the fields' values; a `--grep` with a quote or a brace (`"step":"x"`, JSON as printed) is not sent
+  and is matched by the CLI over every line of the window.
 - **`flow logs` and `read_logs` join a stack trace** that Cloud Run split into an entry per line: a
-  line starting with whitespace (`    at ...`) at the same time from the same instance goes on the
-  line before it, which keeps the higher severity. Flow Framework's own lines are already one entry
+  line starting with whitespace (`    at ...`) at the same time (within 2 ms: Cloud Run stamps
+  each line microseconds apart) from the same instance goes on the line before it, which keeps the
+  higher severity, whatever runtime wrote it. Flow Framework's own lines are already one entry
   with the stack inside (above); this is for an agent's own `console.error` and older
   runtimes.
 - **`flow logs` no longer stops at the host's first page.** Without `--follow` it read one page (the

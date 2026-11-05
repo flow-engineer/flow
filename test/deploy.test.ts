@@ -622,14 +622,16 @@ test("logs --until is a duration back from now or a time, as --since is, and eve
   } finally { host.close(); }
 });
 
+// 0.16.0c joined only lines whose time was the same string, but Cloud Run stamps each line of a
+// split stack microseconds apart (a hosted 0.15.6 agent's, 11-03T06:45:13.313942Z to .313990Z).
 test("logs joins a stack Cloud Run split into an entry per line into the line before it, keeping the higher severity", async () => {
-  const at = "2026-10-20T10:45:13.313Z";
+  const at = "2026-10-20T10:45:13.313942Z";
   const host = await pagedLogs(0, [
     { time: "2026-10-20T10:45:00Z", severity: "INFO", text: "booted", instance: "a" },
     { time: at, severity: "DEFAULT", text: "scheduled messages: DOMException [TimeoutError]", instance: "a" },
-    { time: at, severity: "DEFAULT", text: "    at Timeout._onTimeout (file:///app/a.js:1:2)", instance: "a" },
-    { time: at, severity: "ERROR", text: "    at listOnTimeout (node:internal/timers:594:17)", instance: "a" },
-    { time: at, severity: "DEFAULT", text: "    at another instance's line", instance: "b" },
+    { time: "2026-10-20T10:45:13.313968Z", severity: "DEFAULT", text: "    at Timeout._onTimeout (file:///app/a.js:1:2)", instance: "a" },
+    { time: "2026-10-20T10:45:13.314990Z", severity: "ERROR", text: "    at listOnTimeout (node:internal/timers:594:17)", instance: "a" },
+    { time: "2026-10-20T10:45:13.314991Z", severity: "DEFAULT", text: "    at another instance's line", instance: "b" },
     { time: "2026-10-20T10:46:00Z", severity: "DEFAULT", text: "  later, indented", instance: "a" },
   ]);
   try {
@@ -638,7 +640,7 @@ test("logs joins a stack Cloud Run split into an entry per line into the line be
     assert.deepEqual(stdout.split("\n").map((l) => JSON.parse(l)), [
       { time: "2026-10-20T10:45:00Z", severity: "INFO", text: "booted" },
       { time: at, severity: "ERROR", text: "scheduled messages: DOMException [TimeoutError]\n    at Timeout._onTimeout (file:///app/a.js:1:2)\n    at listOnTimeout (node:internal/timers:594:17)" },
-      { time: at, severity: "DEFAULT", text: "    at another instance's line" },
+      { time: "2026-10-20T10:45:13.314991Z", severity: "DEFAULT", text: "    at another instance's line" },
       { time: "2026-10-20T10:46:00Z", severity: "DEFAULT", text: "  later, indented" },
     ]);
   } finally { host.close(); }
@@ -657,4 +659,21 @@ test("logsWindow, flow logs' and read_logs' one rule: durations are back from no
   assert.deepEqual(logsWindow("2d", "3d", NOW), { wrong: "until" });
   assert.deepEqual(logsWindow("1h", "1h", NOW), { wrong: "until" });
   assert.deepEqual(logsWindow("1h", "soon", NOW), { wrong: "until" });
+});
+
+// 0.16.0c: grep "question to team" found 0 of 14 lines holding it in a JSON line's step field (the
+// host searched only msg); and a grep of the line as printed ("step":"question to team") is in no value.
+test("logs --grep finds text in any field of a JSON line, and JSON as printed is matched here over the whole window", async () => {
+  const line = (i: number, step: string) => ({ time: new Date(Date.parse("2026-10-18T00:00:00Z") + i * 60_000).toISOString(), severity: "INFO", text: JSON.stringify({ severity: "INFO", msg: "vingo ask", step, outcome: "ok" }) });
+  const host = await pagedLogs(0, Array.from({ length: 900 }, (_, i) => line(i, i % 100 === 7 ? "question to team" : "answered")));
+  try {
+    const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url };
+    for (const grep of ["question to team", "TO TEAM", '"step":"question to team"']) {
+      host.asked.length = 0;
+      const { code, stdout, printed } = await run(["logs", "--since", "3d", "--grep", grep, "--json", "--dir", agentFolder()], env, undefined, null);
+      assert.equal(code, 0, printed);
+      assert.equal(stdout.split("\n").length, 9, grep);
+      assert.equal(host.asked[0]!.get("grep"), grep.includes('"') ? null : grep, "JSON as printed is not sent");
+    }
+  } finally { host.close(); }
 });
