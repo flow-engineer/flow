@@ -38,7 +38,15 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `{ ok, tool, file, from }`). Fakes stay optional.
 - `flow test` checks `given:` before sending: a mode other than the four, a `given.tools` key the
   agent has no tool for, and `down` or `flaky` for a tool whose file has no response with an error
-  are named with their file, and nothing is sent.
+  are named with their file, and nothing is sent. When a scenario sent has `given:`, one more line
+  (a suggestion, never blocking) names the agent's tools that count as writes (no `hints.readOnly`)
+  and have no fake, since in a `given:` run only a fake keeps a write for `expect.state`;
+  `FLOW_FRAMEWORK_FAKE_HINT=0` leaves it out.
+- The tests and tools skills say when to add `given:` (only when the test needs the world fixed;
+  without it a scenario plays as before), what `given.tools` covers (a mode is for the tool it names
+  only; a tool left out, or `usual`, goes on to its fake, an exact `input` match, then a model), and
+  what a write tool under `given:` needs (a fake that keeps the write in `state`, with an example
+  for a booking, or no check on the write).
 - After a session, one line says how many tool calls a model played and of which tools (and how
   many of those answers were saved from an earlier run), naming a tool that has a fake on this
   machine but was played by a model in a scenario without `given:`. For the tools with no fake it

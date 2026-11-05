@@ -193,6 +193,16 @@ test("what is wrong on this machine is said before the cloud is called, an addre
     code: 1,
     out: "tests/tools/place_order.fake.ts: its default export must be the fake, a function (export default placeOrder)\n\nNothing was sent: fix the test files above.\n",
   });
+  // A tool that counts as a write (no hints.readOnly) with no fake, while a scenario has given:: one optional line, then the run goes on.
+  const writes = agentDir({ given: `${scenarioYaml("given", "sms")}given: {}\n` });
+  writeFileSync(join(writes, "src", "agent.ts"), 'export const tools = [{ name: "book_table" }, { name: "get_opening_hours", hints: { readOnly: true } }, { name: "place_order" }];\nexport function buildAgent() {\n  return { channels: () => [], receive: () => "m", reacted: () => {} };\n}\n');
+  mkdirSync(join(writes, "tests", "tools"));
+  writeFileSync(join(writes, "tests", "tools", "place_order.fake.ts"), "export default () => ({ output: {} });\n");
+  const line = "book_table counts as a write and has no fake: in scenarios with given:, nothing keeps its writes for expect.state. If you like, npx @flow-engineer/flow test fake book_table writes a starter. Optional (FLOW_FRAMEWORK_FAKE_HINT=0 hides this).";
+  const hinted = await cliOutput(["test", "--cloud", closed], writes);
+  assert.ok(hinted.out.startsWith(`${line}\n`), hinted.out);
+  assert.doesNotMatch((await cliStreams(["test", "--cloud", closed], writes, { FLOW_FRAMEWORK_FAKE_HINT: "0" })).out, /counts as a write/);
+  assert.doesNotMatch((await cliOutput(["test", "--cloud", closed, "--only", "hello"], writes)).out, /counts as a write/, "no scenario with given: is sent, so no line");
   const good = agentDir();
   assert.match((await cliOutput(["test", "--cloud", closed, "--agent-url", "http://127.0.0.1:9/flow"], good)).out, /^Could not reach your agent at http:\/\/127\.0\.0\.1:9\/flow: ECONNREFUSED\. Start it first/m);
   // A cloud that does not answer is a connection failure (2), not a failed run.

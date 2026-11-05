@@ -60,7 +60,7 @@ import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
 import { PROFILE_TOOL } from "../../src/conversation.ts";
-import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, modelPlayedLine, toolsWithoutFake, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
+import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, modelPlayedLine, toolsWithoutFake, writesWithoutFakeLine, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { givenProblems, loadFakes, loadSuite, parseScenario, parseToolFile, suiteHash, type ToolFile } from "./suite.ts";
 import type { RunOutcome, RunSummary } from "./protocol.ts";
@@ -491,6 +491,10 @@ if (!agentUrl) {
   } catch (error) {
     invalid(`${(error as Error).message}\n\nNothing was sent: fix the test files above.`);
   }
+  // A write tool with no fake, while a scenario has given:: one optional line, never blocking.
+  const givenUsed = chosen.some((f) => f.path.startsWith("scenarios/") && parseScenario({ path: join("tests", f.path), content: f.content }).given);
+  const writes = givenUsed && setting("FAKE_HINT") !== "0" ? writesWithoutFakeLine(agent.tools, fakes) : null;
+  if (writes) say(writes);
 }
 files = forUrl(chosen);
 if (agentUrl) await checkAgentReachable(agentUrl);

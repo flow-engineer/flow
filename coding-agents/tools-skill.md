@@ -192,9 +192,15 @@ responses:
   scenario's world, the call's input and what the agent already said. Write dates as placeholders
   for the test's clock (`{{now + 10m}}`, `{{now + 2d | date}}`; see the `flow-framework-tests` skill),
   never as written dates, which go stale.
-- Latency lives only here. A scenario picks a kind by name in `given.tools` (`slow`, `down`,
-  `flaky 30%` with a `seed`: the same calls fail on every run, random but repeatable), or describes
-  the situation in its prose `world` ("the point of sale is slow this morning") for a model to play.
+- Latency lives only here. A scenario picks a kind for one tool by name in `given.tools` (`slow`,
+  `down`, `flaky 30%` with a `seed`: the same calls fail on every run, random but repeatable), or
+  describes the situation in its prose `world` ("the point of sale is slow this morning") for a model
+  to play. Each mode covers only the tool it names; a tool left out (or `usual`) is played by its
+  fake, else a response whose `input` is exactly the call's, else a model.
+- A tool that changes something (books, orders, cancels), in a scenario with `given`: only a fake
+  keeps the change in `state` for `expect.state`, and a call matching a response's `input` exactly
+  records no change. You can write a fake for it (the `flow-framework-tests` skill shows one for a
+  booking), or test it in scenarios without `given`, which play as before.
 
 ## Authenticated backend access
 

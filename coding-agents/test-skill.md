@@ -97,8 +97,9 @@ expect:
   history. The person, the judge and (when no rule below covers a call) the tool model read it.
   An agent with a `profile` gets it played from here too (`get_user_profile`): say who the person
   is ("Sam, a member since 2024, on the monthly plan").
-- `given`: the same world as data, so tools are played by rule instead of by a model (below). A
-  scenario without `given` is played by a model from its prose `world`, as before.
+- `given` (optional): the same world as data, so tools are played by rule instead of by a model
+  (below). Leave it out unless the test needs the world fixed: a scenario without `given` is played
+  by a model from its prose `world`, exactly as before, and that is the safe default.
 - `expect`:
   - `outcome`: what must have happened, checked against what the tools did ("exactly one
     order is placed", "no order is placed").
@@ -143,14 +144,17 @@ A model playing a tool costs money and may answer differently each run. Give the
 `given` block and each tool call is played by the first rule that fits; a model plays only what
 no rule covers, and its answer is saved, so the next run of the same scenario replays it free.
 
+Add `given` only when the test needs the world fixed: a tool down, flaky or slow on every run, or
+data a fake answers from. Without it the scenario plays exactly as before.
+
 ```yaml
 world: |                     # stays, as a note for the person and the judge
   The café is busy this morning, so the point of sale is slow, but orders go through.
 given:
-  menu: get_menu.yaml        # a tool file's name: that tool's usual output (its first response with an output)
+  menu: get_menu.yaml        # data: get_menu.yaml's first output, for the fakes and the model to read
   stock: { oat: true }       # anything else: plain data for the fakes
   tools:
-    place_order: slow        # usual | slow | down | flaky 30%
+    place_order: slow        # this tool only: usual | slow | down | flaky 30%
   seed: 7                    # flaky's dice: the same seed fails the same calls every run (default 1)
 expect:
   state:
@@ -167,6 +171,44 @@ The rules, in order:
 4. A model, from the prose `world` and `given`, marked "played by a model" in the report.
 
 `slow` keeps the answer and takes the latency of the tool file's slowest response with an output.
+
+What `given.tools` covers:
+- A mode applies only to the tool it names; there is no mode for every tool. A tool left out is
+  `usual`, and `usual` adds no fault and nothing else: the call goes on to rules 2 to 4, so with no
+  fake and no response whose `input` is exactly the call's, a model plays it from the tool file and
+  the world, as in a scenario without `given`. Writing `usual` is the same as leaving the tool out.
+- A tool file's name in the data (`menu: get_menu.yaml`) is data only: fakes and the model read
+  that output, but `get_menu` itself is still played by the rules above.
+
+A tool that changes something (books, orders, cancels) in a scenario with `given`:
+- Only fakes keep `state`, so `expect.state` fails when the tool has no fake.
+- With no fake, a call whose input is exactly a response's `input` in the tool file plays that
+  response and records no change, so an `outcome` about the write ("exactly one table is booked")
+  can fail too.
+- So either give it a fake that keeps the write in `state` and check it with `expect.state`, or
+  leave `given` out of that scenario (or check nothing about the write). You can do either.
+
+```ts
+// tests/tools/book_table.fake.ts
+import type { Fake } from "@flow-engineer/flow/testing";
+
+const bookTable: Fake<{ name: string; party_size: number; time: string }> = ({ input, state }) => {
+  const bookings = (state.bookings ??= []) as unknown[];
+  const booking_id = `T-${100 + bookings.length}`;
+  bookings.push({ booking_id, ...input });
+  return { output: { booking_id, confirmed: true }, changes: [`table ${booking_id} booked for ${input.name}`] };
+};
+
+export default bookTable;
+```
+
+```yaml
+given: {}                    # turns the rules on; no mode needed, the fake plays book_table
+expect:
+  state:
+    bookings:                # exactly one booking, for Sam, four people
+      - { name: Sam, party_size: 4 }
+```
 
 **Fakes and `given` are optional.** A scenario without them plays, passes and costs exactly as
 before. You can add a fake to make a tool the tests call often free and repeatable: a few lines of
@@ -213,7 +255,9 @@ export default placeOrder;
   model (place_order 2, order_status 1) ...") and, once, which of them have no fake, with the
   `test fake` command (`toolsWithoutFake` in `--json`). You can add a fake for those tools to make
   them free and repeatable, or add `given` to the scenarios when a fake exists but was not used; or
-  leave them to the model. `FLOW_FRAMEWORK_FAKE_HINT=0` (in `.env`) leaves the suggestion out.
+  leave them to the model. Before a session with a `given` scenario, one line names the tools that
+  count as writes (no `hints.readOnly`) and have no fake. `FLOW_FRAMEWORK_FAKE_HINT=0` (in `.env`)
+  leaves both suggestions out.
 
 ### Scenarios the business starts
 
