@@ -171,8 +171,10 @@ The rules, in order:
 **Fakes and `given` are optional.** A scenario without them plays, passes and costs exactly as
 before. You can add a fake to make a tool the tests call often free and repeatable: a few lines of
 plain TypeScript next to the tool file, written from its `behaviour`; it runs on the developer's
-machine, beside the agent, and is never uploaded. Show it to the developer to approve before
-relying on it.
+machine, beside the agent, and is never uploaded. `npx @flow-engineer/flow test fake <tool>` writes
+a starter from the tool file (it answers as the file's responses do, and never writes over a fake
+already there); make it answer from the call and `given`. Show it to the developer to approve
+before relying on it.
 
 ```ts
 // tests/tools/place_order.fake.ts
@@ -208,9 +210,10 @@ export default placeOrder;
   many entries (in any order), each matching in part. "Exactly one order, a large oat latte for
   Sam" is the `state` above, with no judge call.
 - After a session the report says how many calls a model played ("3 tool calls were played by a
-  model (place_order 2, order_status 1) ..."). You can add a fake for those tools to make them free
-  and repeatable, or add `given` to the scenarios when a fake exists but was not used; or leave
-  them to the model.
+  model (place_order 2, order_status 1) ...") and, once, which of them have no fake, with the
+  `test fake` command (`toolsWithoutFake` in `--json`). You can add a fake for those tools to make
+  them free and repeatable, or add `given` to the scenarios when a fake exists but was not used; or
+  leave them to the model. `FLOW_FRAMEWORK_FAKE_HINT=0` (in `.env`) leaves the suggestion out.
 
 ### Scenarios the business starts
 

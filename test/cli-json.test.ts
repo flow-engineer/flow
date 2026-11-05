@@ -1,4 +1,4 @@
-// covers: testing/src/cli.ts testing/src/conversations.ts testing/src/templates.ts testing/src/deploy.ts testing/src/show.ts testing/src/cloud-call.ts testing/src/pull.ts testing/src/account.ts testing/src/projects.ts testing/src/chat.ts testing/src/check-endpoint.ts testing/src/check.ts
+// covers: testing/src/cli.ts testing/src/conversations.ts testing/src/templates.ts testing/src/deploy.ts testing/src/show.ts testing/src/cloud-call.ts testing/src/pull.ts testing/src/account.ts testing/src/projects.ts testing/src/chat.ts testing/src/check-endpoint.ts testing/src/check.ts testing/src/fake.ts
 // With --json, stdout carries exactly one JSON document on every failure, as a coding agent parses it
 // (json.load(stdout)): a wrong flag, no key, a refused key, a missing route, an unreachable cloud, a
 // value that cannot be read; flow test's report too; never text, never two documents. And a long answer reaches the reader
@@ -97,6 +97,8 @@ test("every --json failure prints exactly one JSON document on stdout, { ok: fal
       { args: ["test", "pull", "--dry-run", "--json"], dir: keyed, exit: 1, code: "bad_key" },
       { args: ["test", "pull", "--json"], dir: bare, exit: 1, code: "no_ci_key" },
       { args: ["test", "pull", "extra", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["test", "fake", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["test", "fake", "place_order", "--json"], dir: keyed, exit: 1, code: "no_tool_file" },
       { args: ["chat", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
       { args: ["chat", "--json"], dir: keyed, exit: 1, code: "not_built" },
       { args: ["check", "--json"], dir: mkdtempSync(join(tmpdir(), "flow-cli-json-empty-")), exit: 1, code: "no_agent" },
