@@ -8,20 +8,72 @@ import { pluginProblems } from "./plugin.ts";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { cliProblems, type CliConfig } from "../../cli/src/commands.ts";
-import { CHAT_ONLY, describe, toolsProblems } from "../../mcp/src/describe.ts";
+import { CHAT_ONLY, describe, FULL_CATALOG_META, toolsProblems } from "../../mcp/src/describe.ts";
 import { loadSkills, readAgentFolder } from "../../src/skills.ts";
 import type { Tool } from "../../src/tools.ts";
 
 export const CHECK_LINE = `  flow check [--json] [--plugin <dir>]    Check the agent's tools, CLI file and skills for MCP and the CLI`;
 
-/** A file of the agent's, imported; TypeScript Node cannot run is one line saying what to change, not a stack. */
-async function load(file: string): Promise<Record<string, unknown> | undefined> {
+/** A file of the agent's, imported; TypeScript Node cannot run is a string saying what to change, not a stack. */
+async function load(file: string): Promise<Record<string, unknown> | string> {
   try {
     return await import(pathToFileURL(file).href);
   } catch (error) {
     if ((error as { code?: string }).code !== "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX") throw error;
-    console.error(`${(error as Error).message.split("\n")[0]}\nNode runs .ts files by stripping types only: no parameter properties (constructor(readonly x)), enums or namespaces. Write them as plain fields and objects.`);
+    return `${(error as Error).message.split("\n")[0]}\nNode runs .ts files by stripping types only: no parameter properties (constructor(readonly x)), enums or namespaces. Write them as plain fields and objects.`;
+  }
+}
+
+/**
+ * The names of the tools src/mcp.ts's server lists to a CLI, asked in-process as the CLI asks it
+ * (tools/list, the full catalog), so check says what `<cli> <command>` really reaches. undefined
+ * when there is no src/mcp.ts, it exports no `mcp`, or it will not answer here (sign-in, another
+ * path); a string, what to change, when it cannot be imported. A src/mcp.ts that throws is an error.
+ */
+async function servedTools(dir: string, errors: string[]): Promise<Set<string> | undefined | string> {
+  const file = join(dir, "src/mcp.ts");
+  if (!existsSync(file)) return undefined;
+  let mcp: { fetch?: unknown } | undefined;
+  try {
+    const loaded = await load(file);
+    if (typeof loaded === "string") return loaded;
+    mcp = loaded.mcp as typeof mcp;
+  } catch (error) {
+    errors.push(`src/mcp.ts: ${(error as Error).message.split("\n")[0]}`);
     return undefined;
+  }
+  if (typeof mcp?.fetch !== "function") return undefined;
+  const serve = mcp.fetch as (request: Request) => Promise<Response>;
+  // Every request goes to the handle in this process, never the network; as from 127.0.0.1, which
+  // mcpServer's Host check lets in.
+  const here = (url: string | URL, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    headers.set("host", "127.0.0.1");
+    return serve(new Request(url, { ...init, headers }));
+  };
+  // An optional peer dependency, as the CLI's own (cli/src/run.ts): imported only here.
+  let sdk: typeof import("@modelcontextprotocol/client");
+  try {
+    sdk = await import("@modelcontextprotocol/client");
+  } catch {
+    return undefined;
+  }
+  const { Client, StreamableHTTPClientTransport } = sdk;
+  const client = new Client({ name: "flow-check", version: "1" });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL("http://127.0.0.1/mcp"), { fetch: here }));
+    const names = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const page = await client.listTools({ ...(cursor ? { cursor } : {}), _meta: { [FULL_CATALOG_META]: true } });
+      for (const t of page.tools) names.add(t.name);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return names;
+  } catch {
+    return undefined;
+  } finally {
+    await client.close().catch(() => {});
   }
 }
 
@@ -33,13 +85,16 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
   const pluginDir = pluginAt >= 0 ? argv[pluginAt + 1] : undefined;
   if (pluginAt >= 0 && (!pluginDir || pluginDir.startsWith("--"))) errors.push("--plugin needs its generated folder");
   if (pluginDir) errors.push(...pluginProblems(dir, resolve(dir, pluginDir)));
-  const agentFile = join(dir, "src/agent.ts");
-  if (!existsSync(agentFile)) {
-    console.error(`No src/agent.ts in ${dir}. Run flow check from the agent's folder.`);
+  // Nothing checked: the sentence on stderr, and with --json one { ok: false, error, next } document (errors too, as the report has them).
+  const stop = (code: string, message: string) => {
+    if (json) console.log(JSON.stringify({ ok: false, error: { code, message }, errors: [message], warnings: [], next: null }));
+    console.error(message);
     return 1;
-  }
+  };
+  const agentFile = join(dir, "src/agent.ts");
+  if (!existsSync(agentFile)) return stop("no_agent", `No src/agent.ts in ${dir}. Run flow check from the agent's folder.`);
   const agent = await load(agentFile);
-  if (!agent) return 1;
+  if (typeof agent === "string") return stop("not_loaded", agent);
   const tools: Tool[] = Array.isArray(agent.tools) ? agent.tools : [];
   if (!Array.isArray(agent.tools)) errors.push("src/agent.ts exports no tools array");
   errors.push(...toolsProblems(tools));
@@ -54,18 +109,22 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
   const cliFile = join(dir, "src/cli.ts");
   if (existsSync(cliFile)) {
     const loaded = await load(cliFile);
-    if (!loaded) return 1;
+    if (typeof loaded === "string") return stop("not_loaded", loaded);
     const cli = loaded.cli as CliConfig | undefined;
     if (!cli) errors.push("src/cli.ts exports no cli (export const cli = defineCli({ ... }))");
     else {
-      const described = tools.flatMap((t) => {
+      // The CLI's commands are the tools its MCP server lists: src/mcp.ts's, when it can be asked.
+      const served = await servedTools(dir, errors);
+      if (typeof served === "string") return stop("not_loaded", served);
+      // A tool kept to the CLI (mcp.clients) is listed only to a signed-in CLI, never here: it counts as served.
+      const described = tools.filter((t) => !served || served.has(t.name) || t.mcp?.clients?.includes("cli")).flatMap((t) => {
         try {
           return [describe(t)];
         } catch {
           return [];
         }
       });
-      const found = cliProblems(cli, described);
+      const found = cliProblems(cli, described, served !== undefined);
       errors.push(...found.errors.map((e) => `src/cli.ts: ${e}`));
       warnings.push(...found.warnings.map((w) => `src/cli.ts: ${w}`));
     }

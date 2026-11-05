@@ -23,6 +23,26 @@
 //        (whenever observe answered; an older server sends neither); 403 not_a_member, 409 workspace_ambiguous (pass the id);
 //        429 slow_down with Retry-After; 403 for a trial limit (sandbox_allowance_used, ...), its next prose
 //        Any answer may carry warnings: up to 20 strings to show the owner as they are.
+//   POST /cli/setup (bearer) {live: true, content, name, workspace?, rotate: false | ["flow_live_key"]}  (setup --live)
+//        -> {flow_live_key: {env: "FLOW_LIVE_KEY", value: "flow_live_...", kid, mode: "live", scopes, content,
+//            text: "deidentified" | "raw", expires_at (30 days), idle_days (7), checklist}, advisory, stopped?,
+//            workspace_id, workspace_name, agent_id, flow_agent_id, account, minted, next}; no other key and no
+//            Messaging call. The key is the agent's live Flow key with safe defaults (read, de-identified unless
+//            content; tests; traces; model; no sends, no live deploy: those are flow keys grant send|deploy). It
+//            replaces the agent's earlier live keys at once (their kids in stopped); rotate is still taken. 403 owner_only, health_workspace, content_not_allowed; 404 not_set_up; 502 observe_failed
+//            (the key is revoked before any error goes out). An older server ignores live: so the request also names
+//            every key as had and no channel, and its 400 invalid_request to rotate ["flow_live_key"], or a 200 with
+//            no flow_live_key, means it makes no live keys
+//   GET  /cli/keys (bearer) -> {keys: [{kid, kind, mode, scopes, agent, flow_agent_id, environment, content, last4, created_at,
+//        expires_at, last_used_at, checklist: [{capability, label, allowed, grant}], grants: [{scope, at, by}]}]}:
+//        the account's live keys, never their values, expired and revoked ones left out; kind is developer or runtime;
+//        checklist is the same lines in the same order for every key, grant the command for a line not allowed
+//   POST /cli/keys/grant (bearer) {kid, grant: read|tests|traces|model|content|send|deploy} -> 200 {granted: true, already?,
+//        tier, advisory, key: {kid, mode, scopes, checklist}}; for send and deploy (critical) 202 {granted: false,
+//        status: "pending", tier, advisory, grant_id, approve_url, expires_at, interval, message, next}; 400 invalid_request,
+//        404 not_found, 409 not_for_this_key, observe's refusals for content, 429 slow_down
+//   GET  /cli/keys/grant/<grant_id> (bearer) -> {grant_id, status: pending|approved|denied|expired, kid, interval, key?}
+//   POST /cli/keys/revoke (bearer) {kid} -> {kid, revoked: true, next}; 400 invalid_request, 404 not_found
 //   GET  <model URL>/credit (bearer FLOW_KEY) -> {limit_usd, spent_usd, left_usd, default_model, models};
 //        the model URL is src/model.ts's flowModelURL (flow.engineer/llm/framework/v1); 401 invalid_api_key,
 //        403 insufficient_scope (the key lacks model), 402 trial_credit_used or trial_credit_unavailable
@@ -38,6 +58,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { configDir, configFile, RUN, setting } from "../../src/names.ts";
 
 export const LOGIN_URL = "https://flow.engineer";
@@ -157,7 +178,9 @@ export interface DeviceStart {
 
 export type TokenAnswer =
   | { status: "signed_in"; token: string; expires_at?: string; account?: Account }
-  | { status: "authorization_pending" | "slow_down" | "expired_token" | "access_denied" };
+  | { status: "authorization_pending" | "expired_token" | "access_denied" }
+  /** retryAfter: the seconds a 429 asked to wait before the next poll. */
+  | { status: "slow_down"; retryAfter?: number };
 
 export interface Account {
   email: string;
@@ -313,9 +336,20 @@ function refused(path: string, given: Answer, url: string): LoginRefused {
   return new LoginRefused(answer.status, code, `${path} answered ${answer.status} ${code}${sentence ? `: ${sentence}` : ""}.`, next, answer.body, answer.retryAfter);
 }
 
-/** `clientName` and `hostname` are shown on the approval page. */
-export async function startDevice(url: string, clientName: string, hostname: string): Promise<DeviceStart> {
-  const answer = await call(url, "/cli/device", { body: { client_name: clientName, hostname } });
+/** The longest 429 wait a sign-in waits out by itself; a longer one is printed for the person. */
+const MAX_LOGIN_WAIT_S = 30;
+
+/** The error code of an answer, flat ({ error: "slow_down" }) or nested ({ error: { code } }). */
+const errorCode = (body: Record<string, unknown>) => (typeof body.error === "string" ? body.error : body.error && typeof body.error === "object" ? (body.error as { code?: unknown }).code : undefined);
+
+/** `clientName` and `hostname` are shown on the approval page. A 429 that asks for 30 s or less is waited out once. */
+export async function startDevice(url: string, clientName: string, hostname: string, wait: (ms: number) => Promise<unknown> = delay): Promise<DeviceStart> {
+  let answer = await call(url, "/cli/device", { body: { client_name: clientName, hostname } });
+  if (answer.status === 429 && answer.retryAfter !== undefined && answer.retryAfter <= MAX_LOGIN_WAIT_S) {
+    process.stderr.write(`flow.engineer asked to wait ${answer.retryAfter} s before a new sign-in (429 ${errorCode(answer.body) ?? "slow_down"}); waiting.\n`);
+    await wait(answer.retryAfter * 1000);
+    answer = await call(url, "/cli/device", { body: { client_name: clientName, hostname } });
+  }
   if (answer.status !== 200 || typeof answer.body.device_code !== "string") throw refused("/cli/device", answer, url);
   return answer.body as unknown as DeviceStart;
 }
@@ -329,7 +363,9 @@ export async function pollToken(url: string, deviceCode: string, timeoutMs?: num
   if (answer.status === 200 && typeof token === "string") {
     return { status: "signed_in", token, expires_at: answer.body.expires_at as string | undefined, account: answer.body.account as Account | undefined };
   }
-  const error = answer.body.error;
+  const error = errorCode(answer.body);
+  // A 429 slow_down is RFC 8628's slow_down with a wait: polling goes on, after it.
+  if (error === "slow_down" || (answer.status === 429 && error === undefined)) return { status: "slow_down", ...(answer.retryAfter !== undefined ? { retryAfter: answer.retryAfter } : {}) };
   if (typeof error === "string" && WAITING.has(error)) return { status: error as "authorization_pending" };
   throw refused("/cli/token", answer, url);
 }
@@ -351,6 +387,123 @@ export async function setup(url: string, token: string, request: { name: string;
   // A 200 is returned whole even without a join code: the keys it minted are shown only now.
   if (answer.status !== 200) throw refused("/cli/setup", answer, url);
   return answer.body as unknown as SetupAnswer;
+}
+
+/** setup --live's key: the agent's live Flow key, its value shown once. */
+export interface LiveKey {
+  env?: string;
+  value?: string;
+  kid?: string;
+  mode?: string;
+  scopes?: string[];
+  content?: boolean;
+  /** deidentified, or raw for a key made with --content. */
+  text?: string;
+  expires_at?: string;
+  idle_days?: number;
+  checklist?: ChecklistLine[];
+}
+
+/** One line of what a key can do, in the server's fixed order; `grant` is the command that gives a line not allowed. */
+export interface ChecklistLine {
+  capability: string;
+  label: string;
+  allowed: boolean;
+  grant?: string | null;
+}
+
+/** The three advisory tiers, as flow.engineer words them. */
+export interface Advisory {
+  default?: string;
+  ask_user?: string;
+  critical?: string;
+}
+
+export interface LiveSetupAnswer {
+  flow_live_key?: LiveKey;
+  advisory?: Advisory;
+  /** The agent's earlier live keys this one replaced. */
+  stopped?: string[];
+  workspace_id?: string;
+  workspace_name?: string;
+  agent_id?: string;
+  flow_agent_id?: string;
+  account?: Account;
+  minted?: string[];
+  next?: string[];
+  warnings?: string[];
+}
+
+/** `flow setup --live`: mints the agent's live Flow key; a 200 without flow_live_key is an older server's (it made nothing). */
+export async function setupLive(url: string, token: string, request: { live: true; content: boolean; name: string; workspace?: string; rotate: false | ["flow_live_key"]; hostname: string; channels: []; have: string[] }): Promise<LiveSetupAnswer> {
+  const answer = await call(url, "/cli/setup", { token, body: request });
+  if (answer.status !== 200) throw refused("/cli/setup", answer, url);
+  return answer.body as LiveSetupAnswer;
+}
+
+/** One of the account's live keys as GET /cli/keys lists it (never its value). */
+export interface ListedKey {
+  kid: string;
+  kind?: string;
+  mode?: string;
+  scopes?: string[];
+  agent?: string | null;
+  flow_agent_id?: string | null;
+  environment?: string | null;
+  content?: boolean;
+  last4?: string;
+  created_at?: string;
+  expires_at?: string | null;
+  last_used_at?: string | null;
+  checklist?: ChecklistLine[];
+  grants?: Array<{ scope: string; at?: string; by?: string }>;
+}
+
+export async function listKeys(url: string, token: string): Promise<ListedKey[]> {
+  const answer = await call(url, "/cli/keys", { token, method: "GET" });
+  if (answer.status !== 200 || !Array.isArray(answer.body.keys)) throw refused("/cli/keys", answer, url);
+  return answer.body.keys as ListedKey[];
+}
+
+/** Ends one of the account's keys at once. */
+export async function revokeKey(url: string, token: string, kid: string): Promise<{ kid: string; revoked: boolean; next?: string }> {
+  const answer = await call(url, "/cli/keys/revoke", { token, body: { kid } });
+  if (answer.status !== 200) throw refused("/cli/keys/revoke", answer, url);
+  return answer.body as { kid: string; revoked: boolean; next?: string };
+}
+
+/** A key's changed part, as a grant answers it. */
+export interface GrantedKey { kid?: string; mode?: string; scopes?: string[]; checklist?: ChecklistLine[] }
+
+/** POST /cli/keys/grant's answer: granted now (200), or waiting for the owner's click (202, critical). */
+export interface GrantAnswer {
+  granted: boolean;
+  already?: boolean;
+  status?: string;
+  tier?: string;
+  advisory?: Advisory;
+  key?: GrantedKey;
+  grant_id?: string;
+  approve_url?: string;
+  expires_at?: string;
+  interval?: number;
+  message?: string;
+  next?: string | string[];
+}
+
+/** Asks for one more thing on a live key; a 202 is returned (granted false) for the owner to approve in the browser. */
+export async function grantKey(url: string, token: string, kid: string, grant: string): Promise<GrantAnswer> {
+  const answer = await call(url, "/cli/keys/grant", { token, body: { kid, grant } });
+  if (answer.status === 200 || (answer.status === 202 && typeof answer.body.grant_id === "string")) return answer.body as unknown as GrantAnswer;
+  throw refused("/cli/keys/grant", answer, url);
+}
+
+/** Where a critical grant is: pending, approved (with the key's new checklist), denied or expired. */
+export async function grantStatus(url: string, token: string, grantId: string): Promise<{ grant_id?: string; status: string; kid?: string; interval?: number; key?: GrantedKey }> {
+  const path = `/cli/keys/grant/${encodeURIComponent(grantId)}`;
+  const answer = await call(url, path, { token, method: "GET" });
+  if (answer.status !== 200 || typeof answer.body.status !== "string") throw refused(path, answer, url);
+  return answer.body as { status: string };
 }
 
 /** GET /credit's answer: the account's Flow trial credit in US dollars. */

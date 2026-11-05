@@ -21,9 +21,8 @@ Read the relevant section:
 
 ## Serve the tools over MCP
 
-The same tools and skills go to Claude, ChatGPT and any MCP host as an MCP server. Install the
-SDK it runs on (`npm i @modelcontextprotocol/server@2.3.1`, the version Flow Framework pins) and add
-`src/mcp.ts`:
+The same tools and skills go to Claude, ChatGPT and any MCP host as an MCP server. The SDK it runs
+on, `@modelcontextprotocol/server`, comes with Flow Framework; add `src/mcp.ts`:
 
 ```ts
 import { createServer } from "node:http";
