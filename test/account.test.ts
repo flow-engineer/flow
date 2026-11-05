@@ -265,7 +265,7 @@ test("whoami uses FLOW_FRAMEWORK_TOKEN over the file, and without either says to
   const config = temp();
   const none = await run(["whoami", "--json"], { url: flow.url, config, cwd: temp() });
   assert.equal(none.code, 1);
-  assert.deepEqual(none.lines[0], { error: { code: "not_signed_in", message: "Not signed in to flow.engineer.", next: "npx @flow-engineer/flow login" } });
+  assert.deepEqual(none.lines[0], { ok: false, error: { code: "not_signed_in", message: "Not signed in to flow.engineer.", next: "npx @flow-engineer/flow login" }, next: "npx @flow-engineer/flow login" });
   const result = await run(["whoami", "--json"], { url: flow.url, config, cwd: temp(), env: { FLOW_FRAMEWORK_TOKEN: "fcli_from_env" } });
   assert.equal(result.code, 0, result.err);
   assert.deepEqual(result.lines[0], { email: "dev@example.com", account: "uid_1" });
@@ -378,7 +378,7 @@ test("link in a folder set up already needs no sign-in: it prints the server's t
   writeFileSync(join(cwd, ".env"), `FLOW_MESSAGING_KEY=${KEYS.messaging_key}\nFLOW_MESSAGING_WHATSAPP_SENDER=snd_wa\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\n`);
   const refused = await run(["link", "--channel", "whatsapp", "--json"], { url: nothing.url, config: temp(), cwd });
   assert.equal(refused.code, 3, "with no channel open at all it is still a refusal");
-  assert.deepEqual(refused.lines[0], { error: { code: "channel_not_open", message: "WhatsApp is not open on the sandbox yet.", next: "npx @flow-engineer/flow link --channel telegram" } });
+  assert.deepEqual(refused.lines[0], { ok: false, error: { code: "channel_not_open", message: "WhatsApp is not open on the sandbox yet.", next: "npx @flow-engineer/flow link --channel telegram" }, next: "npx @flow-engineer/flow link --channel telegram" });
   assert.equal((await run(["link", "--channel", "sms"], { url: flow.url, config: temp(), cwd })).code, 1, "an unknown channel is a usage error");
 });
 
@@ -677,7 +677,9 @@ test("a setup the server asks to wait on (429 slow_down) prints the wait and nex
   const result = await run(["setup", "--json"], { url: flow.url, config: temp(), cwd: agentDir(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
   assert.equal(result.code, 4, result.err);
   assert.deepEqual(result.lines.at(-1), {
+    ok: false,
     error: { code: "slow_down", message: "/cli/setup answered 429 slow_down: Too many setups from this account. Wait 30 s before trying again.", next: "npx @flow-engineer/flow setup", retry_after: 30 },
+    next: "npx @flow-engineer/flow setup",
     warnings: ["Setup was run 6 times in a minute."],
   });
   assert.match(result.err, /^Setup was run 6 times in a minute\.$/m);
@@ -1336,8 +1338,27 @@ test("flow keys (and keys list) lists the account's keys, never a value: id, age
     assert.equal(listed.out, table);
   }
   const json = await run(["keys", "list", "--json"], options);
-  assert.deepEqual(json.lines, [{ keys: LISTED }]);
+  assert.deepEqual(json.lines, [{ keys: LISTED, agent: null, all: true }]);
+  assert.equal(json.err, "", "--json prints the document alone, no table on stderr");
   assert.equal((await run(["keys", "list", "FAKElive00"], options)).code, 1);
+});
+
+// 0.16.0's release candidate listed every agent's keys from an agent's folder (16 keys across 12 agents).
+test("flow keys list in an agent's folder lists that agent's keys (by the key in .env, else package.json's name); --agent names one, --all lists every one", async (t) => {
+  const bakery = { ...LISTED[1]!, kid: "FAKEbake00", agent: "bakery", flow_agent_id: "agt_2", last4: "B4k3" };
+  const flow = await flowServer([], 200, { answers: { "/cli/keys": { status: 200, body: { keys: [...LISTED, bakery] } } } });
+  t.after(flow.close);
+  const env = { FLOW_FRAMEWORK_TOKEN: TOKEN };
+  const byKey = await run(["keys", "--json"], { url: flow.url, config: temp(), cwd: liveFolder(), env });
+  assert.deepEqual(byKey.lines, [{ keys: LISTED, agent: "cafe", all: false }]);
+  const byName = await run(["keys"], { url: flow.url, config: temp(), cwd: agentDir("bakery"), env });
+  assert.equal(byName.code, 0, byName.err);
+  assert.match(byName.out, /^KID {9}AGENT {3}MODE  KEY {4}EXPIRES\nFAKEbake00  bakery  test  …B4k3  -\n\n?1 of this account's 3 live keys: the ones of bakery\. Every agent's: npx @flow-engineer\/flow keys list --all\n$/);
+  const named = await run(["keys", "--agent", "bakery", "--json"], { url: flow.url, config: temp(), cwd: liveFolder(), env });
+  assert.deepEqual(named.lines[0]!.keys.map((k: { kid: string }) => k.kid), ["FAKEbake00"]);
+  const all = await run(["keys", "list", "--all", "--json"], { url: flow.url, config: temp(), cwd: liveFolder(), env });
+  assert.deepEqual(all.lines, [{ keys: [...LISTED, bakery], agent: null, all: true }]);
+  assert.equal((await run(["keys", "--all", "--agent", "cafe"], { url: flow.url, config: temp(), cwd: temp(), env })).code, 1);
 });
 
 test("flow keys show <kid> prints one key's ✓/✗ checklist in the server's order and its grants; a kid the list lacks is not_found (exit 3)", async (t) => {
@@ -1456,6 +1477,6 @@ test("a grant flow.engineer refuses (409 not_for_this_key: a live key not made b
   t.after(flow.close);
   const result = await run(["keys", "grant", "read", "--json"], { url: flow.url, config: temp(), cwd: liveFolder(), env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
   assert.equal(result.code, 3);
-  assert.deepEqual(result.lines, [{ error: { code: "not_for_this_key", message: "/cli/keys/grant answered 409 not_for_this_key: Only a live key made by flow setup --live takes grants.", next: "npx @flow-engineer/flow setup --live" } }]);
+  assert.deepEqual(result.lines, [{ ok: false, error: { code: "not_for_this_key", message: "/cli/keys/grant answered 409 not_for_this_key: Only a live key made by flow setup --live takes grants.", next: "npx @flow-engineer/flow setup --live" }, next: "npx @flow-engineer/flow setup --live" }]);
   assert.match(result.err, /Only a live key made by flow setup --live takes grants\. Next: npx @flow-engineer\/flow setup --live/);
 });

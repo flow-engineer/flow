@@ -10,7 +10,7 @@
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { RUN } from "../../src/names.ts";
-import { asStop, EXIT, signedIn, Stop, writeAll } from "./account.ts";
+import { asStop, errorReport, EXIT, signedIn, Stop, usageExit, writeAll } from "./account.ts";
 import { deleteProject, listProjects, LoginRefused, type Project } from "./flow-login.ts";
 
 export const PROJECTS_LINE = `  flow projects list [--workspace <acc_id>] [--json]
@@ -49,12 +49,11 @@ export async function projectsCli(args: string[]): Promise<number> {
       },
     }));
   } catch (error) {
-    console.error(`flow projects: ${(error as Error).message.split(". ")[0]}\n\n${USAGE}`);
-    return EXIT.usage;
+    return usageExit(args, `flow projects: ${(error as Error).message.split(". ")[0]}`, USAGE);
   }
   if (values.help) return console.log(USAGE), EXIT.ok;
   const [sub, target, ...extra] = positionals;
-  const usage = (problem: string) => (console.error(`flow projects: ${problem}\n\n${USAGE}`), EXIT.usage);
+  const usage = (problem: string) => usageExit(args, `flow projects: ${problem}`, USAGE);
   if (sub !== "list" && sub !== "delete") return usage(sub === undefined ? "say list or delete" : `unknown command "${sub}"`);
   if (sub === "list" && target !== undefined) return usage("list takes no name");
   if (sub === "delete" && (target === undefined || extra.length)) return usage("delete takes one name or id");
@@ -89,7 +88,7 @@ export async function projectsCli(args: string[]): Promise<number> {
   } catch (error) {
     const stop = asStop(error);
     writeAll(2, `${stop.next ? `${stop.message} Next: ${stop.next}` : stop.message}\n`);
-    if (json) out({ error: { code: stop.code, message: stop.message, next: stop.next ?? null, ...(stop instanceof Ambiguous ? { matches: stop.matches } : {}) } });
+    if (json) out(errorReport(stop.code, stop.message, stop.next, stop instanceof Ambiguous ? { matches: stop.matches } : {}));
     return stop.exit;
   }
 }

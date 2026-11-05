@@ -38,7 +38,10 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   const own = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(pkg.name, "my-agent");
   assert.equal(pkg.dependencies["@flow-engineer/flow"], own.version, "pinned exactly, as the docs say for production");
-  assert.equal(pkg.dependencies["@modelcontextprotocol/server"], own.peerDependencies["@modelcontextprotocol/server"], "the MCP SDK at the version chinwag pins");
+  assert.equal(pkg.dependencies["@modelcontextprotocol/client"], own.peerDependencies["@modelcontextprotocol/client"], "the MCP client SDK at the version Flow Framework pins");
+  // flow mcp serve and src/mcp.ts run on the MCP server SDK, a dependency of Flow Framework itself: an agent folder made on 0.15 without it still serves.
+  assert.equal(own.dependencies["@modelcontextprotocol/server"], "2.3.1");
+  assert.equal(pkg.dependencies["@modelcontextprotocol/server"], undefined);
   assert.equal(pkg.scripts.test, "flow test");
   assert.deepEqual(pkg.bin, { "my-agent": "src/cli.ts" }, "installed, the CLI is a command of its own");
   assert.equal(pkg.engines.node, own.engines.node);

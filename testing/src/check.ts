@@ -14,14 +14,13 @@ import type { Tool } from "../../src/tools.ts";
 
 export const CHECK_LINE = `  flow check [--json] [--plugin <dir>]    Check the agent's tools, CLI file and skills for MCP and the CLI`;
 
-/** A file of the agent's, imported; TypeScript Node cannot run is one line saying what to change, not a stack. */
-async function load(file: string): Promise<Record<string, unknown> | undefined> {
+/** A file of the agent's, imported; TypeScript Node cannot run is a string saying what to change, not a stack. */
+async function load(file: string): Promise<Record<string, unknown> | string> {
   try {
     return await import(pathToFileURL(file).href);
   } catch (error) {
     if ((error as { code?: string }).code !== "ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX") throw error;
-    console.error(`${(error as Error).message.split("\n")[0]}\nNode runs .ts files by stripping types only: no parameter properties (constructor(readonly x)), enums or namespaces. Write them as plain fields and objects.`);
-    return undefined;
+    return `${(error as Error).message.split("\n")[0]}\nNode runs .ts files by stripping types only: no parameter properties (constructor(readonly x)), enums or namespaces. Write them as plain fields and objects.`;
   }
 }
 
@@ -29,15 +28,15 @@ async function load(file: string): Promise<Record<string, unknown> | undefined> 
  * The names of the tools src/mcp.ts's server lists to a CLI, asked in-process as the CLI asks it
  * (tools/list, the full catalog), so check says what `<cli> <command>` really reaches. undefined
  * when there is no src/mcp.ts, it exports no `mcp`, or it will not answer here (sign-in, another
- * path); null when it cannot be imported (said already). A src/mcp.ts that throws is an error.
+ * path); a string, what to change, when it cannot be imported. A src/mcp.ts that throws is an error.
  */
-async function servedTools(dir: string, errors: string[]): Promise<Set<string> | undefined | null> {
+async function servedTools(dir: string, errors: string[]): Promise<Set<string> | undefined | string> {
   const file = join(dir, "src/mcp.ts");
   if (!existsSync(file)) return undefined;
   let mcp: { fetch?: unknown } | undefined;
   try {
     const loaded = await load(file);
-    if (!loaded) return null;
+    if (typeof loaded === "string") return loaded;
     mcp = loaded.mcp as typeof mcp;
   } catch (error) {
     errors.push(`src/mcp.ts: ${(error as Error).message.split("\n")[0]}`);
@@ -86,13 +85,16 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
   const pluginDir = pluginAt >= 0 ? argv[pluginAt + 1] : undefined;
   if (pluginAt >= 0 && (!pluginDir || pluginDir.startsWith("--"))) errors.push("--plugin needs its generated folder");
   if (pluginDir) errors.push(...pluginProblems(dir, resolve(dir, pluginDir)));
-  const agentFile = join(dir, "src/agent.ts");
-  if (!existsSync(agentFile)) {
-    console.error(`No src/agent.ts in ${dir}. Run flow check from the agent's folder.`);
+  // Nothing checked: the sentence on stderr, and with --json one { ok: false, error, next } document (errors too, as the report has them).
+  const stop = (code: string, message: string) => {
+    if (json) console.log(JSON.stringify({ ok: false, error: { code, message }, errors: [message], warnings: [], next: null }));
+    console.error(message);
     return 1;
-  }
+  };
+  const agentFile = join(dir, "src/agent.ts");
+  if (!existsSync(agentFile)) return stop("no_agent", `No src/agent.ts in ${dir}. Run flow check from the agent's folder.`);
   const agent = await load(agentFile);
-  if (!agent) return 1;
+  if (typeof agent === "string") return stop("not_loaded", agent);
   const tools: Tool[] = Array.isArray(agent.tools) ? agent.tools : [];
   if (!Array.isArray(agent.tools)) errors.push("src/agent.ts exports no tools array");
   errors.push(...toolsProblems(tools));
@@ -107,13 +109,13 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
   const cliFile = join(dir, "src/cli.ts");
   if (existsSync(cliFile)) {
     const loaded = await load(cliFile);
-    if (!loaded) return 1;
+    if (typeof loaded === "string") return stop("not_loaded", loaded);
     const cli = loaded.cli as CliConfig | undefined;
     if (!cli) errors.push("src/cli.ts exports no cli (export const cli = defineCli({ ... }))");
     else {
       // The CLI's commands are the tools its MCP server lists: src/mcp.ts's, when it can be asked.
       const served = await servedTools(dir, errors);
-      if (served === null) return 1;
+      if (typeof served === "string") return stop("not_loaded", served);
       // A tool kept to the CLI (mcp.clients) is listed only to a signed-in CLI, never here: it counts as served.
       const described = tools.filter((t) => !served || served.has(t.name) || t.mcp?.clients?.includes("cli")).flatMap((t) => {
         try {
