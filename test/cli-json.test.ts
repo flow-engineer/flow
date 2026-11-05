@@ -64,7 +64,7 @@ function agentFolder(lines: string[]): string {
   return dir;
 }
 
-test("every --json failure prints exactly one JSON document on stdout, { ok: false, error: { code, message }, next }, and never a key", { timeout: 60_000 }, async () => {
+test("every --json failure prints exactly one JSON document on stdout, { ok: false, error: { code, message }, next }, and never a key", { timeout: 120_000 }, async () => {
   const fake = await cloud();
   const nowhere = await closedAddress();
   try {
@@ -126,8 +126,11 @@ test("every --json failure prints exactly one JSON document on stdout, { ok: fal
     const listed = new Set(help.stdout.split("\n").map((line) => /^ {2}flow ((?:[a-z-]+)(?: (?:[a-z-]+|--live))?)(?= |$).*--json/.exec(line)?.[1]).filter((c): c is string => Boolean(c)));
     assert.ok(listed.size >= 20, [...listed].join(", "));
     for (const command of listed) assert.ok(cases.some((c) => c.args.join(" ").startsWith(`${command} `) || c.args.join(" ") === command), `no --json failure case for flow ${command}`);
+    // Eight at a time: each case is a fresh node process, and one after another passed the minute under a full run's load.
+    const runs = new Map<(typeof cases)[number], Awaited<ReturnType<typeof flow>>>();
+    for (let i = 0; i < cases.length; i += 8) await Promise.all(cases.slice(i, i + 8).map(async (c) => runs.set(c, await flow(c.args, c.dir))));
     for (const c of cases) {
-      const run = await flow(c.args, c.dir);
+      const run = runs.get(c)!;
       const what = `flow ${c.args.join(" ")}: ${JSON.stringify(run)}`;
       assert.equal(run.code, c.exit, what);
       assert.equal(run.stdout.trim().split("\n").length, 1, `one line: ${what}`);
