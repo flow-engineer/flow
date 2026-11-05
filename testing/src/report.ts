@@ -146,6 +146,17 @@ export function scenarioRates(runs: Array<{ scenario: string; path?: string; cha
 /** The switch that leaves the fake suggestion out of the line after a session (in the environment or .env). */
 export const FAKE_HINT_OFF = "FLOW_FRAMEWORK_FAKE_HINT=0";
 
+/** The line before a session with a `given:` scenario, naming the agent's tools that count as writes (no
+ * `hints.readOnly`) and have no fake here: in a given: run only a fake keeps a write in state. A suggestion, hidden
+ * by the same switch as modelPlayedLine's; null when there are none. */
+export function writesWithoutFakeLine(tools: Array<{ name: string; hints?: { readOnly?: boolean } }>, fakes: Iterable<string>): string | null {
+  const have = new Set(fakes);
+  const names = tools.filter((t) => !t.hints?.readOnly && !have.has(t.name)).map((t) => t.name);
+  if (!names.length) return null;
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+  return `${list} ${names.length === 1 ? "counts as a write and has" : "count as writes and have"} no fake: in scenarios with given:, nothing keeps ${names.length === 1 ? "its writes" : "their writes"} for expect.state. If you like, ${RUN} test fake ${names[0]} writes a starter. Optional (${FAKE_HINT_OFF} hides this).`;
+}
+
 /** The tools a model played in these runs that have no fake on this machine (`fakes`), the most played first. */
 export function toolsWithoutFake(runs: Array<Pick<RunSummary, "toolsPlayedBy">>, fakes: Iterable<string>): string[] {
   const byTool = new Map<string, number>();

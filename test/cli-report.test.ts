@@ -167,6 +167,19 @@ test("the command line: --version, each command's own --help, and a plain line f
   assert.ok(!existsSync(join(dir, "x")));
 });
 
+test("before a session with a given: scenario, one optional line names the tools that count as writes and have no fake; FLOW_FRAMEWORK_FAKE_HINT=0 and no given: scenario leave it out", { timeout: 15_000 }, async () => {
+  const closed = "http://127.0.0.1:9";
+  const writes = agentDir({ given: `${scenarioYaml("given", "sms")}given: {}\n` });
+  writeFileSync(join(writes, "src", "agent.ts"), 'export const tools = [{ name: "book_table" }, { name: "get_opening_hours", hints: { readOnly: true } }, { name: "place_order" }];\nexport function buildAgent() {\n  return { channels: () => [], receive: () => "m", reacted: () => {} };\n}\n');
+  mkdirSync(join(writes, "tests", "tools"));
+  writeFileSync(join(writes, "tests", "tools", "place_order.fake.ts"), "export default () => ({ output: {} });\n");
+  const line = "book_table counts as a write and has no fake: in scenarios with given:, nothing keeps its writes for expect.state. If you like, npx @flow-engineer/flow test fake book_table writes a starter. Optional (FLOW_FRAMEWORK_FAKE_HINT=0 hides this).";
+  const hinted = await cliOutput(["test", "--cloud", closed], writes);
+  assert.ok(hinted.out.startsWith(`${line}\n`), hinted.out);
+  assert.doesNotMatch((await cliStreams(["test", "--cloud", closed], writes, { FLOW_FRAMEWORK_FAKE_HINT: "0" })).out, /counts as a write/);
+  assert.doesNotMatch((await cliOutput(["test", "--cloud", closed, "--only", "hello"], writes)).out, /counts as a write/, "no scenario with given: is sent, so no line");
+});
+
 test("what is wrong on this machine is said before the cloud is called, an address that does not answer is named, and the default cloud asks for its key", { timeout: 15_000 }, async () => {
   const closed = "http://127.0.0.1:9";
   const empty = mkdtempSync(join(tmpdir(), "flow-cli-"));

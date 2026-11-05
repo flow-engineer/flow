@@ -81,10 +81,10 @@ function starter(tool: string, file: string, parsed: ToolFile): string {
 // tests/tools/${file}, as before.
 //
 // It plays ${tool} only in scenarios with a given: block; what given: holds (but tools and seed)
-// reaches it as \`world\`, and a tool file's name there is that tool's usual output:
+// reaches it as \`world\` (a tool file's name there becomes that file's first output, as data):
 //   given:
 //     stock: { oat: true }
-//     tools: { ${tool}: usual }       # usual | slow | down | flaky 30%
+//     tools: { ${tool}: slow }        # optional, this tool only: usual (the same as left out) | slow | down | flaky 30%
 // \`state\` is one object per run, shared by every fake: keep what ${tool} changed there (an order
 // placed, a booking made) and check it at the end with the scenario's expect.state:
 //   expect:
