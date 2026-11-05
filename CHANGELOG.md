@@ -136,7 +136,17 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - **`flow logs`** takes `--until <duration|time>`, `--severity <DEFAULT|INFO|WARNING|ERROR>` (that
   severity or above) and `--grep <text>`, sends them to the cloud and filters what an older cloud
   sends anyway; `--since` takes a time or up to 30 days; when the lines start later than `--since`
-  asked, stderr says "Logs start at <time>: this Flow keeps <N> back".
+  asked, stderr says "Logs start at <time>: this Flow keeps <N> back". `--since` and `--until` take
+  one rule, shared with MCP's `read_logs`: a duration (2d) is that long before now for both, a time
+  is taken as given, and `--until` must be after `--since` (every page now carries `since`: the
+  release candidate's later pages left it out and the cloud refused "until is before since").
+  `--grep` matches the text anywhere in the line as printed, a JSON line's every field (needs
+  Flow's hosting of 5 Nov 2026 or later; an older one matched only `message`/`msg`).
+- **`flow logs` and `read_logs` join a stack trace** that Cloud Run split into an entry per line: a
+  line starting with whitespace (`    at ...`) at the same time from the same instance goes on the
+  line before it, which keeps the higher severity. Flow Framework's own lines are already one entry
+  with the stack inside (above); this is for an agent's own `console.error` and older
+  runtimes.
 - **`flow logs` no longer stops at the host's first page.** Without `--follow` it read one page (the
   host answers 500 lines, oldest first), so `--since 3d` printed the oldest 500 lines and silently
   left out the newest. It now reads every page up to `--until` (else now) before printing, keeps the

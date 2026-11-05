@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/client";
+import { hostLogs, type HostLogLine } from "./helpers.ts";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
@@ -103,6 +104,27 @@ test("read_logs follows the cursor until it stops moving and keeps the newest li
     assert.deepEqual(data.lines.map((l) => l.text), ["line 2", "line 3", "line 4"]);
     assert.equal(data.truncated, true);
     assert.equal(cloud.seen.length, 3);
+  } finally {
+    await client.close();
+    await cloud.close();
+  }
+});
+
+// 0.16.0's release candidate refused since "30d" (its own clock moved between two reads of it) and every until (a later page sent no since).
+test("read_logs takes flow logs' window, since 30d and a relative until across pages, and joins a split stack", async () => {
+  const start = Date.now() - 29 * 86_400_000;
+  const lines: HostLogLine[] = Array.from({ length: 600 }, (_, i) => ({ time: new Date(start + i * 60_000).toISOString(), severity: "INFO", text: `line ${i}` }));
+  const at = new Date(start + 600 * 60_000).toISOString();
+  lines.push({ time: at, severity: "DEFAULT", text: "Error: boom" }, { time: at, severity: "DEFAULT", text: "    at run (file:///app/a.js:1:2)" });
+  const cloud = await fakeCloud((req) => hostLogs(new URL(req.url!, "http://x").searchParams, lines, Date.now()));
+  const client = await serve(cloud.url);
+  try {
+    const result = await client.callTool({ name: "read_logs", arguments: { since: "30d", until: "1d", limit: 1000 } });
+    assert.equal(result.isError, undefined, JSON.stringify(result.structuredContent));
+    const data = result.structuredContent as { lines: Array<{ text: string }>; truncated: boolean };
+    assert.equal(data.lines.length, 601);
+    assert.deepEqual([data.lines[0]!.text, data.lines.at(-1)!.text, data.truncated], ["line 0", "Error: boom\n    at run (file:///app/a.js:1:2)", false]);
+    assert.ok(cloud.seen.length >= 2 && cloud.seen.every((s) => /[?&]since=/.test(s.url) && /[?&]until=/.test(s.url)), "since and until on every page");
   } finally {
     await client.close();
     await cloud.close();
