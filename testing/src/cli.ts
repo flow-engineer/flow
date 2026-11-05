@@ -53,13 +53,14 @@ import { CONVERSATIONS_LINES, conversationsCli, INSIGHTS_LINES, insightsCli, iss
 import { TEMPLATES_LINE, templatesCli, templateWarnings } from "./templates.ts";
 import { KEYS_HELP } from "./cloud-call.ts";
 import { PULL_LINE, pullCli } from "./pull.ts";
+import { FAKE_LINE, fakeCli } from "./fake.ts";
 import type { TemplateDefinition } from "../../src/types.ts";
 import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
 import { PROFILE_TOOL } from "../../src/conversation.ts";
-import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, modelPlayedLine, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
+import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, modelPlayedLine, toolsWithoutFake, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { givenProblems, loadFakes, loadSuite, parseScenario, parseToolFile, suiteHash, type ToolFile } from "./suite.ts";
 import type { RunOutcome, RunSummary } from "./protocol.ts";
@@ -77,7 +78,8 @@ const NEW_LINE = `  flow new <name> [--display-name <name>]
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
                             the tests are in tests/scenarios and tests/tools)
-${PULL_LINE}`;
+${PULL_LINE}
+${FAKE_LINE}`;
 const CHECK_LINE = `  flow check-endpoint <url> [--token-env NAME] [--json]
                             Check an agent's HTTP endpoint against the contract, for --agent-url
                             (flow check-endpoint --help)`;
@@ -252,6 +254,7 @@ if (process.argv[2] === "issues") await exitFlushed(await issuesCli(process.argv
 if (process.argv[2] === "insights") await exitFlushed(await insightsCli(process.argv.slice(3)));
 if (process.argv[2] === "templates") await exitFlushed(await templatesCli(process.argv.slice(3)));
 if (process.argv[2] === "test" && process.argv[3] === "pull") await exitFlushed(await pullCli(process.argv.slice(4)));
+if (process.argv[2] === "test" && process.argv[3] === "fake") await exitFlushed(await fakeCli(process.argv.slice(4)));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) await exitFlushed(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
 const TEST_FLAGS = {
@@ -372,6 +375,8 @@ const seen: RunSummary[] = [];
 let endedInvalid: SessionInvalid | null = null;
 /** Conversations whose messages did not all go through the agent's send (client.ts sendPathCheck). */
 let sendPath: SendPathProblem[] = [];
+/** The tools with a fake on this machine (tests/tools/<tool>.fake.ts), once loaded. */
+let fakes: string[] = [];
 /** The pass rate the session needs, in tenths of a percent (report.ts minPassTenths). */
 let minPass = DEFAULT_MIN_PASS * 10;
 
@@ -480,7 +485,6 @@ picked = values.failed ? failedLastTime(suite) : values.only ? new Set(values.on
 const chosen = only(suite, picked);
 checkSuite(chosen);
 // The fakes are loaded before anything is sent; a file that does not load is named like a test file that does not parse.
-let fakes: string[] = [];
 if (!agentUrl) {
   try {
     fakes = [...(await loadFakes(join(dir, "tests"))).keys()];
@@ -580,7 +584,7 @@ if (flaky.length) {
   for (const r of flaky) say(`  ${r.scenario} #${r.run} (${r.channel}): ${r.watch}${r.rerun ? ` then ${r.rerun.watch}` : ""}`);
 }
 for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m) => ({ scenario: m.scenario, invalid: m.summary?.invalid }))))) say(line);
-const byModel = modelPlayedLine(summary.runs, fakes);
+const byModel = modelPlayedLine(summary.runs, fakes, setting("FAKE_HINT") !== "0");
 if (byModel) say(byModel);
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
 say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
@@ -779,6 +783,7 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       invalid: invalidScenarios(runs),
       sessionInvalid: endedInvalid,
       limits,
+      toolsWithoutFake: toolsWithoutFake(received, fakes),
     };
     writeAll(`${JSON.stringify(report)}\n`);
   }
