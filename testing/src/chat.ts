@@ -5,7 +5,7 @@
 // its turn is over, so it works typed by a person or piped by a coding agent:
 //   printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat
 // --json prints each thing the agent sends as one JSON line, and an error as
-// {"error":{"code","message","next"}} (no_model_key, no_agent, not_built, no_test_people,
+// {"ok":false,"error":{"code","message","next"},"next"} (a wrong flag: usage; no_model_key, no_agent, not_built, no_test_people,
 // no_channel). The conversation lives only as long as the command. Exit status: 0 done (stdin
 // ended), 1 usage or the agent could not be built.
 
@@ -17,6 +17,7 @@ import { parseArgs } from "node:util";
 import type { Agent, FlowEvent, Outbound, Photo } from "../../src/index.ts";
 import { replyButton } from "../../src/channels.ts";
 import { NO_MODEL_KEY } from "../../src/model.ts";
+import { failureDocument } from "./cloud-call.ts";
 import { loadEnv } from "./report.ts";
 
 export const CHAT_LINE = `  flow chat [--channel <name>] [--person <phone>] [--json]
@@ -34,7 +35,9 @@ export async function chatCli(args: string[], input: NodeJS.ReadableStream = pro
   try {
     ({ values } = parseArgs({ args, strict: true, options: { channel: { type: "string" }, person: { type: "string" }, json: { type: "boolean", default: false }, help: { type: "boolean", short: "h", default: false } } }));
   } catch (error) {
-    console.error(`flow chat: ${(error as Error).message.split(". ")[0]}\n\n${USAGE}`);
+    const message = `flow chat: ${(error as Error).message.split(". ")[0]}`;
+    if (args.includes("--json")) process.stdout.write(failureDocument("usage", message));
+    console.error(`${message}\n\n${USAGE}`);
     return 1;
   }
   if (values.help) {
@@ -46,7 +49,7 @@ export async function chatCli(args: string[], input: NodeJS.ReadableStream = pro
   /** Stops with exit 1: the sentence on stderr, and with --json the error as one JSON line on stdout. */
   const fail = (code: string, message: string, next?: string, nextLine = next ? `Next: ${next}` : undefined) => {
     console.error(`flow chat: ${message}${nextLine ? `\n${nextLine}` : ""}`);
-    if (json) process.stdout.write(`${JSON.stringify({ error: { code, message, next: next ?? null } })}\n`);
+    if (json) process.stdout.write(`${JSON.stringify({ ok: false, error: { code, message, next: next ?? null }, next: next ?? null })}\n`);
     return 1;
   };
   const file = join(process.cwd(), "src", "agent.ts");
@@ -57,6 +60,7 @@ export async function chatCli(args: string[], input: NodeJS.ReadableStream = pro
     const module = await import(pathToFileURL(file).href);
     if (typeof module.buildAgent !== "function") throw new Error("src/agent.ts must export buildAgent({ events }).");
     agent = module.buildAgent({ events: [(event: FlowEvent) => turns.forEach((listener) => listener(event))] });
+    if (!agent || typeof agent.testPeople !== "function") throw new Error("src/agent.ts's buildAgent must return the agent createAgent makes.");
   } catch (error) {
     if ((error as { code?: unknown }).code === NO_MODEL_KEY.code) return fail(NO_MODEL_KEY.code, NO_MODEL_KEY.message, NO_MODEL_KEY.next, NO_MODEL_KEY.nextLine);
     return fail("not_built", (error as Error).message);

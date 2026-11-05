@@ -218,8 +218,8 @@ if (process.argv[2] === "mcp") {
     process.exit(0);
   }
   if (process.argv[3] === "serve") {
-    // Loaded only here: it needs @modelcontextprotocol/server, an optional peer.
-    const { mcpServeCli } = await withPeers("mcp serve", () => import("./mcp-serve.ts"));
+    // Loaded only here, so the other commands never load the MCP SDK (a dependency of Flow Framework).
+    const { mcpServeCli } = await import("./mcp-serve.ts");
     process.exit(await mcpServeCli(process.argv.slice(4)));
   }
   if (process.argv[3] !== "update") {

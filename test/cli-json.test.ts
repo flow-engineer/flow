@@ -1,4 +1,4 @@
-// covers: testing/src/cli.ts testing/src/conversations.ts testing/src/templates.ts testing/src/deploy.ts testing/src/show.ts testing/src/cloud-call.ts
+// covers: testing/src/cli.ts testing/src/conversations.ts testing/src/templates.ts testing/src/deploy.ts testing/src/show.ts testing/src/cloud-call.ts testing/src/pull.ts testing/src/account.ts testing/src/projects.ts testing/src/chat.ts testing/src/check-endpoint.ts testing/src/check.ts
 // With --json, stdout carries exactly one JSON document on every failure, as a coding agent parses it
 // (json.load(stdout)): a wrong flag, no key, a refused key, a missing route, an unreachable cloud, a
 // value that cannot be read; flow test's report too; never text, never two documents. And a long answer reaches the reader
@@ -93,7 +93,39 @@ test("every --json failure prints exactly one JSON document on stdout, { ok: fal
       { args: ["logs", "--since", "40d", "--json"], dir: keyed, exit: 2, code: "usage" },
       { args: ["logs", "--bogus", "--json"], dir: keyed, exit: 2, code: "usage" },
       { args: ["show", "last", "--json"], dir: keyed, exit: 1, code: "not_shown" },
+      // 0.16.0's release candidate: test pull's refusals went to stderr only, stdout empty.
+      { args: ["test", "pull", "--dry-run", "--json"], dir: keyed, exit: 1, code: "bad_key" },
+      { args: ["test", "pull", "--json"], dir: bare, exit: 1, code: "no_ci_key" },
+      { args: ["test", "pull", "extra", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["chat", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["chat", "--json"], dir: keyed, exit: 1, code: "not_built" },
+      { args: ["check", "--json"], dir: mkdtempSync(join(tmpdir(), "flow-cli-json-empty-")), exit: 1, code: "no_agent" },
+      { args: ["check-endpoint", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["check-endpoint", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["cli", "pack", "--bogus", "--json"], dir: keyed, exit: 2, code: "usage" },
+      { args: ["login", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["logout", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["whoami", "--json"], dir: keyed, exit: 1, code: "not_signed_in" },
+      { args: ["setup", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["setup", "--json"], dir: keyed, exit: 1, code: "not_signed_in" },
+      { args: ["setup", "--live", "--ci", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["link", "--channel", "fax", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["status", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["keys", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["keys", "--json"], dir: keyed, exit: 1, code: "not_signed_in" },
+      { args: ["keys", "show", "short", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["keys", "grant", "content", "--json"], dir: bare, exit: 1, code: "no_live_key" },
+      { args: ["keys", "revoke", "abcdefghij", "--json"], dir: keyed, exit: 1, code: "not_signed_in" },
+      { args: ["projects", "list", "--bogus", "--json"], dir: keyed, exit: 1, code: "usage" },
+      { args: ["projects", "delete", "x", "--json"], dir: keyed, exit: 1, code: "not_signed_in" },
+      { args: ["issues", "test-case", "--json"], dir: keyed, exit: 2, code: "usage" },
+      { args: ["insights", "show", "--json"], dir: keyed, exit: 2, code: "usage" },
     ];
+    // Every command the help lists with --json has a case here, so a new one cannot skip the rule.
+    const help = await flow(["--help"], bare);
+    const listed = new Set(help.stdout.split("\n").map((line) => /^ {2}flow ((?:[a-z-]+)(?: (?:[a-z-]+|--live))?)(?= |$).*--json/.exec(line)?.[1]).filter((c): c is string => Boolean(c)));
+    assert.ok(listed.size >= 20, [...listed].join(", "));
+    for (const command of listed) assert.ok(cases.some((c) => c.args.join(" ").startsWith(`${command} `) || c.args.join(" ") === command), `no --json failure case for flow ${command}`);
     for (const c of cases) {
       const run = await flow(c.args, c.dir);
       const what = `flow ${c.args.join(" ")}: ${JSON.stringify(run)}`;

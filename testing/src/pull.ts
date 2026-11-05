@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import type { Access } from "./conversations.ts";
-import { Failed, get, parse, table } from "./conversations.ts";
+import { Failed, failed as printFailed, get, parse, table, usageFailed } from "./conversations.ts";
 import { loadEnv } from "./report.ts";
 import { parseScenario } from "./suite.ts";
 
@@ -57,14 +57,16 @@ export async function pullCli(args: string[]): Promise<number> {
   if (!parsed) return 1;
   const { values, positionals } = parsed;
   if (values.help) return console.log(USAGE), 0;
-  if (positionals.length) return console.error(`${name} takes no arguments.\n\n${USAGE}`), 1;
+  const json = values.json === true;
+  // With --json every failure is one { ok: false, error, next } document on stdout, as for every command.
+  if (positionals.length) return usageFailed(json, `${name} takes no arguments.`, USAGE), 1;
   const envProblem = loadEnv(values.dotenv);
-  if (envProblem) return console.error(envProblem), 1;
+  if (envProblem) return printFailed(json, new Failed(envProblem, "bad_dotenv"));
   const key = setting("CLOUD_KEY")?.trim();
-  if (!key) return console.error(`${name} reads with the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY (flow setup writes it into .env).`), 1;
+  if (!key) return printFailed(json, new Failed(`${name} reads with the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY (flow setup writes it into .env).`, "no_ci_key", undefined, "npx @flow-engineer/flow setup"));
   const cloud = (values.cloud || setting("CLOUD") || OBSERVE_URL).replace(/\/+$/, "");
   const where: Access = { cloud, key: { kind: "ci_key", name: "FLOW_FRAMEWORK_CLOUD_KEY", where: values.dotenv ?? ".env in this folder", value: key } };
-  const say = values.json ? (line: string) => console.error(line) : (line: string) => console.log(line);
+  const say = json ? (line: string) => console.error(line) : (line: string) => console.log(line);
 
   let drafts: Draft[];
   try {
@@ -72,7 +74,8 @@ export async function pullCli(args: string[]): Promise<number> {
     if (!Array.isArray(body.drafts)) throw new Failed(`${name}: ${cloud} answered without a list of drafts.`);
     drafts = body.drafts as Draft[];
   } catch (error) {
-    return console.error(refusal(name, error)), 1;
+    if (!(error instanceof Failed)) throw error;
+    return printFailed(json, new Failed(refusal(name, error), error.code, error.hint, error.next));
   }
 
   const dir = join(process.cwd(), "tests", "drafts");
@@ -116,7 +119,7 @@ export async function pullCli(args: string[]): Promise<number> {
     }
   }
 
-  if (values.json) process.stdout.write(`${JSON.stringify({ drafts: rows })}\n`);
+  if (json) process.stdout.write(`${JSON.stringify({ ok: !failed, drafts: rows })}\n`);
   for (const line of lines(rows, values["dry-run"]!)) say(line);
   return failed ? 1 : 0;
 }

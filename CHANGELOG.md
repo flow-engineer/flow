@@ -118,9 +118,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `flow deploy restart [--env]` restarts on its own. A cloud without those routes says it cannot yet
   and that a value applies at the next deploy or promote. A refused `FLOW_FRAMEWORK_TRACES_*` or
   `CHINWAG_TRACES_*` says hosting already sends message text and how to turn it off.
-- **`flow deploy status`** prints the Flow Framework version hosting runs, each deploy's own, and
+- **`flow deploy status`** prints the Flow Framework the folder's `package.json` pins
+  (`agent_framework` in `--json`), the newest line Flow's hosting runs, labelled as hosting's
+  (`hosting_framework`), each deploy's own (`built with:`, `deploy.framework`), and
   per environment whether observe takes its traces (`ok`, `quiet`, or `REFUSED` with observe's
   reason), when the cloud sends them.
+- **`flow logs`** asks the cloud for at most 500 lines a page (the cloud's limit) and follows the
+  cursor until `--limit` (the newest kept) or the window is read; MCP's `read_logs` the same.
 - **`flow logs`** takes `--until <duration|time>`, `--severity <DEFAULT|INFO|WARNING|ERROR>` (that
   severity or above) and `--grep <text>`, sends them to the cloud and filters what an older cloud
   sends anyway; `--since` takes a time or up to 30 days; when the lines start later than `--since`
@@ -184,8 +188,11 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `FLOW_FRAMEWORK_CLOUD_KEY`, staging and production). Each result is `structuredContent` and the
   same JSON as text under a one-line summary; a failure is `isError` with `--json`'s failure
   document (code, message with the key story, next). Keys are read again on every call, so a key
-  fixed in `.env` works without a restart. It needs `@modelcontextprotocol/server`, an optional
-  peer (installed in an agent made by `flow new`). `flow mcp --help` lists it.
+  fixed in `.env` works without a restart. `flow mcp --help` lists it.
+- **`@modelcontextprotocol/server` is a dependency of Flow Framework now** (pinned 2.3.1), no longer
+  an optional peer: `flow mcp serve` and `@flow-engineer/flow/mcp`'s `mcpServer` work in any agent
+  folder, one made on 0.15 included, with nothing more to install. `flow new` no longer lists it in
+  the agent's `package.json`; an agent that lists it at 2.3.1 keeps working (npm installs it once).
 
 #### `flow setup --live` and `flow keys`: production reads with a key the owner makes
 
@@ -286,9 +293,21 @@ working. What can break is a script or query that reads the CLI's output, and a 
   was empty, with the message on stderr only. A script that took "stdout is not empty" as success
   checks `ok` or the exit status instead. Progress and notes stay on stderr: do not merge it in
   with `2>&1`. `--json` answers passed through from the server now end in a newline.
-- **`login`, `link` and `setup` are unchanged**: JSON Lines, one document a line, the last line the
-  answer, with their own exit codes (0 to 4). `logs --json` stays one `{ time, severity, text }`
+- **Every other command's `--json` failure is that document too**, a wrong flag included: `test
+  pull` (its refusals were on stderr only), `chat`, `check`, `check-endpoint`, `projects`, `keys`,
+  `login`, `logout`, `whoami`, `setup`, `link` and `status`. The account commands' error
+  `{ "error": { "code", "message", "next" } }` gains `"ok": false` and a top-level `"next"` (the same
+  value; `error.next` stays). `test pull --json`'s report gains `ok`.
+- **`login`, `link` and `setup` are otherwise unchanged**: JSON Lines, one document a line, the last
+  line the answer, with their own exit codes (0 to 4). `logs --json` stays one `{ time, severity, text }`
   object per line.
+- **`flow keys list` lists this folder's agent's keys** (the agent of the `FLOW_KEY` or
+  `FLOW_LIVE_KEY` in `.env`, else `package.json`'s name; every agent's outside an agent's folder).
+  `--all` lists every agent's on the account, as before; `--agent <name>` one agent's. `--json` is
+  `{ "keys", "agent", "all" }` and nothing else: the table no longer goes to stderr.
+- **`flow deploy status`'s `framework` is `hosting_framework`** (the line Flow's hosting runs, not
+  the agent's), beside `agent_framework` (what `package.json` pins); the MCP tool `deploy_status`
+  answers the same names. Each deploy's `framework` (the one its build used) is unchanged.
 - **A wrong flag exits 2** on `flow conversations`, `flow issues` and `flow templates` (was 1), as
   `deploy` and `logs` do. A refused `conversations show` usage exits 2 with its usage error as the
   JSON document (0.15.6 printed the usage on stdout and exited 0). `conversations show` takes

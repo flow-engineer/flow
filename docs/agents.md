@@ -244,8 +244,8 @@ the hint and the plans link rather than retrying. Test keys keep working meanwhi
 - `setup`'s Flow key is a test key (`flow_test_`), which reads staging. To read production and
   Insights, the workspace's owner runs `npx @flow-engineer/flow setup --live` once (0.16.0 on): it
   writes `FLOW_LIVE_KEY`, de-identified unless `--content`, for 30 days, ending after 7 days
-  unused, and messaging no customer and deploying nothing live. `flow keys` lists the account's
-  live keys, `flow keys show <kid>` one key's checklist, `flow keys revoke <kid>` ends one, and
+  unused, and messaging no customer and deploying nothing live. `flow keys` lists this folder's
+  agent's live keys (`--all` every agent's on the account, `--agent <name>` one agent's), `flow keys show <kid>` one key's checklist, `flow keys revoke <kid>` ends one, and
   `flow keys grant <name>` asks for more by tier ([Read production with a live
   key](https://flow.engineer/docs/hosting#read-production-with-a-live-key)).
 
@@ -475,11 +475,12 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
   text: `trace text: on (Flow's default)` or `trace text: off (set by you)` (`deploy.trace_text`,
   `{ on, source: "flow" | "owner" }`; nothing, and `null` in `--json`, on a Flow that does not say).
   `--json` prints
-  `{ ok, environments: { staging: { deploy, pending, url, from } | null, production: ... }, next }`;
+  `{ ok, agent_framework, hosting_framework, environments: { staging: { deploy, pending, url, from } | null, production: ... }, next }`;
   `from` is `list` (the cloud's list) or `this_folder` (the last deploy from `.flow/deploys.json`, on
-  a Flow whose cloud does not list deploys to a CI key yet). When the cloud says them (0.16.0 on):
-  `Flow hosts Flow Framework <version>` first (`framework` in `--json`), each deploy's own
-  `framework:` line, and `traces:` per environment, whether Flow's dashboard takes its traces: `ok`
+  a Flow whose cloud does not list deploys to a CI key yet). First, the Flow Framework this folder's
+  `package.json` pins (`agent_framework` in `--json`), then, when the cloud says them (0.16.0 on), the
+  newest line Flow's hosting runs, which is hosting's and not the agent's (`hosting_framework`),
+  each deploy's `built with:` line (the framework its build used, `deploy.framework`), and `traces:` per environment, whether Flow's dashboard takes its traces: `ok`
   (with when it last took one), `quiet` (none yet), or `REFUSED (<status> <code>)` with the reason
   and hint (`environments.<env>.traces`).
 - Trace text is on by default in hosting. To switch it off in production, set the secret, then
@@ -600,7 +601,7 @@ claude mcp add flow -- npx @flow-engineer/flow mcp serve
 
 Any other MCP host: the command `npx`, the arguments `@flow-engineer/flow mcp serve`, started in the
 agent's folder (or add `--dir <folder>`; `--cloud <url>` as for the other commands). It speaks
-MCP on stdio and needs `@modelcontextprotocol/server`, which an agent made by `flow new` has.
+MCP on stdio on `@modelcontextprotocol/server`, which comes with Flow Framework: nothing more to install.
 
 | Tool | Reads | Key |
 | --- | --- | --- |

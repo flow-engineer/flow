@@ -22,6 +22,12 @@ interface Call {
   bytes: number;
 }
 
+/** Whether observe's logs route takes this query's limit (observe/internal/hosting/logs.go): 1 to 500, or none. 0.16.0's release candidate asked for 1000 and every flow logs was refused. */
+function hostTakes(query: URLSearchParams): boolean {
+  const limit = query.get("limit");
+  return limit === null || (/^\d+$/.test(limit) && Number(limit) >= 1 && Number(limit) <= 500);
+}
+
 /** A fake cloud: the routes `flow deploy` calls, a deploy that builds once then ends as `ending`. */
 async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean | "unfiltered"; neverDeployed?: boolean; framework?: string; traceText?: { on: boolean; source: "flow" | "owner" }; restart?: "ok" | "nothing"; unset?: boolean; health?: boolean; limitOnce?: boolean } = {}) {
   const calls: Call[] = [];
@@ -65,7 +71,9 @@ async function cloud(options: { ending?: "live" | "refused"; address?: boolean; 
     }
     if (req.method === "GET" && path.startsWith("/v1/hosting/logs?")) {
       if (!options.logs) return res.writeHead(404, { "content-type": "text/plain" }).end("404 page not found");
-      const after = new URL(path, url).searchParams.get("after");
+      const asked = new URL(path, url).searchParams;
+      const after = asked.get("after");
+      if (!hostTakes(asked)) return send(400, { error: { code: "invalid_request", message: "limit must be 1 to 500" } });
       // An older host: every line in its 24 hours, whatever until, severity and grep said, and no from.
       if (options.logs === "unfiltered") return send(200, { lines: [
         { time: "2026-10-20T08:00:00Z", severity: "INFO", text: "booted" },
@@ -516,7 +524,7 @@ test("logs asks from --since up to 30 days with --until, --severity and --grep, 
     { time: "2026-10-20T09:30:00Z", severity: "WARNING", text: "Tool book slow" },
   ]);
   const asked = new URL(older.calls[0]!.path, older.url).searchParams;
-  assert.deepEqual(Object.fromEntries(asked), { environment: "staging", since: "2026-10-17T11:00:00.000Z", limit: "1000", until: "2026-10-20T10:00:00.000Z", severity: "WARNING", grep: "tool book" });
+  assert.deepEqual(Object.fromEntries(asked), { environment: "staging", since: "2026-10-17T11:00:00.000Z", limit: "500", until: "2026-10-20T10:00:00.000Z", severity: "WARNING", grep: "tool book" });
   assert.match(printed, /Logs start at 2026-10-19T11:00:00\.000Z: this Flow keeps 24 hours back\./, "an older host keeps 24 hours and says nothing of it");
   const newer = await cloud({ logs: true });
   const kept = await run(["logs", "--since", "30d", "--dir", agentFolder()], { ...env, FLOW_FRAMEWORK_CLOUD: newer.url });
@@ -527,15 +535,19 @@ test("logs asks from --since up to 30 days with --until, --severity and --grep, 
   }
 });
 
-test("deploy status prints the framework hosting runs, each deploy's own, and whether observe takes its traces", async () => {
+// 0.16.0's release candidate printed hosting's line as "framework" and it read as the agent's own: each now says whose it is.
+test("deploy status prints the framework the agent pins, the line hosting runs, each deploy's own, and whether observe takes its traces", async () => {
   const fake = await cloud({ list: true, address: true, health: true });
   const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url };
-  const human = await run(["status", "--env", "production", "--dir", agentFolder()], env);
+  const dir = agentFolder();
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ dependencies: { "@flow-engineer/flow": "0.15.6" } }));
+  const human = await run(["status", "--env", "production", "--dir", dir], env);
   assert.equal(human.code, 0, human.printed);
-  assert.match(human.printed, /^Flow hosts Flow Framework 0\.15\.6\.\nproduction: live/);
-  assert.match(human.printed, /framework: @flow-engineer\/flow 0\.15\.0\n {2}traces: REFUSED \(403 not_live\) at 2026-10-29T09:00:00Z: this workspace takes no production traces yet \(ask Flow to let it go live\)/);
-  const json = JSON.parse((await run(["status", "--env", "production", "--json", "--dir", agentFolder()], env)).stdout);
-  assert.equal(json.framework, "0.15.6");
+  assert.match(human.printed, /^This agent pins Flow Framework 0\.15\.6 \(package\.json\)\.\nFlow's hosting runs agents on Flow Framework up to 0\.15\.x \(0\.15\.6; hosting's own, not this agent's\)\.\nproduction: live/);
+  assert.match(human.printed, /built with: @flow-engineer\/flow 0\.15\.0\n {2}traces: REFUSED \(403 not_live\) at 2026-10-29T09:00:00Z: this workspace takes no production traces yet \(ask Flow to let it go live\)/);
+  const json = JSON.parse((await run(["status", "--env", "production", "--json", "--dir", dir], env)).stdout);
+  assert.equal(json.agent_framework, "0.15.6");
+  assert.equal(json.hosting_framework, "0.15.6");
   assert.equal(json.environments.production.traces.state, "refused");
   assert.deepEqual(json.environments.production.deploy.framework, { package: "@flow-engineer/flow", version: "0.15.0" });
 });
@@ -555,8 +567,9 @@ async function pagedLogs(count: number) {
   const http = createServer((req, res) => {
     const query = new URL(req.url!, "http://x").searchParams;
     asked.push(query);
+    if (!hostTakes(query)) return res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: { code: "invalid_request", message: "limit must be 1 to 500" } }));
     const after = query.has("after") ? Number(query.get("after")) : -1;
-    const lines = Array.from({ length: count }, (_, i) => ({ time: new Date(Date.parse("2026-10-18T00:00:00Z") + i * 60_000).toISOString(), severity: "INFO", text: `line ${i}` })).slice(after + 1, after + 501);
+    const lines = Array.from({ length: count }, (_, i) => ({ time: new Date(Date.parse("2026-10-18T00:00:00Z") + i * 60_000).toISOString(), severity: "INFO", text: `line ${i}` })).slice(after + 1, after + 1 + Number(query.get("limit") ?? 500));
     const next = lines.length ? String(after + lines.length) : (query.get("after") ?? String(after));
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ lines, next, from: "2026-10-17T11:00:00Z" }));
   });

@@ -914,7 +914,7 @@ export interface EnvironmentStatus {
  * Per environment, what is live, its version, when, its URL and whether its traces reach observe;
  * and the Flow Framework version hosting runs, when the cloud says (null else).
  */
-export async function deployStatus(ctx: Pick<Ctx, "api" | "dir">, environments: string[]): Promise<{ environments: EnvironmentStatus[]; framework: string | null }> {
+export async function deployStatus(ctx: Pick<Ctx, "api" | "dir">, environments: string[]): Promise<{ environments: EnvironmentStatus[]; hostingFramework: string | null; agentFramework: string | null }> {
   const found: EnvironmentStatus[] = [];
   let framework: string | null = null;
   for (const environment of environments) {
@@ -944,21 +944,35 @@ export async function deployStatus(ctx: Pick<Ctx, "api" | "dir">, environments: 
     const url = live ? (live.url ?? (await address(ctx, environment))) : null;
     found.push({ environment, deploy: serving, traces, pending, url, from });
   }
-  return { environments: found, framework };
+  return { environments: found, hostingFramework: framework, agentFramework: pinnedFramework(ctx.dir) };
+}
+
+/** The Flow Framework this folder's package.json pins (@flow-engineer/flow, else chinwag before the rename), as written; null without one. */
+function pinnedFramework(dir: string): string | null {
+  try {
+    const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown> };
+    for (const name of ["@flow-engineer/flow", "chinwag"]) {
+      const pin = pkg.dependencies?.[name] ?? pkg.devDependencies?.[name];
+      if (typeof pin === "string") return pin;
+    }
+  } catch { /* no package.json, or not JSON: unknown */ }
+  return null;
 }
 
 /** `flow deploy status`: per environment, what is live, its version, when, its URL and its traces. */
 async function status(ctx: Ctx, environments: string[]): Promise<number> {
-  const { environments: found, framework } = await deployStatus(ctx, environments);
+  const { environments: found, hostingFramework, agentFramework } = await deployStatus(ctx, environments);
   const anyLive = found.some((f) => f.deploy?.status === "live");
   const next = anyLive
     ? `${RUN} logs${found.length === 1 && found[0]!.environment === "production" ? " --env production" : ""}`
     : `${RUN} deploy`;
   if (ctx.json) {
-    console.log(JSON.stringify({ ok: true, framework, environments: Object.fromEntries(found.map((f) => [f.environment, f.deploy ? { deploy: pick(f.deploy), pending: f.pending, url: f.url, from: f.from, traces: f.traces } : null])), next }));
+    console.log(JSON.stringify({ ok: true, hosting_framework: hostingFramework, agent_framework: agentFramework, environments: Object.fromEntries(found.map((f) => [f.environment, f.deploy ? { deploy: pick(f.deploy), pending: f.pending, url: f.url, from: f.from, traces: f.traces } : null])), next }));
     return 0;
   }
-  if (framework) ctx.say(`Flow hosts Flow Framework ${framework}.`);
+  // Hosting's own line is not the agent's: each says whose it is (an agent pinned to 0.15.6 read "0.15.0" as its own).
+  if (agentFramework) ctx.say(`This agent pins Flow Framework ${agentFramework} (package.json).`);
+  if (hostingFramework) ctx.say(`Flow's hosting runs agents on Flow Framework up to ${hostingFramework.split(".").slice(0, 2).join(".")}.x (${hostingFramework}; hosting's own, not this agent's).`);
   for (const f of found) {
     if (!f.deploy) {
       ctx.say(`${f.environment}: no deploy known${f.from === null ? " (this Flow lists deploys to a dashboard member only, and this folder has made none: the dashboard shows them)" : ""}.`);
@@ -968,7 +982,7 @@ async function status(ctx: Ctx, environments: string[]): Promise<number> {
     const when = d.updated_at ?? d.created_at;
     ctx.say(`${f.environment}: ${d.status}${d.version ? `, version ${d.version}` : ""}, deploy ${d.id}${when ? `, ${d.status === "live" ? "deployed" : "updated"} ${when}` : ""}${f.from === "this_folder" ? " (the last deploy from this folder)" : ""}`);
     if (d.status === "live") ctx.say(`  URL: ${f.url ?? NO_URL}`);
-    if (d.framework) ctx.say(`  framework: ${d.framework.package} ${d.framework.version}`);
+    if (d.framework) ctx.say(`  built with: ${d.framework.package} ${d.framework.version}`);
     if (d.trace_text) ctx.say(`  trace text: ${d.trace_text.on ? "on" : "off"} (${d.trace_text.source === "owner" ? "set by you" : "Flow's default"})`);
     if (f.traces) ctx.say(`  traces: ${traceLine(f.traces)}`);
     if (f.pending) ctx.say(`  then ${f.pending.id}${f.pending.version ? ` (${f.pending.version})` : ""}: ${f.pending.status}…`);
@@ -1013,8 +1027,8 @@ export function sinceSeconds(since: string): number | undefined {
 /** The severities --severity takes, lowest first, as Cloud Logging orders them. */
 export const SEVERITIES = ["DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY"] as const;
 
-/** The most lines asked for in one page (the host answers at most 500). */
-const LOGS_PAGE = 1000;
+/** The lines asked for in one page: the host refuses a limit over 500 ("limit must be 1 to 500"). */
+const LOGS_PAGE = 500;
 /** The lines `flow logs` prints by default, and at most (--limit): the newest are kept. */
 const LOGS_LIMIT = 10_000;
 const LOGS_LIMIT_MAX = 100_000;
@@ -1033,7 +1047,7 @@ export interface LogsQuery {
 }
 
 /** One page of log lines, filtered here too (an older Flow ignores until, severity and grep), with the cursor and where the host's logs start (from). */
-export async function logsPage(api: Api, query: LogsQuery): Promise<{ lines: LogLine[]; next: string | null; from: string | null; full: boolean }> {
+export async function logsPage(api: Api, query: LogsQuery): Promise<{ lines: LogLine[]; next: string | null; from: string | null }> {
   const params = new URLSearchParams({ environment: query.environment, ...(query.after ? { after: query.after } : { since: query.since }), limit: String(LOGS_PAGE) });
   if (query.until) params.set("until", query.until);
   if (query.severity) params.set("severity", query.severity);
@@ -1054,7 +1068,7 @@ export async function logsPage(api: Api, query: LogsQuery): Promise<{ lines: Log
     (query.severity === undefined || rank(line.severity) >= rank(query.severity)) &&
     (until === undefined || !(Date.parse(line.time) > until)) &&
     (grep === undefined || line.text.toLowerCase().includes(grep)));
-  return { lines, next: page.next ?? null, from: typeof page.from === "string" ? page.from : null, full: (page.lines ?? []).length >= LOGS_PAGE };
+  return { lines, next: page.next ?? null, from: typeof page.from === "string" ? page.from : null };
 }
 
 /** A time for --since or --until: a duration back from now (30m, 3d), or an RFC 3339 time; undefined when it is neither. */
@@ -1094,8 +1108,9 @@ async function logs(ctx: Ctx, environment: string, asked: { since: string; until
     if (ctx.json) console.log(JSON.stringify({ time: line.time, severity: line.severity ?? null, text: line.text }));
     else console.log(`${line.time} ${(line.severity ?? "").padEnd(7)} ${line.text}`);
   };
-  // First every page up to --until (else now), the newest `limit` lines kept; the host answers 500 a
-  // page, oldest first, and a page whose cursor does not move is the end.
+  // First every page up to --until (else now), at most LOGS_PAGE lines a request whatever --limit
+  // says, the newest `limit` lines kept; the host answers oldest first, and a page whose cursor does
+  // not move is the end.
   let kept: LogLine[] = [];
   let dropped = 0;
   let lastDropped: string | undefined;
@@ -1212,8 +1227,7 @@ export async function cliReleaseCli(argv: string[], env: NodeJS.ProcessEnv = pro
       },
     });
   } catch (error) {
-    console.error(`${(error as Error).message}\n\n${CLI_RELEASE_USAGE}`);
-    return 2;
+    return failer(argv.includes("--json"))("usage", `${(error as Error).message}\n\n${CLI_RELEASE_USAGE}`, 2);
   }
   const { values, positionals } = parsed;
   if (values.help) {

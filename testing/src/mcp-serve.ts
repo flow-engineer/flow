@@ -7,7 +7,8 @@
 // .env), so a key fixed in .env works on the next call. A result is structuredContent and the same
 // data as text under a one-line summary (a host that reads only text still gets it); a failure is
 // isError with --json's failure document. No key value is ever returned, only its prefix and last 4.
-// Loaded only by `flow mcp serve`: it needs @modelcontextprotocol/server, an optional peer.
+// Loaded only by `flow mcp serve`. It runs on @modelcontextprotocol/server, a dependency of Flow
+// Framework (an optional peer until 0.16.0), so `npx @flow-engineer/flow mcp serve` works in any folder.
 
 import { join, resolve } from "node:path";
 import { readFileSync } from "node:fs";
@@ -232,13 +233,14 @@ export const TOOLS: ServeTool[] = [
   tool({
     name: "deploy_status",
     title: "Deploy status",
-    description: "What is live on Flow's hosting per environment: the deploy (id, status, version, when, framework, lint findings, error), a newer one still on its way, the agent's URL, and whether its traces reach Flow. Use it to answer what is live, or whether a deploy finished. Reads with the CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_...), staging and production.",
+    description: "What is live on Flow's hosting per environment: the deploy (id, status, version, when, framework: the Flow Framework its build used, lint findings, error), a newer one still on its way, the agent's URL, and whether its traces reach Flow; agent_framework is the version this folder's package.json pins, hosting_framework the newest line Flow's hosting runs (not the agent's). Use it to answer what is live, or whether a deploy finished. Reads with the CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_...), staging and production.",
     input: z.object({ environment: ENVIRONMENT.optional().describe("One environment (default: both)") }),
     async run({ environment }, reads) {
       const { api } = reads.ci();
-      const { environments, framework } = await deployStatus({ api, dir: reads.dir }, environment ? [environment] : ["staging", "production"]);
-      const said = environments.map((e) => `${e.environment}: ${e.deploy ? `${e.deploy.status}${e.deploy.version ? ` ${e.deploy.version}` : ""}` : "no deploy known"}${e.pending ? ` (then ${e.pending.status})` : ""}`);
-      return { data: { framework, environments: Object.fromEntries(environments.map((e) => [e.environment, e])) }, summary: `${said.join("; ")}.` };
+      const { environments, hostingFramework, agentFramework } = await deployStatus({ api, dir: reads.dir }, environment ? [environment] : ["staging", "production"]);
+      const said = environments.map((e) => `${e.environment}: ${e.deploy ? `${e.deploy.status}${e.deploy.version ? ` ${e.deploy.version}` : ""}${e.deploy.framework ? `, built with ${e.deploy.framework.package} ${e.deploy.framework.version}` : ""}` : "no deploy known"}${e.pending ? ` (then ${e.pending.status})` : ""}`);
+      const versions = [agentFramework && `This agent pins Flow Framework ${agentFramework}`, hostingFramework && `Flow's hosting runs up to ${hostingFramework} (hosting's line, not the agent's)`].filter(Boolean);
+      return { data: { agent_framework: agentFramework, hosting_framework: hostingFramework, environments: Object.fromEntries(environments.map((e) => [e.environment, e])) }, summary: `${said.join("; ")}.${versions.length ? ` ${versions.join("; ")}.` : ""}` };
     },
   }),
 ];
