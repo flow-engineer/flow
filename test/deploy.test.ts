@@ -12,7 +12,8 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { deployCli, logsCli, pack, parseEnv, sinceSeconds } from "../testing/src/deploy.ts";
+import { addLogLines, deployCli, logsCli, logsWindow, pack, parseEnv, sinceSeconds } from "../testing/src/deploy.ts";
+import { hostLogs, type HostLogLine } from "./helpers.ts";
 
 interface Call {
   method: string;
@@ -22,11 +23,8 @@ interface Call {
   bytes: number;
 }
 
-/** Whether observe's logs route takes this query's limit (observe/internal/hosting/logs.go): 1 to 500, or none. 0.16.0's release candidate asked for 1000 and every flow logs was refused. */
-function hostTakes(query: URLSearchParams): boolean {
-  const limit = query.get("limit");
-  return limit === null || (/^\d+$/.test(limit) && Number(limit) >= 1 && Number(limit) <= 500);
-}
+/** The CLI's now in these tests (run's ctx.now), and the fake host's. */
+const NOW = Date.parse("2026-10-20T11:00:00Z");
 
 /** A fake cloud: the routes `flow deploy` calls, a deploy that builds once then ends as `ending`. */
 async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean | "unfiltered"; neverDeployed?: boolean; framework?: string; traceText?: { on: boolean; source: "flow" | "owner" }; restart?: "ok" | "nothing"; unset?: boolean; health?: boolean; limitOnce?: boolean } = {}) {
@@ -73,7 +71,9 @@ async function cloud(options: { ending?: "live" | "refused"; address?: boolean; 
       if (!options.logs) return res.writeHead(404, { "content-type": "text/plain" }).end("404 page not found");
       const asked = new URL(path, url).searchParams;
       const after = asked.get("after");
-      if (!hostTakes(asked)) return send(400, { error: { code: "invalid_request", message: "limit must be 1 to 500" } });
+      // The host's own refusals (limit, since and until) first, as hosting answers them.
+      const refused = hostLogs(asked, [], NOW);
+      if (refused.status !== 200) return send(refused.status, refused.body);
       // An older host: every line in its 24 hours, whatever until, severity and grep said, and no from.
       if (options.logs === "unfiltered") return send(200, { lines: [
         { time: "2026-10-20T08:00:00Z", severity: "INFO", text: "booted" },
@@ -111,7 +111,7 @@ async function run(argv: string[], env: NodeJS.ProcessEnv, stdin?: string, polls
   console.log = (...a: unknown[]) => void out.push(a.join(" "));
   console.error = (...a: unknown[]) => void err.push(a.join(" "));
   try {
-    const options = { pollMs: 1, maxPolls: polls ?? undefined, now: () => Date.parse("2026-10-20T11:00:00Z"), readStdin: () => stdin ?? "", waits: { wait: async (ms: number) => void waited.push(ms), note: (line: string) => void err.push(line) } };
+    const options = { pollMs: 1, maxPolls: polls ?? undefined, now: () => NOW, readStdin: () => stdin ?? "", waits: { wait: async (ms: number) => void waited.push(ms), note: (line: string) => void err.push(line) } };
     const code = argv[0] === "logs" ? await logsCli(argv.slice(1), env, options) : await deployCli(argv, env, options);
     return { code, stdout: out.join("\n"), printed: [...out, ...err].join("\n") };
   } finally {
@@ -561,17 +561,15 @@ test("a 429 from the cloud is waited out for its Retry-After and the call sent a
   assert.equal(fake.calls.filter((c) => c.path.startsWith("/v1/hosting/deploys?")).length, 2);
 });
 
-/** A host with `count` log lines a minute apart, answering 500 a page, oldest first, as hosting does: `next` is the last line's cursor, unchanged when there are no more. */
-async function pagedLogs(count: number) {
+/** A host with `count` log lines a minute apart from 2026-10-18T00:00Z (or `lines`), answering by hosting's rules (helpers' hostLogs): 500 a page, oldest first, `next` the last line's cursor, unchanged when there are no more. */
+async function pagedLogs(count: number, given?: HostLogLine[]) {
   const asked: URLSearchParams[] = [];
+  const all = given ?? Array.from({ length: count }, (_, i) => ({ time: new Date(Date.parse("2026-10-18T00:00:00Z") + i * 60_000).toISOString(), severity: "INFO", text: `line ${i}` }));
   const http = createServer((req, res) => {
     const query = new URL(req.url!, "http://x").searchParams;
     asked.push(query);
-    if (!hostTakes(query)) return res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: { code: "invalid_request", message: "limit must be 1 to 500" } }));
-    const after = query.has("after") ? Number(query.get("after")) : -1;
-    const lines = Array.from({ length: count }, (_, i) => ({ time: new Date(Date.parse("2026-10-18T00:00:00Z") + i * 60_000).toISOString(), severity: "INFO", text: `line ${i}` })).slice(after + 1, after + 1 + Number(query.get("limit") ?? 500));
-    const next = lines.length ? String(after + lines.length) : (query.get("after") ?? String(after));
-    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ lines, next, from: "2026-10-17T11:00:00Z" }));
+    const { status, body } = hostLogs(query, all, NOW);
+    res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
   });
   await new Promise<void>((done) => http.listen(0, "127.0.0.1", done));
   return { url: `http://127.0.0.1:${(http.address() as AddressInfo).port}`, asked, close: () => http.close() };
@@ -599,4 +597,64 @@ test("logs over --limit keeps the newest lines and says on stderr where they sta
     assert.match(printed, /Printed the newest 1000 of 1200 lines, from 2026-10-18T03:20:00\.000Z \(--limit 1000\)\. The 200 older ones: npx @flow-engineer\/flow logs --since 2026-10-17T11:00:00\.000Z --until 2026-10-18T03:19:00\.000Z/);
     assert.equal((await run(["logs", "--limit", "0", "--dir", agentFolder()], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url })).code, 2);
   } finally { host.close(); }
+});
+
+// 0.16.0's release candidate refused every --until: a page after the first sent after without since,
+// and the host checked until against its 1h default ("until is before since").
+test("logs --until is a duration back from now or a time, as --since is, and every page of the window is read", async () => {
+  const host = await pagedLogs(1200);
+  try {
+    const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url };
+    const cases: Array<[string[], string, string, number]> = [
+      [["--since", "3d", "--until", "2d"], "line 0", "line 660", 661],
+      [["--since", "2026-10-18T06:00:00Z", "--until", "2026-10-18T07:00:00Z"], "line 360", "line 420", 61],
+      [["--since", "2026-10-18T10:00:00Z", "--until", "1d"], "line 600", "line 1199", 600],
+    ];
+    for (const [args, first, last, count] of cases) {
+      host.asked.length = 0;
+      const { code, stdout, printed } = await run(["logs", ...args, "--json", "--dir", agentFolder()], env, undefined, null);
+      assert.equal(code, 0, `${args.join(" ")}: ${printed}`);
+      const texts = stdout.split("\n").map((l) => JSON.parse(l).text);
+      assert.deepEqual([texts[0], texts.at(-1), texts.length], [first, last, count], args.join(" "));
+      assert.ok(host.asked.length >= 2 && host.asked.every((q) => q.has("since") && q.has("until")), "since and until on every page");
+    }
+    assert.equal((await run(["logs", "--since", "2d", "--until", "3d", "--dir", agentFolder()], env)).code, 2, "until before since");
+  } finally { host.close(); }
+});
+
+test("logs joins a stack Cloud Run split into an entry per line into the line before it, keeping the higher severity", async () => {
+  const at = "2026-10-20T10:45:13.313Z";
+  const host = await pagedLogs(0, [
+    { time: "2026-10-20T10:45:00Z", severity: "INFO", text: "booted", instance: "a" },
+    { time: at, severity: "DEFAULT", text: "scheduled messages: DOMException [TimeoutError]", instance: "a" },
+    { time: at, severity: "DEFAULT", text: "    at Timeout._onTimeout (file:///app/a.js:1:2)", instance: "a" },
+    { time: at, severity: "ERROR", text: "    at listOnTimeout (node:internal/timers:594:17)", instance: "a" },
+    { time: at, severity: "DEFAULT", text: "    at another instance's line", instance: "b" },
+    { time: "2026-10-20T10:46:00Z", severity: "DEFAULT", text: "  later, indented", instance: "a" },
+  ]);
+  try {
+    const { code, stdout, printed } = await run(["logs", "--json", "--dir", agentFolder()], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url }, undefined, null);
+    assert.equal(code, 0, printed);
+    assert.deepEqual(stdout.split("\n").map((l) => JSON.parse(l)), [
+      { time: "2026-10-20T10:45:00Z", severity: "INFO", text: "booted" },
+      { time: at, severity: "ERROR", text: "scheduled messages: DOMException [TimeoutError]\n    at Timeout._onTimeout (file:///app/a.js:1:2)\n    at listOnTimeout (node:internal/timers:594:17)" },
+      { time: at, severity: "DEFAULT", text: "    at another instance's line" },
+      { time: "2026-10-20T10:46:00Z", severity: "DEFAULT", text: "  later, indented" },
+    ]);
+  } finally { host.close(); }
+  // A stack across two pages joins too.
+  const kept = [{ time: at, severity: "DEFAULT", text: "Error: x" }];
+  addLogLines(kept, [{ time: at, severity: "DEFAULT", text: "    at y" }]);
+  assert.deepEqual(kept, [{ time: at, severity: "DEFAULT", text: "Error: x\n    at y" }]);
+});
+
+test("logsWindow, flow logs' and read_logs' one rule: durations are back from now for since and until alike, times as given, since at most 30 days back, until after since", () => {
+  assert.deepEqual(logsWindow("30d", undefined, NOW), { since: "2026-09-20T11:00:00.000Z" });
+  assert.deepEqual(logsWindow("3d", "2d", NOW), { since: "2026-10-17T11:00:00.000Z", until: "2026-10-18T11:00:00.000Z" });
+  assert.deepEqual(logsWindow("2026-10-18T06:00:00Z", "1d", NOW), { since: "2026-10-18T06:00:00.000Z", until: "2026-10-19T11:00:00.000Z" });
+  assert.deepEqual(logsWindow("2026-10-18T06:00:00+05:30", "2026-10-18T07:00:00Z", NOW), { since: "2026-10-18T00:30:00.000Z", until: "2026-10-18T07:00:00.000Z" });
+  assert.deepEqual(logsWindow("31d", undefined, NOW), { wrong: "since" });
+  assert.deepEqual(logsWindow("2d", "3d", NOW), { wrong: "until" });
+  assert.deepEqual(logsWindow("1h", "1h", NOW), { wrong: "until" });
+  assert.deepEqual(logsWindow("1h", "soon", NOW), { wrong: "until" });
 });

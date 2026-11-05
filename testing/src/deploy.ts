@@ -55,7 +55,8 @@ export const LOGS_USAGE = `Usage:
                2026-11-03T09:00:00Z.
   --until      Up to when: a duration back from now (2h) or a time. Not with --follow.
   --severity   Only lines at this severity or above: DEFAULT, INFO, WARNING or ERROR.
-  --grep       Only lines that hold this text (any case).
+  --grep       Only lines that hold this text (any case) anywhere in the line as printed: a JSON
+               line's every field and value, not only its message.
   --limit      The most lines printed (default 10000, at most 100000): the newest are kept, and
                stderr says where the kept lines start and the --since/--until for the older ones.
   --follow     Keep printing new lines until Ctrl-C.
@@ -67,7 +68,11 @@ Flow sends only the lines that match --until, --severity and --grep; an older Fl
 filter gets them filtered here, so the lines are the same either way. Flow keeps an agent's logs
 for a while (30 days, older hosts 24 hours): when the lines start later than --since asked, stderr
 says "Logs start at <time>: this Flow keeps <N> back". Flow answers in pages (500 lines); every
-page up to --until (else now) is read before anything is printed, oldest line first.`;
+page up to --until (else now) is read before anything is printed, oldest line first. A stack
+trace Cloud Run split into an entry per line prints as one: each line of it that starts with a
+space ("    at ..."), at the same time from the same instance, joins the line before it, which
+keeps the higher severity. With --grep or --severity, only the lines that match come, so a stack's
+"at" lines show only when they match too.`;
 
 export const DEPLOY_USAGE = `Usage:
   flow deploy [--env staging|production] [--dir <folder>] [--version <v>] [--no-secrets] [--no-cli] [--json]
@@ -1014,6 +1019,8 @@ interface LogLine {
   time: string;
   severity?: string;
   text: string;
+  /** Which instance wrote it, as the host names it (an older host does not). */
+  instance?: string;
 }
 
 /** --since as seconds: 30s, 15m, 1h, 2d. */
@@ -1048,7 +1055,8 @@ export interface LogsQuery {
 
 /** One page of log lines, filtered here too (an older Flow ignores until, severity and grep), with the cursor and where the host's logs start (from). */
 export async function logsPage(api: Api, query: LogsQuery): Promise<{ lines: LogLine[]; next: string | null; from: string | null }> {
-  const params = new URLSearchParams({ environment: query.environment, ...(query.after ? { after: query.after } : { since: query.since }), limit: String(LOGS_PAGE) });
+  // since goes with every page, after too: the host checks until against it, and without it against 1h back.
+  const params = new URLSearchParams({ environment: query.environment, since: query.since, ...(query.after ? { after: query.after } : {}), limit: String(LOGS_PAGE) });
   if (query.until) params.set("until", query.until);
   if (query.severity) params.set("severity", query.severity);
   if (query.grep) params.set("grep", query.grep);
@@ -1061,11 +1069,10 @@ export async function logsPage(api: Api, query: LogsQuery): Promise<{ lines: Log
     }
     throw error;
   }
-  const rank = (s: string | undefined) => Math.max(0, SEVERITIES.indexOf((s ?? "DEFAULT").toUpperCase() as (typeof SEVERITIES)[number]));
   const until = query.until ? Date.parse(query.until) : undefined;
   const grep = query.grep?.toLowerCase();
   const lines = (page.lines ?? []).filter((line) =>
-    (query.severity === undefined || rank(line.severity) >= rank(query.severity)) &&
+    (query.severity === undefined || severityRank(line.severity) >= severityRank(query.severity)) &&
     (until === undefined || !(Date.parse(line.time) > until)) &&
     (grep === undefined || line.text.toLowerCase().includes(grep)));
   return { lines, next: page.next ?? null, from: typeof page.from === "string" ? page.from : null };
@@ -1076,6 +1083,40 @@ function logsTime(value: string, now: number): number | undefined {
   const seconds = sinceSeconds(value);
   if (seconds !== undefined) return seconds > 0 ? now - seconds * 1000 : undefined;
   return /^\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:\d\d)$/.test(value) && !Number.isNaN(Date.parse(value)) ? Date.parse(value) : undefined;
+}
+
+/** The furthest back since may reach: the host keeps 30 days. */
+const LOGS_MAX_AGE_MS = 30 * 86400_000;
+
+/**
+ * The window `flow logs` and MCP's read_logs ask for, by one rule: a duration (30m, 3d) is that
+ * long before `now` for since and until alike, a time is taken as given; since at most 30 days
+ * back, until after since. As RFC 3339 times, or which of the two is wrong.
+ */
+export function logsWindow(since: string, until: string | undefined, now: number): { since: string; until?: string } | { wrong: "since" | "until" } {
+  const from = logsTime(since, now);
+  if (from === undefined || now - from > LOGS_MAX_AGE_MS) return { wrong: "since" };
+  if (until === undefined) return { since: new Date(from).toISOString() };
+  const to = logsTime(until, now);
+  if (to === undefined || to <= from) return { wrong: "until" };
+  return { since: new Date(from).toISOString(), until: new Date(to).toISOString() };
+}
+
+const severityRank = (s: string | undefined) => Math.max(0, SEVERITIES.indexOf((s ?? "DEFAULT").toUpperCase() as (typeof SEVERITIES)[number]));
+
+/**
+ * Adds `lines` to `kept`, oldest first, each line of a stack Cloud Run kept as an entry of its own
+ * (one that starts with whitespace, such as "    at ...", at the same time from the same instance)
+ * joined into the line before it, which keeps the higher severity.
+ */
+export function addLogLines(kept: LogLine[], lines: LogLine[]): void {
+  for (const line of lines) {
+    const before = kept.at(-1);
+    if (before && /^\s/.test(line.text) && line.time === before.time && line.instance === before.instance) {
+      const severity = severityRank(line.severity) > severityRank(before.severity) ? line.severity : before.severity;
+      kept[kept.length - 1] = { ...before, text: `${before.text}\n${line.text}`, ...(severity !== undefined ? { severity } : {}) };
+    } else kept.push(line);
+  }
 }
 
 /** "3 days", "24 hours": how far back a host keeps logs, as said in the notice. */
@@ -1093,17 +1134,17 @@ function span(ms: number): string {
  */
 async function logs(ctx: Ctx, environment: string, asked: { since: string; until?: string; severity?: string; grep?: string; limit?: string }, followLines: boolean): Promise<number> {
   const now = ctx.now();
-  const since = logsTime(asked.since, now);
-  if (since === undefined || now - since > 30 * 86400_000) throw new Usage(`--since is a duration such as 30s, 15m, 1h or 3d (at most 30d), or a time such as 2026-11-03T09:00:00Z.\n\n${LOGS_USAGE}`);
-  const until = asked.until === undefined ? undefined : logsTime(asked.until, now);
-  if (asked.until !== undefined && (until === undefined || until <= since)) throw new Usage(`--until is a duration back from now (2h) or a time, after --since.\n\n${LOGS_USAGE}`);
-  if (until !== undefined && followLines) throw new Usage(`--until and --follow do not go together: --follow prints lines as they come.\n\n${LOGS_USAGE}`);
+  const window = logsWindow(asked.since, asked.until, now);
+  if ("wrong" in window && window.wrong === "since") throw new Usage(`--since is a duration such as 30s, 15m, 1h or 3d (at most 30d), or a time such as 2026-11-03T09:00:00Z.\n\n${LOGS_USAGE}`);
+  if ("wrong" in window) throw new Usage(`--until is a duration back from now (2h) or a time, after --since.\n\n${LOGS_USAGE}`);
+  const since = Date.parse(window.since);
+  if (window.until !== undefined && followLines) throw new Usage(`--until and --follow do not go together: --follow prints lines as they come.\n\n${LOGS_USAGE}`);
   const severity = asked.severity?.toUpperCase();
   if (severity !== undefined && !(SEVERITIES as readonly string[]).includes(severity)) throw new Usage(`--severity is DEFAULT, INFO, WARNING or ERROR (the lines at it or above).\n\n${LOGS_USAGE}`);
   if (asked.grep !== undefined && (!asked.grep || asked.grep.length > 200)) throw new Usage(`--grep is the text to find, 1 to 200 characters.\n\n${LOGS_USAGE}`);
   const limit = asked.limit === undefined ? LOGS_LIMIT : /^\d{1,6}$/.test(asked.limit) ? Number(asked.limit) : NaN;
   if (!(limit >= 1 && limit <= LOGS_LIMIT_MAX)) throw new Usage(`--limit is the most lines to print, 1 to ${LOGS_LIMIT_MAX}.\n\n${LOGS_USAGE}`);
-  const query: LogsQuery = { environment, since: new Date(since).toISOString(), ...(until !== undefined ? { until: new Date(until).toISOString() } : {}), ...(severity ? { severity } : {}), ...(asked.grep ? { grep: asked.grep } : {}) };
+  const query: LogsQuery = { environment, since: window.since, ...(window.until !== undefined ? { until: window.until } : {}), ...(severity ? { severity } : {}), ...(asked.grep ? { grep: asked.grep } : {}) };
   const print = (line: LogLine) => {
     if (ctx.json) console.log(JSON.stringify({ time: line.time, severity: line.severity ?? null, text: line.text }));
     else console.log(`${line.time} ${(line.severity ?? "").padEnd(7)} ${line.text}`);
@@ -1125,7 +1166,7 @@ async function logs(ctx: Ctx, environment: string, asked: { since: string; until
       if (starts !== undefined && starts - since > 60_000) console.error(`Logs start at ${new Date(starts).toISOString()}: this Flow keeps ${span(now - starts)} back.`);
     }
     const moved = Boolean(page.next) && page.next !== query.after;
-    if (moved || polls === 1) kept.push(...page.lines);
+    if (moved || polls === 1) addLogLines(kept, page.lines);
     if (kept.length > limit) {
       const cut = kept.length - limit;
       dropped += cut;
@@ -1154,7 +1195,9 @@ async function logs(ctx: Ctx, environment: string, asked: { since: string; until
     const page = await logsPage(ctx.api, query);
     polls++;
     if (page.next && page.next !== query.after) {
-      for (const line of page.lines) print(line);
+      const lines: LogLine[] = [];
+      addLogLines(lines, page.lines);
+      for (const line of lines) print(line);
       query.after = page.next;
     }
     if (ctx.maxPolls !== undefined && polls >= ctx.maxPolls) return 0;

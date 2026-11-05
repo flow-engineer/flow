@@ -19,7 +19,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { RUN } from "../../src/names.ts";
 import { ADVISORY, NetworkError, textLine, type FoundKey } from "./cloud-call.ts";
 import { Failed, get, insightConversations, listConversations, listInsights, listIssues, noKey, readKey, showConversation, sinceTime, type Access } from "./conversations.ts";
-import { cloudOf, deployStatus, logsPage, NotAvailable, Refused, SEVERITIES, type LogsQuery } from "./deploy.ts";
+import { addLogLines, cloudOf, deployStatus, logsPage, logsWindow, NotAvailable, Refused, SEVERITIES, type LogsQuery } from "./deploy.ts";
 import { packageRoot } from "./new.ts";
 
 const MCP_SERVE_USAGE = `Usage:
@@ -192,20 +192,21 @@ export const TOOLS: ServeTool[] = [
   tool({
     name: "read_logs",
     title: "Read logs",
-    description: "The hosted agent's log lines, oldest first: { time, severity, text }. Use it for why something errored or what the service did around a time: severity ERROR shows the failures, grep narrows to a tool, an id or a message. When more lines match than limit, the newest are kept and truncated is true: narrow since, severity or grep (when it stops after 20 pages, newer_from is where the unread lines start). Reads with the CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_...), staging and production.",
+    description: "The hosted agent's log lines, oldest first: { time, severity, text }; a stack trace split into an entry per line comes as one line. Use it for why something errored or what the service did around a time: severity ERROR shows the failures, grep narrows to a tool, an id or a message. When more lines match than limit, the newest are kept and truncated is true: narrow since, severity or grep (when it stops after 20 pages, newer_from is where the unread lines start). Reads with the CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_...), staging and production.",
     input: z.object({
       environment: ENVIRONMENT.default("staging").describe("staging or production"),
       since: z.string().default("1h").describe(`How far back, at most 30 days: ${WHEN}`),
       until: z.string().optional().describe(`Up to when: ${WHEN}`),
       severity: z.enum(SEVERITIES).optional().describe("Only lines at this severity or above"),
-      grep: z.string().min(1).max(200).optional().describe("Only lines that hold this text (any case)"),
+      grep: z.string().min(1).max(200).optional().describe("Only lines that hold this text (any case) anywhere in the line: a JSON line's every field, not only its message"),
       limit: z.number().int().min(1).max(1000).default(200).describe("At most this many lines, the newest"),
     }),
     async run(input, reads) {
-      const since = sinceTime(input.since);
-      if (!since || Date.now() - Date.parse(since) > 30 * 86400_000) throw new Failed(`since is ${WHEN}, at most 30 days back (got "${input.since}").`, "usage");
-      const until = input.until === undefined ? undefined : sinceTime(input.until);
-      if (input.until !== undefined && (!until || Date.parse(until) <= Date.parse(since))) throw new Failed(`until is ${WHEN}, after since (got "${input.until}").`, "usage");
+      // flow logs' own rule (logsWindow): a duration is that long before now for since and until alike.
+      const window = logsWindow(input.since, input.until, Date.now());
+      if ("wrong" in window && window.wrong === "since") throw new Failed(`since is ${WHEN}, at most 30 days back (got "${input.since}").`, "usage");
+      if ("wrong" in window) throw new Failed(`until is ${WHEN}, after since (got "${input.until}").`, "usage");
+      const { since, until } = window;
       const query: LogsQuery = { environment: input.environment, since, ...(until ? { until } : {}), ...(input.severity ? { severity: input.severity } : {}), ...(input.grep ? { grep: input.grep } : {}) };
       const { api } = reads.ci();
       let lines: Array<{ time: string; severity?: string; text: string }> = [];
@@ -217,7 +218,10 @@ export const TOOLS: ServeTool[] = [
         const page = await logsPage(api, query);
         if (pages === 0) from = page.from;
         const moved = Boolean(page.next) && page.next !== query.after;
-        if (moved || pages === 0) lines = [...lines, ...page.lines].slice(-input.limit - 1);
+        if (moved || pages === 0) {
+          addLogLines(lines, page.lines);
+          lines = lines.slice(-input.limit - 1);
+        }
         if (!moved) { complete = true; break; }
         query.after = page.next!;
       }
