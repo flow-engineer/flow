@@ -1,5 +1,6 @@
-// covers: testing/src/mcp-serve.ts testing/src/cli.ts testing/src/deploy.ts
+// covers: testing/src/mcp-serve.ts testing/src/flow-tools.ts testing/src/cli.ts testing/src/deploy.ts testing/src/conversations.ts
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage } from "node:http";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -10,6 +11,10 @@ import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/client";
 import { hostLogs, type HostLogLine } from "./helpers.ts";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+import { ToolError } from "../src/tools.ts";
+import { mcpServer } from "../mcp/src/server.ts";
+import { flowReadTools, type FlowAgent, type FlowAgentAccess } from "../testing/src/flow-tools.ts";
 
 const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
 const KEY = "flow_test_k1_secretvalue";
@@ -194,6 +199,101 @@ test("production tools read with FLOW_LIVE_KEY when .env has it, staging ones wi
     assert.match(tools.find((t) => t.name === "list_insights")!.description!, /flow setup --live/);
   } finally {
     await client.close();
+    await cloud.close();
+  }
+});
+
+const CONNECTION_KEY = "flow_live_conn01_connectionsecret";
+const SHOP: FlowAgent = { flow_agent_id: "agt_1", name: "shop", workspace_id: "acc_1" };
+const CAFE: FlowAgent = { flow_agent_id: "agt_2", name: "cafe", workspace_id: "acc_1" };
+
+/** A person's agents and keys as the hosted project's credentials give them; cafe's key is refused as flow-mono refuses one. */
+function scriptedAccess(agents: FlowAgent[], asked: string[] = []): FlowAgentAccess {
+  return {
+    agents: async () => agents,
+    async key(agent) {
+      asked.push(agent);
+      const found = agents.find((a) => a.flow_agent_id === agent || a.name === agent);
+      if (!found) throw new ToolError("not_found", `You have no agent ${agent}.`, { next: "list_agents" });
+      if (found.name === "cafe") throw new ToolError("owner_only", "Only cafe's workspace owner can read it.", { hint: "Ask the owner to read it.", next: "list_agents" });
+      return { value: CONNECTION_KEY, flow_agent_id: found.flow_agent_id, name: found.name };
+    },
+  };
+}
+
+test("hosted, every tool reads the agent the call names (or the person's only one) with the key the server's credentials give for it, and list_agents lists them", async () => {
+  const cloud = await fakeCloud(() => ({ status: 200, body: { issues: [{ id: "iss_1", status: "open" }] } }));
+  const asked: string[] = [];
+  const { tools, instructions } = flowReadTools({ hosted: { cloud: cloud.url } });
+  const handle = mcpServer({ name: "flow", version: "1", tools, instructions, feedback: false, traces: false, credentials: (name) => (name === "flow" ? scriptedAccess([SHOP, CAFE], asked) : undefined) });
+  const server = createServer((req, res) => void handle.node(req, res));
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const client = new Client({ name: "test", version: "1" });
+  try {
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`)));
+    const listed = (await client.listTools()).tools;
+    // The CLI's own reads stay the CLI's: a host sees list_agents and the eight.
+    assert.deepEqual(listed.map((t) => t.name), ["list_agents", "list_conversations", "show_conversation", "list_issues", "list_insights", "insight_conversations", "list_templates", "read_logs", "deploy_status"]);
+    assert.ok(listed.slice(1).every((t) => "agent" in (t.inputSchema.properties as object)), "every read takes agent");
+    assert.doesNotMatch(JSON.stringify(listed), /FLOW_KEY|\.env/);
+    assert.deepEqual((await client.callTool({ name: "list_agents", arguments: {} })).structuredContent, { agents: [SHOP, CAFE] });
+    const unnamed = await client.callTool({ name: "list_issues", arguments: {} });
+    assert.equal(unnamed.isError, true);
+    assert.deepEqual(unnamed.structuredContent, { ok: false, error: { code: "agent_required", message: "You have 2 Flow agents: name one with agent (shop, cafe)." }, next: "list_agents" });
+    const read = await client.callTool({ name: "list_issues", arguments: { agent: "shop" } });
+    assert.equal(read.isError, undefined, JSON.stringify(read.structuredContent));
+    assert.deepEqual(read.structuredContent, { issues: [{ id: "iss_1", status: "open" }] });
+    assert.deepEqual(cloud.seen, [{ url: "/v1/agent/issues?status=open", authorization: `Bearer ${CONNECTION_KEY}` }]);
+    const refused = await client.callTool({ name: "deploy_status", arguments: { agent: "cafe" } });
+    assert.deepEqual(refused.structuredContent, { ok: false, error: { code: "owner_only", message: "Only cafe's workspace owner can read it.", hint: "Ask the owner to read it." }, next: "list_agents" });
+    assert.deepEqual(asked, ["shop", "cafe"]);
+    assert.doesNotMatch(JSON.stringify([unnamed, read, refused]), /connectionsecret/);
+  } finally {
+    await client.close();
+    await new Promise((done) => server.close(done));
+    await cloud.close();
+  }
+});
+
+/** The flow command, with only `env` set beyond the PATH: its exit status and output. */
+function flow(args: string[], env: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((done) => {
+    execFile(process.execPath, [cli, ...args], { env: { PATH: process.env.PATH!, HOME: mkdtempSync(join(tmpdir(), "flow-mcp-home-")), ...env } }, (error, stdout, stderr) => done({ code: error ? (error as { code?: number }).code ?? 1 : 0, stdout, stderr }));
+  });
+}
+
+test("the read commands with --server read over a hosted Flow MCP as the person signed in, through the CLI's own tools, and say its refusals as their own", async () => {
+  const conversation = { id: "cnv_1", environment: "staging", channel: "whatsapp", contact: "Contact 0100", messages: 2 };
+  const cloud = await fakeCloud(() => ({ status: 200, body: { conversations: [conversation], next_cursor: null } }));
+  const { tools, instructions } = flowReadTools({ hosted: { cloud: cloud.url } });
+  // As the OAuth bridge says it: the token's person, their credentials, and the CLI as the client (which sees the CLI's own tools).
+  const people: Record<string, FlowAgent[]> = { one: [SHOP], two: [SHOP, CAFE] };
+  const handle = mcpServer({
+    name: "flow", version: "1", tools, instructions, feedback: false, traces: false,
+    auth: { issuer: "https://issuer.invalid", verify: (token) => (people[token] ? { key: `person-${token}`, client: { id: "flow-cli", kind: "cli" }, credentials: (name) => (name === "flow" ? scriptedAccess(people[token]!) : undefined) } : null) },
+  });
+  const server = createServer((req, res) => void handle.node(req, res));
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
+  try {
+    const listedJson = await flow(["conversations", "--json"], { FLOW_MCP_SERVER: url, FLOW_MCP_TOKEN: "one" });
+    assert.equal(listedJson.code, 0, listedJson.stderr);
+    assert.deepEqual(JSON.parse(listedJson.stdout), { conversations: [conversation], next_cursor: null });
+    assert.deepEqual(cloud.seen, [{ url: "/v1/agent/conversations?limit=20", authorization: `Bearer ${CONNECTION_KEY}` }]);
+    const unnamed = await flow(["deploy", "status", "--server", url, "--json"], { FLOW_MCP_TOKEN: "two" });
+    assert.equal(unnamed.code, 1);
+    assert.deepEqual(JSON.parse(unnamed.stdout), { ok: false, error: { code: "agent_required", message: "You have 2 Flow agents: name one with agent (shop, cafe)." }, next: "list_agents" });
+    const refused = await flow(["issues", "--server", url, "--agent", "cafe"], { FLOW_MCP_TOKEN: "two" });
+    assert.deepEqual([refused.code, refused.stdout, refused.stderr], [1, "", "Only cafe's workspace owner can read it.\n"]);
+    const signedOut = await flow(["templates", "--server", url, "--json"], { FLOW_MCP_TOKEN: "nobody" });
+    assert.equal(signedOut.code, 1);
+    assert.equal(JSON.parse(signedOut.stdout).error.code, "signed_out");
+    assert.match(signedOut.stderr, /flow mcp login/);
+    const mixed = await flow(["insights", "--server", url, "--cloud", cloud.url], {});
+    assert.deepEqual([mixed.code, mixed.stderr.split("\n")[0]], [2, "--server reads as you, signed in with flow mcp login, not with this folder's keys: --cloud and --dotenv do not go with it."]);
+    assert.equal(cloud.seen.length, 1);
+  } finally {
+    await new Promise((done) => server.close(done));
     await cloud.close();
   }
 });
