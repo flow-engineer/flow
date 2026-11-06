@@ -810,6 +810,16 @@ async function sendSecrets(ctx: Ctx, file: string, env: string, onlyChanged: boo
       ctx.say(`  ${name} skipped: a secret's name is upper case letters, digits and _`);
       continue;
     }
+    // A live Flow key is never sent to staging (Flow's hosting refuses it too); a test one sent to
+    // production is warned about. FLOW_KEY is exchanged for the environment's own, so it goes to both.
+    const keyMode = name === "FLOW_KEY" ? null : /^(fk|flow|otk)_(live|test)_/.exec(value.trim());
+    if (keyMode && keyMode[2] === "live" && env !== "production") {
+      const why = `a live key (${keyMode[0]}) goes to production only; ${env} takes a test key (${keyMode[1]}_test_), set with ${RUN} deploy secret ${name} --env ${env}`;
+      out.skipped.push({ name, why });
+      ctx.say(`  ${name} skipped: ${why}`);
+      continue;
+    }
+    if (keyMode && keyMode[2] === "test" && env === "production") console.error(`  Warning: ${name} is a test key (${keyMode[0]}) and goes to production as one; production should run on a live key (${keyMode[1]}_live_).`);
     const hash = secretHash(ctx, env, name, value);
     if (onlyChanged && known[name] === hash) {
       out.unchanged.push(name);
