@@ -101,8 +101,10 @@ export const DEPLOY_USAGE = `Usage:
                                                            flow deploy does this itself
 
   --env        Where (default: staging); --environment works too. Production takes only an agent
-               whose buildAgent passes options.host on to createAgent, with no database of its own.
-  --dir        The agent's folder (default: .): package.json, package-lock.json, src/agent.ts.
+               whose buildAgent passes options.host on to createAgent, with no database of its own
+               (an MCP server alone, src/mcp.ts with no src/agent.ts, has no chat state).
+  --dir        The agent's folder (default: .): package.json, package-lock.json, and src/agent.ts
+               or, for an MCP server alone, src/mcp.ts.
   --version    A label for this version (default: the agent's version, as its traces and flow test
                send it: FLOW_AGENT_VERSION, else the CI's commit, else the folder's git commit with
                +dirty when it has uncommitted changes, else package.json's version).
@@ -462,8 +464,12 @@ interface Ctx {
 }
 
 async function deploy(ctx: Ctx, dir: string, env: "staging" | "production", version: string | undefined, withSecrets: boolean, withCli: boolean): Promise<number> {
-  for (const file of ["package.json", "package-lock.json", "src/agent.ts"]) {
+  for (const file of ["package.json", "package-lock.json"]) {
     if (!existsSync(join(dir, file))) throw new Usage(`${join(dir, file)} is missing: deploy the agent's folder (npm install makes package-lock.json).`);
+  }
+  // A chat agent (src/agent.ts), or an MCP server alone (src/mcp.ts), which hosting serves without one.
+  if (!existsSync(join(dir, "src", "agent.ts")) && !existsSync(join(dir, "src", "mcp.ts"))) {
+    throw new Usage(`${join(dir, "src", "agent.ts")} is missing: deploy the agent's folder (an MCP server alone needs only src/mcp.ts).`);
   }
   await frameworkFits(ctx, dir, env);
   if (version === undefined) {

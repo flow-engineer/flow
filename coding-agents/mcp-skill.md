@@ -42,7 +42,9 @@ createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamabl
 
 - `mcp.fetch(request)` serves a web-standard `Request` instead (Cloudflare Workers, Deno, Bun), so
   it mounts beside the chat agent in one process or runs on its own: it needs no model, channels
-  or store.
+  or store. A project that is only an MCP server has `src/mcp.ts` and no `src/agent.ts`; it exports
+  `tools` beside `mcp` for `flow check`, and `flow deploy` puts it on Flow's hosting
+  (`oauth-bridge-skill.md`, "Deploy").
 - `await mcp.stdio()` serves the same tools and instructions on stdin and stdout, for a host that
   runs the server as a local command (`claude mcp add acme -- node src/mcp.ts`), until the host
   closes stdin. Nothing but the protocol goes to stdout. There is no sign-in on stdio: the caller is

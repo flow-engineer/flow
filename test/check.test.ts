@@ -98,6 +98,21 @@ test("with a src/mcp.ts, a tool the CLI file does not name is reachable only if 
   assert.deepEqual((await check(serving("true"))).warnings, [`src/cli.ts: tool get_order has no command in the CLI file; it is reachable as "get-order"`]);
 });
 
+// An MCP server alone has no src/agent.ts: its tools are src/mcp.ts's, checked by the same rules.
+test("an MCP server alone (src/mcp.ts, no src/agent.ts) is checked by the tools src/mcp.ts exports", async () => {
+  const mcpModule = pathToFileURL(join(import.meta.dirname, "../mcp/src/index.ts")).href;
+  const mcpOnly = (exported: string) => {
+    const dir = agentFolder("");
+    rmSync(join(dir, "src/agent.ts"));
+    writeFileSync(join(dir, "src/mcp.ts"), `import { tool, z } from ${JSON.stringify(chinwag)};\nimport { mcpServer } from ${JSON.stringify(mcpModule)};\nconst tools = [${listOrders}];\nexport const mcp = mcpServer({ name: "acme", version: "1", tools });\n${exported}\n`);
+    return dir;
+  };
+  assert.deepEqual(await check(mcpOnly("export { tools };")), { code: 0, ok: true, errors: [], warnings: [] });
+  const none = await check(mcpOnly(""));
+  assert.equal(none.code, 1);
+  assert.deepEqual(none.errors, ["src/mcp.ts exports no tools array: with no src/agent.ts, export the tools it serves beside mcp (export { tools })"]);
+});
+
 // Existing checks cover warnings on chat-only skill tools, but not native package generation.
 test("plugins preserve skill bytes and assets, use native transports, and detect stale sources", () => {
   const dir = agentFolder(listOrders, undefined, "Check the order first.");

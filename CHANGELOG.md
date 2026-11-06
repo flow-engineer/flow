@@ -6,6 +6,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **An MCP server alone deploys to Flow's hosting.** A project with `src/mcp.ts` and no
+  `src/agent.ts` (no `buildAgent`, model key or channels) is no longer refused: `flow deploy` needs
+  `package.json`, `package-lock.json` and either file, and hosting serves its MCP paths with no chat
+  agent, calling the factory as `mcp(undefined, host)` with `host.oauthStorage` (the OAuth bridge's
+  storage on Flow's store), so production takes it. `flow check` reads such a project's tools from
+  `src/mcp.ts`, which exports them beside `mcp` (`export { tools }`); without them it is an error,
+  as it is for `src/agent.ts`. `flow mcp update` loads `src/mcp.ts` when there is no `src/agent.ts`.
 - **`flow logs --severity ERROR` and MCP `read_logs` with severity ERROR show a 0.15.x runtime's
   errors.** Runtimes before 0.16 wrote Flow Framework's own errors as plain console text, which
   Cloud Run keeps at `DEFAULT` (`flow: scheduled messages: Error: flow-agent-store: unfinished:
@@ -145,6 +152,9 @@ no host.
 `flow mcp serve`'s tools/list, instructions and results are unchanged; it now runs on the
 framework's `mcpServer`. A `FLOW_MCP_SERVER` set in the environment sends the read commands to that
 hosted Flow MCP, so leave it unset to read with the folder's keys.
+An MCP server alone that `flow check` should check exports its tools from `src/mcp.ts`
+(`export { tools }`); its `mcp(agent, host)` factory gets `undefined` for `agent` on Flow's hosting,
+as `mcpServer({ agent: undefined })` already takes it (no `/agent/terminal`).
 
 ## 0.16.0 (2026-11-05)
 

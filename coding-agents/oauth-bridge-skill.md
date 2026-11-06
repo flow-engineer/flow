@@ -243,6 +243,12 @@ export async function mcp(agent, host) {
 Passing `agent` serves `<cli> chat` at `/agent/terminal` with the same sign-in as `/mcp`
 (`mcp-skill.md`, "Terminal conversations"); leave it out for MCP and CLI commands only.
 
+An MCP server alone (`src/mcp.ts` and no `src/agent.ts`: no model key, channels or chat) deploys
+the same way. The runtime calls the factory as `mcp(undefined, host)`, so `agent` is `undefined`
+and there is no `/agent/terminal`; it serves only the handle's paths and the CLI install, and
+production takes it, since its state is the bridge's, in `host.oauthStorage`. Export the tools
+beside `mcp` (`export { tools }`) so `flow check` checks them.
+
 The signing key, encryption key and cookie key go in as secrets (`npx @flow-engineer/flow deploy
 secrets`). Self-hosted, deploy with durable storage (`databaseStorage(postgres(pool), issuer)`).
 Either way, `issuer` is the agent's public https origin and `resources` its MCP URLs, and the
