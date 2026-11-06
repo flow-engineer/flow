@@ -399,6 +399,31 @@ const insights = {
   "/v1/agent/insights/findings/fnd_2/conversations 7": findingConversations,
 };
 
+test("flow insights says how many conversations came without text only when Flow sends without_text, counting conversations, not messages", { timeout: 15_000 }, async () => {
+  const shown = { ...insightsOn, findings: [], without_text: { conversations: 12, of: 40 }, messages_without_text: 20 };
+  const below = { ...insightsOn, findings: [], messages_without_text: 3 };
+  const fake = await server({ insights: { "/v1/agent/insights 7": shown, "/v1/agent/insights 30": below } });
+  try {
+    const dir = agentDir();
+    const listed = await flow(["insights", "--cloud", fake.url], dir);
+    assert.equal(listed.code, 0, listed.stderr);
+    assert.equal(listed.stdout, [
+      "No open findings in the last 7 days.",
+      "",
+      "Last 7 days: 132 closed sessions from 87 people.",
+      "Insights can't read 12 of 40 conversations (30%): they came without message text (the agent's traces send metadata only).",
+      "",
+    ].join("\n"));
+    const quiet = await flow(["insights", "--days", "30", "--cloud", fake.url], dir);
+    assert.equal(quiet.code, 0, quiet.stderr);
+    assert.doesNotMatch(quiet.stdout, /without|message text/, "below Flow's rule nothing is said, whatever messages_without_text holds");
+    const json = await flow(["insights", "--json", "--cloud", fake.url], dir);
+    assert.deepEqual(JSON.parse(json.stdout).without_text, { conversations: 12, of: 40 }, "--json passes Flow's answer through");
+  } finally {
+    fake.close();
+  }
+});
+
 test("flow insights lists the open findings ranked as sent, with the window before's count and tags named under them; no_data says what makes data", { timeout: 15_000 }, async () => {
   const fake = await server({ insights });
   try {

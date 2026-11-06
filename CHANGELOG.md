@@ -6,6 +6,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **`flow insights` counts conversations it can't read, and only when that matters.** The line
+  about text Insights can't read comes from Flow's `without_text` (`{conversations, of}`, sent at 5 or
+  more conversations and 20% or more of the window's, never for a health workspace): "Insights can't
+  read 12 of 40 conversations (30%): they came without message text (the agent's traces send
+  metadata only)." Below that rule it says nothing; the older `messages_without_text` (a count of
+  messages) is no longer printed. `--json` is Flow's answer as before.
+
 - **An MCP server alone deploys to Flow's hosting.** A project with `src/mcp.ts` and no
   `src/agent.ts` (no `buildAgent`, model key or channels) is no longer refused: `flow deploy` needs
   `package.json`, `package-lock.json` and either file, and hosting serves its MCP paths with no chat

@@ -882,8 +882,13 @@ function insightsLines(body: Record<string, unknown>, status: string): string[] 
       "Test-key traffic, flow chat, the playground and flow test conversations are never graded.");
   }
   out.push(...note);
-  const noText = Number(body.messages_without_text ?? 0);
-  if (noText > 0) out.push(`${noText} messages came without their text (trace content off): Insights reads none of them.`);
+  // Flow sends without_text only when it matters (5+ conversations and 20%+ of the window's), never for a health
+  // workspace; below that, nothing is said. messages_without_text, the older per-message count, is not printed.
+  const without = body.without_text as { conversations?: number; of?: number } | undefined;
+  const textless = Number(without?.conversations ?? 0), of = Number(without?.of ?? 0);
+  if (textless > 0 && of > 0) {
+    out.push(`Insights can't read ${textless} of ${of} conversations (${Math.round((100 * textless) / of)}%): they came without message text (the agent's traces send metadata only).`);
+  }
   if (tags.length) out.push(`Low-confidence tags, left out above: ${tags.map((f) => `${f.id} ${signalTitle(f.signal)} (${f.conversations ?? 0})`).join(", ")}.`);
   if (rows.length || tags.length) out.push("Read one: flow insights show <finding>");
   return out;
