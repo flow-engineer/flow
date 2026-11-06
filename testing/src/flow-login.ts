@@ -12,7 +12,8 @@
 //            that shared sender is open), try_urls?, trial?, minted, next}; a 502 carries every field that worked too;
 //        flow_key is the agent's one Flow key, {env: "FLOW_KEY", value: "flow_test_...", kid, mode, scopes, agent_id,
 //        minted: true, previous_expires_at}, only when made in this call (in every answer of that call, errors too;
-//        absent when have names FLOW_KEY and rotate does not); for now only the model uses it;
+//        absent when have names FLOW_KEY and rotate does not); the model, observe (traces, tests), Messaging and
+//        hosting all take it;
 //        model_credit is the account's Flow trial model credit, {limit_usd, left_usd, base_url, default_model}, when
 //        have names no provider key and the account has the credit (left_usd 0 when used up), else absent with
 //        the reason in warnings; every folder's setup makes its own key, the credit is the account's;
