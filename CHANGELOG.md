@@ -178,6 +178,14 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   latest message on that channel, from the conversation's history. The adapter finds the
   conversation from it (`GET /v0/messages/{id}`) when it has none, and starts one from the sender as
   before when Flow no longer knows that message.
+- **A store outage no longer loses Flow Messaging stream events.** An event that failed 5 times was
+  passed over and the stream's cursor moved past it, also when what failed was the agent's store
+  (flow-agent-store down, a database restarting): every message in the outage was lost. After a
+  failed event the adapter now reads the store once (`agent.conversationOf`, the event's own
+  identity): while the store does not answer, the cursor stays, the try is not counted and the
+  stream reconnects with its backoff for as long as the outage lasts (one `WARNING` per outage,
+  with the event's id). Only an event that fails 5 times while the store answers is passed over, as
+  before.
 - **A turn owed a reply never ends in silence when the model answers in plain text twice.** After
   the one reminder that plain text never reaches them, a second step of plain text is sent as the
   reply on the channel they are owed one on (the latest), as the send tool would have sent it, and

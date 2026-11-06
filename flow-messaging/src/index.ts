@@ -876,6 +876,15 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value!);
   }
 
+  /**
+   * Whether the agent's store answers, after an event failed: a read of the event's own identity
+   * (agent.conversationOf). Without conversationOf the store is taken to answer.
+   */
+  const storeAnswers = (agent: WebhookAgent, event: FlowEvent): Promise<boolean> =>
+    agent.conversationOf
+      ? agent.conversationOf({ channel: event.conversation?.channel ?? "", address: event.conversation?.contact ?? event.id }).then(() => true, () => false)
+      : Promise.resolve(true);
+
   const failed = (event: FlowEvent, error: unknown) =>
     log("WARNING", `@flow-engineer/flow/flow-messaging: event ${event.id} (${event.type}) failed: ${error instanceof FlowMessagingError ? error.type : error instanceof Error ? error.name : "error"}`);
 
@@ -935,8 +944,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * came after it: at once after a reconnect frame, else after a jittered backoff (up to 1 s, doubling
    * to 30 s; 30 s to 5 min after 4404 or 4429), never sooner than Flow's retry_after. The backoff starts
    * again only once a connection delivers an event or stays open 30 s, so a stream refused right after
-   * it opens never reconnects in a tight loop. An event that fails 5 times in a row is passed over, so
-   * it cannot hold up every later one. A refused key or request stops the stream (`stopped`). Replies
+   * it opens never reconnects in a tight loop. An event that fails 5 times in a row while the agent's
+   * store answers is passed over, so it cannot hold up every later one; while the store does not
+   * answer, the stream keeps its place and tries again for as long as that lasts. A refused key or request stops the stream (`stopped`). Replies
    * go over HTTP (with Idempotency-Keys), so they do not depend on the stream being up.
    */
   function stream(agent: WebhookAgent, o: StreamOptions = {}): StreamHandle {
@@ -947,7 +957,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     let healthy: NodeJS.Timeout | undefined;
     let closed = false;
     let tries = 0;
-    let failing: { id: string; times: number } | undefined;
+    let failing: { id: string; times: number; storeDown: boolean } | undefined;
     let generation = 0;
     let queue = Promise.resolve();
     let stop!: (reason: StreamStop) => void;
@@ -1034,9 +1044,15 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         await once(agent, event);
       } catch (error) {
         failed(event, error);
-        const times = failing?.id === event.id ? failing.times + 1 : 1;
-        if (times < STREAM_EVENT_TRIES) {
-          failing = { id: event.id, times };
+        // The agent's store not answering is no fault of the event's: the cursor stays and the try is
+        // not counted, however long the outage lasts (the reconnect's backoff paces it). Only an event
+        // that fails while the store answers is counted, and passed over at STREAM_EVENT_TRIES.
+        const store = await storeAnswers(agent, event);
+        const before = failing?.id === event.id ? failing.times : 0;
+        const times = store ? before + 1 : before;
+        if (!store || times < STREAM_EVENT_TRIES) {
+          if (!store && !failing?.storeDown) log("WARNING", `@flow-engineer/flow/flow-messaging: event ${event.id} waits: the agent's store does not answer; the stream keeps its place and tries again`);
+          failing = { id: event.id, times, storeDown: !store };
           if (mine === generation) ws.close(1000, "event failed; resuming");
           return;
         }
