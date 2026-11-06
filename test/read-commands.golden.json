@@ -1,0 +1,192 @@
+{
+  "conversations": {
+    "code": 0,
+    "stdout": "Text: de-identified (names, phones, emails, ids, addresses are placeholders)\nID     LAST MESSAGE          CHANNEL   KIND  VERSION  CONTACT       MESSAGES  WRONG  UNHELPFUL\ncnv_1  2026-11-04 09:00:00Z  whatsapp  -     -        Contact 0100  4         2      0\ncnv_2  2026-11-03 09:00:00Z  telegram  -     -        Contact 9e35  2         -      -\n\n2 conversations; - is grades unavailable. Read one: flow conversations show <id>\n",
+    "stderr": ""
+  },
+  "conversations --json": {
+    "code": 0,
+    "stdout": "{\"conversations\":[{\"id\":\"cnv_1\",\"environment\":\"staging\",\"channel\":\"whatsapp\",\"contact\":\"Contact 0100\",\"messages\":4,\"last_message_at\":\"2026-11-04T09:00:00Z\",\"agent_version\":\"v7\",\"grades\":{\"good\":1,\"unhelpful\":0,\"wrong\":2,\"not_graded\":1}},{\"id\":\"cnv_2\",\"environment\":\"staging\",\"channel\":\"telegram\",\"contact\":\"Contact 9e35\",\"messages\":2,\"last_message_at\":\"2026-11-03T09:00:00Z\",\"agent_version\":null,\"grades\":null}],\"next_cursor\":null,\"text_mode\":\"deidentified\"}\n",
+    "stderr": ""
+  },
+  "conversations --contact --limit": {
+    "code": 0,
+    "stdout": "{\"conversations\":[{\"id\":\"cnv_2\",\"environment\":\"staging\",\"channel\":\"telegram\",\"contact\":\"Contact 9e35\",\"messages\":2,\"last_message_at\":\"2026-11-03T09:00:00Z\",\"agent_version\":null,\"grades\":null}],\"next_cursor\":null,\"text_mode\":\"deidentified\"}\n",
+    "stderr": ""
+  },
+  "conversations show": {
+    "code": 0,
+    "stdout": "Text: de-identified (names, phones, emails, ids, addresses are placeholders)\nConversation ?: \n  started ?, last message ?, ? messages\n  version unknown\n  replies: grades unavailable\n\n2026-11-04 09:00:00Z  person: is 2 < 3 & > 1?\n2026-11-04 09:00:02Z  agent: Yes.\n                             tool lookup 12 ms FAILED: \n                             delivery: FAILED 131047\n                             WRONG  rule: facts\n                               why: It guessed.\n                               quote: \"Yes.\"\n\nIssues:\n  iss_1  Guesses\n",
+    "stderr": ""
+  },
+  "conversations show --json": {
+    "code": 0,
+    "stdout": "{\"id\":\"cnv_1\",\"environment\":\"staging\",\"channel\":\"whatsapp\",\"text_mode\":\"deidentified\",\"messages\":[{\"id\":\"m1\",\"role\":\"person\",\"at\":\"2026-11-04T09:00:00Z\",\"text\":\"is 2 \\u003c 3 \\u0026 \\u003e 1?\"},{\"id\":\"m2\",\"role\":\"agent\",\"at\":\"2026-11-04T09:00:02Z\",\"text\":\"Yes.\",\"tools\":[{\"name\":\"lookup\",\"ms\":12,\"ok\":false,\"error\":\"timeout\"}],\"delivery\":{\"state\":\"failed\",\"code\":\"131047\"},\"grade\":{\"label\":\"wrong\",\"rule\":\"facts\",\"reason\":\"It guessed.\",\"quote\":\"Yes.\"}}],\"issues\":[{\"id\":\"iss_1\",\"title\":\"Guesses\"}]}\n",
+    "stderr": ""
+  },
+  "conversations show missing": {
+    "code": 1,
+    "stdout": "{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"flow conversations: <cloud> answered 404: 404 page not found (this Flow may not have this command's route yet).\"},\"next\":null}\n",
+    "stderr": "flow conversations: <cloud> answered 404: 404 page not found (this Flow may not have this command's route yet).\n"
+  },
+  "conversations --limit wrong": {
+    "code": 2,
+    "stdout": "{\"ok\":false,\"error\":{\"code\":\"usage\",\"message\":\"--limit is a whole number from 1 to 1000 (got \\\"x\\\").\"},\"next\":null}\n",
+    "stderr": "--limit is a whole number from 1 to 1000 (got \"x\").\n"
+  },
+  "conversations --help": {
+    "code": 0,
+    "stdout": "Usage:\n  flow conversations [options]\n  flow conversations show <id> [--env production] [--json]\n\nLists the hosted agent's conversations, newest first: id, last message, channel, the agent version\nbehind its latest reply, contact, messages, and how many replies were graded wrong and unhelpful. show prints one conversation, one line per\nmessage, and under each graded agent reply its label, the rule it was graded on, why, and the quoted\nwords; under an agent reply, its tool calls (name, time, ok or the error) and its delivery (queued,\nsent, delivered, read or failed, with the channel's code) when Flow has them. show reads with\nFLOW_KEY and, when Flow does not find the id with it, once more with FLOW_LIVE_KEY when set;\nshow --env production reads with FLOW_LIVE_KEY straight away. To fix bad replies:\nflow conversations --grade wrong, then flow conversations show <id>.\n\nOptions:\n  --env <name>             staging or production (default: production for a live key, else\n                           staging); --environment works too\n  --grade <label>          Only conversations with a reply graded wrong, unhelpful or good\n  --contact <label>        Only this contact's conversations, by its label as listed: \"Contact 9e35\"\n                           or 9e35 (read over as many pages as it takes)\n  --since <when>           Only conversations with a message since then: 30m, 24h, 7d, or a time\n                           such as 2026-10-29T09:00:00Z\n  --limit <n>              At most this many conversations (default: 20, at most 1000), asked for 100 a\n                           page over as many pages as it takes\n  --json                   One JSON document on stdout: the server's (pages of conversations\n                           merged into one), or { ok: false, error: { code, message, hint }, next }\n                           when it did not work; every other line goes to stderr\n  --cloud <url>            Flow's address (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)\n  --dotenv <path>          Read the environment from this file instead of the folder's .env\n  --server <url>           Read over a hosted Flow MCP as you (flow mcp login), not with this\n                           folder's keys (default: FLOW_MCP_SERVER)\n  --agent <id|name>        With --server: which of your agents (default: your only one)\n  -h, --help               Show this help\n\nReads with the agent's Flow key, FLOW_KEY (flow setup writes it into .env); production reads\n(--env production, insights) read with the live Flow key FLOW_LIVE_KEY when it is set\n(npx @flow-engineer/flow setup --live writes it), else FLOW_KEY. No key is ever printed. Each read prints how its\nmessage text came, one line such as \"Text: de-identified (...)\"; --json keeps it as text_mode.\nA 429 (60 reads a minute per key) is waited out, up to 30 s, and said on stderr; a read that hit a\nnetwork error or a 5xx is tried once more.\nExit status: 0 printed, 1 no key, or the server refused or could not be reached (its message and\nhint are printed), 2 a wrong flag.\n\nKeys (the environment wins over the agent's .env; errors name a key by its prefix and last 4 only):\n  FLOW_KEY                  flow_test_... reads staging, flow_live_... staging and production:\n                            flow conversations, flow issues, flow templates. flow setup makes a\n                            flow_test_ one\n  FLOW_LIVE_KEY             The agent's live Flow key, flow_live_...: production reads (flow\n                            conversations --env production, flow conversations show of a\n                            production one, flow insights) use it whenever it is set, with text\n                            de-identified unless made with --content; npx @flow-engineer/flow setup --live makes it\n                            (the workspace's owner), for 30 days, ending after 7 unused. It\n                            reads, runs tests, writes traces and uses the model; it messages\n                            customers or deploys live only after npx @flow-engineer/flow keys grant send|deploy\n                            and the owner's one click\n  FLOW_FRAMEWORK_CLOUD_KEY  The CI key, oci_...: flow test, flow show, flow deploy (every\n                            subcommand), flow logs, flow cli publish|rollback|status\n  npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).\nCloud (--cloud, else FLOW_FRAMEWORK_CLOUD): https://flow.engineer/observe (US, the default; /dashboard\n  is the same) or https://flow.engineer/dashboard/in (an agent in the India cell).\n",
+    "stderr": ""
+  },
+  "issues": {
+    "code": 0,
+    "stdout": "ID     STATUS  CONVERSATIONS  LAST SEEN             TITLE\niss_1  open    3              2026-11-04 09:00:00Z  Guesses <facts>\n    fix: Look it up first.\n\nFeedback from your team (last 30 days): 1\n  grade marked wrong  conversation ?, reply ?, rules -\n",
+    "stderr": ""
+  },
+  "issues --json": {
+    "code": 0,
+    "stdout": "{\n  \"issues\": [\n    {\"id\": \"iss_1\", \"status\": \"open\", \"conversations\": 3, \"last_seen\": \"2026-11-04T09:00:00Z\", \"title\": \"Guesses \\u003cfacts\\u003e\", \"suggested_fix\": \"Look it up first.\"}\n  ]\n}\n",
+    "stderr": ""
+  },
+  "issues test-case": {
+    "code": 0,
+    "stdout": "Text: de-identified (names, phones, emails, ids, addresses are placeholders)\nissue: iss_1\nrule: facts\nfrom: conversation cnv_1, reply m2\nincludes:\n  - \"look\"\nmust_not:\n  - \"Yes.\"\nexpect:\n  - \"It checks before answering.\"\n\nThese are Flow's fields, not a scenario file: a scenario also needs the person, the opening and the channels.\nWrite tests/scenarios/<name>.yaml from them and flow conversations show cnv_1 (expect as its expect.judge), then run flow test --only <name>.\n",
+    "stderr": ""
+  },
+  "issues test-case --json": {
+    "code": 0,
+    "stdout": "{\"test_case\":{\"issue\":\"iss_1\",\"rule_id\":\"facts\",\"from\":{\"conversation\":\"cnv_1\",\"message\":\"m2\"},\"expectations\":{\"includes\":[\"look\"],\"must_not\":[\"Yes.\"],\"expect\":[\"It checks before answering.\"]}},\"text_mode\":\"deidentified\"}\n",
+    "stderr": ""
+  },
+  "issues --help": {
+    "code": 0,
+    "stdout": "Usage:\n  flow issues [--status open|resolved|ignored|all] [--json]\n  flow issues test-case <id> [--json]\n\nThe problems the grades of the agent's replies add up to: id, status, conversations, last seen,\ntitle, and the suggested fix. flow conversations show <id> reads one of the conversations.\nThen your team's feedback: checks marked out of date (change them in the scenario file) and reply\ngrades marked wrong. test-case prints the test case Flow proposes for one issue (on stdout only; it\nwrites no file): write a scenario in tests/scenarios from it, then flow test --only <that scenario>.\n\nOptions:\n  --status <status>        open (the default), resolved, ignored or all\n  --env, --environment     Taken and ignored: issues cover both environments\n  --json                   One JSON document on stdout: the server's (pages of conversations\n                           merged into one), or { ok: false, error: { code, message, hint }, next }\n                           when it did not work; every other line goes to stderr\n  --cloud <url>            Flow's address (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)\n  --dotenv <path>          Read the environment from this file instead of the folder's .env\n  --server <url>           Read over a hosted Flow MCP as you (flow mcp login), not with this\n                           folder's keys (default: FLOW_MCP_SERVER)\n  --agent <id|name>        With --server: which of your agents (default: your only one)\n  -h, --help               Show this help\n\nReads with the agent's Flow key, FLOW_KEY (flow setup writes it into .env); production reads\n(--env production, insights) read with the live Flow key FLOW_LIVE_KEY when it is set\n(npx @flow-engineer/flow setup --live writes it), else FLOW_KEY. No key is ever printed. Each read prints how its\nmessage text came, one line such as \"Text: de-identified (...)\"; --json keeps it as text_mode.\nA 429 (60 reads a minute per key) is waited out, up to 30 s, and said on stderr; a read that hit a\nnetwork error or a 5xx is tried once more.\nExit status: 0 printed, 1 no key, or the server refused or could not be reached (its message and\nhint are printed), 2 a wrong flag.\n\nKeys (the environment wins over the agent's .env; errors name a key by its prefix and last 4 only):\n  FLOW_KEY                  flow_test_... reads staging, flow_live_... staging and production:\n                            flow conversations, flow issues, flow templates. flow setup makes a\n                            flow_test_ one\n  FLOW_LIVE_KEY             The agent's live Flow key, flow_live_...: production reads (flow\n                            conversations --env production, flow conversations show of a\n                            production one, flow insights) use it whenever it is set, with text\n                            de-identified unless made with --content; npx @flow-engineer/flow setup --live makes it\n                            (the workspace's owner), for 30 days, ending after 7 unused. It\n                            reads, runs tests, writes traces and uses the model; it messages\n                            customers or deploys live only after npx @flow-engineer/flow keys grant send|deploy\n                            and the owner's one click\n  FLOW_FRAMEWORK_CLOUD_KEY  The CI key, oci_...: flow test, flow show, flow deploy (every\n                            subcommand), flow logs, flow cli publish|rollback|status\n  npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).\nCloud (--cloud, else FLOW_FRAMEWORK_CLOUD): https://flow.engineer/observe (US, the default; /dashboard\n  is the same) or https://flow.engineer/dashboard/in (an agent in the India cell).\n",
+    "stderr": ""
+  },
+  "insights": {
+    "code": 0,
+    "stdout": "Text: de-identified (names, phones, emails, ids, addresses are placeholders)\nID   STATUS  CONVERSATIONS  TOPIC            FINDING\nf_1  open    4 (was 9)      Prices & offers  Repeated question\n\nLast 7 days: 0 closed sessions from 0 people.\nRead one: flow insights show <finding>\n",
+    "stderr": ""
+  },
+  "insights --json": {
+    "code": 0,
+    "stdout": "{\"state\":\"on\",\"days\":7,\"text_mode\":\"deidentified\",\"findings\":[{\"id\":\"f_1\",\"signal\":\"re_ask\",\"status\":\"open\",\"topic\":{\"id\":\"t1\",\"name\":\"Prices \\u0026 offers\"},\"conversations\":4,\"previous\":9},{\"id\":\"f_2\",\"signal\":\"no_reply\",\"status\":\"fixed\",\"topic\":null,\"conversations\":1,\"previous\":null}]}\n",
+    "stderr": ""
+  },
+  "insights --status all": {
+    "code": 0,
+    "stdout": "Text: de-identified (names, phones, emails, ids, addresses are placeholders)\nID   STATUS  CONVERSATIONS  TOPIC            FINDING\nf_1  open    4 (was 9)      Prices & offers  Repeated question\nf_2  fixed   1              -                No reply\n\nLast 7 days: 0 closed sessions from 0 people.\nRead one: flow insights show <finding>\n",
+    "stderr": ""
+  },
+  "insights show": {
+    "code": 0,
+    "stdout": "Text: de-identified (names, phones, emails, ids, addresses are placeholders)\nf_1    Repeated question: 0 conversations in the last 7 days\n\ncnv_1  2026-11-04 09:00:00Z  Repeated question; Annoyed asked twice\n    \"how much >?\"\n    around it:\n      ?  person: how much?\n      ?  agent: Which one?\n    next: flow conversations show cnv_1\n",
+    "stderr": ""
+  },
+  "insights show --json": {
+    "code": 0,
+    "stdout": "{\"finding\":{\"id\":\"f_1\",\"signal\":\"re_ask\"},\"text_mode\":\"deidentified\",\"data\":[{\"conversation\":\"cnv_1\",\"at\":\"2026-11-04T09:00:00Z\",\"cause\":\"asked twice\",\"quote\":\"how much \\u003e?\",\"window\":[{\"role\":\"person\",\"text\":\"how much?\"},{\"role\":\"agent\",\"text\":\"Which one?\"}]}]}\n",
+    "stderr": ""
+  },
+  "insights --help": {
+    "code": 0,
+    "stdout": "Usage:\n  flow insights [--days 7|30] [--status open|fixed|muted|all] [--json]\n  flow insights show <finding> [--days 7|30] [--json]\n\nLists Flow Insights' findings as the dashboard ranks them: id, status, conversations in the window\n(with the window before's: \"4 (was 9)\"), topic, and what happened. show prints one finding's\nconversations: id, time, why it was flagged, the person's words and, when Flow sends them, the\n3 messages before the flagged one and 2 after. Insights reads only closed production conversations\n(quiet for 24 h), so it reads with the live Flow key, FLOW_LIVE_KEY (npx @flow-engineer/flow setup --live), else a\nflow_live_ FLOW_KEY. To check\na finding: flow insights show <finding>, then flow conversations show <id>; once a fix is deployed\nand a window has passed, flow insights again to see its count drop.\n\nOptions:\n  --days <n>               The window: 7 (the default) or 30 days\n  --status <status>        open (the default), fixed, muted or all\n  --json                   One JSON document on stdout: the server's (pages of conversations\n                           merged into one), or { ok: false, error: { code, message, hint }, next }\n                           when it did not work; every other line goes to stderr\n  --cloud <url>            Flow's address (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)\n  --dotenv <path>          Read the environment from this file instead of the folder's .env\n  --server <url>           Read over a hosted Flow MCP as you (flow mcp login), not with this\n                           folder's keys (default: FLOW_MCP_SERVER)\n  --agent <id|name>        With --server: which of your agents (default: your only one)\n  -h, --help               Show this help\n\nReads with the agent's Flow key, FLOW_KEY (flow setup writes it into .env); production reads\n(--env production, insights) read with the live Flow key FLOW_LIVE_KEY when it is set\n(npx @flow-engineer/flow setup --live writes it), else FLOW_KEY. No key is ever printed. Each read prints how its\nmessage text came, one line such as \"Text: de-identified (...)\"; --json keeps it as text_mode.\nA 429 (60 reads a minute per key) is waited out, up to 30 s, and said on stderr; a read that hit a\nnetwork error or a 5xx is tried once more.\nExit status: 0 printed, 1 no key, or the server refused or could not be reached (its message and\nhint are printed), 2 a wrong flag.\n\nKeys (the environment wins over the agent's .env; errors name a key by its prefix and last 4 only):\n  FLOW_KEY                  flow_test_... reads staging, flow_live_... staging and production:\n                            flow conversations, flow issues, flow templates. flow setup makes a\n                            flow_test_ one\n  FLOW_LIVE_KEY             The agent's live Flow key, flow_live_...: production reads (flow\n                            conversations --env production, flow conversations show of a\n                            production one, flow insights) use it whenever it is set, with text\n                            de-identified unless made with --content; npx @flow-engineer/flow setup --live makes it\n                            (the workspace's owner), for 30 days, ending after 7 unused. It\n                            reads, runs tests, writes traces and uses the model; it messages\n                            customers or deploys live only after npx @flow-engineer/flow keys grant send|deploy\n                            and the owner's one click\n  FLOW_FRAMEWORK_CLOUD_KEY  The CI key, oci_...: flow test, flow show, flow deploy (every\n                            subcommand), flow logs, flow cli publish|rollback|status\n  npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).\nCloud (--cloud, else FLOW_FRAMEWORK_CLOUD): https://flow.engineer/observe (US, the default; /dashboard\n  is the same) or https://flow.engineer/dashboard/in (an agent in the India cell).\n",
+    "stderr": ""
+  },
+  "templates": {
+    "code": 0,
+    "stdout": "NAME         LANGUAGE  CATEGORY  STATUS    SEND ORDER\norder_ready  en        UTILITY   approved  body[0], body[1]\n\nDeclare them: flow templates --declare\n",
+    "stderr": ""
+  },
+  "templates --json": {
+    "code": 0,
+    "stdout": "{\"synced_at\":\"2026-11-04T09:00:00Z\",\"templates\":[{\"name\":\"order_ready\",\"language\":\"en\",\"category\":\"UTILITY\",\"status\":\"approved\",\"body\":\"Hi {{1}}, order \\u003c{{2}}\\u003e is ready.\",\"buttons\":[],\"values\":{\"body\":[\"{{1}}\",\"{{2}}\"]},\"send_order\":\"body[0], body[1]\"},{\"name\":\"promo\",\"language\":\"en\",\"category\":\"MARKETING\",\"status\":\"rejected\",\"body\":\"Sale!\",\"buttons\":[]}]}\n",
+    "stderr": ""
+  },
+  "templates --all": {
+    "code": 0,
+    "stdout": "NAME         LANGUAGE  CATEGORY   STATUS    SEND ORDER\norder_ready  en        UTILITY    approved  body[0], body[1]\npromo        en        MARKETING  rejected  -\n\nDeclare them: flow templates --declare\n",
+    "stderr": ""
+  },
+  "templates --declare": {
+    "code": 0,
+    "stdout": "// The approved WhatsApp templates, exactly as Meta has them: paste into createAgent({ ... }).\ntemplates: [\n  {\n    name: \"order_ready\",\n    language: \"en\",\n    category: \"UTILITY\",\n    body: \"Hi {{1}}, order <{{2}}> is ready.\",\n  },\n],\n\n// A send of each gives its values by position, in this order:\n// order_ready (en): body[0], body[1]\n// await agent.nudge({ to, template: { name: \"order_ready\", language: \"en\", body: [\"<1>\", \"<2>\"] } });\n",
+    "stderr": ""
+  },
+  "templates --help": {
+    "code": 0,
+    "stdout": "Usage:\n  flow templates [--all] [--declare] [--json]\n\nThe project's WhatsApp templates on Flow's dashboard: name, language, category, status, and the\norder a send gives its values in (header, body[0], body[1], ..., buttons[i]). Before declaring\nWhatsApp templates, run flow templates --declare and paste its output. flow test warns when a\ndeclared template differs from the approved one.\n\nOptions:\n  --all                    Every status (pending, rejected, ...), not only approved\n  --declare                The approved templates as createAgent's templates: [...], ready to paste,\n                           and one agent.nudge per template with its values in order\n  --json                   The server's JSON on stdout, every status (or { ok: false, error, next }\n                           when it did not work)\n  --env, --environment     Taken and ignored: the templates are the project's, in both\n  --cloud <url>            Flow's address (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)\n  --dotenv <path>          Read the environment from this file instead of the folder's .env\n  --server <url>           Read over a hosted Flow MCP as you (flow mcp login), not with this\n                           folder's keys (default: FLOW_MCP_SERVER)\n  --agent <id|name>        With --server: which of your agents (default: your only one)\n  -h, --help               Show this help\n\nReads with the agent's Flow key, FLOW_KEY (flow setup writes it into .env); it is never printed.\nExit status: 0 printed, 1 no key, or the server refused or could not be reached, 2 a wrong flag.\n\nKeys (the environment wins over the agent's .env; errors name a key by its prefix and last 4 only):\n  FLOW_KEY                  flow_test_... reads staging, flow_live_... staging and production:\n                            flow conversations, flow issues, flow templates. flow setup makes a\n                            flow_test_ one\n  FLOW_LIVE_KEY             The agent's live Flow key, flow_live_...: production reads (flow\n                            conversations --env production, flow conversations show of a\n                            production one, flow insights) use it whenever it is set, with text\n                            de-identified unless made with --content; npx @flow-engineer/flow setup --live makes it\n                            (the workspace's owner), for 30 days, ending after 7 unused. It\n                            reads, runs tests, writes traces and uses the model; it messages\n                            customers or deploys live only after npx @flow-engineer/flow keys grant send|deploy\n                            and the owner's one click\n  FLOW_FRAMEWORK_CLOUD_KEY  The CI key, oci_...: flow test, flow show, flow deploy (every\n                            subcommand), flow logs, flow cli publish|rollback|status\n  npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).\nCloud (--cloud, else FLOW_FRAMEWORK_CLOUD): https://flow.engineer/observe (US, the default; /dashboard\n  is the same) or https://flow.engineer/dashboard/in (an agent in the India cell).\n",
+    "stderr": ""
+  },
+  "logs": {
+    "code": 0,
+    "stdout": "2026-11-04T09:00:01Z INFO    booted\n2026-11-04T09:00:02Z ERROR   Error: boom\n2026-11-04T09:00:03Z WARNING slow < reply\n",
+    "stderr": ""
+  },
+  "logs --json --severity ERROR": {
+    "code": 0,
+    "stdout": "{\"time\":\"2026-11-04T09:00:02Z\",\"severity\":\"ERROR\",\"text\":\"Error: boom\"}\n",
+    "stderr": ""
+  },
+  "logs --grep": {
+    "code": 0,
+    "stdout": "2026-11-04T09:00:01Z INFO    booted\n",
+    "stderr": ""
+  },
+  "logs --follow": {
+    "code": 2,
+    "stdout": "",
+    "stderr": "--until and --follow do not go together: --follow prints lines as they come.\n\nUsage:\n  flow logs [--env staging|production] [--since 1h] [--until <when>] [--severity <min>] [--grep <text>] [--limit <n>] [--follow] [--json]\n\n  --env        Which (default: staging); --environment works too.\n  --since      How far back: 30s, 15m, 1h (the default), 3d, at most 30d, or a time such as\n               2026-11-03T09:00:00Z.\n  --until      Up to when: a duration back from now (2h) or a time. Not with --follow.\n  --severity   Only lines at this severity or above: DEFAULT, INFO, WARNING or ERROR. A DEFAULT line\n               that is plainly an uncaught error (Error:, DOMException, a stack) counts as ERROR.\n  --grep       Only lines that hold this text (any case) anywhere in the line as printed: a JSON\n               line's every field, not only its message. Flow searches the fields' values; text\n               with a quote or a brace (\"step\":\"question\", JSON as printed) is matched here\n               instead, over every line of the window, which reads more pages.\n  --limit      The most lines printed (default 10000, at most 100000): the newest are kept, and\n               stderr says where the kept lines start and the --since/--until for the older ones.\n  --follow     Keep printing new lines until Ctrl-C.\n  --json       One JSON object per line on stdout: { time, severity, text }; nothing else goes there\n               (a failure is one { ok: false, error, next } line).\n  --dir, --cloud, FLOW_FRAMEWORK_CLOUD_KEY: as for flow deploy (flow deploy --help).\n  --server     Read over a hosted Flow MCP as you (flow mcp login), not with the CI key (default:\n               FLOW_MCP_SERVER); --agent <id|name> says which of your agents (default: your only one).\n\nFlow sends only the lines that match --until, --grep and a --severity above ERROR (up to ERROR,\nevery line comes and is filtered here); an older Flow that does not filter gets them filtered\nhere, so the lines are the same either way. Flow keeps an agent's logs\nfor a while (30 days, older hosts 24 hours): when the lines start later than --since asked, stderr\nsays \"Logs start at <time>: this Flow keeps <N> back\". Flow answers in pages (500 lines); every\npage up to --until (else now) is read before anything is printed, oldest line first. A stack\ntrace Cloud Run split into an entry per line prints as one: each line of it that starts with a\nspace (\"    at ...\"), at the same time from the same instance, joins the line before it, which\nkeeps the higher severity. With --grep, only the lines that match come, so a stack's \"at\" lines\nshow only when they match too.\n"
+  },
+  "logs --help": {
+    "code": 0,
+    "stdout": "Usage:\n  flow logs [--env staging|production] [--since 1h] [--until <when>] [--severity <min>] [--grep <text>] [--limit <n>] [--follow] [--json]\n\n  --env        Which (default: staging); --environment works too.\n  --since      How far back: 30s, 15m, 1h (the default), 3d, at most 30d, or a time such as\n               2026-11-03T09:00:00Z.\n  --until      Up to when: a duration back from now (2h) or a time. Not with --follow.\n  --severity   Only lines at this severity or above: DEFAULT, INFO, WARNING or ERROR. A DEFAULT line\n               that is plainly an uncaught error (Error:, DOMException, a stack) counts as ERROR.\n  --grep       Only lines that hold this text (any case) anywhere in the line as printed: a JSON\n               line's every field, not only its message. Flow searches the fields' values; text\n               with a quote or a brace (\"step\":\"question\", JSON as printed) is matched here\n               instead, over every line of the window, which reads more pages.\n  --limit      The most lines printed (default 10000, at most 100000): the newest are kept, and\n               stderr says where the kept lines start and the --since/--until for the older ones.\n  --follow     Keep printing new lines until Ctrl-C.\n  --json       One JSON object per line on stdout: { time, severity, text }; nothing else goes there\n               (a failure is one { ok: false, error, next } line).\n  --dir, --cloud, FLOW_FRAMEWORK_CLOUD_KEY: as for flow deploy (flow deploy --help).\n  --server     Read over a hosted Flow MCP as you (flow mcp login), not with the CI key (default:\n               FLOW_MCP_SERVER); --agent <id|name> says which of your agents (default: your only one).\n\nFlow sends only the lines that match --until, --grep and a --severity above ERROR (up to ERROR,\nevery line comes and is filtered here); an older Flow that does not filter gets them filtered\nhere, so the lines are the same either way. Flow keeps an agent's logs\nfor a while (30 days, older hosts 24 hours): when the lines start later than --since asked, stderr\nsays \"Logs start at <time>: this Flow keeps <N> back\". Flow answers in pages (500 lines); every\npage up to --until (else now) is read before anything is printed, oldest line first. A stack\ntrace Cloud Run split into an entry per line prints as one: each line of it that starts with a\nspace (\"    at ...\"), at the same time from the same instance, joins the line before it, which\nkeeps the higher severity. With --grep, only the lines that match come, so a stack's \"at\" lines\nshow only when they match too.\n",
+    "stderr": ""
+  },
+  "deploy status": {
+    "code": 0,
+    "stdout": "Flow's hosting runs agents on Flow Framework up to 0.16.x (0.16.0; hosting's own, not this agent's).\nstaging: live, version v7, deploy dep_1, deployed 2026-11-03T10:00:00Z\n  URL: https://agent.example/\n  built with: @flow-engineer/flow 0.16.0\n  traces: ok, last taken 2026-11-04T09:00:00Z\n  then dep_2 (v8): building…\nproduction: no deploy known.\nNext: npx @flow-engineer/flow logs\n",
+    "stderr": ""
+  },
+  "deploy status --json": {
+    "code": 0,
+    "stdout": "{\"ok\":true,\"hosting_framework\":\"0.16.0\",\"agent_framework\":null,\"environments\":{\"staging\":{\"deploy\":{\"id\":\"dep_1\",\"status\":\"live\",\"version\":\"v7\",\"source\":null,\"created_at\":\"2026-11-03T10:00:00Z\",\"updated_at\":null,\"trace_text\":null,\"framework\":{\"package\":\"@flow-engineer/flow\",\"version\":\"0.16.0\"}},\"pending\":{\"id\":\"dep_2\",\"status\":\"building\",\"version\":\"v8\"},\"url\":\"https://agent.example/\",\"from\":\"list\",\"traces\":{\"state\":\"ok\",\"accepted_at\":\"2026-11-04T09:00:00Z\",\"refused\":null}},\"production\":null},\"next\":\"npx @flow-engineer/flow logs\"}\n",
+    "stderr": ""
+  },
+  "deploy status --env production": {
+    "code": 0,
+    "stdout": "{\"ok\":true,\"hosting_framework\":\"0.16.0\",\"agent_framework\":null,\"environments\":{\"production\":null},\"next\":\"npx @flow-engineer/flow deploy\"}\n",
+    "stderr": ""
+  },
+  "no key: conversations --json": {
+    "code": 1,
+    "stdout": "{\"ok\":false,\"error\":{\"code\":\"no_flow_key\",\"message\":\"flow conversations reads with the agent's Flow key: set FLOW_KEY (flow setup writes it into .env).\"},\"next\":\"npx @flow-engineer/flow setup\"}\n",
+    "stderr": "flow conversations reads with the agent's Flow key: set FLOW_KEY (flow setup writes it into .env).\n"
+  },
+  "no key: insights": {
+    "code": 1,
+    "stdout": "",
+    "stderr": "flow insights reads production with the agent's live Flow key: set FLOW_LIVE_KEY (npx @flow-engineer/flow setup --live writes it into .env), or a flow_live_ FLOW_KEY.\n"
+  },
+  "no key: logs --json": {
+    "code": 2,
+    "stdout": "{\"ok\":false,\"error\":{\"code\":\"no_ci_key\",\"message\":\"Set FLOW_FRAMEWORK_CLOUD_KEY to your agent's CI key (oci_...), in the environment or the agent's .env.\"},\"next\":\"npx @flow-engineer/flow setup\"}\n",
+    "stderr": "Set FLOW_FRAMEWORK_CLOUD_KEY to your agent's CI key (oci_...), in the environment or the agent's .env.\nNext: npx @flow-engineer/flow setup\n"
+  },
+  "refused: issues --json": {
+    "code": 1,
+    "stdout": "{\"ok\":false,\"error\":{\"code\":\"bad_key\",\"message\":\"flow issues: This key is not valid. (bad_key, 401)\\nflow issues reads with the agent's Flow key, FLOW_KEY (flow_test_... reads staging; flow_live_... reads staging and production).\\nIt found FLOW_KEY=flow_test_…alue in .env in this folder.\\nGet the right one: npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).\"},\"next\":null}\n",
+    "stderr": "flow issues: This key is not valid. (bad_key, 401)\nflow issues reads with the agent's Flow key, FLOW_KEY (flow_test_... reads staging; flow_live_... reads staging and production).\nIt found FLOW_KEY=flow_test_…alue in .env in this folder.\nGet the right one: npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).\n"
+  },
+  "refused: templates": {
+    "code": 1,
+    "stdout": "",
+    "stderr": "flow templates: This key is not valid. (bad_key, 401)\nflow templates reads with the agent's Flow key, FLOW_KEY (flow_test_... reads staging; flow_live_... reads staging and production).\nIt found FLOW_KEY=flow_test_…alue in .env in this folder.\nGet the right one: npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).\n"
+  },
+  "refused: conversations show": {
+    "code": 1,
+    "stdout": "",
+    "stderr": "flow conversations: This key is not valid. (bad_key, 401)\nflow conversations reads with the agent's Flow key, FLOW_KEY (flow_test_... reads staging; flow_live_... reads staging and production).\nIt found FLOW_KEY=flow_test_…alue in .env in this folder.\nGet the right one: npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).\n"
+  }
+}
