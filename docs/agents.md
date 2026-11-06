@@ -621,6 +621,13 @@ MCP on stdio on `@modelcontextprotocol/server`, which comes with Flow Framework:
 | `deploy_status` | `flow deploy status`: `environment` (default both) | CI key |
 
 - Every tool only reads (`readOnlyHint: true`). Nothing here deploys, changes a secret or sends a message.
+- The same tools are `flowReadTools()` (`@flow-engineer/flow/testing`), for your own
+  `mcpServer({ tools })`; `flowReadTools({ hosted: {} })` adds an `agent` input and `list_agents`, and
+  takes each call's key from the signed-in person's credentials, never from the model (0.16.1 on).
+- The read commands (`conversations`, `issues`, `insights`, `templates`, `logs`, `deploy status`)
+  read over a hosted Flow MCP with `--server <url>` (or `FLOW_MCP_SERVER`) and `--agent`, as the
+  person signed in with `flow mcp login --server <url>` (`FLOW_MCP_TOKEN` in CI); their output is
+  the same (0.16.1 on).
 - `FLOW_KEY`: a `flow_test_` key, the one `flow setup` writes, reads staging only. Production, and
   Insights (closed production conversations only), read with `FLOW_LIVE_KEY` when it is set: the
   workspace's owner makes it with `npx @flow-engineer/flow setup --live`
