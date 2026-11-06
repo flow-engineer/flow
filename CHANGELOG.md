@@ -210,6 +210,45 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   on stderr. `FLOW_KEY` goes to both: Flow's hosting exchanges it for the environment's own runtime
   key. Until now a `.env` holding the live `FLOW_MESSAGING_KEY` put it on staging, which then read
   production's live stream.
+- **Tests: fakes are gone.** `tests/tools/<tool>.fake.ts` is no longer run: a model plays every
+  tool from its tool file (`tests/tools/<tool>.yaml`) and the scenario's `world`. `loadFakes` is
+  removed, the open no longer names `fakes`, and the protocol's fake round trip (`play: "fake"`,
+  the call's `ticket` and `faked`, `fake_failed`) is gone. `Fake`, `FakeCall` and `FakeAnswer` stay
+  exported as deprecated types for this release, so a leftover fake file still typechecks.
+- **`flow test fake` is removed.** It says so and what to do instead (write the tool's responses,
+  each with a `when:`, in `tests/tools/<tool>.yaml`), and exits 1 (`--json`: code `removed`).
+- **The fake hints are gone**: the line after a session naming the tool calls a model played and
+  suggesting a fake, the line before one naming write tools without a fake, the "This cloud does not
+  play fakes" line, and `FLOW_FRAMEWORK_FAKE_HINT`. `flow test --json` no longer has
+  `toolsWithoutFake` or each run's `toolsPlayedBy`.
+- **`given:` is no longer played**: no tool modes (`usual`, `slow`, `down`, `flaky N%`), `seed` or
+  data, and `flow test` no longer checks `given.tools` before sending. Say how a tool behaves in
+  `world:` and give its tool file a response for it whose `when:` fits.
+- **`expect.state` is no longer checked.** Check what the agent did with `expect.calls` (a tool and
+  its `args`) or an `expect.outcome` sentence.
+- **`origin:` is no longer read.** `flow test pull` takes each draft's check from the draft Flow
+  sends (`check`), not from its YAML.
+- **`--fresh` does nothing, and the cloud's replays are gone from the client**: the open no longer
+  sends `fresh`, a run's line no longer says how many stored answers it replayed, the "The cloud
+  replays stored person, tool and judge answers" line is gone, and `flow test --json` no longer has
+  each run's `replayed`. `--fresh` is still taken for this release and warns.
+- **The `restart` opening step is removed** (`restart: crash | deploy`), with the protocol's
+  `restart` command and step answer and `options.testing.runner` in a business run. What it showed
+  (across a crash a new runner takes the turn once the lease runs out and runs it once; across a
+  deploy the old runner finishes what it holds, a message the new one stored included; no message
+  answered twice, no turn lost) is proved on the store by Flow Framework's own tests
+  (`test/store.test.ts`). A business run's agent still gets a store of its own (`options.testing.database`).
+- **What 0.16.1 stopped playing still parses, for this release.** A scenario with `given:`,
+  `origin:`, `expect.state` or a `restart` step, and a leftover `tests/tools/*.fake.ts`, is never an
+  error: the field is dropped (nothing reads it) and `flow test` and `flow check` print one line per
+  file and field with what to do instead, such as `tests/scenarios/order-fails.yaml:20: given: is
+  no longer played (deprecated in 0.16.1, removed in the next release): describe the data in world:
+  and how a tool fails or is slow as a response in tests/tools/<tool>.yaml with a when:; then delete
+  given:.` A restart step is left out of the opening; an opening of only restart steps is an error.
+- **The café starter has no fakes and no `given:`.** `flow new` and `flow init` no longer copy
+  `tests/tools/get_menu.fake.ts` and `place_order.fake.ts`; `latte-correction` checks the order with
+  `expect.calls` and an `outcome` sentence, `order-fails` gets the point of sale down from its
+  `world`, and the starter's `tsconfig.json` includes `src` only.
 
 ### Migration notes
 
@@ -247,6 +286,56 @@ agent whose instructions use plain text for notes to itself should keep them out
 A `.env` that held a live `FLOW_MESSAGING_KEY` and deployed to staging now leaves staging's key as it
 is: set staging's test key once with `flow deploy secret FLOW_MESSAGING_KEY --env staging`. Sending a
 live key to staging on purpose is refused by design (Flow's hosting refuses it too).
+
+- **`given:` is no longer played.** Until the next release it parses, is ignored, and `flow test`
+  and `flow check` name it. To move, put the data in `world:` and each tool's behaviour in its tool
+  file as a response with a `when:`, then delete `given:`:
+
+  ```yaml
+  # before
+  world: The point of sale is down this morning.
+  given:
+    tools: { place_order: down }
+  # after (tests/tools/place_order.yaml has a response "when: The point of sale is down" with an error)
+  world: The point of sale is down this morning and stays down for the whole conversation.
+  ```
+- **`expect.state` is no longer checked.** It parses, is ignored and is named. To move, check the
+  call the agent made, or say the outcome:
+
+  ```yaml
+  # before
+  expect:
+    state:
+      orders: [{ name: Sam, items: [{ item: Latte, size: large, milk: oat }] }]
+  # after
+  expect:
+    calls:
+      - { tool: place_order, args: { name: Sam } }
+    outcome:
+      - Exactly one order is placed, for one large latte with oat milk, under the name Sam.
+  ```
+- **`origin:` is no longer read.** It parses, is ignored and is named. To move, delete it. Code that
+  read `Scenario["origin"]` reads a draft's `check` from `flow test pull --json` instead.
+- **The `restart` step is removed.** A `- restart: crash` or `- restart: deploy` step parses, is
+  left out of the opening and is named; an opening with nothing else fails to parse. To move, delete
+  the step. Code reading `OpeningStep["restart"]`, `OpenSession.restart`, `Opened.restart`, the
+  `restart` command or `StepAnswer.restart` drops it; a `buildAgent` that read
+  `options.testing.runner` sets its own `runner`.
+- **Fakes are no longer run.** A `tests/tools/*.fake.ts` is named and ignored. To move, delete it
+  (and any `import type { Fake } ...` with it: `Fake`, `FakeCall` and `FakeAnswer` go in the next
+  release). `loadFakes`, and the protocol's `Faked`, `FakeRequest` and `ToolsPlayedBy` types, are no
+  longer exported; `OpenSession.fakes`, `Opened.fakes`, `ToolCallRequest.ticket` and `.faked` are gone.
+- **`flow test fake` is removed**: it exits 1 with what to do instead (`--json`: code `removed`).
+- **`flow test --fresh` does nothing** and warns; drop it. `OpenSession.fresh`, `Opened.replay` and
+  `RunSummary.replayed` are gone.
+- **`flow test --json` drops fields**: top-level `toolsWithoutFake`, and each run's `replayed` and
+  `toolsPlayedBy`. A script that read them stops reading them; `.flow/last-session.json` is unchanged.
+- **Lines `flow test` no longer prints**: `N tool calls were played by a model (...)`, `<tool> counts
+  as a write and has no fake ...`, `This cloud does not play fakes ...`, `The cloud replays stored
+  person, tool and judge answers ...`, and a run line's `; replayed N stored simulator answers`.
+  `FLOW_FRAMEWORK_FAKE_HINT` is no longer read.
+- **The starter's `tsconfig.json` includes `src` only** (it included `tests` for the fakes). An agent
+  made before keeps its own; nothing needs to change.
 
 ## 0.16.0 (2026-11-05)
 

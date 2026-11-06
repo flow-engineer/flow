@@ -4,7 +4,7 @@
 // agent in this folder from the terminal (testing/src/chat.ts), and `flow records export` prints
 // its records (testing/src/records.ts). `flow test`, or `flow` with flags, runs an agent's tests in the cloud,
 // from the agent's folder:
-//   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--strict] [--min-pass 98] [--fresh] [--json]
+//   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--strict] [--min-pass 98] [--json]
 // A hosted cloud (any --cloud off this machine, the default included) needs the
 // agent's CI key in FLOW_FRAMEWORK_CLOUD_KEY and --synthetic, the attestation that the test files hold no real
 // customer or member data. --agent-version (else the agent's version, as its traces carry it:
@@ -51,20 +51,18 @@ import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli, keysCli } from "./account.
 import { PROJECTS_LINE, projectsCli } from "./projects.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
 import { RECORDS_LINE, recordsCli } from "./records.ts";
-import { CONVERSATIONS_LINES, conversationsCli, INSIGHTS_LINES, insightsCli, issuesCli } from "./conversations.ts";
+import { CONVERSATIONS_LINES, conversationsCli, Failed, failed, INSIGHTS_LINES, insightsCli, issuesCli } from "./conversations.ts";
 import { TEMPLATES_LINE, templatesCli, templateWarnings } from "./templates.ts";
 import { KEYS_HELP } from "./cloud-call.ts";
 import { PULL_LINE, pullCli } from "./pull.ts";
-import { FAKE_LINE, fakeCli } from "./fake.ts";
 import type { TemplateDefinition } from "../../src/types.ts";
 import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
-import { PROFILE_TOOL } from "../../src/conversation.ts";
-import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, modelPlayedLine, toolsWithoutFake, writesWithoutFakeLine, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
+import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
-import { givenProblems, loadFakes, loadSuite, parseScenario, parseToolFile, suiteHash, type ToolFile } from "./suite.ts";
+import { deprecatedInSuite, FAKE_COMMAND_REMOVED, FRESH_IGNORED, loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
 import type { RunOutcome, RunSummary } from "./protocol.ts";
 
 const NEW_LINE = `  flow new <name> [--display-name <name>]
@@ -80,8 +78,7 @@ const NEW_LINE = `  flow new <name> [--display-name <name>]
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
                             the tests are in tests/scenarios and tests/tools)
-${PULL_LINE}
-${FAKE_LINE}`;
+${PULL_LINE}`;
 const CHECK_LINE = `  flow check-endpoint <url> [--token-env NAME] [--json]
                             Check an agent's HTTP endpoint against the contract, for --agent-url
                             (flow check-endpoint --help)`;
@@ -112,8 +109,6 @@ const TEST_OPTIONS = `Options for test:
                            as failed, also in the pass rate
   --min-pass <percent>     The pass rate the session needs, 0 to 100 with at most one decimal
                            (default: FLOW_TEST_MIN_PASS, else 98); 100 fails on any failed run
-  --fresh                  Play every simulator anew: the cloud replays no stored person, tool or
-                           judge answers
   --synthetic              Attest the test files hold no real customer data (a hosted cloud needs it)
   --json                   Print one JSON report on stdout when it ends, whatever the exit; every
                            other line goes to stderr
@@ -142,9 +137,7 @@ A suite with more runs than that plays them in turn, so its time grows with the 
 
 Flaky runs: the cloud plays a run that failed once more. When the second play passes, the run is
 flaky ("FLAKY" on its line, and its own section in the summary with both watch links); when it fails
-too, the run failed. A flaky run counts as passed unless --strict. The cloud also replays
-the person's, the tools' and the judge's stored answers for a scenario it has played unchanged, so
-runs vary less and --runs 3 is rarely needed; --fresh plays everything anew.
+too, the run failed. A flaky run counts as passed unless --strict.
 
 Outcomes: each run passed, failed, stopped for credit (the workspace's daily test budget, or the
 agent's model refused for credit: CREDIT on its line) or hit an infrastructure error (the cloud
@@ -263,7 +256,7 @@ if (process.argv[2] === "issues") await exitFlushed(await issuesCli(process.argv
 if (process.argv[2] === "insights") await exitFlushed(await insightsCli(process.argv.slice(3)));
 if (process.argv[2] === "templates") await exitFlushed(await templatesCli(process.argv.slice(3)));
 if (process.argv[2] === "test" && process.argv[3] === "pull") await exitFlushed(await pullCli(process.argv.slice(4)));
-if (process.argv[2] === "test" && process.argv[3] === "fake") await exitFlushed(await fakeCli(process.argv.slice(4)));
+if (process.argv[2] === "test" && process.argv[3] === "fake") await exitFlushed(failed(process.argv.includes("--json"), new Failed(FAKE_COMMAND_REMOVED, "removed")));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) await exitFlushed(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
 const TEST_FLAGS = {
@@ -277,7 +270,7 @@ const TEST_FLAGS = {
   strict: { type: "boolean", default: false },
   /** The pass rate the session needs, in percent; else FLOW_TEST_MIN_PASS, else 98. */
   "min-pass": { type: "string" },
-  /** The cloud replays no stored simulator answers. */
+  /** Deprecated in 0.16.1: still taken, does nothing, and says so (FRESH_IGNORED). */
   fresh: { type: "boolean", default: false },
   synthetic: { type: "boolean", default: false },
   json: { type: "boolean", default: false },
@@ -384,8 +377,6 @@ const seen: RunSummary[] = [];
 let endedInvalid: SessionInvalid | null = null;
 /** Conversations whose messages did not all go through the agent's send (client.ts sendPathCheck). */
 let sendPath: SendPathProblem[] = [];
-/** The tools with a fake on this machine (tests/tools/<tool>.fake.ts), once loaded. */
-let fakes: string[] = [];
 /** The pass rate the session needs, in tenths of a percent (report.ts minPassTenths). */
 let minPass = DEFAULT_MIN_PASS * 10;
 
@@ -472,8 +463,8 @@ function forUrl(files: ReturnType<typeof loadSuite>) {
   if (toolFiles.length) console.warn(`Not sent: ${toolFiles.map((f) => f.path).join(", ")}. Tool simulators play a Flow Framework agent's tools; your agent's own tools run for real.`);
   for (const f of files.filter((f) => f.path.startsWith("scenarios/"))) {
     const scenario = parseScenario(f); // checkSuite has read it already
-    if (scenario.world || scenario.given || scenario.expect.outcome?.length || scenario.expect.state) {
-      console.warn(`${scenario.id}: its world, given, outcome and state checks are for simulated tools; your agent's tools run on its side, so the judge sees no tool calls. Running it anyway.`);
+    if (scenario.world || scenario.expect.outcome?.length) {
+      console.warn(`${scenario.id}: its world and outcome checks are for simulated tools; your agent's tools run on its side, so the judge sees no tool calls. Running it anyway.`);
     }
   }
   return files.filter((f) => !f.path.startsWith("tools/"));
@@ -493,18 +484,9 @@ const suite = loadSuite(join(dir, "tests"));
 picked = values.failed ? failedLastTime(suite) : values.only ? new Set(values.only.split(",").map((s) => s.trim())) : undefined;
 const chosen = only(suite, picked);
 checkSuite(chosen);
-// The fakes are loaded before anything is sent; a file that does not load is named like a test file that does not parse.
-if (!agentUrl) {
-  try {
-    fakes = [...(await loadFakes(join(dir, "tests"))).keys()];
-  } catch (error) {
-    invalid(`${(error as Error).message}\n\nNothing was sent: fix the test files above.`);
-  }
-  // A write tool with no fake, while a scenario has given:: one optional line, never blocking.
-  const givenUsed = chosen.some((f) => f.path.startsWith("scenarios/") && parseScenario({ path: join("tests", f.path), content: f.content }).given);
-  const writes = givenUsed && setting("FAKE_HINT") !== "0" ? writesWithoutFakeLine(agent.tools, fakes) : null;
-  if (writes) say(writes);
-}
+// What 0.16.1 stopped playing still parses and is dropped; each is named once, as flow check names it.
+for (const line of deprecatedInSuite(join(dir, "tests"))) console.warn(line);
+if (values.fresh) console.warn(FRESH_IGNORED);
 files = forUrl(chosen);
 if (agentUrl) await checkAgentReachable(agentUrl);
 perScenario = runs;
@@ -533,7 +515,6 @@ try {
     files,
     testsDir: join(dir, "tests"),
     runs: perScenario,
-    fresh: values.fresh,
     openHeaders,
     log: say,
     verbose: values.verbose,
@@ -603,8 +584,6 @@ if (flaky.length) {
   for (const r of flaky) say(`  ${r.scenario} #${r.run} (${r.channel}): ${r.watch}${r.rerun ? ` then ${r.rerun.watch}` : ""}`);
 }
 for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m) => ({ scenario: m.scenario, invalid: m.summary?.invalid }))))) say(line);
-const byModel = modelPlayedLine(summary.runs, fakes, setting("FAKE_HINT") !== "0");
-if (byModel) say(byModel);
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
 say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
 if (mergedRuns(summary.runs).some((m) => m.verdict === "not_played")) endedEarly(summary.runs, "the cloud finished the session without playing every run", say);
@@ -771,8 +750,6 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       invalid: m.summary?.invalid ?? null,
       rerun: m.summary?.rerun ?? null,
       label: m.summary?.label ?? null,
-      replayed: m.summary?.replayed ?? null,
-      toolsPlayedBy: m.summary?.toolsPlayedBy ?? null,
     })) : [];
     const count = (verdict: Verdict) => runs.filter((r) => r.verdict === verdict).length;
     const rate = passRate(runs, values.strict);
@@ -802,7 +779,6 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       invalid: invalidScenarios(runs),
       sessionInvalid: endedInvalid,
       limits,
-      toolsWithoutFake: toolsWithoutFake(received, fakes),
     };
     writeAll(`${JSON.stringify(report)}\n`);
   }
@@ -903,21 +879,14 @@ function checkRuns(runs: string): number {
 /** Every scenario and tool file read as the cloud reads it, before anything is sent; exits 1 with each problem at its line. */
 function checkSuite(sent: ReturnType<typeof loadSuite>): void {
   const problems: string[] = [];
-  const toolFiles: ToolFile[] = [];
-  const scenarios: Array<{ path: string; scenario: ReturnType<typeof parseScenario> }> = [];
   for (const file of sent) {
     const named = { path: join("tests", file.path), content: file.content };
     try {
-      if (file.path.startsWith("scenarios/")) scenarios.push({ path: named.path, scenario: parseScenario(named) });
-      else if (!agentUrl) toolFiles.push(parseToolFile(named));
+      if (file.path.startsWith("scenarios/")) parseScenario(named);
+      else if (!agentUrl) parseToolFile(named);
     } catch (error) {
       problems.push((error as Error).message);
     }
-  }
-  // given.tools names the agent's tools (its own, and the built-in profile the tests play), and down or flaky needs an error to play.
-  if (!agentUrl) {
-    const tools = [...agent.tools.map((t) => t.name), PROFILE_TOOL];
-    for (const { path, scenario } of scenarios) for (const problem of givenProblems(scenario, tools, toolFiles)) problems.push(`${path}: ${problem}`);
   }
   if (!problems.length) return;
   invalid(`${problems.join("\n")}\n\nNothing was sent: fix the test files above.`);

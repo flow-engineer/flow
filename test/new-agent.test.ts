@@ -1,4 +1,4 @@
-// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/tests/tools/get_menu.fake.ts examples/cafe/tests/tools/place_order.fake.ts examples/cafe/src/main.ts examples/cafe/src/mcp.ts src/local.ts examples/cafe/src/agent.ts examples/cafe/src/tools.ts examples/cafe/src/channels.ts examples/cafe/src/name.ts examples/cafe/src/cli.ts coding-agents/skill.md coding-agents/build-agent-skill.md coding-agents/mcp-skill.md coding-agents/cli-design-skill.md
+// covers: scripts/new-agent.ts testing/src/new.ts testing/src/cli.ts examples/cafe/src/main.ts examples/cafe/src/mcp.ts src/local.ts examples/cafe/src/agent.ts examples/cafe/src/tools.ts examples/cafe/src/channels.ts examples/cafe/src/name.ts examples/cafe/src/cli.ts coding-agents/skill.md coding-agents/build-agent-skill.md coding-agents/mcp-skill.md coding-agents/cli-design-skill.md
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer as createHttpServer } from "node:http";
@@ -57,9 +57,7 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   // `npx flow` on its own fetches another npm package: every command names this one.
   assert.doesNotMatch(readFileSync(join(dir, "AGENTS.md"), "utf8"), /npx flow\b/);
   assert.ok(existsSync(join(dir, "tests", "scenarios")));
-  // The tests' fakes import their types from the public entry, and the agent's typecheck reads them.
-  for (const fake of ["get_menu.fake.ts", "place_order.fake.ts"]) assert.match(readFileSync(join(dir, "tests", "tools", fake), "utf8"), /^import type \{ Fake \} from "@flow-engineer\/flow\/testing";$/m, fake);
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, "tsconfig.json"), "utf8")).include, ["src", "tests"]);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "tsconfig.json"), "utf8")).include, ["src"]);
   const env = readFileSync(join(dir, ".env.example"), "utf8");
   assert.doesNotMatch(env, /npx flow\b/);
   assert.match(env, /sign in at https:\/\/flow\.engineer\/dashboard,/, "the dashboard, not the API's address, is where to sign in");

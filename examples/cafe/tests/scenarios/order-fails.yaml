@@ -13,13 +13,9 @@ person:
 opening:
   - say: "Hi, could I order a small cold brew for pickup please? Name's Jo."
 
-world: |
+world: |                     # every place_order call gets place_order.yaml's response for when the point of sale is down
   The menu is as in tests/tools/get_menu.yaml. The café's point of sale is down this morning and
   stays down for the whole conversation.
-
-given:
-  menu: get_menu.yaml
-  tools: { place_order: down }   # every call gets place_order.yaml's first response with an error
 
 max_turns: 6
 

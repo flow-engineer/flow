@@ -1,4 +1,4 @@
-// covers: testing/src/cli.ts testing/src/suite.ts testing/src/client.ts testing/src/report.ts testing/src/show.ts testing/src/print-run.ts testing/src/protocol.ts src/traces.ts examples/cafe/tests/tools/get_menu.fake.ts examples/cafe/tests/tools/place_order.fake.ts
+// covers: testing/src/cli.ts testing/src/suite.ts testing/src/client.ts testing/src/report.ts testing/src/show.ts testing/src/print-run.ts testing/src/protocol.ts src/traces.ts testing/src/check.ts
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { loadFakes, loadSuite, parseScenario, parseToolFile, type ToolFile } from "../testing/src/suite.ts";
+import { loadSuite, parseScenario, parseToolFile } from "../testing/src/suite.ts";
 import { finishedOutcome, passRate, type Verdict } from "../testing/src/report.ts";
 
 const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
@@ -43,7 +43,7 @@ function agentDir(more: Record<string, string> = {}): string {
 function cloud(hold: boolean, frames: unknown[] = [run], sessionId = "s", answer: Record<string, unknown> = {}) {
   let release: (() => void) | undefined;
   const opened = new Promise<void>((done) => { release = done; });
-  const opens: Array<{ files: Array<{ path: string }>; runs: number; flaky?: boolean; fresh?: boolean; agentVersion?: string }> = [];
+  const opens: Array<{ files: Array<{ path: string }>; runs: number; flaky?: boolean; agentVersion?: string }> = [];
   const server = createServer((req, res) => {
     if (req.url === "/api/sessions") {
       let body = "";
@@ -167,17 +167,40 @@ test("the command line: --version, each command's own --help, and a plain line f
   assert.ok(!existsSync(join(dir, "x")));
 });
 
-test("before a session with a given: scenario, one optional line names the tools that count as writes and have no fake; FLOW_FRAMEWORK_FAKE_HINT=0 and no given: scenario leave it out", { timeout: 15_000 }, async () => {
+test("what 0.16.1 stopped playing still parses and is sent without it: flow test and flow check name each file and field with what to do instead, --fresh warns, and flow test fake says it was removed", { timeout: 20_000 }, async () => {
   const closed = "http://127.0.0.1:9";
-  const writes = agentDir({ given: `${scenarioYaml("given", "sms")}given: {}\n` });
-  writeFileSync(join(writes, "src", "agent.ts"), 'export const tools = [{ name: "book_table" }, { name: "get_opening_hours", hints: { readOnly: true } }, { name: "place_order" }];\nexport function buildAgent() {\n  return { channels: () => [], receive: () => "m", reacted: () => {} };\n}\n');
-  mkdirSync(join(writes, "tests", "tools"));
-  writeFileSync(join(writes, "tests", "tools", "place_order.fake.ts"), "export default () => ({ output: {} });\n");
-  const line = "book_table counts as a write and has no fake: in scenarios with given:, nothing keeps its writes for expect.state. If you like, npx @flow-engineer/flow test fake book_table writes a starter. Optional (FLOW_FRAMEWORK_FAKE_HINT=0 hides this).";
-  const hinted = await cliOutput(["test", "--cloud", closed], writes);
-  assert.ok(hinted.out.startsWith(`${line}\n`), hinted.out);
-  assert.doesNotMatch((await cliStreams(["test", "--cloud", closed], writes, { FLOW_FRAMEWORK_FAKE_HINT: "0" })).out, /counts as a write/);
-  assert.doesNotMatch((await cliOutput(["test", "--cloud", closed, "--only", "hello"], writes)).out, /counts as a write/, "no scenario with given: is sent, so no line");
+  const old = [
+    "id: old", "channels: [sms]", "origin: { from: chat, check: not_checked }", "person:", "  persona: a", "  goal: b",
+    "opening:", "  - say: hi", "  - restart: crash", "given:", "  tools: { place_order: down }", "expect:", "  state: { orders: [] }", "",
+  ].join("\n");
+  const dir = agentDir({ old });
+  mkdirSync(join(dir, "tests", "tools"));
+  writeFileSync(join(dir, "tests", "tools", "place_order.fake.ts"), "export default () => ({ output: {} });\n");
+  const soon = "deprecated in 0.16.1, removed in the next release";
+  const lines = [
+    `tests/scenarios/old.yaml:10: given: is no longer played (${soon}): describe the data in world: and how a tool fails or is slow as a response in tests/tools/<tool>.yaml with a when:; then delete given:.`,
+    `tests/scenarios/old.yaml:3: origin: is no longer read (${soon}): delete it.`,
+    `tests/scenarios/old.yaml:9: opening[1]: restart is no longer played (${soon}): delete the step; Flow Framework's own tests cover restarts.`,
+    `tests/scenarios/old.yaml:13: expect.state is no longer checked (${soon}): check what the agent did with expect.calls (a tool and its args) or expect.outcome; then delete it.`,
+    `tests/tools/place_order.fake.ts is no longer used (${soon}): a model plays every tool from its tool file; delete the file.`,
+  ];
+  // Never an error: the lines come first, then the session is tried (and this closed cloud does not answer).
+  const tested = await cliOutput(["test", "--cloud", closed, "--fresh"], dir);
+  assert.equal(tested.code, 2, tested.out);
+  assert.ok(tested.out.startsWith(`${[...lines, "--fresh does nothing now: every run plays anew. Drop it."].join("\n")}\n`), tested.out);
+  // The scenario reaches the cloud's side without them.
+  const parsed = parseScenario({ path: "scenarios/old.yaml", content: old });
+  assert.deepEqual([Object.keys(parsed).sort(), parsed.opening, parsed.expect], [["channels", "expect", "id", "max_turns", "opening", "person"], [{ say: "hi" }], {}]);
+  const checked = await cliStreams(["check", "--json"], dir);
+  assert.equal(checked.code, 0, checked.out);
+  assert.deepEqual(JSON.parse(checked.stdout).warnings, lines);
+  const fake = await cliStreams(["test", "fake", "place_order"], dir);
+  assert.equal(fake.code, 1);
+  assert.match(fake.stderr, /^flow test fake was removed in 0\.16\.1: a model plays every tool from its tool file\. Write how the tool answers as responses in tests\/tools\/<tool>\.yaml, each with a when:/);
+  // An opening that was only restarts has nothing left to play.
+  assert.throws(() => parseScenario({ path: "scenarios/r.yaml", content: "id: r\nchannels: [sms]\nperson:\n  persona: a\n  goal: b\nopening:\n  - restart: deploy\n" }), {
+    message: "scenarios/r.yaml:7: opening: only restart steps, which are no longer played: say something, send an event, nudge, or wait",
+  });
 });
 
 test("what is wrong on this machine is said before the cloud is called, an address that does not answer is named, and the default cloud asks for its key", { timeout: 15_000 }, async () => {
@@ -191,20 +214,6 @@ test("what is wrong on this machine is said before the cloud is called, an addre
   assert.deepEqual(await cliOutput(["test", "--cloud", closed], dir), {
     code: 1,
     out: `${join("tests", "scenarios", "bad.yaml")}:2: channels[1]: Invalid option: expected one of "sms"|"whatsapp"|"imessage"|"telegram"|"web"\n${join("tests", "scenarios", "bad.yaml")}:3: person.goal: missing\n\nNothing was sent: fix the test files above.\n`,
-  });
-  // given.tools names the agent's tools, down and flaky need a response with an error, and every fake loads.
-  const given = agentDir({ given: `${scenarioYaml("given", "sms")}given:\n  tools: { place_order: down, get_user_profile: flaky 10% }\n` });
-  const at = join("tests", "scenarios", "given.yaml");
-  assert.deepEqual(await cliOutput(["test", "--cloud", closed], given), {
-    code: 1,
-    out: `${at}: given.tools.place_order: the agent has no tool place_order\n${at}: given.tools.get_user_profile: flaky 10% needs a response with an error in tools/get_user_profile.yaml\n\nNothing was sent: fix the test files above.\n`,
-  });
-  const faked = agentDir();
-  mkdirSync(join(faked, "tests", "tools"));
-  writeFileSync(join(faked, "tests", "tools", "place_order.fake.ts"), "export const placeOrder = () => ({ output: {} });\n");
-  assert.deepEqual(await cliOutput(["test", "--cloud", closed], faked), {
-    code: 1,
-    out: "tests/tools/place_order.fake.ts: its default export must be the fake, a function (export default placeOrder)\n\nNothing was sent: fix the test files above.\n",
   });
   const good = agentDir();
   assert.match((await cliOutput(["test", "--cloud", closed, "--agent-url", "http://127.0.0.1:9/flow"], good)).out, /^Could not reach your agent at http:\/\/127\.0\.0\.1:9\/flow: ECONNREFUSED\. Start it first/m);
@@ -315,13 +324,12 @@ test("with --json, every exit prints one report on stdout and every other line o
     minPass: 98,
     costUsd: { agent: 0.5, test: 0.5 },
     runs: [
-      { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", outcome: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }], invalid: null, rerun: null, label: null, replayed: null, toolsPlayedBy: null },
-      { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", outcome: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [], invalid: null, rerun: null, label: null, replayed: null, toolsPlayedBy: null },
+      { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", outcome: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }], invalid: null, rerun: null, label: null },
+      { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", outcome: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [], invalid: null, rerun: null, label: null },
     ],
     invalid: [],
     sessionInvalid: null,
     limits: null,
-    toolsWithoutFake: [],
   });
   // A cloud that sends no limits gets no limits line.
   assert.doesNotMatch(result.stderr, /at once/);
@@ -423,19 +431,19 @@ test("a run the cloud names an error for is errored, whatever it ended as: ERROR
   } finally { mixed.close(); }
 });
 
-test("a run that failed and passed when the cloud played it again is flaky: on the summary line, counted as passed on its channel as in the pass rate, its own section, its second play never counted, exit 0 unless --strict; the open asks for flaky runs, and --fresh for no replays", { timeout: 20_000 }, async () => {
+test("a run that failed and passed when the cloud played it again is flaky: on the summary line, counted as passed on its channel as in the pass rate, its own section, its second play never counted, exit 0 unless --strict; the open asks for flaky runs", { timeout: 20_000 }, async () => {
   const dir = agentDir({ b: scenarioYaml("bee", "sms") });
   // The second play has its original's scenario, channel and number; the cloud may send it first.
   const second = runOf({ runId: "trn_3", passed: true, rerunOf: "trn_1", watch: "http://watch/trn_3" });
-  const first = runOf({ runId: "trn_1", watch: "http://watch/trn_1", rerun: { runId: "trn_3", passed: true, watch: "http://watch/trn_3" }, label: "flaky", replayed: { person: 2, tools: 1, judge: 0 } });
+  const first = runOf({ runId: "trn_1", watch: "http://watch/trn_1", rerun: { runId: "trn_3", passed: true, watch: "http://watch/trn_3" }, label: "flaky" });
   const bee = runOf({ runId: "trn_2", scenario: "bee", passed: true });
   const runs = [second, first, bee];
   const frames = [...runs.map((run) => ({ type: "run", run })), { type: "finished", summary: { sessionId: "s1", suiteHash: "h", testModel: "m", runs, dashboard: "http://dash/s1" } }];
-  const local = await cloud(false, frames, "s1", { flaky: true, replay: true });
+  const local = await cloud(false, frames, "s1", { flaky: true });
   try {
     const result = await cliStreams(["test", "--cloud", local.url, "--json"], dir);
     assert.equal(result.code, 0, result.out);
-    assert.match(result.stderr, /^FLAKY {2}hello #1 \(sms\) trn_1: .*replayed 3 stored simulator answers/m);
+    assert.match(result.stderr, /^FLAKY {2}hello #1 \(sms\) trn_1: /m);
     assert.match(result.stderr, /^ {6}played again: passed http:\/\/watch\/trn_3$/m);
     assert.doesNotMatch(result.stderr, /trn_3:/);
     // Every count agrees with the pass rate: the flaky run is named on the first line and counted as passed on its channel's.
@@ -446,55 +454,20 @@ test("a run that failed and passed when the cloud played it again is flaky: on t
     const report = JSON.parse(result.stdout);
     assert.deepEqual([report.outcome, report.strict, report.counts], ["passed", false, { runs: 2, passed: 1, failed: 0, flaky: 1, errored: 0, notPlayed: 0, credit: 0, infra: 0 }]);
     assert.deepEqual(report.runs.map((r: { runId: string; verdict: string; label: string | null; rerun: { runId: string } | null }) => `${r.runId} ${r.verdict} ${r.label} ${r.rerun?.runId ?? null}`), ["trn_2 passed null null", "trn_1 flaky flaky trn_3"]);
-    assert.deepEqual(report.runs[1].replayed, { person: 2, tools: 1, judge: 0 });
     assert.deepEqual(lastSession(dir).runs.map((r: { runId: string; verdict: string }) => `${r.runId} ${r.verdict}`), ["trn_2 passed", "trn_1 flaky"]);
 
-    const strict = await cliStreams(["test", "--cloud", local.url, "--json", "--strict", "--fresh"], dir);
+    const strict = await cliStreams(["test", "--cloud", local.url, "--json", "--strict"], dir);
     assert.equal(strict.code, 1, strict.out);
     assert.match(strict.stderr, /^ {2}sms: 1 of 2 counted runs passed \(1 flaky\)$/m);
     const strictReport = JSON.parse(strict.stdout);
     assert.deepEqual([strictReport.outcome, strictReport.strict, strictReport.counts.failed, strictReport.counts.flaky], ["failed", true, 1, 1]);
-    // Every open asks for flaky runs; only --fresh asks the cloud to replay nothing.
-    assert.deepEqual(local.opens.map((o) => [o.flaky, o.fresh]), [[true, undefined], [true, true]]);
+    // Every open asks for flaky runs.
+    assert.deepEqual(local.opens.map((o) => o.flaky), [true, true]);
   } finally { local.close(); }
 });
 
 /** Runs with these verdicts, as many of each as given. */
 const verdicts = (counts: Partial<Record<Verdict, number>>) => Object.entries(counts).flatMap(([verdict, n]) => Array.from({ length: n }, () => ({ verdict: verdict as Verdict })));
-
-test("after a session whose tool calls a model played, one line says how many and of which tools, naming a tool with a fake here; --json keeps each run's toolsPlayedBy", { timeout: 20_000 }, async () => {
-  const dir = agentDir({ b: scenarioYaml("bee", "sms") });
-  mkdirSync(join(dir, "tests", "tools"));
-  writeFileSync(join(dir, "tests", "tools", "place_order.fake.ts"), "export default () => ({ output: {} });\n");
-  const hello = { rule: 1, fake: 2, recorded: 0, model: 2, byModel: { place_order: 2 } };
-  const bee = { rule: 0, fake: 0, recorded: 1, model: 1, byModel: { order_status: 1 } };
-  const session = (runs: unknown[]) => [{ type: "finished", summary: { sessionId: "s1", suiteHash: "h", testModel: "m", runs, dashboard: "http://dash/s1" } }];
-  const local = await cloud(false, session([
-    runOf({ runId: "trn_1", passed: true, toolsPlayedBy: hello, replayed: { person: 0, tools: 1, judge: 0 } }),
-    runOf({ runId: "trn_2", scenario: "bee", passed: true, toolsPlayedBy: bee }),
-  ]), "s1", { fakes: true });
-  try {
-    const result = await cliStreams(["test", "--cloud", local.url, "--json"], dir);
-    assert.equal(result.code, 0, result.out);
-    // A suggestion, once, for the tool with no fake, with the command and the switch that hides it.
-    assert.match(result.stderr, /^3 tool calls were played by a model \(place_order 2, order_status 1; 1 saved from an earlier run, free\)\. If you like, a fake makes order_status free and repeatable: npx @flow-engineer\/flow test fake order_status writes a starter\. Optional: tests pass without one \(FLOW_FRAMEWORK_FAKE_HINT=0 hides this\)\. place_order has a fake: add a given: block to its scenarios to use it\.$/m);
-    assert.equal(result.stderr.match(/test fake/g)?.length, 1);
-    const report = JSON.parse(result.stdout);
-    assert.deepEqual(report.runs.map((r: { toolsPlayedBy: unknown }) => r.toolsPlayedBy), [bee, hello]);
-    assert.deepEqual(report.toolsWithoutFake, ["order_status"]);
-    assert.doesNotMatch(result.stdout, /test fake/, "the suggestion is never in the document, only its field");
-    const quiet = await cliStreams(["test", "--cloud", local.url, "--json"], dir, { FLOW_FRAMEWORK_FAKE_HINT: "0" });
-    assert.equal(quiet.code, 0, quiet.out);
-    assert.match(quiet.stderr, /^3 tool calls were played by a model \(place_order 2, order_status 1; 1 saved from an earlier run, free\)\. place_order has a fake/m);
-    assert.doesNotMatch(quiet.stderr, /test fake/);
-    assert.deepEqual(JSON.parse(quiet.stdout).toolsWithoutFake, ["order_status"]);
-  } finally { local.close(); }
-  // Every call played by rule, fake or recording: no line.
-  const ruled = await cloud(false, session([runOf({ runId: "trn_1", passed: true, toolsPlayedBy: { ...hello, model: 0, byModel: {} } })]), "s1", { fakes: true });
-  try {
-    assert.doesNotMatch((await cliOutput(["test", "--cloud", ruled.url, "--only", "hello"], dir)).out, /played by a model/);
-  } finally { ruled.close(); }
-});
 
 test("a finished session fails only when its pass rate is under --min-pass, compared exactly; errored and unplayed runs are not counted", () => {
   // 98.0% passes at the default 98; 97.9% does not.
@@ -756,22 +729,6 @@ test("test files: old ones parse as before, the clock, calls and never parse, an
   assert.deepEqual([[...named.title!].length, named.about, named.theme], [45, "Orders a latte, corrects the milk mid-thought, confirms.", "Ordering"]);
   // The café example, as shipped, is valid.
   for (const file of loadSuite(fileURLToPath(new URL("../examples/cafe/tests", import.meta.url)))) (file.path.startsWith("scenarios/") ? parseScenario : parseToolFile)(file);
-  // given: each tool's mode, flaky's seed, and any other value as data for the fakes; expect.state, what the fakes kept.
-  const played = parseScenario(scenario([
-    "given:", "  menu: get_menu.yaml", "  stock: { oat: true }", "  opens: '{{now + 1d @ 08:00}}'", "  seed: 7",
-    "  tools: { place_order: slow, get_menu: usual, order_status: down, refund: flaky 0%, pay: flaky 100% }",
-    "expect:", "  state:", "    orders:", "      - { name: Sam, items: [{ item: Latte }] }", "",
-  ].join("\n")));
-  assert.deepEqual([played.given, played.expect.state], [
-    { menu: "get_menu.yaml", stock: { oat: true }, opens: "{{now + 1d @ 08:00}}", seed: 7, tools: { place_order: "slow", get_menu: "usual", order_status: "down", refund: "flaky 0%", pay: "flaky 100%" } },
-    { orders: [{ name: "Sam", items: [{ item: "Latte" }] }] },
-  ]);
-  const mode = "usual, slow, down, or flaky N% with N a whole number from 0 to 100, such as flaky 30%";
-  for (const bad of ["flaky 130%", "sometimes", "flaky 2.5%", "flaky 30"]) {
-    assert.throws(() => parseScenario(scenario(`given:\n  tools:\n    place_order: ${bad}\n`)), { message: `scenarios/x.yaml:11: given.tools.place_order: ${mode}` }, bad);
-  }
-  assert.throws(() => parseScenario(scenario("given:\n  seed: 1.5\n")), { message: "scenarios/x.yaml:10: given.seed: Invalid input: expected int, received number" });
-
   const placeholder = (text: string) => `unknown placeholder ${text}: write it like {{now + 3d}}, {{now - 2h | time}} or {{now + 1w @ 10:00 | date}}`;
   const mistakes: Array<[string, string]> = [
     ["title: Orders a latte, corrects the milk mid-thought, confirms", "scenarios/x.yaml:9: title: 55 characters, at most 45: a title is a name, not the test. Move the detail to about:"],
@@ -818,37 +775,6 @@ test("the person's reveal, behaviours and attack parse as written; a wrong value
     ["  behaviours:\n    - tangents\n    - walks_away\n  attack: { rule: r }", "scenarios/p.yaml:8: person.behaviours[1]: an attacker does not walk away: leave walks_away out"],
   ];
   for (const [person, error] of mistakes) assert.throws(() => parseScenario(scenario(`${person}\n`)), { message: error }, person);
-});
-
-test("origin parses as metadata, in the shape a coverage plan writes (from code, by, covers) and Flow's drafts (from chat, check); a wrong value is named at its line", () => {
-  const scenario = (origin: string) => ({ path: "scenarios/o.yaml", content: `id: o\nchannels: [sms]\n${origin}person:\n  persona: a\n  goal: b\nopening:\n  - say: hi\n` });
-  assert.deepEqual(parseScenario(scenario("origin:\n  from: code\n  by: coding agent, from the plan's gaps\n  covers: [tool:order_status, code:beforeSend]\n")).origin, {
-    from: "code", by: "coding agent, from the plan's gaps", covers: ["tool:order_status", "code:beforeSend"],
-  });
-  for (const check of ["not_checked", "passes_on_fixed", "reproduces_on_bad"]) assert.deepEqual(parseScenario(scenario(`origin: { from: chat, check: ${check} }\n`)).origin, { from: "chat", check });
-  const mistakes: Array<[string, string]> = [
-    ["origin: { from: support }", "scenarios/o.yaml:3: origin.from: code or chat"],
-    ["origin:\n  from: chat\n  check: checked", "scenarios/o.yaml:5: origin.check: not_checked, passes_on_fixed or reproduces_on_bad"],
-    ["origin: { check: not_checked }", "scenarios/o.yaml:3: origin.from: code or chat"],
-  ];
-  for (const [origin, error] of mistakes) assert.throws(() => parseScenario(scenario(`${origin}\n`)), { message: error }, origin);
-});
-
-test("the café's fakes play its tools from given: the menu it names, orders numbered up from BL-1040 and kept in state, an item not on the menu refused", async () => {
-  const tests = fileURLToPath(new URL("../examples/cafe/tests", import.meta.url));
-  const fakes = await loadFakes(tests);
-  assert.deepEqual([...fakes.keys()], ["get_menu", "place_order"]);
-  const menuFile = parseToolFile(loadSuite(tests).find((f) => f.path === "tools/get_menu.yaml")!);
-  const usual = menuFile.responses[0]!.output;
-  const world = { menu: usual };
-  const state: Record<string, unknown> = {};
-  const call = (tool: string, input: unknown, responses: ToolFile["responses"] = []) => fakes.get(tool)!({ input, world, state, now: "2026-11-04T09:00:00Z", call: 1, responses });
-  assert.deepEqual(await fakes.get("get_menu")!({ input: {}, world: {}, state, now: "", call: 1, responses: menuFile.responses }), { output: usual }, "no menu in given: the usual one");
-  const latte = { name: "Sam", items: [{ item: "Latte", size: "large", milk: "oat", quantity: 1 }] };
-  assert.deepEqual(await call("place_order", latte), { output: { order_id: "BL-1040", ready_by: "{{now + 10m}}", pay_at_pickup: true }, changes: ["order BL-1040 for Sam: 1 large Latte (oat)"] });
-  assert.deepEqual(await call("place_order", { name: "Jo", items: [{ item: "Latte", size: "small", milk: "soy" }] }), { error: "Unknown item: Latte" });
-  assert.equal(((await call("place_order", { name: "Jo", items: [{ item: "Cold brew", size: "small" }] })) as { output: { order_id: string } }).output.order_id, "BL-1041");
-  assert.deepEqual(state.orders, [{ order_id: "BL-1040", ...latte }, { order_id: "BL-1041", name: "Jo", items: [{ item: "Cold brew", size: "small" }] }]);
 });
 
 test("the summary reads the same on every machine: token counts in one format, and whether every run called the agent's model", { timeout: 15_000 }, async () => {

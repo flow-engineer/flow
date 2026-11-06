@@ -10,15 +10,6 @@
 //   POST /api/sessions/:id/tool-calls  ToolCallRequest → ToolCallResult   held open while the tool is played
 //   POST /api/sessions/:id/events      { seq, events: FlowEvent[] }
 //
-// A tool call in a scenario with `given:` is played by the first rule that fits: its mode (down, flaky),
-// the developer's fake, a recorded response whose input equals the call's, else a model, whose answer the
-// cloud saves so a rerun replays it. Fakes (tests/tools/<tool>.fake.ts) are the developer's code and run
-// on this machine only: the open names the tools that have one (`fakes`), and a cloud that plays them
-// (Opened.fakes) answers such a call at once with `play: "fake"` and a ticket. The client runs the fake on
-// a copy of the run's state and POSTs a second time to the same route, with the ticket and what the fake
-// answered (`faked`), under its own Idempotency-Key; that answer is the call's ToolCallResult, given once
-// the rest of the call's latency has passed. An older cloud ignores `fakes` and a model plays every call.
-//
 // Every POST after the open sends Idempotency-Key. An older cloud ignores it. When Opened
 // says idempotency, a repeat of a key is the stored answer and the client may send it again.
 //   POST /api/sessions/:id/receipts    Receipt → { ok }
@@ -30,9 +21,8 @@
 // own on the agent's side, built with a clock the commands move (its own `now`, no schedule timer),
 // and the agent's own channels, whose sends come to the cloud as an outbound with `at`, the run's
 // clock. The cloud sends `open` first, then any of `message`, `reaction`, `event`, `nudge`,
-// `advance`, `restart` (both sides said `restart`), and `close` when the run is over. `open`,
-// `event`, `nudge`, `advance` and `restart` are each answered by one StepAnswer once the agent has
-// settled: everything they set off has been sent (a deploy's answer comes once the new agent is up).
+// `advance`, and `close` when the run is over. `open`, `event`, `nudge` and `advance` are each
+// answered by one StepAnswer once the agent has settled: everything they set off has been sent.
 //
 // When Opened says resume, every command on the stream carries `id: N` (1, 2, 3, ... per session).
 // A stream that drops, or sits silent past the idle watch, is opened again with Last-Event-ID set
@@ -55,8 +45,7 @@
 //
 // When Opened says flaky, a run that fails is played once more: the failed run's `run` command carries
 // `rerun` and `label`, and the second play comes as a `run` command of its own with `rerunOf`, in any
-// order (match them by runId); it is not a run of the suite. When Opened says replay, the cloud
-// replays stored person, tool and judge answers for a scenario version it has played; `fresh` asks it not to.
+// order (match them by runId); it is not a run of the suite.
 //
 // The open goes to the cloud's front door; every later call goes to Opened.tunnel (else the same
 // address) and carries `authorization: Bearer <token>` from Opened.
@@ -105,16 +94,10 @@ export interface OpenSession {
   reopen?: boolean;
   /** The client plays business runs (open, event, nudge, advance, close). */
   business?: boolean;
-  /** The client plays a business run's `restart` step (a crash or a deploy of the agent mid-conversation). */
-  restart?: boolean;
   /** The client reports flaky runs: when a run fails, the cloud plays it once more and labels it. */
   flaky?: boolean;
-  /** Play every simulator afresh: the cloud replays no stored person, tool or judge answers. */
-  fresh?: boolean;
   /** The client seeds a run's earlier conversation (`history` on a run's first message or open). */
   history?: boolean;
-  /** The tools this client has a fake for (tests/tools/<tool>.fake.ts). Sent only when there is one. */
-  fakes?: string[];
   /** Play only these runs, numbered as given: a re-open after session_gone. Sent only to a cloud whose Opened said reopen,
    * and only when some run finished: the cloud checks it against the suite's files it already stores. */
   only?: RunKey[];
@@ -152,16 +135,10 @@ export interface Opened {
   reopen?: boolean;
   /** This cloud plays business runs; the client sent `business`. Absent on an older cloud. */
   business?: boolean;
-  /** This cloud sends `restart` steps; the client sent `restart`. Absent on an older cloud. */
-  restart?: boolean;
   /** This cloud plays a failed run once more and labels it; the client sent `flaky`. Absent on an older cloud. */
   flaky?: boolean;
-  /** This cloud replays stored simulator answers for the same scenario version (absent with `fresh`, or on an older cloud). */
-  replay?: boolean;
   /** This cloud sends a scenario's `history`; the client sent `history`. Absent on an older cloud. */
   history?: boolean;
-  /** This cloud plays `given:` by rule and asks for the fakes the client named (`play: "fake"`). Absent on an older cloud. */
-  fakes?: boolean;
   /** What this workspace may do, printed when the session opens. Absent on an older cloud. */
   limits?: SessionLimits;
 }
@@ -213,13 +190,6 @@ export type BusinessCommand =
   | { type: "nudge"; conversationId: string; step: number; nudge: BusinessNudge }
   /** Time passes: the clock moves to `to` (epoch ms), a minute at a time, and what came due runs at each step. */
   | { type: "advance"; conversationId: string; step: number; to: number }
-  /** The agent restarts, on the same store: `crash`, the run's agent dies where it is (nothing more it does is
-   * sent or kept, its lease stays until it runs out) and a new one starts once the clock has moved past it;
-   * `deploy`, a new one starts beside it and takes every command from now on, while the old one finishes what it
-   * holds and stops. Each has a runner name of its own. Sent only when both sides said `restart`. A cloud
-   * that plays it right after a message sends it once that message's receipt is in, not its reply, so it
-   * lands while the message's turn runs. */
-  | { type: "restart"; conversationId: string; step: number; mode: "crash" | "deploy" }
   /** The run is over: its agent is dropped. */
   | { type: "close"; conversationId: string };
 
@@ -258,9 +228,6 @@ export interface StepAnswer {
   nudge?: { status: string; reason?: string };
   /** The run's clock when the step settled, epoch ms. */
   at: number;
-  /** A restart's runners (createAgent's runner names): the one that stopped (at once on a crash; once it
-   * finished what it held on a deploy) and the one that started. */
-  restart?: { stopped: string; started: string };
   /** The step could not be played on the agent's side (the agent threw, no such route ...). */
   error?: string;
 }
@@ -282,42 +249,9 @@ export interface ToolCallRequest {
   conversationId: string;
   tool: string;
   input: unknown;
-  /** The second POST of a call the cloud asked a fake for: its ticket, and what the fake answered. */
-  ticket?: string;
-  faked?: Faked;
 }
 
-/** What the fake answered, with the run's state as it left it; or why it failed (it threw, or answered neither output nor error, or not plain JSON). */
-export type Faked = { output?: unknown; error?: string; changes?: string[]; state: Record<string, unknown> } | { failed: string };
-
-/** The cloud asks the client to run its fake for this call (sent only for a tool named in OpenSession.fakes, on a cloud whose Opened said fakes). */
-export interface FakeRequest {
-  play: "fake";
-  ticket: string;
-  /** The scenario's given: without tools and seed, a tool file's name there replaced by that tool's usual output. */
-  world: Record<string, unknown>;
-  /** The run's fake state so far. */
-  state: Record<string, unknown>;
-  /** The run's clock, ISO 8601 (UTC). */
-  now: string;
-  /** This tool's calls in the run, this one included. */
-  call: number;
-  /** The tool file's responses, placeholders filled. */
-  responses: unknown[];
-}
-
-/** `fake_failed`: the fake failed, an infrastructure error for the run (the test's code, not the agent). */
-export type ToolCallResult = { ok: true; output: unknown } | { ok: false; error: string } | FakeRequest;
-
-/** How a run's tool calls were played: by a mode (rule), the developer's fake, a recorded response, or a model. */
-export interface ToolsPlayedBy {
-  rule: number;
-  fake: number;
-  recorded: number;
-  model: number;
-  /** The model-played calls per tool (RunSummary.replayed.tools counts those whose answer came from the store). */
-  byModel: Record<string, number>;
-}
+export type ToolCallResult = { ok: true; output: unknown } | { ok: false; error: string };
 
 export interface RunSummary {
   runId: string;
@@ -362,10 +296,6 @@ export interface RunSummary {
   rerun?: { runId: string; passed: boolean; watch: string };
   /** On a failed run the cloud played again: flaky when the second play passed, failing when it failed too. */
   label?: "flaky" | "failing";
-  /** How many simulator answers this run replayed from stored ones (person, tool simulator, judge). */
-  replayed?: { person: number; tools: number; judge: number };
-  /** How this run's tool calls were played, from a cloud that plays `given:` by rule (absent on an older cloud). */
-  toolsPlayedBy?: ToolsPlayedBy;
 }
 
 export interface SessionSummary {

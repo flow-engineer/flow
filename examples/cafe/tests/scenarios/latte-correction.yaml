@@ -16,23 +16,18 @@ opening:                     # the first messages, sent exactly like this; then 
   - say: "oat milk actually"
     after_ms: 1200
 
-world: |                     # what is true in this test, in words: for the person, the judge, and a model playing a tool
+world: |                     # what is true in this test, in words: for the person, the judge, and the model playing the tools
   The menu is as in tests/tools/get_menu.yaml. Oat milk is in stock. The café is busy this
-  morning, so the point of sale is slow to take orders, but they go through.
-
-given:                       # the same world as data: each tool call is played by rule from it, a model only last
-  menu: get_menu.yaml        # a tool file's name: that tool's usual output (the fakes read it)
-  stock: { oat: true }       # any other value: plain data for the fakes (tests/tools/*.fake.ts)
-  tools:
-    place_order: slow        # usual | slow | down | flaky N%: slow, as long as its slowest response with an output
+  morning, so the point of sale is slow to take orders, but they go through (place_order.yaml's
+  busy response).
 
 max_turns: 8
 
 expect:
-  state:                     # checked in code against what the fakes kept: exactly one order, as below
-    orders:
-      - name: Sam
-        items: [{ item: Latte, size: large, milk: oat, quantity: 1 }]
+  calls:                     # checked in code from the recorded tool calls
+    - { tool: place_order, args: { name: Sam } }
+  outcome:                   # checked against what the tools did
+    - Exactly one order is placed, for one large latte with oat milk, under the name Sam.
   judge:                    # read by the judge from the transcript, each pass or fail with a reason
     - The order read back to Sam uses oat milk, not whole milk.
     - The agent asks Sam to confirm before placing the order.

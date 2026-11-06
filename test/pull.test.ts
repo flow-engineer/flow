@@ -26,15 +26,16 @@ async function flow(args: string[], dir: string, env: NodeJS.ProcessEnv = {}) {
   return { code, stdout, stderr };
 }
 
-const yaml = (id: string, title: string, check = "not_checked") => [
-  `id: ${id}`, `title: ${title}`, "channels: [whatsapp]", `origin: { from: chat, check: ${check} }`,
+// The check column comes from the draft's envelope (`check`), never from the YAML.
+const yaml = (id: string, title: string) => [
+  `id: ${id}`, `title: ${title}`, "channels: [whatsapp]",
   "person:", "  persona: Arjun, short messages.", "  goal: Find out when the order arrives.",
   "opening:", "  - say: order kab aayega?", "max_turns: 8", "expect:", "  judge:", "    - The agent does not ask again for the phone number.", "",
 ].join("\n");
 
 const drafts = [
   { id: "tdr_a", file: "chat-aaaaaa.yaml", yaml: yaml("chat-aaaaaa", "Asked for the phone number twice"), check: "not_checked", made_on: "2026-11-04", pulled: false },
-  { id: "tdr_b", file: "chat-bbbbbb.yaml", yaml: yaml("chat-bbbbbb", "Wrong delivery day", "reproduces_on_bad"), check: "reproduces_on_bad", made_on: "2026-11-04", pulled: false },
+  { id: "tdr_b", file: "chat-bbbbbb.yaml", yaml: yaml("chat-bbbbbb", "Wrong delivery day"), check: "reproduces_on_bad", made_on: "2026-11-04", pulled: false },
   { id: "tdr_c", file: "chat-cccccc.yaml", yaml: yaml("chat-cccccc", "Pulled last week"), check: "not_checked", made_on: "2026-10-28", pulled: true },
   // Not a scenario (no opening), and a file name that is a path: neither is written or marked pulled.
   { id: "tdr_d", file: "chat-dddddd.yaml", yaml: "id: chat-dddddd\nchannels: [whatsapp]\nperson:\n  persona: a\n  goal: b\n", check: "not_checked", made_on: "2026-11-04", pulled: false },

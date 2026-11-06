@@ -6,6 +6,7 @@
 
 import { existsSync } from "node:fs";
 import { pluginProblems } from "./plugin.ts";
+import { deprecatedInSuite } from "./suite.ts";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { cliProblems, type CliConfig } from "../../cli/src/commands.ts";
@@ -142,6 +143,9 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
   if (!existsSync(cliFile)) {
     for (const t of tools) if (t.mcp?.clients?.includes("cli")) warnings.push(`tool ${t.name}: kept to the CLI (mcp.clients): only a CLI signed in as this server's CLI client sees it, and this project has no CLI file (src/cli.ts); without another CLI that signs in so (such as \`npx @flow-engineer/flow <command> --server <url>\`), no client sees it`);
   }
+
+  // What 0.16.1 stopped playing in the tests, named as flow test names it.
+  warnings.push(...deprecatedInSuite(join(dir, "tests")));
 
   if (json) console.log(JSON.stringify({ ok: errors.length === 0, errors, warnings }));
   else {
