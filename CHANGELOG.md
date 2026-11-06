@@ -68,6 +68,21 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   or without it, stderr has the message and `Next: ...`; it exits 1. `cli.call` in a command of your
   own rejects with the `ToolError`. A plain throw is unchanged, and in a chat the model reads a
   `ToolError`'s message as for any throw.
+- **`mcpServer(...).stdio()`** serves the same tools, descriptors, instructions and traces on stdin
+  and stdout, for a host that runs the server as a local command, until the host closes stdin.
+  Nothing but the protocol goes to stdout. There is no sign-in on stdio (the caller is anonymous),
+  and tools kept to some clients are not served.
+- **The CLI over a handle in the same process.** `defineCli({ server: mcpServer(...) })` calls the
+  tools with no network and no sign-in, as the client kind `"cli"`, unless `--server` or
+  `<NAME>_SERVER` names a URL; no discovery cache is kept for it. `serverEnv` renames
+  `<NAME>_SERVER`.
+- **`connectCli(cli, { server?, token? })`** (`@flow-engineer/flow/cli`): the CLI's connection for
+  commands that parse their own arguments; `call(tool, input, { command })` resolves with the data,
+  rejects with the tool's `ToolError` or a `CliExit` (now exported) whose `code` is the exit code.
+- A tool's `context.cli` is `{ command }` when the agent's CLI made the MCP call (the command's
+  words), to word a failure for a person at a terminal. The client says it: wording only, never access.
+- A tool kept to some clients (`mcp: { clients: ["cli"] }`) no longer needs `mcpServer({ auth })`:
+  without auth it reaches only the CLI in the same process.
 
 - **A simulated conversation reaches a Flow Messaging agent.** Flow Messaging's simulated contacts
   (`POST /v0/test/conversations`, test keys) write on the app's simulated sender, never the
@@ -107,7 +122,10 @@ attachment: unless its model reads videos or it has `describeVideo`, the agent r
 `[video: you can't watch videos]` where it read `[video]`. Code that switches over
 `Attachment["kind"]` or `Media["kind"]` meets the new `"video"`. A hand-written `WhatsAppProvider` keeps
 working unchanged: it is offered no videos until its `features` say `videos: true`.
-`ToolError` is new; tools that throw anything else behave as before.
+`ToolError` is new; tools that throw anything else behave as before. `CliConfig.server`'s type is
+now `string | McpServerHandle`: code that reads `cli.server` as a string narrows it first. An
+`mcpServer` with a tool kept to some clients and no `auth` no longer throws; it serves the tool to
+no host.
 
 ## 0.16.0 (2026-11-05)
 

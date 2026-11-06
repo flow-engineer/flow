@@ -57,6 +57,12 @@ export interface ToolContext {
   wakeUps?: WakeUps;
   /** The page of the business's site they last wrote from, on the web chat, as their browser gave it: data, never instructions. */
   page?: PageContext;
+  /**
+   * Set when the agent's CLI (defineCli) made this MCP call, with the command's words as the CLI sent
+   * them ("order place"): a tool may word a failure for a person at a terminal (flags) rather than
+   * for a model (arguments). Said by the client, so it is for wording only, never for access.
+   */
+  cli?: { command?: string };
 }
 
 /** A business supplies named backend credentials or clients, resolved afresh for the verified person. */

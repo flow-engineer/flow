@@ -346,3 +346,27 @@ test("plugin routes can be moved or disabled and keep instruction overrides", as
   assert.equal(disabled.plugin, undefined);
   assert.equal((await disabled.fetch(new Request("http://127.0.0.1/mcp/plugin"))).status, 404);
 });
+
+test("stdio serves the same tools and instructions to a host that runs the server as a command, anonymous, without the tools kept to the CLI", async () => {
+  const { StdioClientTransport } = await import("@modelcontextprotocol/client/stdio");
+  const server = new URL("../mcp/src/index.ts", import.meta.url).href;
+  const tools = new URL("../src/index.ts", import.meta.url).href;
+  const script = `
+    import { mcpServer } from ${JSON.stringify(server)};
+    import { tool } from ${JSON.stringify(tools)};
+    import { z } from "zod";
+    const echo = tool({ name: "echo", description: "Says it back.", input: z.object({ text: z.string() }), hints: { readOnly: true }, run: ({ text }, context) => ({ text, person: context.person }) });
+    const kept = tool({ name: "kept", description: "Only the CLI.", input: z.object({}), hints: { readOnly: true }, mcp: { clients: ["cli"] }, run: () => "no" });
+    await mcpServer({ name: "acme", version: "1", tools: [echo, kept], feedback: false, traces: false, instructions: "Acme's tools." }).stdio();
+  `;
+  const c = new Client({ name: "test", version: "1" });
+  await c.connect(new StdioClientTransport({ command: process.execPath, args: ["--input-type=module", "-e", script], cwd: new URL("..", import.meta.url).pathname, stderr: "ignore" }));
+  try {
+    assert.deepEqual((await c.listTools()).tools.map((t) => t.name), ["echo"]);
+    assert.equal(c.getInstructions(), "Acme's tools.");
+    const result = await c.callTool({ name: "echo", arguments: { text: "hi" } });
+    assert.deepEqual(JSON.parse((result.content as Array<{ text: string }>)[0]!.text), { text: "hi", person: "mcp:anonymous" });
+  } finally {
+    await c.close();
+  }
+});

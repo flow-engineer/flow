@@ -43,6 +43,12 @@ createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamabl
 - `mcp.fetch(request)` serves a web-standard `Request` instead (Cloudflare Workers, Deno, Bun), so
   it mounts beside the chat agent in one process or runs on its own: it needs no model, channels
   or store.
+- `await mcp.stdio()` serves the same tools and instructions on stdin and stdout, for a host that
+  runs the server as a local command (`claude mcp add acme -- node src/mcp.ts`), until the host
+  closes stdin. Nothing but the protocol goes to stdout. There is no sign-in on stdio: the caller is
+  anonymous, and tools kept to some clients are not served.
+- A tool's `context.cli` is set when the agent's CLI made the call (`{ command: "order place" }`), to
+  word a failure for a person at a terminal; it is the client's say-so, never for access.
 - Hosts get the skills as the server's instructions (each one's description) and read one with the
   `read_skill` tool. A skill that tells the chat agent to use `send_*` or `share_updates` makes
   no sense to a host: `flow check` warns about it.
@@ -130,7 +136,8 @@ export const apiKeysReveal = tool({
 
 The caller is told apart by the OAuth client its token was issued to, never by anything a client
 says about itself (MCP's `clientInfo` is not a signal). It needs `mcpServer({ auth })`; without
-it `mcpServer` refuses such a tool, since no caller could be told apart.
+it no host is told apart, so such a tool reaches only the CLI in the same process
+(`defineCli({ server: handle })`).
 - **With the OAuth bridge** (`flow-framework-oauth-bridge`), nothing else to write: the bridge
   serves the CLI's Client ID Metadata Document at `<origin>/.well-known/oauth-client/cli`,
   advertises it as `flow_cli_client_id`, notes which client each token went to, and `verify` returns
@@ -183,6 +190,12 @@ export const cli = defineCli({
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) process.exit(await runCli(cli, process.argv.slice(2)));
 ```
 
+- `server` may be an `mcpServer(...)` handle instead of a URL: the CLI then calls those tools in the
+  same process (no network, no sign-in, the client kind `"cli"`), unless `--server` or `ACME_SERVER`
+  (`serverEnv` renames it) names a URL. No discovery cache is kept for it.
+- Commands that parse their own arguments use the CLI's connection one level down:
+  `const c = await connectCli(cli, { server })` and `await c.call("get_order", { order_id }, { command:
+  "order view" })` (the data, or the tool's `ToolError`, or a `CliExit` whose `code` is the exit code).
 - Words are groups then a verb: `order` is a **command group**, `list`, `view` and `place` its
   subcommands. `acme order` and `acme order -h` list the group's subcommands, `acme order place -h`
   that command's flags and examples, and `acme -h` the groups and top-level commands. A word is a
