@@ -34,6 +34,8 @@ export const findSlots = tool({
   For a failure the caller should act on, throw `new ToolError(code, message, { hint, next })`
   (from `@flow-engineer/flow`): over MCP it is the result's structured content `{ ok: false, error:
   { code, message, hint }, next }`, and a CLI command prints it with `--json` and exits 1.
+  To return an API's JSON as it came, `return jsonText(await res.text())`: the text is what a host,
+  a model and the CLI's `--json` read, byte for byte.
 - Don't make tools for talking to the person (send_<channel>, react, share_updates, edit_message, unsend_message), for reminders
   or scheduled messages, for waking the agent later (`wake_me_up`; from a tool, `context.wakeUps`),
   or for opting out of messages: Flow Framework has them.
