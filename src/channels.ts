@@ -13,7 +13,7 @@
 import type { z } from "zod";
 import type { TranscriptEntry } from "./conversation.ts";
 import type { StoreApi } from "./store.ts";
-import type { CarouselCard, ChannelInfo, Incoming, ListRow, Outbound, Photo, ReplyButton, SendReceipt, Template, TemplateDefinition } from "./types.ts";
+import type { CarouselCard, ChannelInfo, Incoming, ListRow, Outbound, Photo, ReplyButton, SendReceipt, Template, TemplateDefinition, Video } from "./types.ts";
 
 export type ChannelKind = "sms" | "whatsapp" | "custom";
 
@@ -129,6 +129,8 @@ export interface Message {
   link?: { label: string; url: string };
   /** A photo, the text its caption; with buttons or a link it heads the same message. Never with a list. */
   image?: Photo;
+  /** A video, the text its caption, with nothing else. Only to a provider whose features say videos. */
+  video?: Video;
   /** false: send it with link previews off (a message the business started). */
   preview?: false;
   /** Given for a send the business starts (a nudge, a scheduled text): the same in every process, so a provider that takes one sends it once. */
@@ -149,8 +151,8 @@ export interface WhatsAppProvider {
   sendMessage(to: string, message: Message): Promise<void | SendReceipt>;
   /** A media carousel; without it the agent is never offered one. */
   sendCarousel?(to: string, carousel: Carousel): Promise<void | SendReceipt>;
-  /** Which parts of a message this provider can send. Default: all. */
-  features?: { buttons?: boolean; lists?: boolean; replies?: boolean; links?: boolean; images?: boolean };
+  /** Which parts of a message this provider can send. Default: all but videos, which a provider takes only when it says `videos: true`. */
+  features?: { buttons?: boolean; lists?: boolean; replies?: boolean; links?: boolean; images?: boolean; videos?: boolean };
   react?(to: string, messageId: string, emoji: string): Promise<void>;
   /** Shows (or hides) the typing indicator. Reject with an error whose message starts with `outside_window` when the platform refuses it outside the person's window: typing is tried again after the agent's next message. Any other rejection ends typing for the turn. */
   typing?(to: string, on: boolean): Promise<void>;
@@ -203,6 +205,7 @@ export const WHATSAPP: ChannelInfo = {
   linkButton: { labelMax: 20 },
   // An image's caption is at most 1,024 characters (as is an interactive message's body).
   images: { captionMax: 1024 },
+  videos: { captionMax: 1024 },
   readReceipts: true,
   // Typing shows until the reply, or for up to 25 seconds.
   typingLastsMs: 25_000,
@@ -215,7 +218,7 @@ export const WHATSAPP_CAROUSELS: NonNullable<ChannelInfo["carousels"]> = { maxCa
 /** SMS: plain text; providers join up to 10 segments into one text (1,530 GSM-7 characters). */
 export const SMS: ChannelInfo = { platform: "sms", reactions: false, status: false, formatting: "plain", maxLength: 1530, templates: false, typing: false };
 
-export type WhatsAppFeature = "buttons" | "lists" | "links" | "images" | "carousels" | "replies" | "reactions" | "typing" | "readReceipts" | "templates";
+export type WhatsAppFeature = "buttons" | "lists" | "links" | "images" | "videos" | "carousels" | "replies" | "reactions" | "typing" | "readReceipts" | "templates";
 
 export function whatsapp(provider: WhatsAppProvider, options: { name?: string; disable?: WhatsAppFeature[]; instructions?: string; keywords?: false | Partial<Keywords> } = {}): Channel {
   const off = new Set(options.disable ?? []);
@@ -230,6 +233,7 @@ export function whatsapp(provider: WhatsAppProvider, options: { name?: string; d
     lists: has("lists", f.lists !== false) ? WHATSAPP.lists : undefined,
     linkButton: has("links", f.links !== false) ? WHATSAPP.linkButton : undefined,
     images: has("images", f.images !== false) ? WHATSAPP.images : undefined,
+    videos: has("videos", f.videos === true) ? WHATSAPP.videos : undefined,
     carousels: has("carousels", Boolean(provider.sendCarousel)) ? WHATSAPP_CAROUSELS : undefined,
     // Only ever true: a provider without sendTemplate keeps 0.4's behaviour (its send says so), and a
     // business run's copy of the channel, whose send goes to the test cloud, still sends templates.
@@ -339,6 +343,7 @@ function message(outbound: Extract<Outbound, { type: "message" }>): Message {
     ...(outbound.list ? { list: outbound.list } : {}),
     ...(outbound.link ? { link: outbound.link } : {}),
     ...(outbound.image ? { image: outbound.image } : {}),
+    ...(outbound.video ? { video: outbound.video } : {}),
     ...(outbound.preview === false ? { preview: false as const } : {}),
     ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}),
   };
@@ -459,12 +464,18 @@ export interface ContentRefusal {
  * carousels are checked, on channels whose info names a platform. A link is a link button, a photo
  * with buttons or a link their header (else a photo with the text as its caption), a button's id is
  * its own or its label (a list row's, its id), and a carousel on a channel without carousels is checked as the
- * messages it is sent as. Photos by file id are the provider's own and not checked here; nor are
+ * messages it is sent as. A video goes only where the channel takes videos, alone with its caption. Photos
+ * and videos by file id are the provider's own and not checked here; nor are
  * media types (Flow converts WebP, GIF, BMP and TIFF; the rest is known only from the file's bytes).
  */
 export function contentRefusal(info: ChannelInfo, outbound: Outbound): ContentRefusal | null {
   // Flow Messaging's own refusal of a template where the channel has none.
   if (outbound.type === "template" && info.templates === false) return refuse("content.type", `${info.platform ? CONTENT_LIMITS[info.platform].name : "This channel"} has no templates; send a message instead.`);
+  // Flow Framework's own rules for a video, on every channel: only where the channel takes videos, and alone with its caption.
+  if (outbound.type === "message" && outbound.video) {
+    if (!info.videos) return refuse("content.media", `${info.platform ? CONTENT_LIMITS[info.platform].name : "This channel"} takes no videos here; send a link to the video, or a photo, instead.`);
+    if (outbound.buttons?.length || outbound.list || outbound.link || outbound.image) return refuse("content.media", "A video goes with only its caption: send buttons, a list, a link or a photo in a message of their own.");
+  }
   const limits = info.platform ? CONTENT_LIMITS[info.platform] : undefined;
   if (!limits) return null;
   if (outbound.type === "message") return messageRefusal(limits, outbound);
@@ -511,7 +522,7 @@ function buttonsRefusal(buttons: FlowButton[], param: string, seen: Set<string>,
   return null;
 }
 
-function messageRefusal(limits: ContentLimits, m: Pick<Message, "text" | "buttons" | "list" | "link" | "image">): ContentRefusal | null {
+function messageRefusal(limits: ContentLimits, m: Pick<Message, "text" | "buttons" | "list" | "link" | "image" | "video">): ContentRefusal | null {
   const length = (s: string) => (limits.utf16 ? s.length : codePoints(s));
   const on = limits.name;
   const buttons: FlowButton[] | undefined = m.link
@@ -533,8 +544,9 @@ function messageRefusal(limits: ContentLimits, m: Pick<Message, "text" | "button
     if (m.image && limits.mediaHeaderReplies && replies > limits.mediaHeaderReplies) return refuse("content.header", `A media header goes with at most ${limits.mediaHeaderReplies} reply buttons on ${on}.`);
     return null;
   }
-  if (m.image) {
-    if (header !== undefined && !isHttps(header)) return refuse("content.url", "url must be an https URL Flow can fetch.");
+  if (m.image || m.video) {
+    const url = m.video && "url" in m.video ? m.video.url : header;
+    if (url !== undefined && !isHttps(url)) return refuse("content.url", "url must be an https URL Flow can fetch.");
     if (m.text && codePoints(m.text) > SPEC.caption) return refuse("content.caption", `caption must be at most ${SPEC.caption} characters.`);
     if (m.text && length(m.text) > limits.caption) return refuse("content.caption", `caption must be at most ${limits.caption} characters on ${on}.`);
     return null;

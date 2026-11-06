@@ -103,6 +103,11 @@ export function sendInput(channel: ChannelInfo, several = false, params: Record<
       .optional()
       .describe(`A photo, by a URL or file id you were given; your text is its caption, up to ${channel.images.captionMax} characters${channel.lists ? "; not with a list" : ""}`);
   }
+  if (channel.videos) {
+    shape.video = photo
+      .optional()
+      .describe(`A video, by a URL or file id you were given; your text is its caption, up to ${channel.videos.captionMax} characters; nothing else with it`);
+  }
   if (channel.carousels) {
     const c = channel.carousels;
     shape.carousel = z
@@ -130,11 +135,12 @@ export type SendInput = {
   list?: { button: string; rows: Array<{ id: string; title: string; description?: string }> };
   link?: { label: string; url: string };
   image?: { url: string } | { file_id: string };
+  video?: { url: string } | { file_id: string };
   carousel?: Array<{ image: { url: string } | { file_id: string }; text?: string; buttons?: ReplyButton[]; link?: { label: string; url: string } }>;
   confirm?: boolean;
 };
 
-/** A photo as the send tool took it, as channels take it. */
+/** A photo (or a video) as the send tool took it, as channels take it. */
 export function photoOf(image: { url: string } | { file_id: string }): Photo {
   return "url" in image ? { url: image.url } : { fileId: image.file_id };
 }
@@ -151,6 +157,7 @@ export function cardsOf(cards: NonNullable<SendInput["carousel"]>): CarouselCard
 
 /** Why a send that fits its schema still cannot go out as written (WhatsApp's rules), or null. */
 export function sendRefusal(channel: ChannelInfo, input: SendInput): string | null {
+  if (input.video && (input.buttons?.length || input.list || input.link || input.image || input.carousel)) return "Not sent: a video goes with only its caption, without buttons, a list, a link, an image or a carousel. Send them in separate messages.";
   if (input.link && (input.buttons?.length || input.list)) return "Not sent: a message with a link cannot also have buttons or a list. Send them in separate messages.";
   if (input.carousel) {
     if (input.buttons?.length || input.list || input.link || input.image) return "Not sent: a carousel goes alone, without buttons, a list, a link or an image. Send them in separate messages.";
@@ -161,6 +168,9 @@ export function sendRefusal(channel: ChannelInfo, input: SendInput): string | nu
     const max = channel.carousels?.textMax ?? 1024;
     if (input.text.length > max) return `Not sent: a carousel's text is at most ${max} characters. Shorten it, or send the rest in another message.`;
     return null;
+  }
+  if (input.video && channel.videos && input.text.length > channel.videos.captionMax) {
+    return `Not sent: with a video, your text is its caption, at most ${channel.videos.captionMax} characters. Shorten it, or send the rest in another message.`;
   }
   if (input.image && input.list) return "Not sent: a message with an image cannot also have a list. Send them in separate messages.";
   if (input.image && channel.images && input.text.length > channel.images.captionMax) {
@@ -197,6 +207,7 @@ export function sentArgs(outbound: Extract<Outbound, { type: "message" | "carous
     ...(outbound.list ? { list: outbound.list } : {}),
     ...(outbound.link ? { link: outbound.link } : {}),
     ...(outbound.image ? { image: tool(outbound.image) } : {}),
+    ...(outbound.video ? { video: tool(outbound.video) } : {}),
     ...outbound.fields,
   };
 }

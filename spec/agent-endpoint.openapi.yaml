@@ -136,6 +136,7 @@ x-flow-platforms: &platforms
     lists: { maxRows: 10, titleMax: 24, buttonMax: 20 }
     linkButton: { labelMax: 20 }
     images: { captionMax: 1024 }
+    videos: { captionMax: 1024 }
     readReceipts: true
   imessage:
     platform: imessage
@@ -145,6 +146,7 @@ x-flow-platforms: &platforms
     maxLength: 9999
     replies: true
     images: { captionMax: 1024 }
+    videos: { captionMax: 1024 }
     readReceipts: true
     edits: true
     unsends: true
@@ -159,6 +161,7 @@ x-flow-platforms: &platforms
     buttonIds: true
     linkButton: { labelMax: 20 }
     images: { captionMax: 1024 }
+    videos: { captionMax: 1024 }
     readReceipts: false
     edits: true
     unsends: true

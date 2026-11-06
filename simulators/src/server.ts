@@ -59,6 +59,7 @@ import {
   type ListRow,
   type Outbound,
   type Photo,
+  type Video,
   type ReplyButton,
   type FlowEvent,
   type PlaygroundSink,
@@ -345,6 +346,8 @@ export type Line =
       authentication?: boolean;
       /** A photo above the text, which is its caption. */
       image?: Photo;
+      /** A video above the text, which is its caption. */
+      video?: Video;
       /** The channel's own params the agent filled in (an app_link): shown under the message. */
       fields?: Record<string, unknown>;
       /**
@@ -613,6 +616,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
           ...(outbound.link ? { link: outbound.link } : {}),
           ...(outbound.authentication ? { authentication: true } : {}),
           ...(outbound.image ? { image: outbound.image } : {}),
+          ...(outbound.video ? { video: outbound.video } : {}),
           ...(outbound.fields ? { fields: outbound.fields } : {}),
           ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}),
         });

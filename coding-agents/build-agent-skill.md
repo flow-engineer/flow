@@ -143,7 +143,11 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   The provider gets it as `image: { url }` or `image: { fileId }`; elsewhere the text goes alone.
   WhatsApp's rules hold everywhere: a link never with buttons or a list, an image never with a
   list. A provider without them says so (`features: { links: false, images: false }`) and never
-  gets them; the URLs and file ids come from your tools' results, like app_link's.
+  gets them; the URLs and file ids come from your tools' results, like app_link's. Channels with
+  `videos` (Flow Messaging's WhatsApp, Telegram and iMessage) also offer a `video`, the same shape,
+  the text its caption and nothing else with it (no buttons, list, link or image). A hand-written
+  WhatsApp provider gets videos only when it says `features: { videos: true }`. A video sent where
+  the channel has no videos (SMS, the web chat), or with buttons, is refused and the agent told why.
 - Carousels (WhatsApp's media carousel): a WhatsApp provider with `sendCarousel(to, { text, cards })`,
   or a customUI whose `info` has `carousels`, offers the agent a `carousel` of 2 to 10 cards, each
   `{ image, text?, buttons? | link? }` with the same kind and number of buttons on every card

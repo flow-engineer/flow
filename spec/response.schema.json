@@ -37,7 +37,7 @@
   },
   "$defs": {
     "message": {
-      "description": "A message to the person. Only the keys below: any other key is refused as something the platform does not show. Not allowed together: `link` with `buttons` or `list`; `image` with `list`. With `image`, `text` is its caption.",
+      "description": "A message to the person. Only the keys below: any other key is refused as something the platform does not show. Not allowed together: `link` with `buttons` or `list`; `image` with `list`; `video` with `buttons`, `list`, `link` or `image`. With `image` or `video`, `text` is its caption.",
       "type": "object",
       "required": [
         "type",
@@ -159,6 +159,38 @@
               "pattern": "^https://[^\\s/?#]+"
             }
           }
+        },
+        "video": {
+          "type": "object",
+          "description": "A video by https URL or by the provider's file id, `text` its caption (within the platform's videos.captionMax). Where the platform has no videos, the reply is refused.",
+          "anyOf": [
+            {
+              "type": "object",
+              "required": [
+                "url"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "pattern": "^https://[^\\s/?#]+"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "fileId"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "fileId": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          ]
         },
         "fields": {
           "type": "object",

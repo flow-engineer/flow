@@ -39,7 +39,7 @@ test("a WhatsApp message reaches the agent with its quote, and the reply, read r
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
-test("a link goes as a url button and a photo as media with its caption; a photo with buttons or a link is their message's image header, by URL or Flow file id", async (t) => {
+test("a link goes as a url button, a photo or a video as media with its caption; a photo with buttons or a link is their message's image header, by URL or Flow file id", async (t) => {
   const flow = await fakeFlow();
   const live = await liveAgent(flow);
   t.after(() => (flow.close(), live.close()));
@@ -52,9 +52,11 @@ test("a link goes as a url button and a photo as media with its caption; a photo
       call("send_whatsapp", { text: "The sea view room", image: { url: photo } }),
       call("send_whatsapp", { text: "Want it?", image: { url: photo }, buttons: ["Yes", "No"] }),
       call("send_whatsapp", { text: "Or this one", image: { file_id: "file_7" }, link: { label: "Book", url: "https://example.com/book" } }),
+      call("send_whatsapp", { text: "The walk-through", video: { url: "https://example.com/tour.mp4" } }),
+      call("send_whatsapp", { text: "And the garden", video: { file_id: "file_8" } }),
     ),
   );
-  await flow.request((r) => r.method === "POST" && r.body?.text === "Or this one");
+  await flow.request((r) => r.method === "POST" && r.body?.text === "And the garden");
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
   assert.deepEqual(
     flow.into("conv_wa").map((r) => [r.path.split("/").at(-1), r.body]),
@@ -63,6 +65,8 @@ test("a link goes as a url button and a photo as media with its caption; a photo
       ["basic", { media: { type: "image", url: photo }, text: "The sea view room" }],
       ["buttons", { text: "Want it?", buttons: [{ id: "Yes", label: "Yes" }, { id: "No", label: "No" }], header: { type: "image", url: photo } }],
       ["buttons", { text: "Or this one", buttons: [{ url: "https://example.com/book", label: "Book" }], header: { type: "image", file_id: "file_7" } }],
+      ["basic", { media: { type: "video", url: "https://example.com/tour.mp4" }, text: "The walk-through" }],
+      ["basic", { media: { type: "video", file_id: "file_8" }, text: "And the garden" }],
     ],
   );
 });

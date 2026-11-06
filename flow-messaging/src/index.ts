@@ -29,7 +29,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
-import { carouselMessages, replyButton, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type SendReceipt, type Template, type WhatsAppFeature } from "../../src/index.ts";
+import { carouselMessages, replyButton, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type SendReceipt, type Template, type Video, type WhatsAppFeature } from "../../src/index.ts";
 import { log } from "../../src/events.ts";
 import { Client, FlowMessagingError, idSegment, verifySignature } from "./client.ts";
 import { imessageStyles, telegramHTML } from "./richtext.ts";
@@ -118,7 +118,7 @@ export interface StreamHandle {
 }
 
 /**
- * Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos (one with
+ * Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos and videos (a photo with
  * buttons is one message), carousels (their text, then one message per card: its photo, text and
  * buttons), Markdown (sent as Telegram's HTML), edits and unsends (Flow refuses an unsend past 48
  * hours, and the agent is told), no read receipts for bots.
@@ -134,6 +134,7 @@ export const TELEGRAM: ChannelInfo = {
   buttonIds: true,
   linkButton: { labelMax: 20 },
   images: { captionMax: 1024 },
+  videos: { captionMax: 1024 },
   carousels: WHATSAPP_CAROUSELS,
   readReceipts: false,
   templates: false,
@@ -145,7 +146,7 @@ export const TELEGRAM: ChannelInfo = {
 
 /**
  * iMessage as Flow sends it: text up to 9999 characters, its Markdown sent as iMessage's own styles
- * (bold, italic, underline, strikethrough), photos, inline replies, tapbacks (other emoji go as emoji
+ * (bold, italic, underline, strikethrough), photos and videos, inline replies, tapbacks (other emoji go as emoji
  * reactions), typing and read receipts (the whole conversation), edits and unsends (Flow refuses one
  * that comes too late, and the agent is told). No buttons, lists or templates. No reply window is
  * set: the line only answers people who wrote to it, and a send it will not deliver comes back as
@@ -159,6 +160,7 @@ export const IMESSAGE: ChannelInfo = {
   maxLength: 9999,
   replies: true,
   images: { captionMax: 1024 },
+  videos: { captionMax: 1024 },
   readReceipts: true,
   templates: false,
   edits: true,
@@ -506,8 +508,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   /**
    * A message as one Flow kind. A link is a buttons message with one URL button (WhatsApp's
-   * cta_url), a photo a basic message with the text as its caption; a photo with buttons or a link is
-   * their message's image header. On WhatsApp a list, or more than 3 buttons, is a list message.
+   * cta_url), a photo or a video a basic message with the text as its caption; a photo with buttons or
+   * a link is their message's image header. On WhatsApp a list, or more than 3 buttons, is a list message.
    */
   function pieceOf(kind: Kind, message: Message): Piece {
     const replyTo = message.replyTo ? { reply_to: message.replyTo } : {};
@@ -520,6 +522,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       return { kind: "list", body: { text: message.text, button: message.list?.button ?? LIST_BUTTON, sections: [{ rows }], ...replyTo }, ...preview };
     }
     const text = styled(kind, message.text);
+    if (message.video) return { kind: "basic", body: { media: { type: "video", ...file(message.video) }, ...(message.text ? text : {}), ...replyTo } };
     if (buttons) return { kind: "buttons", body: { ...text, buttons, ...(message.image ? { header: { type: "image", ...file(message.image) } } : {}), ...replyTo }, ...preview };
     if (message.image) return { kind: "basic", body: { media: { type: "image", ...file(message.image) }, ...(message.text ? text : {}), ...replyTo } };
     return { kind: "basic", body: { ...text, ...replyTo, ...(message.preview === false ? { link_preview: false } : {}) } };
@@ -602,10 +605,10 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     };
   }
 
-  /** WhatsApp from a Flow sender: buttons (a list past 3), lists, link buttons, photos (as the header of buttons or a link), carousels, quotes, reactions, typing, blue ticks, templates. */
+  /** WhatsApp from a Flow sender: buttons (a list past 3), lists, link buttons, photos (as the header of buttons or a link), videos, carousels, quotes, reactions, typing, blue ticks, templates. */
   function whatsapp(o: FlowChannelOptions & { disable?: WhatsAppFeature[] } = {}): Channel {
     const route = register("whatsapp", o);
-    const channel = whatsappChannel(provider(route), { name: route.name, disable: o.disable, instructions: o.instructions });
+    const channel = whatsappChannel({ ...provider(route), features: { videos: true } }, { name: route.name, disable: o.disable, instructions: o.instructions });
     // Flow Messaging sends every reply button's own id and gives it back on the tap.
     return { ...channel, info: { ...channel.info, ...(channel.info.buttons ? { buttonIds: true } : {}) } };
   }
@@ -666,6 +669,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
               ...(outbound.buttons && info.buttons ? { buttons: outbound.buttons } : {}),
               ...(outbound.link && info.linkButton ? { link: outbound.link } : {}),
               ...(outbound.image && info.images ? { image: outbound.image } : {}),
+              ...(outbound.video && info.videos ? { video: outbound.video } : {}),
               ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}),
             });
           case "carousel": {
@@ -1096,7 +1100,7 @@ function styled(kind: Kind, text: string): { text: string; telegram?: { parse_mo
 }
 
 /** A photo as Flow takes it: by URL, or by a file uploaded to Flow. */
-function file(image: Photo): { url: string } | { file_id: string } {
+function file(image: Photo | Video): { url: string } | { file_id: string } {
   return "url" in image ? { url: image.url } : { file_id: image.fileId };
 }
 

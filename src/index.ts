@@ -46,6 +46,6 @@ export { RECORD_LIMITS, type ExportedRecord, type RecordCollection, type RecordC
 export type { AgentFiles } from "./skills.ts";
 export type { TracesOptions } from "./traces.ts";
 export { tool, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Credentials, type McpClientKind, type SignIn, type Tool, type ToolContext, type ToolHints } from "./tools.ts";
-export type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, DescribeVideo, Incoming, ListRow, Media, Model, ModelRequest, ModelResponse, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateButton, TemplateDefinition, ToolCall, ToolSpec, Transcribe, UndeliveredDetail } from "./types.ts";
+export type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, DescribeVideo, Incoming, ListRow, Media, Model, ModelRequest, ModelResponse, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateButton, TemplateDefinition, ToolCall, ToolSpec, Transcribe, UndeliveredDetail, Video } from "./types.ts";
 export { z } from "zod";
 export * from "./business-events/index.ts";

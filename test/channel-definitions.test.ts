@@ -47,6 +47,31 @@ test("WhatsApp offers the agent only what its provider can do; a link it cannot 
   assert.ok(!second.request.tools.some((t) => t.name === "react"), "switched off though the provider has it");
 });
 
+test("a video is offered only by a provider that says videos: true, and goes to it with its caption; where a channel has none, a send of one is refused with why, never handed over", async () => {
+  const r = recorder({ features: { videos: true } });
+  const h = agentWith([whatsapp(r.provider)]);
+  const a = await h.agent.message({ channel: "whatsapp", from: "+15550100100", message: "the tour?" });
+  const first = await h.nextCall(0);
+  assert.ok(props(first.request.tools.find((t) => t.name === "send_whatsapp")!).includes("video"));
+  first.answer(respond(call("send_whatsapp", { text: "The walk-through", video: { url: "https://example.com/tour.mp4" } })));
+  await h.agent.conversation(a!.conversationId)!.whenIdle();
+  assert.deepEqual(r.calls, [["sendMessage", "+15550100100", { text: "The walk-through", video: { url: "https://example.com/tour.mp4" } }]]);
+
+  // A provider that never said it sends videos: the agent is not offered one, and a send that adds one (beforeSend here) is refused.
+  const old = recorder();
+  const withVideo = agentWith([whatsapp(old.provider)], { beforeSend: (m) => (m.type === "message" && m.text === "The walk-through" ? { ...m, video: { fileId: "file_7" } } : m) });
+  const b = await withVideo.agent.message({ channel: "whatsapp", from: "+15550100100", message: "the tour?" });
+  const second = await withVideo.nextCall(0);
+  assert.ok(!props(second.request.tools.find((t) => t.name === "send_whatsapp")!).includes("video"));
+  second.answer(respond(call("send_whatsapp", { text: "The walk-through" })));
+  const told = await withVideo.nextCall(1);
+  assert.match(last(told.request.messages).content, /Not sent, WhatsApp refuses it: WhatsApp takes no videos here; send a link to the video, or a photo, instead\./);
+  told.answer(respond(call("send_whatsapp", { text: "Here is the tour: https://example.com/tour" })));
+  await withVideo.agent.conversation(b!.conversationId)!.whenIdle();
+  assert.deepEqual(old.calls, [["sendMessage", "+15550100100", { text: "Here is the tour: https://example.com/tour" }]]);
+  assert.equal(withVideo.events.find((e) => e.type === "message.refused")?.param, "content.media");
+});
+
 test("one send call reaches the provider's sendMessage with everything; reactions, typing and reads go to theirs", async () => {
   const typing: boolean[] = [];
   const r = recorder({
@@ -260,6 +285,14 @@ test("contentRefusal refuses what Flow Messaging refuses, with its error type, f
   ]);
   assert.deepEqual(refusal(wa, { type: "message", text: long(1025), buttons: ["Yes", "No"] }), ["invalid_request", "content.text", "text must be 1 to 1024 characters with buttons on WhatsApp."]);
   assert.deepEqual(refusal(wa, { type: "message", text: long(1025), image: photo("a.jpg") }), ["invalid_request", "content.caption", "caption must be at most 1024 characters."]);
+  const videos = { ...wa, videos: { captionMax: 1024 } };
+  assert.deepEqual(refusal(videos, { type: "message", text: long(1025), video: photo("tour.mp4") }), ["invalid_request", "content.caption", "caption must be at most 1024 characters."]);
+  assert.deepEqual(refusal(videos, { type: "message", text: "Tour", video: photo("tour.mp4"), buttons: ["Book"] }), [
+    "invalid_request",
+    "content.media",
+    "A video goes with only its caption: send buttons, a list, a link or a photo in a message of their own.",
+  ]);
+  assert.equal(refusal(videos, { type: "message", text: "", video: { fileId: "file_7" } }), null, "a video by file id, no caption");
   assert.deepEqual(refusal(wa, { type: "message", text: "" }), ["invalid_request", "content.text", "text is empty; give 1 to 4096 characters on WhatsApp."]);
   assert.deepEqual(refusal(sms({ sendMessage: async () => {} }).info, { type: "message", text: "✓".repeat(671) }), [
     "invalid_request",

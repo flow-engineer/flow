@@ -90,6 +90,9 @@ export interface ListRow {
 /** A photo by https URL, or by the provider's own id for a file it holds (Flow Messaging's file_..., WhatsApp's media id). */
 export type Photo = { url: string } | { fileId: string };
 
+/** A video by https URL, or by the provider's own id for a file it holds, as a photo is. */
+export type Video = { url: string } | { fileId: string };
+
 /**
  * A reply button: its label (the id a tap carries back is then the label), or an id and a label.
  * Ids are 1 to 64 bytes and unique within a message and across a carousel; labels may repeat.
@@ -123,6 +126,11 @@ export type Outbound =
       link?: { label: string; url: string };
       /** A photo, the text its caption (with buttons or a link, the photo heads the same message); only on channels with images (elsewhere the text goes alone). */
       image?: Photo;
+      /**
+       * A video, the text its caption (or ""), with nothing else: no buttons, list, link or photo.
+       * Only on channels with videos; elsewhere the send is refused, with why.
+       */
+      video?: Video;
       /** The channel's own params (see Channel.params), as the agent filled them in. */
       fields?: Record<string, unknown>;
       /**
@@ -305,6 +313,8 @@ export interface ChannelInfo {
   linkButton?: { labelMax: number };
   /** Photos sent by URL, with the message's text as their caption. */
   images?: { captionMax: number };
+  /** Videos sent by URL or file id, with the message's text as their caption; without it a video is refused. */
+  videos?: { captionMax: number };
   /**
    * The platform whose content rules (Flow Messaging's, CONTENT_LIMITS) every send on this channel is
    * checked against, after beforeSend and before it goes: what the platform would refuse is refused

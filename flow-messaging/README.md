@@ -150,6 +150,10 @@ adapter picks the kind each channel takes:
 - A photo (by URL, or a Flow file ID from `POST /v0/files`): a `basic` message with the photo as
   its `media` and the text as its caption; with buttons or a link, the image header of that same
   message (on Telegram, one photo with its keyboard).
+- A video (by URL, or a Flow file ID), on WhatsApp, Telegram and iMessage: a `basic` message with
+  the video as its `media` and the text as its caption. It goes alone: with buttons, a list, a link
+  or a photo it is refused, as it is on SMS. Flow checks each channel's own size and format limits
+  and refuses a video past them (`unsupported_content`), which the agent is told.
 - A carousel: on WhatsApp a `carousel`, 2 to 10 cards side by side, each a photo, up to 160
   characters and 1 or 2 reply buttons or one link, the same on every card. Telegram has none, so the
   adapter sends the carousel's text, then one message per card in order: its photo with the card's

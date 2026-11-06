@@ -60,7 +60,7 @@ import { ACT_NEXT, EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput,
 import { formatLocal, shortLocal, zoneLabel } from "./time.ts";
 import { activeCall, type QueuedBy, type TurnTrigger } from "./traces.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
-import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, DescribeVideo, Incoming, Media, Model, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe, UndeliveredDetail } from "./types.ts";
+import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, DescribeVideo, Incoming, Media, Model, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe, UndeliveredDetail, Video } from "./types.ts";
 
 export interface ConversationSettings {
   model: Model;
@@ -1579,6 +1579,7 @@ export class Conversation {
             ...(input.list ? { list: input.list } : {}),
             ...(input.link ? { link: input.link } : {}),
             ...(input.image ? { image: photoOf(input.image) } : {}),
+            ...(input.video ? { video: photoOf(input.video) } : {}),
             ...(hasFields ? { fields } : {}),
             ...preview,
           });
@@ -2183,6 +2184,7 @@ export type TranscriptEntry =
       /** As the agent sent them: fitMessage shows them as a channel can. */
       link?: { label: string; url: string };
       image?: Photo;
+      video?: Video;
       /** A carousel's cards; its text is `text`. */
       carousel?: CarouselCard[];
       /** The channel's own params the agent filled in. */
@@ -2199,7 +2201,7 @@ export type TranscriptEntry =
   | { kind: "unsend"; channel: string; messageId: string; at: number }
   | { kind: "tool"; callId: string; tool: string; input: unknown; output: string; ok: boolean; at: number };
 
-const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "carousel", "confirm", "next"]);
+const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "video", "carousel", "confirm", "next"]);
 
 /**
  * The history as the person saw it: their messages (with their ids and channels), what the agent
@@ -2252,6 +2254,7 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
           ...(args.list ? { list: args.list as never } : {}),
           ...(args.link ? { link: args.link as never } : {}),
           ...(args.image ? { image: photoOf(args.image as never) } : {}),
+          ...(args.video ? { video: photoOf(args.video as never) } : {}),
           ...(Array.isArray(args.carousel) ? { carousel: cardsOf(args.carousel as never) } : {}),
           ...(Object.keys(fields).length ? { fields } : {}),
           ...(typeof delivered.message_id === "string" ? { messageId: delivered.message_id } : {}),
@@ -2372,7 +2375,7 @@ function idDetail(receipt?: SendReceipt): { messageId?: string } {
 function outDetail(sent: OutboundMessage, templates: TemplateDefinition[]): Record<string, unknown> {
   if (sent.type === "template") return templateDetail(templates, sent);
   if (sent.type === "carousel") return { text: sent.text, carousel: sent.cards, replyTo: sent.replyTo };
-  return { text: sent.text, buttons: sent.buttons, list: sent.list, link: sent.link, image: sent.image, replyTo: sent.replyTo, ...(sent.fields ? { fields: sent.fields } : {}), ...(sent.authentication ? { authentication: true } : {}) };
+  return { text: sent.text, buttons: sent.buttons, list: sent.list, link: sent.link, image: sent.image, video: sent.video, replyTo: sent.replyTo, ...(sent.fields ? { fields: sent.fields } : {}), ...(sent.authentication ? { authentication: true } : {}) };
 }
 
 /**
