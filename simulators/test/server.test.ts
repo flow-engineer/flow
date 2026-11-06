@@ -90,6 +90,25 @@ test("a person can react to an agent message on WhatsApp, not on SMS", async () 
   }
 });
 
+test("WhatsApp shows a video the agent sends, with its caption; the web simulator refuses one, with why", async () => {
+  const { fake, server, send, lines } = await start();
+  try {
+    const video = { url: "https://example.com/tour.mp4" };
+    await send("whatsapp", "show me the flat");
+    assert.ok(fake.options.at(-1)!.channel.videos);
+    await fake.deliver!({ type: "message", text: "The walk-through", video });
+    const out = (await lines("whatsapp")).at(-1);
+    assert.ok(out?.kind === "out");
+    assert.deepEqual([out.text, out.video], ["The walk-through", video]);
+
+    await send("web", "show me the flat");
+    assert.equal(fake.options.at(-1)!.channel.videos, undefined);
+    assert.throws(() => fake.deliver!({ type: "message", text: "The walk-through", video }), /takes no videos here/);
+  } finally {
+    await server.close();
+  }
+});
+
 test("WhatsApp and web show a link button and a photo the agent sends; SMS offers neither", async () => {
   const { fake, server, send, lines } = await start();
   try {

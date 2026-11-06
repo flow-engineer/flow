@@ -251,12 +251,13 @@ offers are ever set.
 
 | Field | What it is |
 |---|---|
-| `text` | The text, or a photo's caption |
+| `text` | The text, or a photo's or video's caption |
 | `replyTo` | The id of the person's message it quotes |
 | `buttons` | Reply buttons: a label, or `{ id, label }` |
 | `list` | `{ button, rows: [{ id, title, description? }] }`: a list the person picks one row from |
 | `link` | `{ label, url }`: one button that opens a page. Never with buttons or a list |
 | `image` | `{ url }` or `{ fileId }`: a photo, the text its caption. Never with a list |
+| `video` | `{ url }` or `{ fileId }`: a video, the text its caption. Alone: never with buttons, a list, a link or an image. Only to a provider with `features: { videos: true }` |
 | `preview` | `false`: send with link previews off (a message the business started) |
 | `idempotencyKey` | Set on a send the business starts (a nudge, a scheduled text), the same in every process: a provider that takes one sends it once |
 
@@ -274,6 +275,7 @@ What a channel can show; Flow Framework offers the agent only what is set, and f
 | `lists` | `{ maxRows, titleMax, buttonMax }` |
 | `linkButton` | `{ labelMax }`: one button that opens a page |
 | `images` | `{ captionMax }`: photos, the text as caption |
+| `videos` | `{ captionMax }`: videos, the text as caption; without it a video is refused |
 | `carousels` | `{ maxCards, textMax, cardTextMax, buttons, labelMax }` |
 | `platform` | `whatsapp`, `telegram`, `imessage` or `sms`: whose content rules (`CONTENT_LIMITS`) every send is checked against |
 | `replyWindowHours` | The business may write first only this long after the person's last message |

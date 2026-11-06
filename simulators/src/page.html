@@ -937,6 +937,8 @@
     for (const a of line.attachments || []) { b.appendChild(fileEl(a)); shown++; if (a.kind === "image" && a.url) photos++; }
     if (line.image && !line.image.url) { b.appendChild(make("div", "photo missing", `🖼 Photo ${line.image.fileId}`)); shown++; }
     else if (line.image) { b.appendChild(photoEl(line.image.url, line.image.url)); shown++; photos++; }
+    if (line.video && !line.video.url) { b.appendChild(make("div", "photo missing", `🎬 Video ${line.video.fileId}`)); shown++; }
+    else if (line.video) { b.appendChild(videoEl(line.video.url)); shown++; }
     // A WhatsApp template. Declared (it has its buttons, even none): header, filled body, footer,
     // buttons, as WhatsApp shows it. Not declared: its name over the values it was sent with.
     const tpl = line.template;
@@ -1487,7 +1489,7 @@
     else if (e.type === "ack.required") { tag = "held"; cls = "ack"; text = `${e.held.join(", ")} held until they're acknowledged`; }
     else if (e.type === "model.call") { text = `model ${e.ms} ms` + (e.toolCalls.length ? ` → ${e.toolCalls.join(", ")}` : " → (nothing)"); }
     else if (e.type === "message.in") { text = `in [${e.messageId}]: ${e.text}` + (e.transcript ? ` [voice note, transcribed: ${e.transcript}]` : "") + (e.description ? ` [video, described: ${e.description}]` : ""); }
-    else if (e.type === "message.out") { text = `out: ${e.text}` + (e.buttons ? ` [${e.buttons.map((b) => (typeof b === "string" ? b : b.label)).join(" | ")}]` : "") + (e.list ? ` [list: ${e.list.rows.length} rows]` : "") + (e.link ? ` [link: ${e.link.label} → ${e.link.url}]` : "") + (e.image ? ` [image: ${e.image.url || e.image.fileId}]` : "") + (e.carousel ? ` [carousel: ${e.carousel.length} cards]` : "") + (e.fields ? ` [${Object.keys(e.fields).join(", ")}]` : ""); }
+    else if (e.type === "message.out") { text = `out: ${e.text}` + (e.buttons ? ` [${e.buttons.map((b) => (typeof b === "string" ? b : b.label)).join(" | ")}]` : "") + (e.list ? ` [list: ${e.list.rows.length} rows]` : "") + (e.link ? ` [link: ${e.link.label} → ${e.link.url}]` : "") + (e.image ? ` [image: ${e.image.url || e.image.fileId}]` : "") + (e.video ? ` [video: ${e.video.url || e.video.fileId}]` : "") + (e.carousel ? ` [carousel: ${e.carousel.length} cards]` : "") + (e.fields ? ` [${Object.keys(e.fields).join(", ")}]` : ""); }
     else if (e.type === "reaction") { text = `reacted ${e.emoji} to ${e.messageId}`; }
     else if (e.type === "message.edited") { text = `edited ${e.messageId}: ${e.text}`; }
     else if (e.type === "message.unsent") { text = `unsent ${e.messageId}`; }

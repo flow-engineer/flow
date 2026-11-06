@@ -39,6 +39,20 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   videos (they play in the thread) and their Debug log shows the transcript or description the agent got.
 - `spec/request.schema.json` (an HTTP agent's request) takes attachments of kind `video`.
 - The model is told it is no longer shown "the photos, videos or documents" (was "photos or documents").
+- **A reply can carry a video.** `Outbound` messages take `video` (`Video`: `{ url }`, https, or
+  `{ fileId }`, the provider's own), the text its caption, alone: never with buttons, a list, a link
+  or an image. Channels that take videos say so with `ChannelInfo.videos` (`{ captionMax }`), and
+  their send tool offers `video` as it offers `image`. The `flow-messaging` adapter's WhatsApp,
+  Telegram and iMessage channels have it (caption up to 1,024) and send it as a `basic` message with
+  `media.type` `video`. Elsewhere (SMS, the web chat, a custom UI that does not declare it) a video
+  is refused before it is sent, with why (`content.media`), as is one with buttons, a list, a link or
+  a photo; the agent is told and can send a link instead. A hand-written `whatsapp()` provider gets
+  videos only with `features: { videos: true }` (and `disable: ["videos"]` turns them off), so none
+  reaches a provider that would drop it. `WHATSAPP` has `videos`.
+- `spec/response.schema.json` (an HTTP agent's replies) takes a message's `video`, `{ url }` or
+  `{ fileId }`; `spec/agent-endpoint.openapi.yaml`'s platform table names `videos` for WhatsApp,
+  Telegram and iMessage. The simulators show a sent video in the thread (a file id as its id) and
+  refuse one where the platform has none.
 
 ### Migration notes
 
@@ -46,7 +60,8 @@ None. A script that read only `ERROR` lines from `flow logs --json` now also get
 `DEFAULT` lines, as `ERROR`. An agent on the `flow-messaging` adapter now gets a video as an
 attachment: unless its model reads videos or it has `describeVideo`, the agent reads
 `[video: you can't watch videos]` where it read `[video]`. Code that switches over
-`Attachment["kind"]` or `Media["kind"]` meets the new `"video"`.
+`Attachment["kind"]` or `Media["kind"]` meets the new `"video"`. A hand-written `WhatsAppProvider` keeps
+working unchanged: it is offered no videos until its `features` say `videos: true`.
 
 ## 0.16.0 (2026-11-05)
 
