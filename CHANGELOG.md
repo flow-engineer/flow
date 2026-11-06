@@ -6,6 +6,14 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **`logout` ends the sign-in on the server, not only on this computer.** A `defineCli` CLI's
+  `logout` (and `flow mcp logout`) now revokes the stored refresh token, then the access token, at
+  the authorization server's advertised `revocation_endpoint` (RFC 7009) before forgetting them, so
+  the OAuth bridge's `tokens.revoke` ends the connection. Until now it only deleted the local
+  tokens, which stayed good until they expired. A refusal or an unreachable server is a warning, and
+  the person is still signed out here ("Signed out of <server> on this computer only."). A server
+  advertising no revocation endpoint is sent nothing. `beforeLogout` still runs first.
+
 - **`flow insights` counts conversations it can't read, and only when that matters.** The line
   about text Insights can't read comes from Flow's `without_text` (`{conversations, of}`, sent at 5 or
   more conversations and 20% or more of the window's, never for a health workspace): "Insights can't

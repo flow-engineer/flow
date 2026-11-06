@@ -1110,6 +1110,54 @@ test("beforeLogout runs with the stored token before the sign-in is forgotten; f
   assert.equal(isSignedIn(cli(true), server), false);
 });
 
+test("logout ends the sign-in on the server too: the refresh token, then the access token, at the advertised revocation endpoint; refused, it signs out here only", async () => {
+  const seen: Array<Record<string, string>> = [];
+  let answer = 200;
+  const revoker = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => { seen.push({ path: req.url ?? "", ...Object.fromEntries(new URLSearchParams(body)) }); res.writeHead(answer).end(); });
+  });
+  await new Promise<void>((done) => revoker.listen(0, "127.0.0.1", done));
+  const origin = `http://127.0.0.1:${(revoker.address() as { port: number }).port}`;
+  try {
+    const server = "http://127.0.0.1:9/mcp";
+    const cli = defineCli({ name: "acme", server, directory: mkdtempSync(join(testDirectory, "flow-cli-logout-revoke-")) });
+    const signedIn = async (access: string, revocation: boolean) => {
+      const provider = storedProvider(cli, server);
+      await provider.saveDiscoveryState!({ authorizationServerUrl: origin, authorizationServerMetadata: { issuer: origin, authorization_endpoint: `${origin}/auth`, token_endpoint: `${origin}/token`, response_types_supported: ["code"], ...(revocation ? { revocation_endpoint: `${origin}/token/revocation` } : {}) } });
+      await provider.saveClientInformation!({ client_id: `${origin}/.well-known/oauth-client/cli` });
+      await provider.saveTokens({ access_token: access, refresh_token: `r-${access}`, token_type: "Bearer" });
+    };
+
+    await signedIn("a-1", true);
+    const out = io();
+    assert.equal(await runCli(cli, ["logout"], out.channel), 0);
+    assert.equal(out.err, `Signed out of ${server}.\n`);
+    const client_id = `${origin}/.well-known/oauth-client/cli`;
+    assert.deepEqual(seen, [
+      { path: "/token/revocation", token: "r-a-1", token_type_hint: "refresh_token", client_id },
+      { path: "/token/revocation", token: "a-1", token_type_hint: "access_token", client_id },
+    ]);
+    assert.equal(isSignedIn(cli, server), false);
+
+    seen.length = 0;
+    answer = 503;
+    await signedIn("a-2", true);
+    const refused = io();
+    assert.equal(await runCli(cli, ["logout"], refused.channel), 0);
+    assert.equal(refused.err, `${origin} did not end the sign-in (HTTP 503).\nSigned out of ${server} on this computer only.\n`);
+    assert.equal(isSignedIn(cli, server), false, "forgotten here even when the server refused");
+
+    seen.length = 0;
+    await signedIn("a-3", false);
+    assert.equal(await runCli(cli, ["logout"], io().channel), 0);
+    assert.deepEqual(seen, [], "nothing is sent where the server advertises no revocation endpoint");
+  } finally {
+    revoker.close();
+  }
+});
+
 // Updating is the only command that runs a program on the person's computer; flow check holds its option.
 test("update says when this is the newest version, else runs the CLI file's update command and reports a failure", async () => {
   let newest = "1.2.0";
