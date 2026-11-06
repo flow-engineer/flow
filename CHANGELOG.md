@@ -8,8 +8,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 - **`flow mcp login` ends on a page in flow.engineer's look.** Flow's own CLI now sets
   `signInPage` (and `brand.name` "Flow"): the browser lands on Flow's logo and the site's card on
-  its gradient, after flow.engineer's Allow page, in light and dark. The copy and behaviour are the
-  same (the tab tries to close after 1.5 s; the code leaves the address bar), and the page names its
+  its gradient, after flow.engineer's Allow page, light only like every Flow page. The copy and
+  behaviour are the same (the tab tries to close after 1.5 s; the code leaves the address bar), and the page names its
   own style and script by hash in a CSP meta tag. Teams' CLIs keep the framework's branded page;
   nothing changes for them.
 
