@@ -61,6 +61,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   confirms the session; an unconfirmed session is charged normally. The playground and the local
   simulators are not test cloud sessions, and an `--agent-url` agent makes its model calls in its
   own process, so neither sends it.
+- **A tool can fail with a document: `ToolError`.** `throw new ToolError(code, message, { hint, next })`
+  (from `@flow-engineer/flow`). Over MCP the result is an error whose `structuredContent` is
+  `{ ok: false, error: { code, message, hint? }, next }` and whose text is the message, a `Next: ...`
+  line and that JSON. A CLI command (`defineCli`) with `--json` prints the document on stdout; with
+  or without it, stderr has the message and `Next: ...`; it exits 1. `cli.call` in a command of your
+  own rejects with the `ToolError`. A plain throw is unchanged, and in a chat the model reads a
+  `ToolError`'s message as for any throw.
 
 - **A simulated conversation reaches a Flow Messaging agent.** Flow Messaging's simulated contacts
   (`POST /v0/test/conversations`, test keys) write on the app's simulated sender, never the
@@ -100,6 +107,7 @@ attachment: unless its model reads videos or it has `describeVideo`, the agent r
 `[video: you can't watch videos]` where it read `[video]`. Code that switches over
 `Attachment["kind"]` or `Media["kind"]` meets the new `"video"`. A hand-written `WhatsAppProvider` keeps
 working unchanged: it is offered no videos until its `features` say `videos: true`.
+`ToolError` is new; tools that throw anything else behave as before.
 
 ## 0.16.0 (2026-11-05)
 
