@@ -177,6 +177,26 @@ test("taps come as choices, with the button's id (info.buttonIds says so), and r
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
+test("a simulated conversation, on the app's simulated sender, reaches its platform's channel and is answered in it; a real one on a sender the agent does not use is passed over", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_sim = { address: { telegram_user_id: "990001" } };
+  const on = (conversation: object, sender: string, simulated?: boolean) => {
+    const e = received(conversation as typeof TG, `msg_${sender}`, { kind: "basic", text: "Is it open today?" });
+    return { ...e, conversation: { ...e.conversation, sender, ...(simulated ? { simulated } : {}) } };
+  };
+  // Another of the app's real senders: not this agent's channel, so nothing reaches it.
+  await live.deliver(on({ id: "conv_other", channel: "telegram", contact: "ct_sim" }, "snd_other_tg"));
+  await live.deliver(on({ id: "conv_sim", channel: "telegram", contact: "ct_sim" }, "snd_simulated", true));
+  const first = await live.nextCall(0);
+  assert.equal(lastUser(first.request.messages), "[telegram · msg_snd_simulated] Is it open today?");
+  first.answer(respond(call("send_telegram", { text: "Yes, until 22:00." })));
+  assert.deepEqual((await flow.request(post("/v0/conversations/conv_sim/basic"))).body.text, "Yes, until 22:00.");
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+  assert.equal(flow.sends("/v0/conversations/conv_other/basic").length, 0);
+});
+
 test("a delivery reaches the agent only when Flow signed it, and only once", async (t) => {
   const flow = await fakeFlow();
   const live = await liveAgent(flow);

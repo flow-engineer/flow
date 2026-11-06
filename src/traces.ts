@@ -62,6 +62,7 @@ import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { gzipSync } from "node:zlib";
 import { log, type EventSink, type FlowEvent } from "./events.ts";
 import { setting } from "./names.ts";
 
@@ -81,6 +82,8 @@ const MAX_QUEUED = 512;
 /** Turns per request. */
 const BATCH = 64;
 const TIMEOUT_MS = 10_000;
+/** A request body past this many bytes goes gzipped (OTLP/HTTP's Content-Encoding: gzip): a batch with content is mostly text. */
+const GZIP_OVER = 64 * 1024;
 /** The cap per content attribute. */
 const MAX_TEXT = 32 * 1024;
 /** Send spans remembered by the platform's message id, for a delivery failure heard later; past this the oldest goes. */
@@ -185,13 +188,14 @@ export interface Traces {
 let warnedMetadataOnly = false;
 
 /**
- * What traces ask the agent: a channel's platform, and how the person on a channel of a
- * conversation reaches the agent when not through the channel's provider ("playground"; by
- * default on the channel of their latest message).
+ * What traces ask the agent: a channel's platform (for a channel the agent does not define, such
+ * as the test cloud's, the platform the conversation's messages came with), and how the person on a
+ * channel of a conversation reaches the agent when not through the channel's provider
+ * ("playground"; by default on the channel of their latest message).
  */
 export interface TracedAgent {
   service: string;
-  kindOf(channel: string): string | undefined;
+  kindOf(channel: string, conversationId?: string): string | undefined;
   viaOf?(conversationId: string, channel?: string): string | undefined;
 }
 
@@ -232,7 +236,7 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
     log("WARNING", `flow: ${message}; later failures of this kind are not logged`);
   }
 
-  const kindOf = (channel: string | undefined) => (channel ? CHANNEL_KIND[agent.kindOf(channel) ?? ""] ?? "other" : undefined);
+  const kindOf = (channel: string | undefined, conversationId?: string) => (channel ? CHANNEL_KIND[agent.kindOf(channel, conversationId) ?? ""] ?? "other" : undefined);
 
   function waitingFor(id: string) {
     let w = waiting.get(id);
@@ -263,7 +267,7 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
 
   function record(conversationId: string, turn: Turn, failed: boolean, at: number) {
     const attributes = [attr("gen_ai.operation.name", "invoke_agent"), attr("gen_ai.agent.name", agent.service), ...ids(conversationId)];
-    const channel = kindOf(turn.inbound.at(-1)?.channel ?? turn.replyChannel);
+    const channel = kindOf(turn.inbound.at(-1)?.channel ?? turn.replyChannel, conversationId);
     if (channel) attributes.push(attr("chinwag.channel", channel));
     const session = testRun ? setting("TEST_SESSION") : undefined;
     if (session) attributes.push(attr("chinwag.test.session", session));
@@ -301,7 +305,7 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
     const channel = String(e.channel);
     turn.replyChannel ??= channel;
     // The platform, as on the root span; the span's name has the channel's own name.
-    const kind = kindOf(channel);
+    const kind = kindOf(channel, e.conversationId);
     const attributes = kind ? [attr("chinwag.channel", kind)] : [];
     if (asWritten) attributes.push(attr("flow.message.as_written", true));
     const text = typeof e.reads === "string" ? e.reads : e.text;
@@ -322,7 +326,7 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
     const channel = typeof e.channel === "string" ? e.channel : undefined;
     const send = sends.get(messageId);
     const attributes = ids(conversationId);
-    const kind = kindOf(channel);
+    const kind = kindOf(channel, conversationId);
     if (kind) attributes.push(attr("chinwag.channel", kind));
     attributes.push(attr("flow.delivery.message_id", messageId), attr("flow.delivery.status", "failed"));
     if (typeof e.errorType === "string" && e.errorType) attributes.push(attr("flow.delivery.error_type", e.errorType));
@@ -341,18 +345,23 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
 
   function drain(): Promise<void> {
     sending ??= (async () => {
-      while (queue.length) await post(queue.splice(0, BATCH).flat());
+      while (queue.length) {
+        const turns = queue.splice(0, BATCH);
+        await post(turns.flat(), turns.length);
+      }
     })().finally(() => (sending = null));
     return sending;
   }
 
-  async function post(spans: Span[]) {
-    const body = JSON.stringify({ resourceSpans: [{ resource: { attributes: resource }, scopeSpans: [{ scope: { name: "chinwag" }, spans }] }] });
+  async function post(spans: Span[], turns: number) {
+    const json = JSON.stringify({ resourceSpans: [{ resource: { attributes: resource }, scopeSpans: [{ scope: { name: "chinwag" }, spans }] }] });
+    // A big batch (content on, long tool results) went out slower than the timeout on a slow uplink; gzipped it is a few times smaller.
+    const gzip = Buffer.byteLength(json) > GZIP_OVER;
     try {
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${options.key}` },
-        body,
+        headers: { "content-type": "application/json", ...(gzip ? { "content-encoding": "gzip" } : {}), authorization: `Bearer ${options.key}` },
+        body: gzip ? gzipSync(json) : json,
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
       const answer = await response.text();
@@ -361,7 +370,11 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
       if (rejected > 0) warnOnce("partial", `the traces endpoint rejected ${rejected} span(s) of a trace`);
     } catch (error) {
       const name = error instanceof Error ? error.name : "error";
-      warnOnce(`network ${name}`, `traces could not reach the traces endpoint (${name})`);
+      // Said once, with what it cost: those turns' traces are gone, and nothing else is.
+      const why = name === "TimeoutError" ? `${name}: no answer in ${TIMEOUT_MS / 1000} s` : name;
+      const lost = `${turns} ${turns === 1 ? "turn's traces were" : "turns' traces were"} not sent`;
+      const unaffected = testRun ? "the test's results do not depend on them (only those conversations are missing from flow conversations and the dashboard)" : "the agent's replies do not wait on traces";
+      warnOnce(`network ${name}`, `traces could not reach the traces endpoint (${why}); ${lost}, ${unaffected}`);
     }
   }
 

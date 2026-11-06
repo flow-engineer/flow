@@ -38,6 +38,7 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   const own = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
   assert.equal(pkg.name, "my-agent");
   assert.equal(pkg.dependencies["@flow-engineer/flow"], own.version, "pinned exactly, as the docs say for production");
+  assert.deepEqual(pkg.allowScripts, { esbuild: true, koffi: true }, "the install scripts it needs are allowed, so a fresh npm install warns about none");
   assert.equal(pkg.dependencies["@modelcontextprotocol/client"], own.peerDependencies["@modelcontextprotocol/client"], "the MCP client SDK at the version Flow Framework pins");
   // flow mcp serve and src/mcp.ts run on the MCP server SDK, a dependency of Flow Framework itself: an agent folder made on 0.15 without it still serves.
   assert.equal(own.dependencies["@modelcontextprotocol/server"], "2.3.1");

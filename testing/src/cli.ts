@@ -555,6 +555,7 @@ for (const r of summary.runs) printRun(r);
 const played = summary.runs.filter((r) => !r.rerunOf);
 const passed = played.filter((r) => runVerdict(r) === "passed").length;
 const failedRuns = played.filter((r) => runVerdict(r) === "failed").length;
+const flakyRuns = played.filter((r) => runVerdict(r) === "flaky").length;
 const credit = played.filter((r) => runOutcome(r) === "credit");
 const infra = played.filter((r) => runOutcome(r) === "infra" && !r.invalid).length;
 // Cost counts every play, second plays included: the cloud spent it.
@@ -564,17 +565,22 @@ const noModel = played.filter((r) => r.agentModels.length === 0 && r.agentUsage.
 const modelCalls = noModel ? `${noModel} ${noModel === 1 ? "run never called" : "runs never called"} the agent's model.` : "Every run called the agent's model.";
 const checkFails = played.filter((r) => runVerdict(r) === "failed" && r.checks.some((c) => !c.pass)).length;
 // Credit and infrastructure runs say nothing about the agent: each has its own count, never with the failures.
+// Every run is in one count: passed, flaky (failed, then passed when played again), failed, credit or infrastructure.
+const flakyLine = flakyRuns ? ` ${flakyRuns} flaky.` : "";
 const failedLine = failedRuns ? ` ${failedRuns} failed${checkFails && checkFails < failedRuns ? ` (${checkFails} on a check)` : ""}.` : "";
 const creditLine = credit.length ? ` ${credit.length} stopped for credit (not the agent's fault, not counted as failed).` : "";
 const infraLine = infra ? ` ${infra} hit an infrastructure error (the cloud could not play or judge ${infra === 1 ? "it" : "them"}; not counted as failed).` : "";
 const tokens = (n: number) => n.toLocaleString("en-US");
-say(`\n${passed} of ${played.length} runs passed.${failedLine}${creditLine}${infraLine} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
+say(`\n${passed} of ${played.length} runs passed.${flakyLine}${failedLine}${creditLine}${infraLine} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
 const rate = passRate(mergedRuns(summary.runs), values.strict);
 if (rate.tenths !== null) say(rateSummary(rate));
 if (credit.length) say(`Credit: ${creditReason(credit[0]!)}`);
+// Each channel counted as the pass rate is: flaky runs as passed (as failed with --strict), credit and infrastructure runs apart.
 for (const channel of [...new Set(played.map((r) => r.channel))]) {
-  const runs = played.filter((r) => r.channel === channel);
-  say(`  ${channel}: ${runs.filter((r) => runVerdict(r) === "passed").length} of ${runs.length} passed`);
+  const runs = mergedRuns(summary.runs).filter((m) => m.channel === channel);
+  const r = passRate(runs, values.strict);
+  const apart = runs.filter((m) => m.verdict !== "passed" && m.verdict !== "failed" && m.verdict !== "flaky").length;
+  say(`  ${channel}: ${r.passed} of ${r.counted} counted runs passed${r.flaky ? ` (${r.flaky} flaky)` : ""}${apart ? `; ${apart} not counted` : ""}`);
 }
 // With --runs above 1 (or a run played again), each scenario's pass rate: credit and infrastructure runs are not counted.
 const rates = scenarioRates(mergedRuns(summary.runs).map((m) => ({ ...m, scenario: m.id })));
