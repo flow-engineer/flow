@@ -5,7 +5,7 @@
 
 import { emitKeypressEvents } from "node:readline";
 import { colorsAt, painter, type Paint } from "./colors.ts";
-import { brandOf, OLD_AUTH, signInCommand, signInWords, updatesItself, type CliConfig } from "./commands.ts";
+import { brandOf, OLD_AUTH, serverEnvOf, signInCommand, signInWords, updatesItself, type CliConfig } from "./commands.ts";
 import type { CliIO } from "./run.ts";
 
 /** Claude Code, Cursor and Codex mark their commands' environment; their terminal is not a person's. */
@@ -49,7 +49,7 @@ export function banner(name: string, columns = 80): string | undefined {
 export interface WelcomeState {
   server?: string;
   /** "env" when a token variable or --token is used, "login" for a stored sign-in, null for none. */
-  signedIn: "env" | "login" | null;
+  signedIn: "env" | "login" | "local" | null;
   tokenEnv: string;
 }
 
@@ -76,7 +76,8 @@ export function welcomeScreen(config: CliConfig, state: WelcomeState, io: CliIO,
 }
 
 function signInLine(config: CliConfig, state: WelcomeState, paint: Paint): string {
-  if (!state.server) return `  ${paint("warning", "○")} No server: pass --server <url> or set ${config.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_SERVER.`;
+  if (!state.server) return `  ${paint("warning", "○")} No server: pass --server <url> or set ${serverEnvOf(config)}.`;
+  if (state.signedIn === "local") return `  ${paint("success", "●")} Using ${state.server}`;
   if (state.signedIn === "env") return `  ${paint("success", "●")} Signed in with ${state.tokenEnv}`;
   if (state.signedIn === "login") return `  ${paint("success", "●")} Signed in to ${state.server}`;
   return `  ${paint("warning", "○")} Not signed in. ${paint("muted", `Run ${signInCommand(config)} to sign in.`)}`;

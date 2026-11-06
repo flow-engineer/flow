@@ -9,6 +9,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Command as StricliCommand, CommandContext } from "@stricli/core";
 import { FEEDBACK_NUDGE } from "../../src/skills.ts";
+import type { McpServerHandle } from "../../mcp/src/server.ts";
 
 export interface ToolCommand {
   /** The tool this command calls. */
@@ -79,8 +80,14 @@ export interface CliConfig {
   name: string;
   /** The CLI client version sent to the server (default "1"). */
   version?: string;
-  /** The organization's MCP endpoint. Else `--server` or <NAME>_SERVER. */
-  server?: string;
+  /**
+   * The organization's MCP endpoint. Else `--server` or <NAME>_SERVER. Or an mcpServer handle in
+   * this process: the CLI calls its tools with no network and no sign-in (as the client kind "cli"),
+   * unless --server or <NAME>_SERVER names a URL.
+   */
+  server?: string | McpServerHandle;
+  /** The variable a server's URL is read from (default <NAME>_SERVER). */
+  serverEnv?: string;
   /**
    * The MCP server a CLI packed for an environment uses (`flow cli pack --server production`, and
    * flow deploy), in place of the hosted agent's address: an https URL such as
@@ -725,6 +732,10 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     for (const e of c.config && !isCustom(c.config) ? (c.config.examples ?? []) : []) lines.push("", "```bash", e, "```");
   }
   return lines.join("\n") + "\n";
+}
+
+export function serverEnvOf(config: CliConfig): string {
+  return config.serverEnv ?? `${config.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_SERVER`;
 }
 
 export function tokenEnvOf(config: CliConfig): string {

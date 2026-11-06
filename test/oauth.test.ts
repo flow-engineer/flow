@@ -233,7 +233,8 @@ test("a tool kept to the CLI is listed and called only for the CLI's own sign-in
   const mcp = mcpServer({ name: "acme", version: "1", tools: [whoami, lookup, reveal], feedback: false, auth: bridge.auth });
   handle = (req, res) => void mcp.node(req, res);
   assert.deepEqual(mcp.descriptors.map((d) => d.name), ["whoami", "search_tools", "execute_tool"]);
-  assert.throws(() => mcpServer({ name: "acme", version: "1", tools: [reveal] }), /api_keys_reveal is kept to some clients \(mcp.clients\), which needs auth/);
+  // Without auth no host is told apart: such a tool reaches only the CLI in this process (defineCli({ server: handle })).
+  assert.deepEqual(mcpServer({ name: "acme", version: "1", tools: [reveal], feedback: false }).descriptors, []);
   const server = `${origin}/mcp`;
 
   const document = await (await fetch(`${origin}/.well-known/oauth-client/cli`)).json();

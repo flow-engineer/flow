@@ -14,7 +14,7 @@ import { CURSOR_MARKER, TUI, visibleWidth, type Terminal } from "@mariozechner/p
 import { after, test } from "node:test";
 import { z } from "zod";
 import { buildCommand } from "@stricli/core";
-import { cliProblems, command, commandTable, defineCli, runCli, skillFile, type CliConfig, type CliIO } from "../cli/src/index.ts";
+import { cliProblems, command, commandTable, connectCli, defineCli, runCli, skillFile, type CliConfig, type CliIO } from "../cli/src/index.ts";
 import { isSignedIn, signOut, storedProvider } from "../cli/src/auth.ts";
 import { palette } from "../cli/src/colors.ts";
 import { feedbackUsage } from "../cli/src/commands.ts";
@@ -125,6 +125,32 @@ test("a ToolError is a failure document: MCP's structured content and text, the 
   assert.equal(await runCli(acme(server), ["get-refund", "--order-id", "BL-1"], words.channel), 1);
   assert.equal(words.out, "");
   assert.equal(words.err, "No refund for BL-1.\nNext: acme order list\n");
+});
+
+test("over a handle in this process the CLI needs no network or sign-in, sees the tools kept to the CLI, and says its command to the tool; --server and connectCli switch to a URL", async () => {
+  const commands: Array<string | undefined> = [];
+  const reveal = tool({ name: "reveal_code", description: "A code.", input: z.object({}), signIn: "none", hints: { readOnly: true }, mcp: { clients: ["cli"] },
+    run: (_i, context) => (commands.push(context.cli?.command), { code: "7" }) });
+  const handle = mcpServer({ name: "acme", version: "1", tools: [listOrders, reveal], feedback: false });
+  assert.deepEqual(handle.descriptors.map((d) => d.name), ["list_orders"], "no host sees reveal_code");
+  const cli = defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-local-")), server: handle });
+  const listed = io();
+  assert.equal(await runCli(cli, ["reveal-code", "--json"], listed.channel), 0, listed.err);
+  assert.deepEqual(JSON.parse(listed.out), { code: "7" });
+  assert.deepEqual(commands, ["reveal-code"]);
+  const help = io();
+  assert.equal(await runCli(cli, ["--help"], help.channel), 0);
+  assert.match(help.out, /Server: this process/);
+  const connection = await connectCli(cli, { env: {} });
+  assert.deepEqual(await connection.call("list_orders", { status: "making" }, { command: "orders mine" }), { orders: [orders[1]] });
+  await connection.close();
+  // A URL named by --server (or ACME_SERVER) wins over the handle.
+  const remote = await serve({ tools: [listOrders] });
+  const named = io();
+  assert.equal(await runCli(cli, ["list-orders", "--server", remote, "--json"], named.channel), 0, named.err);
+  assert.equal(JSON.parse(named.out).orders.length, 2);
+  const byEnv = await connectCli(cli, { env: { ACME_SERVER: "http://127.0.0.1:9/mcp" } }).catch((error: Error & { code?: number }) => error);
+  assert.equal((byEnv as { code?: number }).code, 5);
 });
 
 test("commands include MCP-deferred tools: positionals, flags, --json and --fields", async () => {
@@ -992,7 +1018,7 @@ test("the sign-in commands are where signIn puts them, beside the team's own, an
 test("the old auth words keep working for a release, hidden from help, saying what replaces them", async () => {
   const directory = mkdtempSync(join(testDirectory, "flow-cli-old-auth-"));
   const cli = defineCli({ name: "acme", server: "http://127.0.0.1:9/mcp", directory });
-  await storedProvider(cli, cli.server!).saveTokens({ access_token: "kept", token_type: "Bearer" });
+  await storedProvider(cli, cli.server as string).saveTokens({ access_token: "kept", token_type: "Bearer" });
   const status = io();
   assert.equal(await runCli(cli, ["auth", "status", "--json"], status.channel), 0);
   assert.deepEqual(JSON.parse(status.out), { server: cli.server, signedIn: true, source: "login", renew: false });

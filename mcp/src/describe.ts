@@ -25,6 +25,12 @@ export interface Scopes {
 /** Explicit full discovery for the CLI and MCP imports; deferral is context management, not access control. */
 export const FULL_CATALOG_META = "flow.engineer/full-tool-catalog";
 
+/**
+ * Where a handle (mcpServer's) takes the CLI's calls in the same process: { path, fetch }, served
+ * as the client kind "cli" with no sign-in. Not part of the API; the CLI layer reads it.
+ */
+export const IN_PROCESS = Symbol.for("flow.engineer/mcp-in-process");
+
 const NAME = /^[A-Za-z0-9_.-]{1,128}$/;
 /** The client kinds Tool.mcp.clients may name. */
 export const MCP_CLIENT_KINDS: readonly McpClientKind[] = ["cli"];
