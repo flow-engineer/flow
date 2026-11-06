@@ -138,8 +138,9 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
     }
   }
 
+  // Without src/cli.ts another CLI may still sign in as the server's CLI client (Flow MCP's is `flow <command> --server`).
   if (!existsSync(cliFile)) {
-    for (const t of tools) if (t.mcp?.clients?.includes("cli")) warnings.push(`tool ${t.name}: kept to the CLI (mcp.clients), but there is no CLI file (src/cli.ts), so no client sees it`);
+    for (const t of tools) if (t.mcp?.clients?.includes("cli")) warnings.push(`tool ${t.name}: kept to the CLI (mcp.clients): only a CLI signed in as this server's CLI client sees it, and this project has no CLI file (src/cli.ts); without another CLI that signs in so (such as \`npx @flow-engineer/flow <command> --server <url>\`), no client sees it`);
   }
 
   if (json) console.log(JSON.stringify({ ok: errors.length === 0, errors, warnings }));
