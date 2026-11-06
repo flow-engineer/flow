@@ -1,9 +1,8 @@
 // `flow inspect <url> <command>`: any MCP server driven from a shell as a host drives it, with the
 // raw results, so the coding agent building an agent tests its tools and sign-in in the chat it is
 // in (a server added to a coding agent only loads in a new chat). It is for testing: it is not the
-// agent's CLI, and needs no CLI file. It needs only @modelcontextprotocol/client, an optional peer;
-// an agent without it runs `npx -y -p @flow-engineer/flow -p @modelcontextprotocol/client@<version>
-// flow inspect ...`, which installs nothing into the agent. Sign-in is the CLI's own (cli/src/auth.ts):
+// agent's CLI, and needs no CLI file. It runs on @modelcontextprotocol/client, a dependency of Flow
+// Framework; `npx -y @flow-engineer/flow inspect ...` installs nothing into the agent. Sign-in is the CLI's own (cli/src/auth.ts):
 // the host's OAuth, tokens kept per server in ~/.config/flow-inspect/auth.json.
 
 import { parseArgs } from "node:util";

@@ -183,8 +183,7 @@ secrets.
 
 Everything runs on localhost. Claude and ChatGPT cannot reach localhost; `flow inspect` runs the
 same OAuth they do (discovery, registration, PKCE, refresh), so it stands in for them. Below,
-`inspect` is `npx -y -p @flow-engineer/flow -p @modelcontextprotocol/client@2.3.1 flow inspect
-http://127.0.0.1:<port>/mcp` (the `flow-framework` skill says more). Run each step
+`inspect` is `npx -y @flow-engineer/flow inspect http://127.0.0.1:<port>/mcp` (the `flow-framework` skill says more). Run each step
 and compare; stop at the first that differs and fix it before going on.
 
 1. **Run the brand's app and the agent locally**, the bridge with `issuer: "http://127.0.0.1:<port>"`,

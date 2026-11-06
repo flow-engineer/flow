@@ -103,9 +103,25 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   [test-case]`, `insights [show]`, `templates`, `logs [--follow]` and `deploy status`: they read over
   a hosted Flow MCP as the person signed in with **`flow mcp login --server <url>`** (`flow mcp
   logout` forgets it; `FLOW_MCP_TOKEN` for CI), through its tools, and print what they print today.
-  `--cloud`, `--dotenv` and `--dir` do not go with it. Without `--server` nothing changes: they read
-  with the folder's keys as before and load no MCP SDK.
+  `--cloud`, `--dotenv` and `--dir` do not go with it. Without `--server` they read with the
+  folder's keys through the same tools, in the same process (`connectCli` over the server's handle),
+  as any CLI built on the framework does: `--json`, help, the lines, failure documents and exit
+  statuses are byte for byte what 0.16.0 printed, and `--json` prints the same with `--server`. The
+  other commands still load no MCP SDK.
 - `Tool.format(output, input)` also gets the input the tool was called with.
+- **`jsonText(text, data?)`** (`@flow-engineer/flow`): a tool returns the JSON an API answered,
+  kept as its text: `return jsonText(await res.text())`. `data` (by default the text parsed) is the
+  structured content checked against `output`; the text is what a host reads as the result's text
+  (unless the tool has `format`), what a model reads in a chat, and what the CLI prints with
+  `--json`, byte for byte, over a handle or a URL (`--fields` picks from the data). `jsonTextOf(value)`
+  is the text a value carries, also on what `cli.call` and `connectCli`'s `call` resolve with.
+  The result's `_meta["flow.engineer/json-text"]` is `true` when its text is that JSON, or, beside a
+  `format`ted text, the JSON itself for a CLI caller only. Flow's read tools return Flow's answers so,
+  which is how `flow <command> --json` prints Flow's own text through them.
+- **`@modelcontextprotocol/client` (2.3.1) and `@stricli/core` (1.3.0) are dependencies**, no longer
+  optional peers: the read commands run on them, and `flow inspect`, `flow cli` and `flow mcp
+  login` need nothing more installed (`npx -y @flow-engineer/flow inspect <url> tools`). `flow new`
+  no longer writes them into a new agent's package.json, as for `@modelcontextprotocol/server`.
 
 - **A simulated conversation reaches a Flow Messaging agent.** Flow Messaging's simulated contacts
   (`POST /v0/test/conversations`, test keys) write on the app's simulated sender, never the
@@ -155,6 +171,11 @@ hosted Flow MCP, so leave it unset to read with the folder's keys.
 An MCP server alone that `flow check` should check exports its tools from `src/mcp.ts`
 (`export { tools }`); its `mcp(agent, host)` factory gets `undefined` for `agent` on Flow's hosting,
 as `mcpServer({ agent: undefined })` already takes it (no `/agent/terminal`).
+Installing Flow Framework now also installs `@modelcontextprotocol/client` and `@stricli/core` and
+their dependencies: a fresh install of the package grows from 6 to 18 packages and from 41.2 MB to
+49.0 MB of files (55 MB to 63 MB on disk); the package itself stays 760 KB packed. An agent that lists
+them in its own package.json can keep them at the same versions or drop them; another version there
+installs a second copy, and its own imports use that one.
 
 ## 0.16.0 (2026-11-05)
 

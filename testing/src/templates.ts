@@ -8,7 +8,7 @@
 // { ok: false, error, next } when it did not work. Exit status: 0 printed, 1 not read, 2 a wrong flag.
 
 import type { TemplateDefinition } from "../../src/types.ts";
-import { access, answerOf, Failed, failed, get, hostedOf, parse, table, usageFailed, USAGE_EXIT, withHosted } from "./conversations.ts";
+import { access, answerOf, Failed, failed, get, hostedOf, parse, table, usageFailed, USAGE_EXIT, withReads, folderAccess } from "./conversations.ts";
 import { KEYS_HELP, type FoundKey } from "./cloud-call.ts";
 import { OBSERVE_URL } from "../../src/traces.ts";
 
@@ -57,7 +57,6 @@ interface Listed {
   send_order?: string;
 }
 
-const NOT_SERVED = "the dashboard does not serve templates yet";
 
 /** Runs `flow templates ...`; resolves to the exit status. */
 export async function templatesCli(args: string[]): Promise<number> {
@@ -76,12 +75,11 @@ export async function templatesCli(args: string[]): Promise<number> {
   let text: string;
   let body: Record<string, unknown>;
   try {
-    // Over a hosted Flow MCP, list_templates says a dashboard without templates in these words itself.
-    ({ text, body } = await withHosted(hosted, "templates", async (read) => (read ? answerOf(await read("list_templates", { status: "all" })) : await get(name, where!, "/v1/agent/templates"))));
+    // list_templates says a dashboard without templates in flow templates' own words.
+    ({ text, body } = await withReads(hosted, "templates", folderAccess(name, values, where), async (read) => answerOf(await read("list_templates", { status: "all" }))));
   } catch (error) {
     if (!(error instanceof Failed)) throw error;
-    const notServed = where !== undefined && error.status === 404;
-    return failed(json, notServed ? Object.assign(new Failed(`${name}: ${NOT_SERVED} (${where.cloud} answered 404).`, "not_available"), { status: 404 }) : error);
+    return failed(json, error);
   }
   if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;
   const listed = (body.templates as Listed[] | undefined) ?? [];

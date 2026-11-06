@@ -221,9 +221,33 @@ export function toSpec(t: Tool): ToolSpec {
 /** Set in an MCP result's _meta when its text is the tool's own `format`, not the JSON of its structured content. */
 export const FORMATTED = "chinwag/formatted";
 
+/** Set in an MCP result's _meta when a tool's output came with its JSON as text (`jsonText`): true when that text is the result's text, else the text itself. */
+export const JSON_TEXT = "flow.engineer/json-text";
+const JSON_TEXT_OF = Symbol.for("flow.engineer/json-text");
+
+/**
+ * A tool's output with its JSON as text: what a server answered, kept byte for byte. Agents and MCP
+ * hosts read that text, the CLI prints it as-is with --json, and `data` (by default the text parsed)
+ * is still the structured content checked against the tool's output schema.
+ */
+export function jsonText<T extends object = Record<string, unknown>>(text: string, data?: T): T {
+  const value = (data ?? JSON.parse(text)) as T;
+  if (!value || typeof value !== "object") throw new TypeError("jsonText needs an object or an array.");
+  Object.defineProperty(value, JSON_TEXT_OF, { value: text, enumerable: false, configurable: true });
+  return value;
+}
+
+/** The JSON text a value carries (`jsonText`), else undefined. */
+export function jsonTextOf(value: unknown): string | undefined {
+  const text = value && typeof value === "object" ? (value as { [JSON_TEXT_OF]?: unknown })[JSON_TEXT_OF] : undefined;
+  return typeof text === "string" ? text : undefined;
+}
+
 /** A tool's output as the model reads it. */
 export function render(output: unknown): string {
   if (typeof output === "string") return output;
+  const text = jsonTextOf(output);
+  if (text !== undefined) return text;
   try {
     return JSON.stringify(output ?? null);
   } catch {

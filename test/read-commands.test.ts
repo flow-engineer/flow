@@ -11,18 +11,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { mcpServer } from "../mcp/src/server.ts";
+import { flowReadTools, type FlowAgentAccess } from "../testing/src/flow-tools.ts";
 
 const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
 const FLOW_KEY = "flow_test_k1_secretvalue";
 const CI_KEY = "oci_ci_secretvalue";
 const BAD = "flow_test_bad_refusedvalue";
+const BAD_CI = "oci_bad_refusedvalue";
+const OLD = "flow_test_old_olderflowvalue";
+const OLD_CI = "oci_old_olderflowvalue";
 const LINE = (n: number, severity: string, text: string) => ({ time: `2026-11-04T09:00:0${n}Z`, severity, text });
 
 /** What the scripted cloud answers, by path: Go's escapes and an indented body kept, so --json shows it prints Flow's own text. */
 function answer(req: IncomingMessage): { status: number; text: string } {
   const url = new URL(req.url!, "http://x");
   const json = (body: unknown) => ({ status: 200, text: `${JSON.stringify(body)}\n` });
-  if (req.headers.authorization === `Bearer ${BAD}`) return { status: 401, text: '{"error":{"code":"bad_key","message":"This key is not valid."}}\n' };
+  if (req.headers.authorization === `Bearer ${BAD}` || req.headers.authorization === `Bearer ${BAD_CI}`) return { status: 401, text: '{"error":{"code":"bad_key","message":"This key is not valid."}}\n' };
+  // An older Flow, without these routes.
+  if (req.headers.authorization === `Bearer ${OLD}` || req.headers.authorization === `Bearer ${OLD_CI}`) return { status: 404, text: "404 page not found\n" };
   switch (url.pathname) {
     case "/v1/agent/conversations":
       return json({ conversations: [
@@ -73,14 +80,15 @@ interface Printed { code: number; stdout: string; stderr: string }
 function flow(args: string[], dir: string, env: Record<string, string>, cloud: string): Promise<Printed> {
   return new Promise((done) => {
     execFile(process.execPath, [cli, ...args], { cwd: dir, env: { PATH: process.env.PATH!, HOME: dir, NO_COLOR: "1", ...env } }, (error, stdout, stderr) => {
-      const plain = (s: string) => s.split(cloud).join("<cloud>").split(realpathSync(dir)).join("<dir>").split(dir).join("<dir>");
+      const plain = (s: string) => s.split(cloud).join("<cloud>").split(DOWN).join("<cloud>").split(realpathSync(dir)).join("<dir>").split(dir).join("<dir>");
       done({ code: error ? ((error as { code?: number }).code ?? 1) : 0, stdout: plain(stdout), stderr: plain(stderr) });
     });
   });
 }
 
 /** Every read command, its --json and its help, plus the ways one fails: by name, its arguments and the folder it runs in. */
-const CASES: Record<string, { args: string[]; folder?: "keys" | "none" | "bad"; hosted?: boolean }> = {
+type Folder = "keys" | "none" | "bad" | "badci" | "old" | "down";
+const CASES: Record<string, { args: string[]; folder?: Folder; hosted?: boolean }> = {
   "conversations": { args: ["conversations"], hosted: true },
   "conversations --json": { args: ["conversations", "--json"], hosted: true },
   "conversations --contact --limit": { args: ["conversations", "--contact", "9e35", "--limit", "150", "--grade", "wrong", "--json"], hosted: true },
@@ -119,15 +127,28 @@ const CASES: Record<string, { args: string[]; folder?: "keys" | "none" | "bad"; 
   "refused: issues --json": { args: ["issues", "--json"], folder: "bad" },
   "refused: templates": { args: ["templates"], folder: "bad" },
   "refused: conversations show": { args: ["conversations", "show", "cnv_1"], folder: "bad" },
+  "refused: deploy status --json": { args: ["deploy", "status", "--json"], folder: "badci" },
+  "refused: logs": { args: ["logs"], folder: "badci" },
+  "older flow: templates": { args: ["templates"], folder: "old" },
+  "older flow: insights --json": { args: ["insights", "--json"], folder: "old" },
+  "older flow: issues": { args: ["issues"], folder: "old" },
+  "older flow: deploy status": { args: ["deploy", "status"], folder: "old" },
+  "older flow: logs --json": { args: ["logs", "--json"], folder: "old" },
+  "cloud down: conversations --json": { args: ["conversations", "--json"], folder: "down" },
+  "cloud down: deploy status": { args: ["deploy", "status"], folder: "down" },
 };
 
-/** An agent's folder whose .env points at the cloud, with the keys, none, or a refused Flow key. */
-function folder(cloud: string, kind: "keys" | "none" | "bad"): string {
+/** An agent's folder whose .env points at the cloud (or at one that is down), with the keys, none, refused ones, or an older Flow's. */
+function folder(cloud: string, kind: Folder): string {
   const dir = mkdtempSync(join(tmpdir(), "flow-read-"));
-  const keys = kind === "keys" ? `FLOW_KEY=${FLOW_KEY}\nFLOW_FRAMEWORK_CLOUD_KEY=${CI_KEY}\n` : kind === "bad" ? `FLOW_KEY=${BAD}\nFLOW_FRAMEWORK_CLOUD_KEY=${CI_KEY}\n` : "";
-  writeFileSync(join(dir, ".env"), `${keys}FLOW_FRAMEWORK_CLOUD=${cloud}\n`);
+  const [flowKey, ciKey] = { keys: [FLOW_KEY, CI_KEY], none: [], bad: [BAD, CI_KEY], badci: [FLOW_KEY, BAD_CI], old: [OLD, OLD_CI], down: [FLOW_KEY, CI_KEY] }[kind];
+  const keys = flowKey ? `FLOW_KEY=${flowKey}\nFLOW_FRAMEWORK_CLOUD_KEY=${ciKey}\n` : "";
+  writeFileSync(join(dir, ".env"), `${keys}FLOW_FRAMEWORK_CLOUD=${kind === "down" ? DOWN : cloud}\n`);
   return dir;
 }
+
+/** A cloud no one answers at (a port nothing listens on), said as <cloud> too. */
+const DOWN = "http://127.0.0.1:9";
 
 /** Runs the cases a few at a time; each one's output by name. */
 async function runAll(run: (name: string) => Promise<Printed>, names: string[]): Promise<Record<string, Printed>> {
@@ -145,7 +166,7 @@ const GOLDEN = JSON.parse(readFileSync(fileURLToPath(new URL("./read-commands.go
 test("each read command prints what 0.16.0 printed against the same cloud: stdout, stderr and exit status, byte for byte", { timeout: 240_000 }, async () => {
   const cloud = await scriptedCloud();
   try {
-    const dirs = { keys: folder(cloud.url, "keys"), none: folder(cloud.url, "none"), bad: folder(cloud.url, "bad") };
+    const dirs = Object.fromEntries((["keys", "none", "bad", "badci", "old", "down"] as const).map((k) => [k, folder(cloud.url, k)])) as Record<Folder, string>;
     const printed = await runAll(async (name) => {
       const c = CASES[name]!;
       const dir = dirs[c.folder ?? "keys"];
@@ -153,6 +174,34 @@ test("each read command prints what 0.16.0 printed against the same cloud: stdou
     }, Object.keys(CASES));
     for (const name of Object.keys(CASES)) assert.deepEqual(printed[name], GOLDEN[name], name);
   } finally {
+    await cloud.close();
+  }
+});
+
+/** One person with one agent, whose key the hosted server's credentials give: the folder's own Flow key, on the same cloud. */
+const ACCESS: FlowAgentAccess = {
+  agents: async () => [{ flow_agent_id: "agt_1", name: "shop", workspace_id: "acc_1" }],
+  key: async () => ({ value: FLOW_KEY, flow_agent_id: "agt_1", name: "shop" }),
+};
+
+test("with --server, each read command prints what it prints locally for the same data: a hosted Flow MCP's tools carry the cloud's own JSON text", { timeout: 240_000 }, async () => {
+  const cloud = await scriptedCloud();
+  const { tools, instructions } = flowReadTools({ hosted: { cloud: cloud.url } });
+  const handle = mcpServer({
+    name: "flow", version: "1", tools, instructions, feedback: false, traces: false,
+    auth: { issuer: "https://issuer.invalid", verify: (token) => (token === "person" ? { key: "person-1", client: { id: "flow-cli", kind: "cli" }, credentials: (name) => (name === "flow" ? ACCESS : undefined) } : null) },
+  });
+  const server = createServer((req, res) => void handle.node(req, res));
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
+  try {
+    const dir = folder(cloud.url, "none");
+    const names = Object.keys(CASES).filter((n) => CASES[n]!.hosted);
+    const printed = await runAll((name) => flow(CASES[name]!.args, dir, { FLOW_MCP_SERVER: url, FLOW_MCP_TOKEN: "person" }, cloud.url), names);
+    for (const name of names) assert.deepEqual(printed[name], GOLDEN[name], name);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((done) => server.close(done));
     await cloud.close();
   }
 });

@@ -52,7 +52,7 @@ async function servedTools(dir: string, errors: string[]): Promise<Set<string> |
     headers.set("host", "127.0.0.1");
     return serve(new Request(url, { ...init, headers }));
   };
-  // An optional peer dependency, as the CLI's own (cli/src/run.ts): imported only here.
+  // The MCP client SDK, imported only here so the other commands never load it.
   let sdk: typeof import("@modelcontextprotocol/client");
   try {
     sdk = await import("@modelcontextprotocol/client");

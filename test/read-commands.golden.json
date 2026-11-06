@@ -188,5 +188,50 @@
     "code": 1,
     "stdout": "",
     "stderr": "flow conversations: This key is not valid. (bad_key, 401)\nflow conversations reads with the agent's Flow key, FLOW_KEY (flow_test_... reads staging; flow_live_... reads staging and production).\nIt found FLOW_KEY=flow_test_…alue in .env in this folder.\nGet the right one: npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).\n"
+  },
+  "refused: deploy status --json": {
+    "code": 1,
+    "stdout": "{\"ok\":false,\"error\":{\"code\":\"bad_key\",\"message\":\"Refused: This key is not valid.\\nflow deploy reads with the agent's CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_..., staging and production for deploys, staging for tests).\\nIt found FLOW_FRAMEWORK_CLOUD_KEY=oci_…alue in <dir>/.env.\\nGet the right one: npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).\"},\"next\":null}\n",
+    "stderr": "Refused: This key is not valid.\nflow deploy reads with the agent's CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_..., staging and production for deploys, staging for tests).\nIt found FLOW_FRAMEWORK_CLOUD_KEY=oci_…alue in <dir>/.env.\nGet the right one: npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).\n"
+  },
+  "refused: logs": {
+    "code": 1,
+    "stdout": "",
+    "stderr": "Refused: This key is not valid.\nflow logs reads with the agent's CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_..., staging and production for deploys, staging for tests).\nIt found FLOW_FRAMEWORK_CLOUD_KEY=oci_…alue in <dir>/.env.\nGet the right one: npx @flow-engineer/flow setup writes both into .env (FLOW_KEY as a flow_test_ key), or copy them from your agent's Developers page on the dashboard (https://flow.engineer/dashboard).\n"
+  },
+  "older flow: templates": {
+    "code": 1,
+    "stdout": "",
+    "stderr": "flow templates: the dashboard does not serve templates yet (<cloud> answered 404).\n"
+  },
+  "older flow: insights --json": {
+    "code": 1,
+    "stdout": "{\"ok\":false,\"error\":{\"code\":\"not_found\",\"message\":\"flow insights: Insights is not open to this workspace yet.\"},\"next\":null}\n",
+    "stderr": "flow insights: Insights is not open to this workspace yet.\n"
+  },
+  "older flow: issues": {
+    "code": 1,
+    "stdout": "",
+    "stderr": "flow issues: <cloud> answered 404: 404 page not found (this Flow may not have this command's route yet).\n"
+  },
+  "older flow: deploy status": {
+    "code": 0,
+    "stdout": "staging: no deploy known (this Flow lists deploys to a dashboard member only, and this folder has made none: the dashboard shows them).\nproduction: no deploy known (this Flow lists deploys to a dashboard member only, and this folder has made none: the dashboard shows them).\nNext: npx @flow-engineer/flow deploy\n",
+    "stderr": ""
+  },
+  "older flow: logs --json": {
+    "code": 1,
+    "stdout": "{\"ok\":false,\"error\":{\"code\":\"not_available\",\"message\":\"Logs are not available on this Flow yet: its cloud has no logs route for a CI key. The dashboard shows the agent's deploys; npx @flow-engineer/flow deploy status shows what is live.\"},\"next\":null}\n",
+    "stderr": "Logs are not available on this Flow yet: its cloud has no logs route for a CI key. The dashboard shows the agent's deploys; npx @flow-engineer/flow deploy status shows what is live.\n"
+  },
+  "cloud down: conversations --json": {
+    "code": 1,
+    "stdout": "{\"ok\":false,\"error\":{\"code\":\"network\",\"message\":\"flow conversations: could not reach <cloud>/v1/agent/conversations: network error EFETCH (bad port).\"},\"next\":null}\n",
+    "stderr": "GET <cloud>/v1/agent/conversations: network error EFETCH; trying once more.\nflow conversations: could not reach <cloud>/v1/agent/conversations: network error EFETCH (bad port).\n"
+  },
+  "cloud down: deploy status": {
+    "code": 1,
+    "stdout": "",
+    "stderr": "GET <cloud>/v1/hosting/deploys: network error EFETCH; trying once more.\nCould not reach the cloud: could not reach <cloud>/v1/hosting/deploys: network error EFETCH (bad port).\n"
   }
 }

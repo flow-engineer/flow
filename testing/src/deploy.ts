@@ -38,7 +38,8 @@ import { Writable } from "node:stream";
 import { RUN } from "../../src/names.ts";
 import { fixedServer, packCli, PackError, type PackedCli } from "./cli-pack.ts";
 import { agentVersion } from "../../src/traces.ts";
-import { Failed, hostedOf, withHosted, type HostedRead } from "./conversations.ts";
+import { Failed, hostedOf, withReads, type HostedRead } from "./conversations.ts";
+import type { Reads } from "./flow-tools.ts";
 import { CLOUDS, cloudCall, failureDocument, keyHelp, keyRefused, KEYS_HELP, NetworkError, type FoundKey, type Waits } from "./cloud-call.ts";
 const DEFAULT_CLOUD = CLOUDS.us;
 
@@ -328,15 +329,17 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
   const hosted = hostedOf(values, env);
   if (typeof hosted === "string") return fail("usage", `${hosted}\n\n${usage}`, 2);
   if (hosted && ((command !== "logs" && command !== "status") || values.dir !== undefined)) return fail("usage", `--server goes with flow logs and flow deploy status, and reads no folder (no --dir).\n\n${usage}`, 2);
+  // flow logs and flow deploy status read through Flow's read tools: hosted, or over this folder's CI key.
+  const reads = (ctx: Ctx, local: () => Reads) => withReads(hosted, top === "logs" ? "logs" : "deploy status", local, (read) => {
+    Object.assign(ctx, overServer(read));
+    if (command === "status") return status(ctx, given ? [given] : ["staging", "production"]);
+    if (args[0] !== undefined) throw new Usage(`flow logs takes no arguments.\n\n${usage}`);
+    return logs(ctx, environment, { since: values.since ?? "1h", until: values.until, severity: values.severity, grep: values.grep, limit: values.limit }, Boolean(values.follow));
+  });
   if (hosted) {
     const ctx: Ctx = { api: async () => { throw new Error("this command does not read the cloud over --server"); }, say, json, dir, pollMs: options.pollMs ?? 3000, maxPolls: options.maxPolls, now: options.now ?? Date.now, keyId: "", env };
     try {
-      return await withHosted(hosted, top === "logs" ? "logs" : "deploy status", (read) => {
-        Object.assign(ctx, overServer(read!));
-        if (command === "status") return status(ctx, given ? [given] : ["staging", "production"]);
-        if (args[0] !== undefined) throw new Usage(`flow logs takes no arguments.\n\n${usage}`);
-        return logs(ctx, environment, { since: values.since ?? "1h", until: values.until, severity: values.severity, grep: values.grep, limit: values.limit }, Boolean(values.follow));
-      });
+      return await reads(ctx, () => { throw new Error("a hosted read has no folder"); });
     } catch (error) {
       if (error instanceof Usage) return fail("usage", error.message, 2);
       if (error instanceof Failed) return fail(error.code, error.message, 1, error.next);
@@ -352,11 +355,11 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
     for (const flag of ["no-secrets", "no-cli"] as const) if (values[flag] && command !== undefined && command !== "promote") throw new Usage(`--${flag} goes with flow deploy and deploy promote\n\n${usage}`);
     if (command === "logs") {
       if (name !== undefined) throw new Usage(`flow logs takes no arguments.\n\n${usage}`);
-      return await logs(ctx, environment, { since: values.since ?? "1h", until: values.until, severity: values.severity, grep: values.grep, limit: values.limit }, Boolean(values.follow));
+      return await reads(ctx, () => ({ dir, flow: async () => { throw new Failed("flow logs reads with the CI key only.", "internal"); }, ci: async () => ({ api, key }) }));
     }
     if (extra !== undefined || (name !== undefined && command !== "secret" && command !== "secrets")) throw new Usage(`Too many arguments.\n\n${usage}`);
     if (command === "promote") return await promote(ctx, !values["no-secrets"], !values["no-cli"]);
-    if (command === "status") return await status(ctx, given ? [given] : ["staging", "production"]);
+    if (command === "status") return await reads(ctx, () => ({ dir, flow: async () => { throw new Failed("flow deploy status reads with the CI key only.", "internal"); }, ci: async () => ({ api, key }) }));
     if (command === "restart") return await restart(ctx, environment);
     if (command === "secret" && values.unset) return await unsetSecret(ctx, name, environment, Boolean(values.apply));
     if (command === "secret") return await secret(ctx, name, environment, options.readStdin ?? readValue, Boolean(values.apply));
@@ -368,6 +371,8 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
     return await deploy(ctx, dir, environment, values.version, !values["no-secrets"], !values["no-cli"]);
   } catch (error) {
     if (error instanceof Usage) return fail("usage", error.message, 2);
+    // A read tool's failure (flow logs, flow deploy status), as the tool said it.
+    if (error instanceof Failed) return fail(error.code, error.message, 1, error.next);
     if (error instanceof TooNew) return fail("chinwag_too_new", `Refused: ${error.message}`, 1, error.next);
     if (error instanceof NotAvailable) return fail("not_available", error.message, 1);
     if (error instanceof PackError) return fail(error.code, `The CLI did not pack, so nothing was sent: ${error.message}`, error.exit, "fix it, or add --no-cli");
