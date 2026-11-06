@@ -231,7 +231,7 @@ interface FlowMessage {
 interface FlowEvent {
   id: string;
   type: string;
-  conversation?: { id: string; type?: "direct" | "group"; channel: string; sender: string; contact: string };
+  conversation?: { id: string; type?: "direct" | "group"; channel: string; sender: string; contact: string; simulated?: boolean };
   data?: { message?: FlowMessage; message_id?: string; emoji?: string; contact?: string };
 }
 
@@ -706,7 +706,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   function routeOf(event: FlowEvent) {
     const c = event.conversation;
     if (!c) return undefined;
-    return routes.find((r) => r.sender === c.sender) ?? routes.find((r) => r.kind === c.channel && !r.sender);
+    // A simulated conversation (POST /v0/test/conversations, test keys only) is on the app's simulated
+    // sender, never the channel's own: it reaches the channel of its platform, as a real one would.
+    return routes.find((r) => r.sender === c.sender) ?? routes.find((r) => r.kind === c.channel && (!r.sender || c.simulated === true));
   }
 
   async function addressOf(route: { kind: Kind }, contactId: string): Promise<string> {

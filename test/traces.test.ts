@@ -6,6 +6,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { gunzipSync } from "node:zlib";
 import { createAgent, customUI, sqlite, tool, z, type Agent, type AgentOptions, type Channel, type NudgeInput, type Outbound } from "../src/index.ts";
 import { NUDGE_TRIGGER } from "../src/business-events/engine.ts";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -19,13 +20,15 @@ const KEY = "trace_key_do-not-log-me";
 
 /** A traces endpoint, played: each request is kept, and `next(n)` waits for the n-th. */
 async function fakeEndpoint(status = 200) {
-  const requests: Array<{ headers: IncomingMessage["headers"]; body: any; path: string }> = [];
+  const requests: Array<{ headers: IncomingMessage["headers"]; body: any; path: string; size: number }> = [];
   const waiters: Array<() => void> = [];
   const server = createServer((req, res) => {
-    let text = "";
-    req.on("data", (chunk) => (text += chunk));
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
-      requests.push({ headers: req.headers, body: JSON.parse(text), path: req.url ?? "" });
+      const raw = Buffer.concat(chunks);
+      const text = req.headers["content-encoding"] === "gzip" ? gunzipSync(raw).toString("utf8") : raw.toString("utf8");
+      requests.push({ headers: req.headers, body: JSON.parse(text), path: req.url ?? "", size: raw.length });
       res.writeHead(status, { "content-type": "application/json" }).end("{}");
       waiters.splice(0).forEach((w) => w());
     });
@@ -286,6 +289,53 @@ test("standalone calls export one trace each with host metadata and content only
 });
 
 // The first test is SMS by hand; this one takes each channel as its adapter makes it.
+test("a batch past 64 KB goes gzipped and reads the same; a small one goes as plain JSON", async () => {
+  const endpoint = await fakeEndpoint();
+  try {
+    const h = agentFor(endpoint.url, true);
+    await h.agent.message({ channel: "sms", from: "+15550100123", message: "Hi", messageId: "SM-1" });
+    (await h.nextCall(0)).answer(respond(call("send_sms", { text: "Hello" })));
+    const small = await endpoint.next(1);
+    assert.equal(small.headers["content-encoding"], undefined);
+    const long = "Can I move my check-in? ".repeat(1500);
+    await h.agent.message({ channel: "sms", from: "+15550100123", message: long, messageId: "SM-2" });
+    (await h.nextCall(1)).answer(respond(call("send_sms", { text: long.slice(0, 1500) }), call("lookup", { day: long })));
+    (await h.nextCall(2)).answer(respond(call("send_sms", { text: "Done." })));
+    const big = await endpoint.next(2);
+    assert.equal(big.headers["content-encoding"], "gzip");
+    assert.ok(big.size < 64 * 1024, `sent ${big.size} bytes`);
+    assert.match(String(tracesOf(endpoint).at(-1)!.attrs["chinwag.user_message"]), /^Can I move my check-in\?/);
+  } finally { endpoint.close(); }
+});
+
+test("a traces endpoint that cannot be reached is logged once, saying how many turns' traces were lost and that the agent is unaffected", async (t) => {
+  const warnings: string[] = [];
+  let warned!: () => void;
+  const once = new Promise<void>((resolve) => (warned = resolve));
+  t.mock.method(console, "warn", (...args: unknown[]) => void (warnings.push(args.map(String).join(" ")), warned()));
+  const gone = await fakeEndpoint();
+  gone.close();
+  const h = agentFor(gone.url, false);
+  await playTurn(h, "+15550100123");
+  await once;
+  await playTurn(h, "+15550100123", 2);
+  await h.agent.flushTraces();
+  assert.deepEqual(h.sent, ["One sec", "Done: Thursday at 10:00.", "One sec", "Done: Thursday at 10:00."]);
+  assert.equal(warnings.length, 1, warnings.join("\n"));
+  assert.match(warnings[0], /traces could not reach the traces endpoint \(\w+\); 1 turn's traces were not sent, the agent's replies do not wait on traces; later failures of this kind are not logged/);
+});
+
+test("a channel the agent does not define (the test cloud's, through receive()) is traced as the platform its messages came with, not other", async () => {
+  const endpoint = await fakeEndpoint();
+  try {
+    const h = agentFor(endpoint.url, false);
+    h.agent.receive("run-1", "Hi", () => {}, { channel: { ...SMS, platform: "telegram" }, channelName: "telegram" });
+    (await h.nextCall(0)).answer(respond(call("send_telegram", { text: "Hello" })));
+    await endpoint.next(1);
+    assert.equal(tracesOf(endpoint)[0].attrs["chinwag.channel"], "telegram");
+  } finally { endpoint.close(); }
+});
+
 test("a trace names the platform the turn was on, the same on the root span and its send spans: Flow Messaging's own, a custom UI's web, the terminal's cli", async () => {
   const fm = flowMessaging({ apiKey: "fk_test_key" });
   const terminal = terminalServer({ agent: () => { throw new Error("not called"); }, auth: { verify: async () => null } }).channel;

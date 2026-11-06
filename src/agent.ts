@@ -458,7 +458,7 @@ export class Agent {
       versionLogged = true;
       log("INFO", `flow: agent version ${version.version} (from ${version.from})`);
     }
-    this.traces = tracing ? traces({ ...tracing, version: this.version }, { service: options.id ?? "flow", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind, viaOf: (id, channel) => this.viaOf(id, channel) }) : null;
+    this.traces = tracing ? traces({ ...tracing, version: this.version }, { service: options.id ?? "flow", kindOf: (name, conversationId) => this.traceKind(name, conversationId), viaOf: (id, channel) => this.viaOf(id, channel) }) : null;
     const sinks = [...(options.events ?? []), ...(this.traces ? [this.traces.sink] : [])];
     this.runner = `${options.runner ?? process.env.FLOW_RUNNER ?? hostname()}:${randomUUID().slice(0, 8)}`;
     // Per-request activity never includes model context or hidden model text.
@@ -1009,6 +1009,17 @@ export class Agent {
   }
 
   /** How the person on a conversation's channel last wrote, when not through its provider: "playground", whose replies the deliverer sends there. */
+  /**
+   * The platform a channel's traces name: the agent's own channel's (traceChannel, else its kind);
+   * for one it does not define (receive() from the test cloud or the simulators, with the platform's
+   * ChannelInfo), the platform its messages in this conversation came with.
+   */
+  private traceKind(name: string, conversationId?: string): string | undefined {
+    const own = this.channelsByName.get(name);
+    if (own) return own.traceChannel ?? own.kind;
+    return conversationId ? this.conversations.get(conversationId)?.channelInfo(name)?.platform : undefined;
+  }
+
   private viaOf(conversationId: string, channel?: string): Via | undefined {
     const at = this.conversations.get(conversationId)?.reachedOn(channel);
     const via = at && this.via.get(viaKey(at.channel, at.address));

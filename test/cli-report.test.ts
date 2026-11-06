@@ -430,7 +430,7 @@ test("a run the cloud names an error for is errored, whatever it ended as: ERROR
   } finally { mixed.close(); }
 });
 
-test("a run that failed and passed when the cloud played it again is flaky: its own section, its second play never counted, exit 0 unless --strict; the open asks for flaky runs, and --fresh for no replays", { timeout: 20_000 }, async () => {
+test("a run that failed and passed when the cloud played it again is flaky: on the summary line, counted as passed on its channel as in the pass rate, its own section, its second play never counted, exit 0 unless --strict; the open asks for flaky runs, and --fresh for no replays", { timeout: 20_000 }, async () => {
   const dir = agentDir({ b: scenarioYaml("bee", "sms") });
   // The second play has its original's scenario, channel and number; the cloud may send it first.
   const second = runOf({ runId: "trn_3", passed: true, rerunOf: "trn_1", watch: "http://watch/trn_3" });
@@ -445,7 +445,10 @@ test("a run that failed and passed when the cloud played it again is flaky: its 
     assert.match(result.stderr, /^FLAKY {2}hello #1 \(sms\) trn_1: .*replayed 3 stored simulator answers/m);
     assert.match(result.stderr, /^ {6}played again: passed http:\/\/watch\/trn_3$/m);
     assert.doesNotMatch(result.stderr, /trn_3:/);
-    assert.match(result.stderr, /^1 of 2 runs passed\./m);
+    // Every count agrees with the pass rate: the flaky run is named on the first line and counted as passed on its channel's.
+    assert.match(result.stderr, /^1 of 2 runs passed\. 1 flaky\. /m);
+    assert.match(result.stderr, /^Pass rate 100% · Excellent: 2 of 2 counted runs passed \(1 flaky counted as passed\)\./m);
+    assert.match(result.stderr, /^ {2}sms: 2 of 2 counted runs passed \(1 flaky\)$/m);
     assert.match(result.stderr, /^1 flaky \(failed once, passed when played again\):\n {2}hello #1 \(sms\): http:\/\/watch\/trn_1 then http:\/\/watch\/trn_3$/m);
     const report = JSON.parse(result.stdout);
     assert.deepEqual([report.outcome, report.strict, report.counts], ["passed", false, { runs: 2, passed: 1, failed: 0, flaky: 1, errored: 0, notPlayed: 0, credit: 0, infra: 0 }]);
@@ -455,6 +458,7 @@ test("a run that failed and passed when the cloud played it again is flaky: its 
 
     const strict = await cliStreams(["test", "--cloud", local.url, "--json", "--strict", "--fresh"], dir);
     assert.equal(strict.code, 1, strict.out);
+    assert.match(strict.stderr, /^ {2}sms: 1 of 2 counted runs passed \(1 flaky\)$/m);
     const strictReport = JSON.parse(strict.stdout);
     assert.deepEqual([strictReport.outcome, strictReport.strict, strictReport.counts.failed, strictReport.counts.flaky], ["failed", true, 1, 1]);
     // Every open asks for flaky runs; only --fresh asks the cloud to replay nothing.

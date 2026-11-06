@@ -240,6 +240,9 @@ function makeAgent(dir: string, name: string, displayName: string, root: string)
     // Flow Framework pinned exactly, as the docs say for production: an upgrade is a change you make and test.
     dependencies: { "@flow-engineer/flow": own.version, ...peers },
     devDependencies: { "@types/node": own.devDependencies["@types/node"], typescript: own.devDependencies.typescript, esbuild },
+    // npm 11 lists every install script it was not told about (and will block them): esbuild's puts its
+    // binary in place, koffi's (under the terminal UI, @mariozechner/pi-tui) its prebuilt library.
+    allowScripts: { esbuild: true, koffi: true },
   };
   writeFileSync(join(dir, "package.json"), `${JSON.stringify(pkg, null, 2)}\n`);
   writeFileSync(join(dir, "tsconfig.json"), `${JSON.stringify(TSCONFIG, null, 2)}\n`);

@@ -54,9 +54,39 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   Telegram and iMessage. The simulators show a sent video in the thread (a file id as its id) and
   refuse one where the platform has none.
 
+- **A simulated conversation reaches a Flow Messaging agent.** Flow Messaging's simulated contacts
+  (`POST /v0/test/conversations`, test keys) write on the app's simulated sender, never the
+  channel's own, so the `flow-messaging` adapter passed their events over: a hosted agent never
+  answered them. An event of a conversation with `simulated: true` now reaches the agent's channel
+  of that platform (its Telegram, WhatsApp or iMessage channel), and the reply goes into that
+  conversation. A real conversation on a sender the agent does not use is still passed over.
+- **Traces of big batches go gzipped, and a lost batch says what it cost.** A request body over
+  64 KB goes with `Content-Encoding: gzip` (OTLP/HTTP's own; Flow's traces endpoint takes it): with
+  content on, as under `flow test`, a batch of turns with long tool results took longer than the 10 s
+  timeout on a slow connection, and every session printed a `TimeoutError`. When traces still cannot
+  be sent, the one warning says how many turns' traces were not sent and that the agent is
+  unaffected (under `flow test`: the test's results do not depend on them; only those conversations
+  are missing from `flow conversations` and the dashboard), and a timeout says it waited 10 s.
+- **A test run's traces name its platform.** A turn on a channel the agent does not define (the test
+  cloud's Telegram run of an agent with no Telegram channel, through `receive()`) was traced as
+  channel `other`; it is now the platform its `ChannelInfo` names (`telegram`), so `flow
+  conversations` and the dashboard show it.
+- **`flow test`'s counts agree with its pass rate.** The first summary line names the flaky runs
+  (`6 of 10 runs passed. 2 flaky. 2 failed.`), and each channel's line is counted as the pass rate
+  is (flaky runs as passed, as failed with `--strict`; credit and infrastructure runs not counted):
+  `  telegram: 10 of 10 counted runs passed (3 flaky)`, where it read `telegram: 7 of 10 passed`
+  under `Pass rate 100%`.
+- **The starter allows the install scripts it needs.** `flow new` and `flow init` write
+  `"allowScripts": { "esbuild": true, "koffi": true }` into `package.json`, so a fresh `npm install`
+  on npm 11 no longer warns `2 packages have install scripts not yet covered by allowScripts` (and
+  keeps working when npm starts blocking unreviewed scripts).
+
 ### Migration notes
 
-None. A script that read only `ERROR` lines from `flow logs --json` now also gets those
+None. An agent made before 0.16.1 can add the starter's line itself, or run
+`npm approve-scripts esbuild koffi`. A script that matched `flow test`'s per-channel line
+(`<channel>: N of M passed`) now reads `<channel>: N of M counted runs passed`. A self-hosted traces
+endpoint must accept `Content-Encoding: gzip` for bodies over 64 KB (OTLP collectors do). A script that read only `ERROR` lines from `flow logs --json` now also gets those
 `DEFAULT` lines, as `ERROR`. An agent on the `flow-messaging` adapter now gets a video as an
 attachment: unless its model reads videos or it has `describeVideo`, the agent reads
 `[video: you can't watch videos]` where it read `[video]`. Code that switches over
