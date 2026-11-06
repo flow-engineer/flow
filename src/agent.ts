@@ -70,6 +70,8 @@ export interface AgentOptions {
    * Text for a video the model can't watch (its `reads.videos` is off): what it shows and what is
    * said. `describeVideoWith("google/gemini-3.8-flash")` is Flow Framework's own, through the agent's
    * model key; or your own function. Without either, the agent is told a video came that it can't watch.
+   * With an `ask(video, question)` (describeVideoWith's has one), the agent also gets ask_about_video:
+   * it asks about a video in the conversation whenever it needs to, fetched again from its channel.
    */
   describeVideo?: DescribeVideo;
   tools?: Tool[];
@@ -295,6 +297,8 @@ export interface ReceiveOptions {
   messageId?: string;
   /** The channel's name. Default "chat". */
   channelName?: string;
+  /** Fetches again a file the person sent, by its attachment's `ref` (as Channel.file): with it, the agent can ask about a video later. */
+  file?: (ref: string) => Promise<Uint8Array | null>;
 }
 
 export interface NudgeInput {
@@ -392,6 +396,9 @@ export interface NudgeState {
 }
 
 const NO_EXTRAS: ChannelInfo = { reactions: false, status: false };
+
+/** A channel's way to fetch a file again (Channel.file), for a conversation's link to it. */
+const fileOf = (adapter: Channel): { file?: (ref: string) => Promise<Uint8Array | null> } => (adapter.file ? { file: (ref) => adapter.file!(ref) } : {});
 const HOUR_MS = 3_600_000;
 /** Provider ids deleted per statement, so each one holds its locks briefly. */
 const PRUNE_BATCH = 1_000;
@@ -661,7 +668,7 @@ export class Agent {
       this.via.set(lock, via);
       if (via === "playground") this.playgroundVisitors.set(lock, { key: input.key });
       this.rows.set(row.id, row);
-      this.open(row.id).link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: input.address, deliver: this.deliverer(adapter, input.address, row.id), lastMessageAt: identity.lastMessageAt });
+      this.open(row.id).link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, ...fileOf(adapter), address: input.address, deliver: this.deliverer(adapter, input.address, row.id), lastMessageAt: identity.lastMessageAt });
       return { conversationId: row.id };
     });
     this.arriving.set(lock, work.catch(() => undefined));
@@ -875,7 +882,7 @@ export class Agent {
     this.via.set(viaKey(input.channel, input.from), input.via);
     const conversation = this.open(conversationId);
     const deliver = this.deliverer(adapter, input.from, conversationId);
-    conversation.link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: input.from, deliver, lastMessageAt: null });
+    conversation.link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, ...fileOf(adapter), address: input.from, deliver, lastMessageAt: null });
     const text = typeof input.message === "string" ? input.message : input.message.text;
     const kind = keywordIn(adapter.keywords, input.message);
     const fixed = this.intercepted(conversationId, text, { keyword: kind, channel: input.channel });
@@ -1076,7 +1083,7 @@ export class Agent {
     const isNew = !this.conversations.has(conversationId) && !this.rows.has(conversationId);
     const conversation = this.open(conversationId, `${name}:${conversationId}`);
     if (isNew) conversation.persist(() => this.store.addIdentity(conversationId, name, conversationId, "channel"));
-    conversation.link({ name, info: defined?.info ?? options.channel ?? NO_EXTRAS, params: defined?.params, instructions: defined?.instructions, address: conversationId, deliver, lastMessageAt: null });
+    conversation.link({ name, info: defined?.info ?? options.channel ?? NO_EXTRAS, params: defined?.params, instructions: defined?.instructions, address: conversationId, deliver, lastMessageAt: null, ...(options.file ? { file: options.file } : {}) });
     const answer = kind ? this.keyword(conversation, defined!.keywords!, kind, text, fixed, name) : null;
     const reply = answer ? answer.reply : fixed;
     if (reply === null) return conversation.receive(message, { channel: name, messageId: options.messageId });
@@ -1304,7 +1311,7 @@ export class Agent {
     const adapter = this.channelOf(to.channel);
     const identity = await this.conversationFor(adapter, to.channel, to.address);
     const conversation = this.open(identity.conversationId);
-    conversation.link({ name: to.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: to.address, deliver: this.deliverer(adapter, to.address, identity.conversationId), lastMessageAt: identity.lastMessageAt });
+    conversation.link({ name: to.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, ...fileOf(adapter), address: to.address, deliver: this.deliverer(adapter, to.address, identity.conversationId), lastMessageAt: identity.lastMessageAt });
     return { conversationId: identity.conversationId };
   }
 
@@ -1670,7 +1677,7 @@ export class Agent {
       const adapter = this.channelsByName.get(i.channel);
       if (!adapter) return [];
       this.via.set(viaKey(i.channel, i.address), i.via);
-      return [{ name: i.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: i.address, deliver: this.deliverer(adapter, i.address, conversationId), lastMessageAt: i.lastMessageAt }];
+      return [{ name: i.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, ...fileOf(adapter), address: i.address, deliver: this.deliverer(adapter, i.address, conversationId), lastMessageAt: i.lastMessageAt }];
     });
   }
 

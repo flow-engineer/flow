@@ -267,6 +267,11 @@ const videoMime = (mime: string) => (mime === "video/quicktime" ? "video/mov" : 
 /** What the video model is asked (model-facing text, kept short). */
 const DESCRIBE_VIDEO = "Describe this video for an assistant that cannot watch it, in a few sentences: what it shows, any text on screen, and what is said in it (word for word when it is short). Say only what is in the video.";
 
+/** What a video model is asked for ask_about_video (model-facing text, kept short): the agent's question, as data. */
+export function videoQuestion(question: string): string {
+  return `An assistant that cannot watch this video asks the question below. Answer it in a few sentences from what the video shows and what is said in it. If the video does not show the answer, say so; say only what is in the video.\nQuestion: ${question}`;
+}
+
 export interface DescribeVideoOptions {
   /** The key, and the address it goes to; when both are omitted, the agent's model key in the environment. */
   apiKey?: string;
@@ -283,7 +288,8 @@ const GEMINI = "https://generativelanguage.googleapis.com/";
  * reads that text in its place. It goes through the agent's model key, so it needs no other: Flow's
  * FLOW_KEY or an OpenRouter key (video_url parts), or a Gemini key (Gemini's generateContent, the
  * model's id without "google/"). With only an OpenAI or Anthropic key it fails when made, naming the
- * key to add. The video is sent once, as base64; nothing is kept.
+ * key to add. Its `ask(video, question)` answers the agent's questions about a video with the same
+ * model (ask_about_video). The video is sent with each call, as base64; nothing is kept.
  */
 export function describeVideoWith(model: string, options: DescribeVideoOptions = {}): DescribeVideo {
   const id = model.trim();
@@ -302,15 +308,25 @@ export function describeVideoWith(model: string, options: DescribeVideoOptions =
     baseURL = found.env === "FLOW_KEY" ? flowModelURL(process.env) : found.baseURL;
   }
   const url = baseURL ?? KEYS[0].baseURL;
-  if (url.startsWith(GEMINI)) return geminiDescriber(id.replace(/^google\//, ""), apiKey ?? "");
+  const watch = url.startsWith(GEMINI) ? geminiWatcher(id.replace(/^google\//, ""), apiKey ?? "") : openAIWatcher(id, url, apiKey);
+  return Object.assign((video: { mime: string; data: Uint8Array }) => watch(DESCRIBE_VIDEO, video), {
+    ask: (video: { mime: string; data: Uint8Array }, question: string) => watch(videoQuestion(question), video),
+  });
+}
+
+/** A video model asked one thing about a video: the text, then the video. */
+type Watch = (prompt: string, video: { mime: string; data: Uint8Array }) => Promise<string>;
+
+/** On FLOW_KEY or OpenRouter (or any OpenAI-compatible server): a video_url part. */
+function openAIWatcher(model: string, url: string, apiKey: string | undefined): Watch {
   const client = new OpenAI({ apiKey: apiKey || "none", baseURL: url, maxRetries: 1, timeout: 120_000 });
-  return async (video) => {
+  return async (prompt, video) => {
     let completion: OpenAI.Chat.ChatCompletion;
     try {
       completion = await client.chat.completions.create({
-        model: id,
+        model,
         max_tokens: 1_024,
-        messages: [{ role: "user", content: [{ type: "text", text: DESCRIBE_VIDEO }, videoPart(video.mime, Buffer.from(video.data).toString("base64"))] }],
+        messages: [{ role: "user", content: [{ type: "text", text: prompt }, videoPart(video.mime, Buffer.from(video.data).toString("base64"))] }],
       }, { headers: testSessionHeader(url) });
     } catch (error) {
       throw flowError(error) ?? error;
@@ -319,17 +335,17 @@ export function describeVideoWith(model: string, options: DescribeVideoOptions =
   };
 }
 
-/** The describer on a Gemini key: Gemini's own generateContent with the video inline (its OpenAI-compatible API takes no video). */
-function geminiDescriber(model: string, apiKey: string): DescribeVideo {
-  return async (video) => {
+/** On a Gemini key: Gemini's own generateContent with the video inline (its OpenAI-compatible API takes no video). */
+function geminiWatcher(model: string, apiKey: string): Watch {
+  return async (prompt, video) => {
     const response = await fetch(`${GEMINI}v1beta/models/${encodeURIComponent(model)}:generateContent`, {
       method: "POST",
       headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: DESCRIBE_VIDEO }, { inlineData: { mimeType: videoMime(video.mime), data: Buffer.from(video.data).toString("base64") } }] }] }),
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }, { inlineData: { mimeType: videoMime(video.mime), data: Buffer.from(video.data).toString("base64") } }] }] }),
       signal: AbortSignal.timeout(120_000),
     });
     const body = (await response.json().catch(() => undefined)) as { candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>; error?: { message?: unknown } } | undefined;
-    if (!response.ok) throw new Error(`Gemini could not describe the video (HTTP ${response.status})${typeof body?.error?.message === "string" ? `: ${body.error.message}` : "."}`);
+    if (!response.ok) throw new Error(`Gemini could not watch the video (HTTP ${response.status})${typeof body?.error?.message === "string" ? `: ${body.error.message}` : "."}`);
     return (body?.candidates?.[0]?.content?.parts ?? []).map((p) => (typeof p.text === "string" ? p.text : "")).join("").trim();
   };
 }

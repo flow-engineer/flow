@@ -174,7 +174,7 @@ const openingStep = z
   .object({
     say: withClock(z.string()).optional(),
     /** A file the person sends with it (say is its caption): a path in the tests folder. */
-    attach: z.object({ kind: z.enum(["image", "audio", "document"]), file: z.string().refine(inTests, "a path inside the tests folder, such as fixtures/receipt.jpg") }).optional(),
+    attach: z.object({ kind: z.enum(["image", "audio", "video", "document"]), file: z.string().refine(inTests, "a path inside the tests folder, such as fixtures/receipt.jpg") }).optional(),
     after_ms: z.number().int().min(0).optional(),
     /** The business's backend sends this event, to the agent's own route. */
     event: flowEvent.optional(),
@@ -346,7 +346,7 @@ function inTests(path: string): boolean {
 
 /** The type of a file a scenario attaches, from its extension. */
 export function mimeOf(path: string): string {
-  const types: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", pdf: "application/pdf", ogg: "audio/ogg", opus: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav" };
+  const types: Record<string, string> = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", gif: "image/gif", pdf: "application/pdf", ogg: "audio/ogg", opus: "audio/ogg", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav", mp4: "video/mp4", mov: "video/quicktime", webm: "video/webm", mpeg: "video/mpeg", mpg: "video/mpeg" };
   return types[extname(path).slice(1).toLowerCase()] ?? "application/octet-stream";
 }
 

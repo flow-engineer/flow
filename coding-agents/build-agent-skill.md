@@ -204,7 +204,7 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   running are reported as interrupted (never rerun).
 - `agent.receive(conversationId, message, deliver)` still works for one channel at a time (the
   test cloud uses it).
-- Photos, voice notes, videos and documents: hand them in on the message, `message: { text: caption, attachments: [{ kind: "image" | "audio" | "video" | "document", mime, name?, size?, data: () => provider.download(id) }] }`.
+- Photos, voice notes, videos and documents: hand them in on the message, `message: { text: caption, attachments: [{ kind: "image" | "audio" | "video" | "document", mime, name?, size?, ref?, data: () => provider.download(id) }] }`.
   `data` is a loader your provider fetches with its own credentials; never put a media URL where
   the model sees it. `size` (bytes, when the platform says) keeps a file over the limit from being
   fetched at all. Photos (JPEG, PNG, WebP, GIF, up to 5 MB) and PDFs (up to 10 MB) go to the
@@ -219,6 +219,16 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   own `async ({ mime, data }) => text`. With neither, the agent is told a video came that it can't watch.
   Anything the agent can't read reaches it named, with why, so it asks for text. The latest 3 photos,
   PDFs and videos (one video at most) stay shown; their bytes are never stored.
+- Asking about a video later: the agent gets the built-in `ask_about_video` (`question`, and
+  `message`, the id of the message the video came in; the latest video when left out) whenever a
+  video in the conversation is one it can't see now (described, or no longer shown) and a video
+  model can answer: `describeVideoWith(...)`'s `ask`, or the agent's own model when it watches
+  videos. A custom describer answers too when it has `ask`:
+  `Object.assign(async ({ mime, data }) => text, { ask: async ({ mime, data }, question) => text })`.
+  The video is fetched again from its channel each time (never kept), by the attachment's `ref`
+  with the channel's `file(ref)`: Flow Messaging's channels have both. Without them it is not offered.
+  3 questions a turn, 10 a video; a video the channel no longer keeps, or any other failure, is a
+  `ToolError` the agent reads ("ask them to send it again"). Don't write your own video tool.
 
 Built in, so don't build them as tools: what the business knows about the person (`profile`, as
 `get_user_profile`), scheduled messages (`schedule_message`, `list_scheduled`,

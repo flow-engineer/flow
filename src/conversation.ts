@@ -45,6 +45,9 @@
 //   as its transcript, a video it can't watch as its description (describeVideo); anything it cannot
 //   read is named with why, so it can ask for text. Only the latest few are shown (one video), and
 //   their bytes are never stored: after a restart they are named, not shown.
+// - A video the agent can't see now (described, or no longer shown) it can ask about with
+//   ask_about_video, when a video model can answer (describeVideo's ask, or its own model when it
+//   watches videos): the video is fetched again from its channel by its ref, never kept.
 
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
@@ -59,7 +62,8 @@ import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, Tim
 import { ACT_NEXT, EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput, contentRefusalText, pageLine, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal, shortLocal, zoneLabel } from "./time.ts";
 import { activeCall, type QueuedBy, type TurnTrigger } from "./traces.ts";
-import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
+import { videoQuestion } from "./model.ts";
+import { render, tool, toolContext, toSpec, ToolError, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
 import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, DescribeVideo, Incoming, Media, Model, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe, UndeliveredDetail, Video } from "./types.ts";
 
 export interface ConversationSettings {
@@ -149,6 +153,8 @@ export interface ChannelLink {
   address: string;
   deliver: Deliver;
   lastMessageAt: number | null;
+  /** Fetches again a file the person sent on it, by its ref (Channel.file): null once it is no longer kept. */
+  file?: (ref: string) => Promise<Uint8Array | null>;
 }
 
 const ACKNOWLEDGE_FIRST =
@@ -194,6 +200,10 @@ const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif
 const VIDEO_TYPES = new Set(["video/mp4", "video/mpeg", "video/quicktime", "video/mov", "video/webm"]);
 /** About what a video shown costs in tokens: Gemini counts about 263 a second, so this is a clip of a minute or so. */
 const VIDEO_TOKENS = 20_000;
+/** The built-in tool that asks a video model about a video in the conversation, and its caps: each question watches the whole video again. */
+const ASK_VIDEO = "ask_about_video";
+const VIDEO_QUESTIONS_PER_TURN = 3;
+const VIDEO_QUESTIONS_PER_VIDEO = 10;
 
 /** What a message's files became: marks after its id, the media the model is shown, a voice note's text, a video's description. */
 interface Files {
@@ -201,6 +211,8 @@ interface Files {
   media: Media[];
   transcript?: string;
   description?: string;
+  /** Its first video that can be fetched again, to ask about later. */
+  video?: { mime: string; ref: string };
 }
 
 /** A tool call the reply is waiting on. */
@@ -247,6 +259,8 @@ interface Pending {
   choiceId?: string;
   channel: string;
   media?: Media[];
+  /** A video in it to ask about later. */
+  video?: { mime: string; ref: string };
   /** The page of the business's site it was written from (the web chat). */
   page?: PageContext;
   inbox?: number;
@@ -445,6 +459,7 @@ export class Conversation {
     const fallback = settings.fallbackTemplate;
     const offered = settings.templates.filter((t) => t.name !== fallback);
     if (offered.length) builtins.push(this.templateTool(offered));
+    if (settings.describeVideo?.ask || settings.model.reads?.videos) builtins.push(this.videoTool());
     this.builtins = new Map(builtins.map((t) => [t.name, t]));
     this.builtinSpecs = builtins.map(toSpec);
     this.loaded = settings.ready.then(() => (existing ? this.claimAndLoad() : settings.store.createConversation(id, personKey)));
@@ -507,6 +522,116 @@ export class Conversation {
     });
   }
 
+  /**
+   * ask_about_video: the agent asks a video model about a video in the conversation it can't see
+   * now, fetched again from its channel. describeVideo's ask answers, else the agent's own model
+   * (which watches videos). Capped per turn and per video, as each question watches it all again.
+   */
+  private videoTool(): Tool {
+    return tool({
+      name: ASK_VIDEO,
+      description: "Ask a question about a video the person sent that you can't see now, when what you know of it does not answer: a video model watches it again and answers from what it shows and what is said in it. Put all you need to know in one question.",
+      input: z.object({
+        question: z.string().min(1).max(1_000),
+        message: z.string().optional().describe("The id of the message the video came in, such as m3; the latest video when left out"),
+      }),
+      run: ({ question, message }, context) => this.askAboutVideo(question, message, context.signal),
+      // The reply waits for the answer up to the video model's own limit (describeVideoWith's 120 s), not the agent's default.
+      deadlineMs: 120_000,
+    });
+  }
+
+  /**
+   * The videos since the latest reset the agent may ask about: their channel gives files again, a
+   * video model takes them, and `shown` when the model is shown the video now (it needs no question).
+   */
+  private videosToAsk(): Array<{ id: string; channel: string; mime: string; ref: string; shown: boolean }> {
+    const viaModel = !this.settings.describeVideo?.ask;
+    const from = this.history.findLastIndex((e) => e.role === "user" && e.reset) + 1;
+    const shown = new Set<string>();
+    const videos: Array<{ id: string; channel: string; mime: string; ref: string; shown: boolean }> = [];
+    for (const entry of this.history.slice(from)) {
+      if (entry.role !== "user") continue;
+      for (const m of entry.media ?? []) if (m.kind === "video" && m.data && m.ref) shown.add(m.ref);
+      for (const m of entry.messages ?? []) {
+        if (!m.video || !this.channels.get(m.channel)?.file || (viaModel && !VIDEO_TYPES.has(m.video.mime))) continue;
+        videos.push({ id: m.id, channel: m.channel, ...m.video, shown: false });
+      }
+    }
+    for (const v of videos) v.shown = shown.has(v.ref);
+    return videos;
+  }
+
+  /** Questions about videos asked this turn (and in which turn), and those running now per video. */
+  private videoAsks = { turn: -1, count: 0, running: new Map<string, number>() };
+
+  private async askAboutVideo(question: string, message: string | undefined, signal: AbortSignal): Promise<{ video: string; answer: string }> {
+    const videos = this.videosToAsk();
+    // "m3", or as the transcript shows it: "[whatsapp · m3]".
+    const wanted = message?.replace(/^\[|\]$/g, "").split("·").pop()!.trim() || undefined;
+    const video = wanted ? videos.findLast((v) => v.id === wanted) : videos.findLast((v) => !v.shown);
+    // In a chat the model reads only a ToolError's message, so each says what to do next.
+    const others = [...new Set(videos.filter((v) => !v.shown).map((v) => v.id))];
+    const which = others.length ? ` Videos you can ask about: ${others.join(", ")}.` : "";
+    if (!video) throw new ToolError("no_video", `${wanted ? `There is no video you can ask about in ${wanted}.` : "There is no video in this conversation you can ask about."}${which}`);
+    if (video.shown) throw new ToolError("video_shown", `You are shown the video in ${video.id} now: answer from what you see in it.`);
+    const asks = this.videoAsks;
+    if (asks.turn !== this.turns) Object.assign(asks, { turn: this.turns, count: 0 });
+    if (asks.count >= VIDEO_QUESTIONS_PER_TURN) throw new ToolError("video_question_limit", `Not asked: ${VIDEO_QUESTIONS_PER_TURN} questions about videos is the most a turn has. Answer from what you have, or ask them.`);
+    if (this.questionsAbout(video.id) + (asks.running.get(video.ref) ?? 0) >= VIDEO_QUESTIONS_PER_VIDEO) {
+      throw new ToolError("video_question_limit", `Not asked: ${VIDEO_QUESTIONS_PER_VIDEO} questions is the most one video has, and the video in ${video.id} has had them. Answer from what you have, or ask them.`);
+    }
+    asks.count++;
+    asks.running.set(video.ref, (asks.running.get(video.ref) ?? 0) + 1);
+    const failed = (code: string, text: string, error: unknown) => {
+      this.settings.emit(this.id, "attachment.failed", { kind: "video", messageId: video.id, tool: ASK_VIDEO, error: String(error) });
+      return new ToolError(code, text);
+    };
+    try {
+      let bytes: Uint8Array | null;
+      try {
+        bytes = await this.channels.get(video.channel)!.file!(video.ref);
+      } catch (error) {
+        throw failed("video_unavailable", `The video in ${video.id} could not be fetched from ${video.channel} just now. Try again later, or answer from what you know of it.`, error);
+      }
+      if (bytes === null) throw failed("video_expired", `The video in ${video.id} is no longer kept by ${video.channel}, so it can't be watched again. Ask them to send it again if you need it.`, "no longer kept by the channel");
+      if (bytes.length > FILE_MAX_MB * 1_048_576) throw failed("video_too_large", `The video in ${video.id} is over ${FILE_MAX_MB} MB, too large to watch. Ask them about it instead.`, `over ${FILE_MAX_MB} MB`);
+      let answer: string;
+      try {
+        const ask = this.settings.describeVideo?.ask;
+        const data = { mime: video.mime, data: bytes };
+        answer = ask ? await ask.call(this.settings.describeVideo, data, question) : await this.askOwnModel(data, question, signal);
+      } catch (error) {
+        throw failed("video_not_answered", `The video model could not answer (${error instanceof Error ? error.message : String(error)}). Try again later, or answer from what you know of it.`, error);
+      }
+      answer = answer.replace(/\s+/g, " ").trim();
+      if (!answer) throw failed("video_not_answered", "The video model gave no answer. Ask it another way, or answer from what you know of it.", "the answer was empty");
+      return { video: video.id, answer };
+    } finally {
+      const left = (asks.running.get(video.ref) ?? 1) - 1;
+      if (left) asks.running.set(video.ref, left);
+      else asks.running.delete(video.ref);
+    }
+  }
+
+  /** The agent's own model, which watches videos, asked one question about one, with no tools. */
+  private async askOwnModel(video: { mime: string; data: Uint8Array }, question: string, signal: AbortSignal): Promise<string> {
+    const media: Media = { kind: "video", mime: video.mime, data: Buffer.from(video.data).toString("base64") };
+    const response = await this.settings.model.complete({ system: videoQuestion(question), messages: [{ role: "user", content: "[video]", media: [media] }], tools: [], signal });
+    return response.text ?? "";
+  }
+
+  /** How many questions about the video in this message were answered so far, from the history (so a restart keeps the count). */
+  private questionsAbout(id: string): number {
+    const calls = new Set<string>();
+    let answered = 0;
+    for (const entry of this.history) {
+      if (entry.role === "assistant") for (const call of entry.toolCalls ?? []) if (call.name === ASK_VIDEO) calls.add(call.id);
+      if (entry.role === "tool" && calls.has(entry.toolCallId) && entry.content.startsWith(`{"video":${JSON.stringify(id)},`)) answered++;
+    }
+    return answered;
+  }
+
   /** What a channel of this conversation can show, if the person has written on it. */
   channelInfo(channel: string): ChannelInfo | undefined {
     return this.channels.get(channel)?.info;
@@ -527,6 +652,7 @@ export class Conversation {
       known.params = link.params;
       known.instructions = link.instructions;
       known.address = link.address;
+      known.file = link.file;
     } else this.channels.set(link.name, link);
   }
 
@@ -570,7 +696,7 @@ export class Conversation {
   /** The message is ready for the agent: it joins the reply in progress, or starts one. */
   private arrive(incoming: Incoming, id: string, channel: string, ownId: boolean, files: Files): void {
     const at = this.settings.now();
-    const item: Pending = { id, text: describe(incoming, files), shown: shownText(incoming, files), ...choiceOf(incoming), channel, ...(files.media.length ? { media: files.media } : {}), ...(incoming.page ? { page: incoming.page } : {}) };
+    const item: Pending = { id, text: describe(incoming, files), shown: shownText(incoming, files), ...choiceOf(incoming), channel, ...(files.media.length ? { media: files.media } : {}), ...(files.video ? { video: files.video } : {}), ...(incoming.page ? { page: incoming.page } : {}) };
     this.pending.push(item);
     if (item.page) this.page = { channel, page: item.page };
     this.recentChannels = [...this.recentChannels, channel].slice(-5);
@@ -578,7 +704,7 @@ export class Conversation {
     if (link) link.lastMessageAt = at;
     const fields = { messageCount: this.messageCount, recentChannels: this.recentChannels };
     this.persist(async () => {
-      const payload = { id, text: item.text, shown: item.shown, ...(item.choice ? { choice: true } : {}), ...(item.choiceId ? { choiceId: item.choiceId } : {}), channel, ...(item.media ? { media: item.media.map(stored) } : {}), ...(item.page ? { page: item.page } : {}) };
+      const payload = { id, text: item.text, shown: item.shown, ...(item.choice ? { choice: true } : {}), ...(item.choiceId ? { choiceId: item.choiceId } : {}), channel, ...(item.media ? { media: item.media.map(stored) } : {}), ...(item.video ? { video: item.video } : {}), ...(item.page ? { page: item.page } : {}) };
       const inbox = await this.settings.store.addMessage(this.id, payload, ownId ? { channel, messageId: id } : undefined);
       if (inbox === null) {
         // Another runner took this provider id first (a retry reached both): the message is theirs.
@@ -707,20 +833,24 @@ export class Conversation {
         files.marks.push(`[${what}: too large for you to read, over ${max} MB]`);
         continue;
       }
+      // A video its channel can give again may be asked about later, even if this download fails.
+      const again = a.kind === "video" && a.ref ? { mime: a.mime, ref: a.ref } : undefined;
       let bytes: Uint8Array;
       try {
         bytes = await a.data();
       } catch (error) {
         this.settings.emit(this.id, "attachment.failed", { kind: a.kind, error: String(error) });
         files.marks.push(`[${what}: it could not be downloaded]`);
+        files.video ??= again;
         continue;
       }
       if (bytes.length > max * 1_048_576) {
         files.marks.push(`[${what}: too large for you to read, over ${max} MB]`);
         continue;
       }
+      files.video ??= again;
       if (a.kind === "image" || a.kind === "document" || watched) {
-        files.media.push({ kind: a.kind as Media["kind"], mime: a.mime, ...(a.name ? { name: a.name } : {}), data: Buffer.from(bytes).toString("base64") });
+        files.media.push({ kind: a.kind as Media["kind"], mime: a.mime, ...(a.name ? { name: a.name } : {}), data: Buffer.from(bytes).toString("base64"), ...(watched && a.ref ? { ref: a.ref } : {}) });
         files.marks.push(`[${what}]`);
         continue;
       }
@@ -755,7 +885,7 @@ export class Conversation {
     const p = row.payload as Record<string, any>;
     if (row.kind === "message") {
       // Its photos and PDFs are named, not shown: their bytes were never stored.
-      this.pending.push({ id: p.id, text: p.text, shown: p.shown ?? p.text, ...(p.choice ? { choice: true } : {}), ...(typeof p.choiceId === "string" ? { choiceId: p.choiceId } : {}), channel: p.channel, inbox: row.id, ...(Array.isArray(p.media) ? { media: p.media } : {}), ...(p.answer ? { answer: p.answer } : {}), ...(p.page ? { page: p.page } : {}) });
+      this.pending.push({ id: p.id, text: p.text, shown: p.shown ?? p.text, ...(p.choice ? { choice: true } : {}), ...(typeof p.choiceId === "string" ? { choiceId: p.choiceId } : {}), channel: p.channel, inbox: row.id, ...(Array.isArray(p.media) ? { media: p.media } : {}), ...(p.video ? { video: p.video } : {}), ...(p.answer ? { answer: p.answer } : {}), ...(p.page ? { page: p.page } : {}) });
       if (p.page) this.page = { channel: p.channel, page: p.page };
       this.messageIds.set(p.id, p.channel);
       if (!p.answer) {
@@ -1237,7 +1367,7 @@ export class Conversation {
     if (messages.length) {
       const tag = this.settings.tagChannels || this.channels.size > 1;
       const line = (m: Pending) => `[${tag ? `${m.channel} · ` : ""}${m.id}${m.text}`;
-      const said = (m: Pending): PersonMessage => ({ id: m.id, channel: m.channel, text: m.shown, ...(m.choice ? { choice: true } : {}), ...(m.choiceId ? { choiceId: m.choiceId } : {}) });
+      const said = (m: Pending): PersonMessage => ({ id: m.id, channel: m.channel, text: m.shown, ...(m.choice ? { choice: true } : {}), ...(m.choiceId ? { choiceId: m.choiceId } : {}), ...(m.video ? { video: m.video } : {}) });
       // In order: the messages the agent answers, together in one entry, and each answered with no
       // model call as one of its own, with what was sent back as the agent's (as a text nudge is).
       let group: Pending[] = [];
@@ -1387,7 +1517,9 @@ export class Conversation {
       const page = this.pageNow();
       const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, wakeUps, elsewhere, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), page ? pageLine(page) : "", context].filter(Boolean).join("\n\n");
       const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
-      const specs = [...ownSpecs, ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk)];
+      // ask_about_video only while there is a video it can ask about.
+      const builtinSpecs = this.builtins.has(ASK_VIDEO) && !this.videosToAsk().some((v) => !v.shown) ? this.builtinSpecs.filter((spec) => spec.name !== ASK_VIDEO) : this.builtinSpecs;
+      const specs = [...ownSpecs, ...builtinSpecs, ...talkSpecs(views, this.settings.talk)];
       const abort = new AbortController();
       if (restarts < this.settings.maxRestarts) this.stepAbort = abort;
       const callStarted = Date.now();

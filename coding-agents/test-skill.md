@@ -90,8 +90,9 @@ expect:
   the previous one (a double text). Then the person plays on until `goal` is met or `max_turns`
   (default 8). A run that uses every turn never passes.
   A step may send a file: `- { say: "here is my receipt", attach: { kind: image, file: fixtures/receipt.jpg } }`
-  (`kind`: image, audio or document; `file` a path in `tests/`; `say` is its caption and may be
-  left out). The file is read on your machine and never uploaded; the person and the judge see it
+  (`kind`: image, audio, video or document; `file` a path in `tests/`; `say` is its caption and may be
+  left out). A video is `.mp4`, `.mov`, `.webm` or `.mpeg`; to check the agent looked at it again,
+  `expect: { calls: [ask_about_video] }`. The file is read on your machine and never uploaded; the person and the judge see it
   by name only.
 - `world`: everything true in this test, in plain words: stock, outages, slowness, the person's
   history. The person, the judge and the tool model read it. For a tool that is down or slow, say

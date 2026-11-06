@@ -239,6 +239,11 @@ From `const fm = flowMessaging({ apiKey?, webhookSecret?, baseUrl? })`
 | `instructions` | Your guidance for the agent on this channel |
 | `disable` | `fm.whatsapp()` only: as `whatsapp()`'s `disable` |
 
+A file the person sends comes with its Flow file id as `ref`, and each channel's `file(ref)` fetches
+it again (null once Flow no longer keeps it), so the agent can ask about a video later
+(`ask_about_video`). A channel of your own can do the same: put `ref` on the attachments it hands
+in and give the channel a `file(ref)`; `agent.receive` takes one as `options.file`.
+
 `fm.channels({ except? })` gives Telegram, plus WhatsApp and iMessage when their sender is set. What
 each channel can send, and how it maps to Flow Messaging, is in
 [flow-messaging/README.md](../flow-messaging/README.md#what-it-maps); their limits are the exported

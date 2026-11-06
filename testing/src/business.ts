@@ -64,6 +64,8 @@ export interface BusinessContext {
   log: (line: string) => void;
   /** Each outbound a run's channel took (testing/src/client.ts's send-path check). */
   sent?: (cloudId: string, outbound: Outbound) => void;
+  /** Reads a file the scenario attached again, by its path (the attachment's ref), in place of the channel's own fetch. */
+  file?: (ref: string) => Promise<Uint8Array | null>;
 }
 
 export function businessRuns(ctx: BusinessContext) {
@@ -97,7 +99,8 @@ export function businessRuns(ctx: BusinessContext) {
     });
     const channels = ctx.sessionAgent.channels().map(({ name }): Channel => {
       const own = ctx.sessionAgent.channel(name)!;
-      return { ...own, send: (address: string, outbound: Outbound) => deliver(run, cloudId, address, outbound) };
+      // The run's files are the tests folder's, never the real channel's.
+      return { ...own, send: (address: string, outbound: Outbound) => deliver(run, cloudId, address, outbound), file: ctx.file };
     });
     return ctx.build({ tools, events: [events], channels, testing: { now: () => run.clock, scheduleCheckMs: 0, eventsSecret: run.secret, database: sqlite() } });
   };

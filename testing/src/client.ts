@@ -531,6 +531,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       watch,
       log,
       sent: sendPath.delivered,
+      file: (ref) => fileAgain(options.testsDir, ref),
     })
     : null;
 
@@ -623,6 +624,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
         channel: command.channel,
         channelName: command.channelName,
         messageId: command.messageId,
+        file: (ref) => fileAgain(options.testsDir, ref),
         });
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
@@ -1071,6 +1073,8 @@ function withFiles(incoming: WireIncoming, testsDir: string | undefined, log: (l
       kind: a.kind,
       mime: mimeOf(a.file),
       name: basename(a.file),
+      // Its path in the tests folder: the agent may read it again (ask_about_video) with fileAgain.
+      ref: a.file,
       data: () => {
         const reading = readAttachment(testsDir, a.file);
         // A caller that never awaits still must not become an uncaught exception.
@@ -1079,6 +1083,16 @@ function withFiles(incoming: WireIncoming, testsDir: string | undefined, log: (l
       },
     })),
   };
+}
+
+/** A file a scenario attached, read again from the tests folder by its path; null once it is no longer there. */
+async function fileAgain(testsDir: string | undefined, file: string): Promise<Uint8Array | null> {
+  try {
+    return await readAttachment(testsDir, file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 function readAttachment(testsDir: string | undefined, file: string): Promise<Uint8Array> {

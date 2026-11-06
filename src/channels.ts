@@ -55,6 +55,12 @@ export interface Channel {
    * function that gives it back: a cap on this channel's turns at once (the web chat's).
    */
   turnSlot?(): Promise<() => void>;
+  /**
+   * Fetches again a file the person sent, by its attachment's `ref`: null when the channel no longer
+   * keeps it (past its retention), a rejection for any other failure. With it, the agent can ask
+   * about a video later in the conversation (ask_about_video).
+   */
+  file?(ref: string): Promise<Uint8Array | null>;
 }
 
 /** What a channel that serves its own HTTP (`serve`) may use of its agent. */

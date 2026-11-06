@@ -6,6 +6,37 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **The agent can ask its own questions about a video: `ask_about_video`.** A video described once
+  (`describeVideo`) or watched turns ago is no longer all the agent gets: when a buyer asks "is
+  there a scratch near the charging port?", the agent calls the built-in `ask_about_video`
+  (`question`, and `message`, the id of the message the video came in; the latest video when left
+  out) and a video model watches it again and answers, `{ video, answer }`.
+  - **Who answers:** `describeVideo`'s new optional `ask(video, question)`; `describeVideoWith(model)`
+    has one, the same model and key as its descriptions (a `Flow-Test-Session` header under
+    `flow test`, as there). A custom describer answers when it has `ask` too:
+    `Object.assign(async ({ mime, data }) => text, { ask: async ({ mime, data }, question) => text })`.
+    Without one, an agent whose own model watches videos (`openAICompatible({ videos: true })`) is
+    asked itself, in a call of its own with the video and no tools.
+  - **When it is offered:** only while the conversation has a video the agent can't see now: one
+    described, or one its model watched that is no longer shown (only the latest 3 photos, PDFs and
+    videos stay shown, one of them a video, and none after a restart). A video the model is shown
+    now needs no question, and asking about it is refused. Never with a describer that only
+    describes and a model that can't watch, or for a video whose channel can't give it again.
+  - **Where the video comes from:** its channel, again, each time: nothing is kept in memory or the
+    store. An `Attachment` may carry `ref` (the file's id on its channel), kept with the message,
+    never shown to the model, and a `Channel` may have `file(ref)`, which fetches it again
+    (`null` once the channel no longer keeps it). The `flow-messaging` adapter sets both (Flow's
+    file id; a 404 or 410 from Flow is `null`), as do the simulators and `flow test`. 10 MB at most.
+    `agent.receive` takes the fetcher as `options.file`.
+  - **Guards:** 3 questions a turn and 10 a video (counted from the history, so a restart keeps
+    them). A video no longer kept, one that can't be fetched now, one over 10 MB, or a video model
+    that fails is a `ToolError` whose message says what to do ("Ask them to send it again"), and an
+    `attachment.failed` event (`kind: "video"`, `messageId`, `tool`). The call is a tool span in
+    traces, as any tool's. The reply waits for it up to 120 s, the video model's own limit.
+- **`flow test` scenarios can send a video:** `attach: { kind: video, file: fixtures/clip.mp4 }`
+  (`.mp4`, `.mov`, `.webm`, `.mpeg`), read from the tests folder and, when the agent asks about it,
+  read again from there by its path; `expect: { calls: [ask_about_video] }` checks it asked. The
+  simulators keep a sent video for the agent to fetch again until newer files push it out.
 - **`flow mcp login` ends on a page in flow.engineer's look.** Flow's own CLI now sets
   `signInPage` (and `brand.name` "Flow"): the browser lands on Flow's logo and the site's card on
   its gradient, after flow.engineer's Allow page, light only like every Flow page. The copy and
@@ -15,7 +46,18 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
-None: nothing changes for a team's CLI.
+- An agent with `describeVideoWith(...)`, or a model that watches videos, now gets `ask_about_video`
+  on channels that give files again (Flow Messaging's, the simulators, `flow test`), and each
+  question is a video model call on its key. To keep descriptions only, pass a describer without
+  `ask`: `describeVideo: (video) => described(video)`, where `const described = describeVideoWith(...)`.
+- `DescribeVideo` is now an interface: a function, as before, with an optional `ask`. A plain
+  `async ({ mime, data }) => text` is still one.
+- A tool of your own named `ask_about_video` is shadowed by the built-in one while it is offered:
+  rename yours.
+- A watched video's `Media` (what a `Model` is sent) carries its `ref`; a model of your own ignores it.
+- A hand-written channel (`customUI`, `whatsapp()` with your provider) gets the tool only once its
+  attachments carry `ref` and the channel has `file(ref)`: add both to let the agent ask.
+- Nothing changes for a team's CLI.
 
 ## 0.16.1 (6 Nov 2026)
 
