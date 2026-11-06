@@ -53,6 +53,14 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `{ fileId }`; `spec/agent-endpoint.openapi.yaml`'s platform table names `videos` for WhatsApp,
   Telegram and iMessage. The simulators show a sent video in the thread (a file id as its id) and
   refuse one where the platform has none.
+- **Under `flow test`, calls to Flow's model gateway carry the test session's id.** Once the test
+  cloud's session opens, `openAICompatible`/`flowModel` completions, `flowTranscribe` and
+  `describeVideoWith` send it in a `Flow-Test-Session` header, only when the call goes to Flow's
+  address (`flowModelURL`), never to OpenRouter, OpenAI, Anthropic, Gemini or any other. On a Pro
+  workspace Flow counts those calls as free test spend whatever the key's mode, once the test cloud
+  confirms the session; an unconfirmed session is charged normally. The playground and the local
+  simulators are not test cloud sessions, and an `--agent-url` agent makes its model calls in its
+  own process, so neither sends it.
 
 - **A simulated conversation reaches a Flow Messaging agent.** Flow Messaging's simulated contacts
   (`POST /v0/test/conversations`, test keys) write on the app's simulated sender, never the

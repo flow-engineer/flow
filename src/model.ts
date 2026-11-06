@@ -114,7 +114,7 @@ export function openAICompatible(options: OpenAICompatibleOptions = {}): Model {
               ? { tools: request.tools.map((t) => ({ type: "function" as const, function: t })) }
               : {}),
           },
-          { signal: request.signal },
+          { signal: request.signal, headers: testSessionHeader(baseURL) },
         );
       } catch (error) {
         throw flowError(error) ?? error;
@@ -140,6 +140,22 @@ export function openAICompatible(options: OpenAICompatibleOptions = {}): Model {
 export function flowModel(options: Omit<OpenAICompatibleOptions, "baseURL"> = {}): Model {
   const apiKey = flowKey(options.apiKey);
   return openAICompatible({ ...options, apiKey, baseURL: flowModelURL(process.env), model: options.model?.trim() || process.env.MODEL?.trim() || KEYS.at(-1)!.model });
+}
+
+/** A test cloud session's id: tse_ and 26 Crockford base32 characters. */
+const TEST_SESSION_ID = /^tse_[0-9A-HJKMNP-TV-Z]{26}$/;
+
+/**
+ * Under `flow test`, a call to Flow's gateway carries the test cloud's session id (Flow-Test-Session),
+ * which Flow confirms with the test cloud before it counts the call as test spend. Read when the call
+ * is made, since the CLI sets the id once the session opens, after the model is made; never sent to
+ * any other address.
+ */
+function testSessionHeader(baseURL: string): Record<string, string> | undefined {
+  const session = setting("TEST_SESSION");
+  if (setting("RUN_KIND") !== "test" || !session || !TEST_SESSION_ID.test(session)) return undefined;
+  const bare = (url: string) => url.replace(/\/+$/, "");
+  return bare(baseURL) === bare(flowModelURL(process.env)) ? { "Flow-Test-Session": session } : undefined;
 }
 
 /** The key sent to Flow: the one given, else FLOW_KEY; with neither it fails with the next step. */
@@ -173,9 +189,10 @@ export async function flowTranscribe(audio: Blob | ArrayBuffer | Uint8Array, opt
   const form = new FormData();
   form.append("file", file, options.filename ?? (typeof File !== "undefined" && audio instanceof File && audio.name ? audio.name : "audio.ogg"));
   if (options.language?.trim()) form.append("language", options.language.trim());
-  const response = await fetch(`${flowModelURL(process.env).replace(/\/+$/, "")}/audio/transcriptions`, {
+  const url = flowModelURL(process.env);
+  const response = await fetch(`${url.replace(/\/+$/, "")}/audio/transcriptions`, {
     method: "POST",
-    headers: { authorization: `Bearer ${apiKey}` },
+    headers: { authorization: `Bearer ${apiKey}`, ...testSessionHeader(url) },
     body: form,
   });
   const body = (await response.json().catch(() => undefined)) as { text?: unknown; error?: { message?: unknown; code?: unknown; next?: unknown } } | undefined;
@@ -294,7 +311,7 @@ export function describeVideoWith(model: string, options: DescribeVideoOptions =
         model: id,
         max_tokens: 1_024,
         messages: [{ role: "user", content: [{ type: "text", text: DESCRIBE_VIDEO }, videoPart(video.mime, Buffer.from(video.data).toString("base64"))] }],
-      });
+      }, { headers: testSessionHeader(url) });
     } catch (error) {
       throw flowError(error) ?? error;
     }
