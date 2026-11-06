@@ -194,6 +194,14 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   ends with nothing sent where a reply was owed (a model that wrote nothing twice) is now logged as a
   `WARNING` too: `flow: conversation <id> turn <n> ended with nothing sent to them on <channel>,
   where they were owed a reply`.
+- **`flow deploy` sends a Flow key only to the environment its mode matches.** A `.env` value that
+  is a live-mode Flow key (`fk_live_`, `flow_live_`, `otk_live_`) is no longer sent to staging, and a
+  test-mode one (`fk_test_`, `flow_test_`, `otk_test_`) no longer to production (`deploy promote`,
+  `--env production`, `secrets --from-env`): it is listed under `skipped` with why, naming only the
+  prefix (`FLOW_MESSAGING_KEY skipped: a live key (fk_live_) goes to production only; staging takes a
+  test key (fk_test_), ...`), and the environment keeps the value it has. `FLOW_KEY` still goes to
+  both: Flow's hosting exchanges it for the environment's own runtime key. Until now a `.env`
+  holding the live `FLOW_MESSAGING_KEY` put it on staging, which then read production's live stream.
 
 ### Migration notes
 
@@ -228,6 +236,9 @@ A channel's `send(address, outbound)` may now be called with a third argument,
 `{ lastMessageId }`; channels written for two arguments keep working unchanged.
 A model that answers in plain text after the reminder now has that text sent to the person: an
 agent whose instructions use plain text for notes to itself should keep them out of the reply step.
+A `.env` that held a live `FLOW_MESSAGING_KEY` and deployed to staging now leaves staging's key as it
+is: set staging's test key once with `flow deploy secret FLOW_MESSAGING_KEY --env staging`. Sending a
+live key to staging on purpose is refused by design (Flow's hosting refuses it too).
 
 ## 0.16.0 (2026-11-05)
 

@@ -810,6 +810,16 @@ async function sendSecrets(ctx: Ctx, file: string, env: string, onlyChanged: boo
       ctx.say(`  ${name} skipped: a secret's name is upper case letters, digits and _`);
       continue;
     }
+    // A Flow key of the other mode (a live messaging key for staging, a test one for production) is
+    // never sent, and Flow's hosting refuses it too. FLOW_KEY is exchanged for the environment's own.
+    const keyMode = name === "FLOW_KEY" ? null : /^(fk|flow|otk)_(live|test)_/.exec(value.trim());
+    const wants = env === "production" ? "live" : "test";
+    if (keyMode && keyMode[2] !== wants) {
+      const why = `a ${keyMode[2]} key (${keyMode[0]}) goes to ${wants === "live" ? "staging" : "production"} only; ${env} takes a ${wants} key (${keyMode[1]}_${wants}_), set with ${RUN} deploy secret ${name} --env ${env}`;
+      out.skipped.push({ name, why });
+      ctx.say(`  ${name} skipped: ${why}`);
+      continue;
+    }
     const hash = secretHash(ctx, env, name, value);
     if (onlyChanged && known[name] === hash) {
       out.unchanged.push(name);
