@@ -736,15 +736,16 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       const title = String(c.label ?? id);
       base = { text: title, choice: id ? { id, title } : { title } };
     } else if (c.kind === "voice" && c.transcript) base = { text: String(c.transcript) }; // Flow transcribed it already
-    else if ((c.kind === "voice" && c.file_id) || (media?.file_id && media.type !== "video")) {
-      // Photos, audio and documents go as attachments, their bytes fetched from Flow only when the agent can use them.
+    else if ((c.kind === "voice" && c.file_id) || media?.file_id) {
+      // Photos, audio, videos and documents go as attachments, their bytes fetched from Flow only when the agent can use them.
       const file = media ?? c;
-      const kind = c.kind === "voice" || file.type === "audio" ? "audio" : file.type === "image" ? "image" : "document";
+      const kind = c.kind === "voice" || file.type === "audio" ? "audio" : file.type === "image" ? "image" : file.type === "video" ? "video" : "document";
       const fileId = String(file.file_id);
-      const attachment: Attachment = { kind, mime: String(file.mime_type ?? "application/octet-stream"), ...(file.filename ? { name: String(file.filename) } : {}), data: () => client.download(fileId) };
+      const size = Number(file.size_bytes);
+      const attachment: Attachment = { kind, mime: String(file.mime_type ?? "application/octet-stream"), ...(file.filename ? { name: String(file.filename) } : {}), ...(Number.isFinite(size) && size > 0 ? { size } : {}), data: () => client.download(fileId) };
       base = { text: caption, attachments: [attachment] };
     } else if (media || c.kind === "file_blocked") {
-      // A video (Flow Framework reads none), or a file Flow did not keep: the caption, and what it was.
+      // A file with no file id, or one Flow did not keep: the caption, and what it was.
       const what = String((media ? media.type : c.media_type) ?? "file");
       base = { text: [media ? caption : c.caption, c.kind === "file_blocked" ? `[${what}: not received (${String(c.reason)})]` : `[${what}]`].filter(Boolean).join(" ") };
     } else if (c.kind === "location") base = { text: `[location: ${[c.name, c.address].filter(Boolean).join(", ")} (${c.lat}, ${c.lng})]` };

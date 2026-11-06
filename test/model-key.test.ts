@@ -84,7 +84,7 @@ test("a model through Flow sends FLOW_KEY and the default model, reads PDFs, and
   await withEnv({ FLOW_KEY: FAKE_TRIAL, FLOW_MODEL_URL: url }, async () => {
     const request = { system: "s", messages: [{ role: "user" as const, content: "hi" }], tools: [], signal: new AbortController().signal };
     for (const model of [openAICompatible(), flowModel()]) {
-      assert.deepEqual(model.reads, { images: true, pdfs: true });
+      assert.deepEqual(model.reads, { images: true, pdfs: true, videos: false });
       await assert.rejects(model.complete(request), {
         message: "Flow trial credit used: add your own model key to .env.\nNext: add your own model key to .env (OPENROUTER_API_KEY=..., https://openrouter.ai/keys)",
         code: "trial_credit_used",

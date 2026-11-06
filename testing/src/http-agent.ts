@@ -38,7 +38,7 @@ export interface HttpAgentRequest {
     text: string;
     replyTo?: Incoming["replyTo"];
     choice?: Incoming["choice"];
-    attachments?: Array<{ kind: "image" | "audio" | "document"; mime: string; name?: string; data: string }>;
+    attachments?: Array<{ kind: "image" | "audio" | "video" | "document"; mime: string; name?: string; data: string }>;
   };
 }
 

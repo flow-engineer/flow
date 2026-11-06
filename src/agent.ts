@@ -29,7 +29,7 @@ import { Store, type ConversationRow, type EventStateStore, type IdentityRow, ty
 import { clock, quietUntil, validZone } from "./time.ts";
 import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } from "./tools.ts";
 import { activeCall, agentVersion, setting, traces, tracesFromEnv, type QueuedBy, type Traces, type TracesOptions, type TurnTrigger } from "./traces.ts";
-import type { BeforeSend, ChannelInfo, Deliver, Incoming, Model, Outbound, SendReceipt, Template, TemplateDefinition, Transcribe, UndeliveredDetail } from "./types.ts";
+import type { BeforeSend, ChannelInfo, Deliver, DescribeVideo, Incoming, Model, Outbound, SendReceipt, Template, TemplateDefinition, Transcribe, UndeliveredDetail } from "./types.ts";
 
 /** What a host supplies to an agent: `createAgent({ ..., host })`. */
 export interface HostOptions {
@@ -66,6 +66,12 @@ export interface AgentOptions {
    * marked as a voice note. Without it, it is told a voice note came that it can't listen to.
    */
   transcribe?: Transcribe;
+  /**
+   * Text for a video the model can't watch (its `reads.videos` is off): what it shows and what is
+   * said. `describeVideoWith("google/gemini-3.8-flash")` is Flow Framework's own, through the agent's
+   * model key; or your own function. Without either, the agent is told a video came that it can't watch.
+   */
+  describeVideo?: DescribeVideo;
   tools?: Tool[];
   /** Backend credentials or clients for a verified person, available only to tool code as context.credentials. */
   credentials?: CredentialProvider;
@@ -477,6 +483,7 @@ export class Agent {
     this.settings = {
       model: options.model,
       transcribe: options.transcribe,
+      describeVideo: options.describeVideo,
       tools: new Map(tools.map((t) => [t.name, t])),
       credentials: options.credentials,
       credentialProvider: ctx => this.requestCredentials.get(viaKey(ctx.channel, ctx.address ?? "")) ?? options.credentials,

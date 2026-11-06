@@ -107,7 +107,7 @@
   .tpl-head { font-weight: 600; margin-bottom: 2px; }
   .tpl-media { display: flex; align-items: center; justify-content: center; width: 260px; max-width: 100%; height: 140px; border-radius: 6px; margin: 0 0 4px; background: rgba(0,0,0,.06); font-size: 13px; opacity: .8; }
   .tpl-foot { display: block; font-size: 12.5px; opacity: .6; margin-top: 2px; }
-  /* Media: a photo heads its bubble, its text the caption; a voice note plays; a document opens. */
+  /* Media: a photo or video heads its bubble, its text the caption; a voice note plays; a document opens. */
   .bubble.media { padding: 3px; }
   .bubble.media > .body, .bubble.media > .tpl-foot, .bubble.media > .quote { display: block; padding: 3px 6px 2px; }
   .bubble.media > .quote { margin: 0 0 3px; padding: 4px 8px; }
@@ -115,6 +115,7 @@
   .bubble.photo-only > .stamp svg { color: #fff; }
   .photo { display: block; width: 260px; max-width: 100%; min-height: 120px; max-height: 320px; object-fit: cover; border-radius: 14px; background: rgba(0,0,0,.06); cursor: zoom-in; }
   .bubble.media .photo { border-radius: 6px; }
+  video.photo { cursor: default; background: #000; }
   .photo.missing { display: grid; place-items: center; height: 160px; font-size: 13px; opacity: .7; cursor: default; }
   .voice { display: flex; align-items: center; gap: 8px; width: 250px; max-width: 100%; padding: 4px 4px 2px; }
   .voice .play { width: 34px; height: 34px; border-radius: 50%; border: 0; display: grid; place-items: center; cursor: pointer; flex: none; background: none; color: inherit; }
@@ -518,14 +519,14 @@
     <div class="thread" id="thread" aria-live="polite"></div>
     <div class="replying" id="replying"><b>Replying to</b><div id="replyingText"></div><button type="button" id="cancelReply" aria-label="Cancel reply">✕</button></div>
     <form class="compose" id="form">
-      <button type="button" class="c-ico plus" id="plus" aria-label="Attach" title="Send a photo, voice note or document" data-icon="plus"></button>
+      <button type="button" class="c-ico plus" id="plus" aria-label="Attach" title="Send a photo, video, voice note or document" data-icon="plus"></button>
       <div class="field">
         <button type="button" class="c-ico" id="cancelRec" aria-label="Delete recording" data-icon="trash"></button>
         <span class="rec"><i></i><span id="recTime">0:00</span></span>
         <span class="c-ico c-emoji" aria-hidden="true" data-icon="emoji"></span>
         <input id="text" autocomplete="off" placeholder="Message" aria-label="Message">
         <span class="counter" id="counter"></span>
-        <label class="c-ico c-attach" title="Send photos, voice notes or documents (the message box is their caption)"><span data-icon="clip"></span><input type="file" id="file" multiple accept="image/*,audio/*,application/pdf,text/*,.csv,.doc,.docx,.xls,.xlsx" hidden></label>
+        <label class="c-ico c-attach" title="Send photos, videos, voice notes or documents (the message box is their caption)"><span data-icon="clip"></span><input type="file" id="file" multiple accept="image/*,video/*,audio/*,application/pdf,text/*,.csv,.doc,.docx,.xls,.xlsx" hidden></label>
         <label class="c-ico c-camera" title="Send a photo"><span data-icon="camera"></span><input type="file" id="photo" accept="image/*" hidden></label>
         <input type="file" id="audioFile" accept="audio/*" hidden>
       </div>
@@ -771,6 +772,17 @@
     return img;
   }
 
+  /** A video, played in its bubble as the apps do. */
+  function videoEl(src) {
+    const video = make("video", "photo");
+    video.src = src; video.controls = true; video.preload = "metadata"; video.playsInline = true;
+    video.addEventListener("loadedmetadata", () => {
+      const thread = $("thread");
+      if (thread.scrollHeight - thread.scrollTop - thread.clientHeight < video.offsetHeight + 120) thread.scrollTop = thread.scrollHeight;
+    }, { once: true });
+    return video;
+  }
+
   /** A voice note: play, its waveform (drawn from the file's name, the same each time), its length. */
   function voiceEl(src, seed) {
     const wrap = make("div", "voice");
@@ -826,8 +838,9 @@
 
   /** One file the person sent, as their app shows it; without its url (a saved run), its name. */
   function fileEl(a) {
-    if (!a.url) return make("div", "file", `📎 ${a.name || { image: "Photo", audio: "Voice note", document: "Document" }[a.kind]}`);
+    if (!a.url) return make("div", "file", `📎 ${a.name || { image: "Photo", audio: "Voice note", video: "Video", document: "Document" }[a.kind]}`);
     if (a.kind === "image") return photoEl(media(a.url), a.name);
+    if (a.kind === "video") return videoEl(media(a.url));
     if (a.kind === "audio") return voiceEl(media(a.url), a.url);
     return docEl(a);
   }
@@ -1473,7 +1486,7 @@
     else if (e.type === "model.restarted") { tag = "folded"; cls = "fold"; text = "new message arrived, step restarted with it"; }
     else if (e.type === "ack.required") { tag = "held"; cls = "ack"; text = `${e.held.join(", ")} held until they're acknowledged`; }
     else if (e.type === "model.call") { text = `model ${e.ms} ms` + (e.toolCalls.length ? ` → ${e.toolCalls.join(", ")}` : " → (nothing)"); }
-    else if (e.type === "message.in") { text = `in [${e.messageId}]: ${e.text}`; }
+    else if (e.type === "message.in") { text = `in [${e.messageId}]: ${e.text}` + (e.transcript ? ` [voice note, transcribed: ${e.transcript}]` : "") + (e.description ? ` [video, described: ${e.description}]` : ""); }
     else if (e.type === "message.out") { text = `out: ${e.text}` + (e.buttons ? ` [${e.buttons.map((b) => (typeof b === "string" ? b : b.label)).join(" | ")}]` : "") + (e.list ? ` [list: ${e.list.rows.length} rows]` : "") + (e.link ? ` [link: ${e.link.label} → ${e.link.url}]` : "") + (e.image ? ` [image: ${e.image.url || e.image.fileId}]` : "") + (e.carousel ? ` [carousel: ${e.carousel.length} cards]` : "") + (e.fields ? ` [${Object.keys(e.fields).join(", ")}]` : ""); }
     else if (e.type === "reaction") { text = `reacted ${e.emoji} to ${e.messageId}`; }
     else if (e.type === "message.edited") { text = `edited ${e.messageId}: ${e.text}`; }
@@ -1686,7 +1699,7 @@
 
   // Files go with whatever is in the message box as their caption: up to 4 at once, as the agent takes them.
   const MAX_FILE_BYTES = 10_000_000;
-  const kindOf = (file) => file.type.startsWith("image/") ? "image" : file.type.startsWith("audio/") ? "audio" : "document";
+  const kindOf = (file) => file.type.startsWith("image/") ? "image" : file.type.startsWith("video/") ? "video" : file.type.startsWith("audio/") ? "audio" : "document";
   const base64 = (blob) => new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",")[1] || "");

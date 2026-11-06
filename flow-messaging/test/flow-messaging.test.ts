@@ -119,6 +119,33 @@ test("a photo arrives as an attachment whose bytes come from Flow's files API wi
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
+test("a video arrives as an attachment the model can watch; one Flow says is over the limit is never fetched", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  live.model.reads = { videos: true };
+  flow.contacts.ct_maya = { address: { phone: "+15550100100" } };
+  flow.files.file_v = Buffer.from([1, 2, 3]);
+  const video = (id: string, size: number) => ({ kind: "basic", text: "the leak", media: { type: "video", url: `${flow.url}/v0/files/${id}`, file_id: id, mime_type: "video/mp4", size_bytes: size } });
+
+  await live.deliver(received(WA, "msg_1", video("file_v", 3)));
+  const first = await live.nextCall(0);
+  assert.deepEqual(first.request.messages.filter((m) => m.role === "user").at(-1), {
+    role: "user",
+    content: "[whatsapp · msg_1] [video] the leak",
+    media: [{ kind: "video", mime: "video/mp4", data: "AQID" }],
+  });
+  first.answer(respond(call("send_whatsapp", { text: "I see it" })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+
+  await live.deliver(received(WA, "msg_2", video("file_big", 16 * 1_048_576)));
+  const second = await live.nextCall(1);
+  assert.equal(lastUser(second.request.messages), "[whatsapp · msg_2] [video: too large for you to read, over 10 MB] the leak");
+  assert.equal(flow.requests.some((r) => r.path === "/v0/files/file_big"), false);
+  second.answer(respond(call("send_whatsapp", { text: "Could you send a shorter clip?" })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+});
+
 test("taps come as choices, with the button's id (info.buttonIds says so), and reactions to the agent's messages as reactions", async (t) => {
   const fm = flowMessaging({ apiKey: "fk_test_key" });
   assert.equal(fm.whatsapp({ sender: "snd_wa" }).info.buttonIds, true);

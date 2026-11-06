@@ -305,6 +305,24 @@ test("independent local playgrounds keep separate operator cookies", async () =>
   } finally { await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve())))); }
 });
 
+test("a video sent from a simulator reaches the agent as a video, and the simulator plays it inline", async () => {
+  const { fake, server, post, lines } = await start();
+  try {
+    const bytes = new Uint8Array(2_000).fill(3);
+    assert.equal((await post("/api/messages", { platform: "telegram", person: "p", text: "the leak", attachments: [{ kind: "video", mime: "video/mp4", data: Buffer.from(bytes).toString("base64") }] })).status, 202);
+    const [file] = fake.incomings[0].attachments ?? [];
+    assert.deepEqual({ kind: file.kind, mime: file.mime }, { kind: "video", mime: "video/mp4" });
+    assert.deepEqual(await file.data(), bytes);
+    const [line] = await lines("telegram");
+    assert.ok(line.kind === "in" && line.attachments);
+    const again = await fetch(server.url + line.attachments[0].url);
+    assert.equal(again.headers.get("content-type"), "video/mp4");
+    assert.match(again.headers.get("content-disposition") ?? "", /^inline;/);
+  } finally {
+    await server.close();
+  }
+});
+
 test("a file sent from a simulator reaches the agent with its bytes, the message box as its caption", async () => {
   const { fake, server, post, lines } = await start();
   try {

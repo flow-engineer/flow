@@ -19,11 +19,34 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   it under `--severity`.
 - Tests: the CLI tests that want plain output (`NO_COLOR`) also drop `FORCE_COLOR`, which
   `node --test` sets when its output is a terminal, so `npm test` passes at a terminal as in a pipe.
+- **Videos the person sends reach the agent.** An `Attachment` may be `kind: "video"`, and the
+  `flow-messaging` adapter now hands WhatsApp, Telegram and iMessage videos in as one (until now a
+  video was only its caption and `[video]`). Up to 10 MB, one of three ways:
+  - **Watched by the model**, when it reads videos: `openAICompatible({ videos: true })` (default
+    false; `reads.videos` on a `Model`) sends MP4, MPEG, MOV and WebM as OpenRouter's `video_url`
+    part, a base64 data URL. Through Flow (FLOW_KEY) or OpenRouter that is a model such as
+    `google/gemini-3.8-flash`. Of the latest 3 photos, PDFs and videos shown, at most one is a video.
+  - **Described**, with `createAgent({ describeVideo })`: the agent reads `[video, described: ...]`
+    in its place. `describeVideoWith("google/gemini-3.8-flash")` is Flow Framework's own: it asks
+    that model, through the agent's own key, what the video shows and what is said in it (FLOW_KEY
+    or OpenRouter: a `video_url` part; a Gemini key: Gemini's `generateContent`, the id without
+    `google/`). With only an OpenAI or Anthropic key it throws `no_video_key` when made, naming the
+    keys that work. Or pass your own `async ({ mime, data }) => text`.
+  - **Neither**: the caption and `[video: you can't watch videos]`, and the video is never fetched.
+- An `Attachment` may say its `size` in bytes; one over the limit is named as too large and never
+  fetched. The `flow-messaging` adapter fills it from Flow's `size_bytes`.
+- The `message.in` event carries a described video's text as `description`; the simulators send
+  videos (they play in the thread) and their Debug log shows the transcript or description the agent got.
+- `spec/request.schema.json` (an HTTP agent's request) takes attachments of kind `video`.
+- The model is told it is no longer shown "the photos, videos or documents" (was "photos or documents").
 
 ### Migration notes
 
 None. A script that read only `ERROR` lines from `flow logs --json` now also gets those
-`DEFAULT` lines, as `ERROR`.
+`DEFAULT` lines, as `ERROR`. An agent on the `flow-messaging` adapter now gets a video as an
+attachment: unless its model reads videos or it has `describeVideo`, the agent reads
+`[video: you can't watch videos]` where it read `[video]`. Code that switches over
+`Attachment["kind"]` or `Media["kind"]` meets the new `"video"`.
 
 ## 0.16.0 (2026-11-05)
 
