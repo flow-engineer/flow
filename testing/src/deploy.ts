@@ -38,6 +38,7 @@ import { Writable } from "node:stream";
 import { RUN } from "../../src/names.ts";
 import { fixedServer, packCli, PackError, type PackedCli } from "./cli-pack.ts";
 import { agentVersion } from "../../src/traces.ts";
+import { Failed, hostedOf, withHosted, type HostedRead } from "./conversations.ts";
 import { CLOUDS, cloudCall, failureDocument, keyHelp, keyRefused, KEYS_HELP, NetworkError, type FoundKey, type Waits } from "./cloud-call.ts";
 const DEFAULT_CLOUD = CLOUDS.us;
 
@@ -66,6 +67,8 @@ export const LOGS_USAGE = `Usage:
   --json       One JSON object per line on stdout: { time, severity, text }; nothing else goes there
                (a failure is one { ok: false, error, next } line).
   --dir, --cloud, FLOW_FRAMEWORK_CLOUD_KEY: as for flow deploy (flow deploy --help).
+  --server     Read over a hosted Flow MCP as you (flow mcp login), not with the CI key (default:
+               FLOW_MCP_SERVER); --agent <id|name> says which of your agents (default: your only one).
 
 Flow sends only the lines that match --until, --grep and a --severity above ERROR (up to ERROR,
 every line comes and is filtered here); an older Flow that does not filter gets them filtered
@@ -106,6 +109,8 @@ export const DEPLOY_USAGE = `Usage:
   --no-secrets Deploy without sending the .env's values as secrets.
   --no-cli     Deploy without packing and publishing the CLI (src/cli.ts).
   --cloud      The cloud's address (default: FLOW_FRAMEWORK_CLOUD, else ${DEFAULT_CLOUD}).
+  --server     With status: read over a hosted Flow MCP as you (flow mcp login), not with the CI
+               key (default: FLOW_MCP_SERVER); --agent <id|name> says which of your agents.
   --from-env   With secrets: send each non-empty value in the file as a secret (never the CI key,
                the cloud's address, or a name Flow sets itself, such as the
                FLOW_FRAMEWORK_TRACES_* that flow link writes). Prints names only.
@@ -277,9 +282,11 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
       options: {
         env: { type: "string" },
         environment: { type: "string" },
-        dir: { type: "string", default: "." },
+        dir: { type: "string" },
         version: { type: "string" },
         cloud: { type: "string" },
+        server: { type: "string" },
+        agent: { type: "string" },
         "from-env": { type: "boolean" },
         "no-secrets": { type: "boolean" },
         "no-cli": { type: "boolean" },
@@ -315,7 +322,25 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
   if (command !== "logs" && (values.since !== undefined || values.follow || values.until !== undefined || values.severity !== undefined || values.grep !== undefined || values.limit !== undefined)) return fail("usage", `--since, --until, --severity, --grep, --limit and --follow go with flow logs\n\n${usage}`, 2);
   if (command !== "secret" && (values.unset || values.apply)) return fail("usage", `--unset and --apply go with deploy secret\n\n${usage}`, 2);
   const environment: "staging" | "production" = given ?? "staging";
-  const dir = resolve(values.dir!);
+  const dir = resolve(values.dir ?? ".");
+  const hosted = hostedOf(values, env);
+  if (typeof hosted === "string") return fail("usage", `${hosted}\n\n${usage}`, 2);
+  if (hosted && ((command !== "logs" && command !== "status") || values.dir !== undefined)) return fail("usage", `--server goes with flow logs and flow deploy status, and reads no folder (no --dir).\n\n${usage}`, 2);
+  if (hosted) {
+    const ctx: Ctx = { api: async () => { throw new Error("this command does not read the cloud over --server"); }, say, json, dir, pollMs: options.pollMs ?? 3000, maxPolls: options.maxPolls, now: options.now ?? Date.now, keyId: "", env };
+    try {
+      return await withHosted(hosted, top === "logs" ? "logs" : "deploy status", (read) => {
+        Object.assign(ctx, overServer(read!));
+        if (command === "status") return status(ctx, given ? [given] : ["staging", "production"]);
+        if (args[0] !== undefined) throw new Usage(`flow logs takes no arguments.\n\n${usage}`);
+        return logs(ctx, environment, { since: values.since ?? "1h", until: values.until, severity: values.severity, grep: values.grep, limit: values.limit }, Boolean(values.follow));
+      });
+    } catch (error) {
+      if (error instanceof Usage) return fail("usage", error.message, 2);
+      if (error instanceof Failed) return fail(error.code, error.message, 1, error.next);
+      return fail("internal", `flow ${top}${top !== "logs" ? ` ${command}` : ""} failed: ${(error as Error).message}`, 1);
+    }
+  }
   const { key, cloud, api, dotEnv } = cloudOf(dir, env, values.cloud, options.waits);
   if (!key) return fail("no_ci_key", NO_KEY, 2, `${RUN} setup`);
 
@@ -352,6 +377,17 @@ async function cloudCli(top: "deploy" | "logs", argv: string[], env: NodeJS.Proc
   }
 }
 
+/** flow logs' pages and flow deploy status's answer from a hosted Flow MCP's tools, in place of the cloud's routes. */
+function overServer(read: HostedRead): Pick<Ctx, "pages" | "statusOf"> {
+  return {
+    pages: async (query) => (await read("logs_page", { ...query })) as unknown as Awaited<ReturnType<typeof logsPage>>,
+    async statusOf(environments) {
+      const data = await read("deploy_status", environments.length === 1 ? { environment: environments[0] } : {});
+      return { environments: Object.values(data.environments as Record<string, EnvironmentStatus>), hostingFramework: data.hosting_framework as string | null, agentFramework: data.agent_framework as string | null };
+    },
+  };
+}
+
 /** Prints a failure, also as JSON with --json; returns the exit code. */
 function failer(json: boolean): (code: string, message: string, exit: number, next?: string) => number {
   return (code, message, exit, next) => {
@@ -378,7 +414,12 @@ export function cloudOf(dir: string, env: NodeJS.ProcessEnv, given: string | und
   const ci = found("FLOW_FRAMEWORK_CLOUD_KEY", "CHINWAG_CLOUD_KEY");
   const key: FoundKey | undefined = ci ? { kind: "ci_key", ...ci } : undefined;
   const cloud = (given || found("FLOW_FRAMEWORK_CLOUD", "CHINWAG_CLOUD")?.value || DEFAULT_CLOUD).replace(/\/$/, "");
-  const api: Api = async <T>(method: string, path: string, body?: unknown): Promise<T> => {
+  return { key, cloud, api: cloudApi(cloud, key, waits), dotEnv };
+}
+
+/** A caller of the cloud's routes with `key`: a 429 waited out, an idempotent call tried again, a refused key explained. */
+export function cloudApi(cloud: string, key: FoundKey | undefined, waits?: Waits): Api {
+  return async <T>(method: string, path: string, body?: unknown): Promise<T> => {
     const res = await cloudCall(cloud + path, {
       method,
       headers: { authorization: `Bearer ${key?.value}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
@@ -400,7 +441,6 @@ export function cloudOf(dir: string, env: NodeJS.ProcessEnv, given: string | und
     }
     return answer as T;
   };
-  return { key, cloud, api, dotEnv };
 }
 
 interface Ctx {
@@ -415,6 +455,10 @@ interface Ctx {
   keyId: string;
   /** The environment, over the agent's .env: where the version's settings (FLOW_AGENT_VERSION, a CI's commit) are read. */
   env: NodeJS.ProcessEnv;
+  /** flow logs' pages from elsewhere than the cloud's route (a hosted Flow MCP); default logsPage. */
+  pages?: (query: LogsQuery) => Promise<Awaited<ReturnType<typeof logsPage>>>;
+  /** flow deploy status's answer from elsewhere than the cloud's routes (a hosted Flow MCP); default deployStatus. */
+  statusOf?: (environments: string[]) => ReturnType<typeof deployStatus>;
 }
 
 async function deploy(ctx: Ctx, dir: string, env: "staging" | "production", version: string | undefined, withSecrets: boolean, withCli: boolean): Promise<number> {
@@ -923,7 +967,7 @@ export interface EnvironmentStatus {
  * Per environment, what is live, its version, when, its URL and whether its traces reach observe;
  * and the Flow Framework version hosting runs, when the cloud says (null else).
  */
-export async function deployStatus(ctx: Pick<Ctx, "api" | "dir">, environments: string[]): Promise<{ environments: EnvironmentStatus[]; hostingFramework: string | null; agentFramework: string | null }> {
+export async function deployStatus(ctx: { api: Api; dir?: string }, environments: string[]): Promise<{ environments: EnvironmentStatus[]; hostingFramework: string | null; agentFramework: string | null }> {
   const found: EnvironmentStatus[] = [];
   let framework: string | null = null;
   for (const environment of environments) {
@@ -939,7 +983,7 @@ export async function deployStatus(ctx: Pick<Ctx, "api" | "dir">, environments: 
     } catch (error) {
       if (!(error instanceof Refused) || !error.missing) throw error;
       // This Flow lists deploys by CI key only to a dashboard member: the last one this folder made.
-      const id = remembered(ctx.dir, environment);
+      const id = ctx.dir === undefined ? undefined : remembered(ctx.dir, environment);
       if (id) {
         deploys = [(await ctx.api<{ deploy: NonNullable<EnvironmentStatus["deploy"]> }>("GET", `/v1/hosting/deploys/${id}`)).deploy];
         from = "this_folder";
@@ -953,7 +997,7 @@ export async function deployStatus(ctx: Pick<Ctx, "api" | "dir">, environments: 
     const url = live ? (live.url ?? (await address(ctx, environment))) : null;
     found.push({ environment, deploy: serving, traces, pending, url, from });
   }
-  return { environments: found, hostingFramework: framework, agentFramework: pinnedFramework(ctx.dir) };
+  return { environments: found, hostingFramework: framework, agentFramework: ctx.dir === undefined ? null : pinnedFramework(ctx.dir) };
 }
 
 /** The Flow Framework this folder's package.json pins (@flow-engineer/flow, else chinwag before the rename), as written; null without one. */
@@ -970,7 +1014,7 @@ function pinnedFramework(dir: string): string | null {
 
 /** `flow deploy status`: per environment, what is live, its version, when, its URL and its traces. */
 async function status(ctx: Ctx, environments: string[]): Promise<number> {
-  const { environments: found, hostingFramework, agentFramework } = await deployStatus(ctx, environments);
+  const { environments: found, hostingFramework, agentFramework } = await (ctx.statusOf ?? ((e) => deployStatus(ctx, e)))(environments);
   const anyLive = found.some((f) => f.deploy?.status === "live");
   const next = anyLive
     ? `${RUN} logs${found.length === 1 && found[0]!.environment === "production" ? " --env production" : ""}`
@@ -1227,7 +1271,7 @@ async function logs(ctx: Ctx, environment: string, asked: { since: string; until
   let polls = 0;
   let stoppedAt: string | undefined;
   for (;;) {
-    const page = await logsPage(ctx.api, query);
+    const page = await (ctx.pages ?? ((q) => logsPage(ctx.api, q)))(query);
     polls++;
     if (polls === 1) {
       // Where the logs start, when later than asked: the host's from, else (an older host) its 24 hours.
@@ -1257,7 +1301,7 @@ async function logs(ctx: Ctx, environment: string, asked: { since: string; until
   // --follow: a look every pollMs until Ctrl-C, each new line printed as it comes.
   for (;;) {
     await new Promise((r) => setTimeout(r, ctx.pollMs));
-    const page = await logsPage(ctx.api, query);
+    const page = await (ctx.pages ?? ((q) => logsPage(ctx.api, q)))(query);
     polls++;
     if (page.next && page.next !== query.after) {
       for (const line of [...reader.add(page.lines), ...reader.end()]) print(line);

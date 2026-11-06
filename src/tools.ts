@@ -118,9 +118,10 @@ export interface Tool<Input = any, Output = any> {
    * The result as text for people (Markdown), made from the checked output; needs `output`. Over
    * MCP it is the result's text and the CLI prints it, while structured content (and --json)
    * keep the data. Keep the ids a model needs to act on: hosts may show their model only this.
-   * If it throws, the result goes out as JSON, still a success. Chats are not changed by it.
+   * If it throws, the result goes out as JSON, still a success. Chats are not changed by it. It also
+   * gets the input the tool was called with, for a line that names what was asked.
    */
-  format?: (output: Output) => string;
+  format?(output: Output, input: Input): string;
   /** Short lines a host shows while the tool runs and once it is done (at most 64 characters each). */
   status?: { running?: string; done?: string };
   /**

@@ -134,7 +134,8 @@ export async function cloudCall(url: string, init: RequestInit & { timeoutMs?: n
 }
 
 /** Which key a command reads. */
-export type KeyKind = "flow_key" | "live_key" | "ci_key";
+/** connection: the read key Flow keeps for a hosted Flow MCP connection, for one agent (never in a .env). */
+export type KeyKind = "flow_key" | "live_key" | "ci_key" | "connection";
 
 /** The key a command found: its name, where it was, and its value (never printed: only its prefix and last 4). */
 export interface FoundKey {
@@ -157,6 +158,7 @@ const WANTS: Record<KeyKind, string> = {
   flow_key: "the agent's Flow key, FLOW_KEY (flow_test_... reads staging; flow_live_... reads staging and production)",
   live_key: "the agent's live Flow key, FLOW_LIVE_KEY (flow_live_..., reads staging and production; it stops 30 days after it was made, after 7 days unused, or when revoked)",
   ci_key: "the agent's CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_..., staging and production for deploys, staging for tests)",
+  connection: "the read key Flow keeps for this connection (flow_live_..., read only, text de-identified unless the owner grants content)",
 };
 
 /** Where to get the right key. */
@@ -173,6 +175,13 @@ const GET_LIVE_KEY = `${SETUP_LIVE} writes FLOW_LIVE_KEY into .env (the workspac
  * looked, what it found there, and how to get the right one.
  */
 export function keyHelp(command: string, found: FoundKey, refusal?: { status: number; code?: string; hint?: string }): string {
+  // A hosted connection's key: nothing to set in a .env; it ends with the connection, or lacks a grant.
+  if (found.kind === "connection") {
+    return [
+      `${command} reads with ${WANTS.connection}, for agent ${found.name} (${keyLabel(found.value)}).`,
+      ...(refusal?.status === 401 ? ["It has ended: sign in again."] : refusal?.status === 403 ? advisoryLines() : []),
+    ].join("\n");
+  }
   const wrongKind =
     found.kind === "flow_key" && found.value.startsWith("oci_") ? " That is a CI key; this command reads FLOW_KEY." :
     found.kind === "ci_key" && found.value.startsWith("flow_") ? " That is a Flow key (FLOW_KEY); this command reads the CI key." :

@@ -47,6 +47,9 @@ const COMMON = `  --json                   One JSON document on stdout: the serv
                            when it did not work; every other line goes to stderr
   --cloud <url>            Flow's address (default: FLOW_FRAMEWORK_CLOUD, else ${OBSERVE_URL})
   --dotenv <path>          Read the environment from this file instead of the folder's .env
+  --server <url>           Read over a hosted Flow MCP as you (flow mcp login), not with this
+                           folder's keys (default: FLOW_MCP_SERVER)
+  --agent <id|name>        With --server: which of your agents (default: your only one)
   -h, --help               Show this help
 
 Reads with the agent's Flow key, FLOW_KEY (flow setup writes it into .env); production reads
@@ -152,6 +155,8 @@ const COMMON_OPTIONS = {
   json: { type: "boolean", default: false },
   cloud: { type: "string" },
   dotenv: { type: "string" },
+  server: { type: "string" },
+  agent: { type: "string" },
   env: { type: "string" },
   environment: { type: "string" },
   help: { type: "boolean", short: "h", default: false },
@@ -229,6 +234,47 @@ export function access(name: string, values: { cloud?: string; dotenv?: string }
   if (!keys) return noKey(name, environment);
   return { cloud: (values.cloud || setting("CLOUD") || OBSERVE_URL).replace(/\/+$/, ""), ...keys };
 }
+
+/** Where a command reads over a hosted Flow MCP (--server, else FLOW_MCP_SERVER) and which agent. */
+export interface Hosted {
+  server: string;
+  agent?: string;
+}
+
+/**
+ * --server (else FLOW_MCP_SERVER) and --agent: the hosted Flow MCP a command reads over, what is
+ * wrong with them, or undefined to read with this folder's keys.
+ */
+export function hostedOf(values: { server?: string; agent?: string; cloud?: string; dotenv?: string }, env: NodeJS.ProcessEnv = process.env): Hosted | string | undefined {
+  const server = values.server ?? (env.FLOW_MCP_SERVER?.trim() || undefined);
+  if (!server) return values.agent === undefined ? undefined : "--agent goes with --server (or FLOW_MCP_SERVER): it names which of your agents a hosted Flow MCP reads.";
+  if (values.cloud !== undefined || values.dotenv !== undefined) return "--server reads as you, signed in with flow mcp login, not with this folder's keys: --cloud and --dotenv do not go with it.";
+  if (values.agent !== undefined && !values.agent.trim()) return "--agent is one of your agents' flow_agent_id or name.";
+  return { server, ...(values.agent ? { agent: values.agent.trim() } : {}) };
+}
+
+/** A hosted tool's result as the commands print a read: --json's text, its JSON and its text mode. */
+export function answerOf(body: Record<string, unknown>): { text: string; body: Record<string, unknown>; textMode?: string } {
+  return { text: JSON.stringify(body), body, ...(typeof body.text_mode === "string" && body.text_mode ? { textMode: body.text_mode } : {}) };
+}
+
+/** Runs `run` with the hosted Flow MCP's reads when the command has one (else with none), closing them after. */
+export async function withHosted<T>(hosted: Hosted | undefined, command: string, run: (read: HostedRead | undefined) => Promise<T>): Promise<T> {
+  if (!hosted) return run(undefined);
+  const { connectHosted } = await import("./flow-tools.ts");
+  const read = await connectHosted(hosted.server, hosted.agent, command);
+  try {
+    return await run(read);
+  } finally {
+    await read.close();
+  }
+}
+
+/** One of the hosted Flow MCP's tools, called for a command: its result, or Failed. */
+export type HostedRead = (tool: string, input: Record<string, unknown>) => Promise<Record<string, unknown>>;
+
+/** A page's query as conversations_page takes it. */
+const pageInput = (page: URLSearchParams): Record<string, unknown> => Object.fromEntries([...page].map(([k, v]) => [k, k === "limit" ? Number(v) : v]));
 
 /** What to print when a read did not work; status is the server's, when it answered. */
 export class Failed extends Error {
@@ -323,7 +369,12 @@ const contactCode = (label: string) => label.trim().replace(/^contact\s+/i, "").
  * limit or the last page; with a contact, only that contact's (read over at most 100 pages). The
  * last page's fields, the conversations, and the cursor of the pages not read (null: none).
  */
-export async function listConversations(name: string, where: Access, query: ListQuery): Promise<{ last: Record<string, unknown>; conversations: Conversation[]; cursor: string | null }> {
+export function listConversations(name: string, where: Access, query: ListQuery): Promise<{ last: Record<string, unknown>; conversations: Conversation[]; cursor: string | null }> {
+  return collectConversations(async (page) => (await get(name, where, `/v1/agent/conversations?${page}`)).body, query);
+}
+
+/** listConversations' pages and filter over any reader of one page (`page`: its query, as sent). */
+export async function collectConversations(read: (page: URLSearchParams) => Promise<Record<string, unknown>>, query: ListQuery): Promise<{ last: Record<string, unknown>; conversations: Conversation[]; cursor: string | null }> {
   const params = new URLSearchParams();
   if (query.environment) params.set("environment", query.environment);
   if (query.grade) params.set("grade", query.grade);
@@ -337,7 +388,7 @@ export async function listConversations(name: string, where: Access, query: List
     const page = new URLSearchParams(params);
     page.set("limit", String(wanted === undefined ? Math.min(PAGE_LIMIT, query.limit - all.length) : PAGE_LIMIT));
     if (cursor) page.set("cursor", cursor);
-    last = (await get(name, where, `/v1/agent/conversations?${page}`)).body;
+    last = await read(page);
     const got = (last.conversations as Conversation[] | undefined) ?? [];
     all.push(...(wanted === undefined ? got : got.filter((c) => typeof c.contact === "string" && contactCode(c.contact) === wanted)));
     cursor = typeof last.next_cursor === "string" && last.next_cursor ? last.next_cursor : null;
@@ -401,19 +452,24 @@ export async function conversationsCli(args: string[]): Promise<number> {
   }
   const id = positionals[1];
   if (show && !/^[A-Za-z0-9_-]{1,100}$/.test(id!)) return usageFailed(json, `"${id}" is not a conversation id: use one from flow conversations.`);
-  const where = access(name, values, values.environment as ListQuery["environment"]);
+  const hosted = hostedOf(values);
+  if (typeof hosted === "string") return usageFailed(json, hosted, CONVERSATIONS_USAGE);
+  const where = hosted ? undefined : access(name, values, values.environment as ListQuery["environment"]);
   if (where instanceof Failed) return failed(json, where);
   try {
-    if (show) {
-      const { text, body, textMode } = await showConversation(name, where, id!);
-      if (json) process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
-      else console.log(withTextLine(textMode, transcript(body)).join("\n"));
+    return await withHosted(hosted, show ? "conversations show" : "conversations", async (read) => {
+      if (show) {
+        const environment = values.environment ? { environment: values.environment } : {};
+        const { text, body, textMode } = read ? answerOf(await read("show_conversation", { id: id!, ...environment })) : await showConversation(name, where!, id!);
+        if (json) process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+        else console.log(withTextLine(textMode, transcript(body)).join("\n"));
+        return 0;
+      }
+      const { last, conversations, cursor } = read ? await collectConversations((page) => read("conversations_page", pageInput(page)), query) : await listConversations(name, where!, query);
+      if (json) return process.stdout.write(`${JSON.stringify({ ...last, conversations, next_cursor: cursor })}\n`), 0;
+      console.log(withTextLine(last.text_mode, list(conversations, cursor !== null)).join("\n"));
       return 0;
-    }
-    const { last, conversations, cursor } = await listConversations(name, where, query);
-    if (json) return process.stdout.write(`${JSON.stringify({ ...last, conversations, next_cursor: cursor })}\n`), 0;
-    console.log(withTextLine(last.text_mode, list(conversations, cursor !== null)).join("\n"));
-    return 0;
+    });
   } catch (error) {
     if (error instanceof Failed) return failed(json, error);
     throw error;
@@ -428,36 +484,43 @@ export async function issuesCli(args: string[]): Promise<number> {
   const { values, positionals } = parsed;
   const json = values.json === true;
   if (values.help) return console.log(ISSUES_USAGE), 0;
-  if (positionals[0] === "test-case" && positionals.length === 2 && !values.status) return issueTestCase(name, positionals[1]!, values);
+  const hosted = hostedOf(values);
+  if (typeof hosted === "string") return usageFailed(json, hosted, ISSUES_USAGE);
+  if (positionals[0] === "test-case" && positionals.length === 2 && !values.status) return issueTestCase(name, positionals[1]!, values, hosted);
   if (positionals.length) return usageFailed(json, `${name} takes no arguments, or test-case <id>.`, ISSUES_USAGE);
   const status = values.status ?? "open";
   if (!["open", "resolved", "ignored", "all"].includes(status)) return usageFailed(json, `--status is open, resolved, ignored or all (got "${status}").`);
-  const where = access(name, values);
+  const where = hosted ? undefined : access(name, values);
   if (where instanceof Failed) return failed(json, where);
   try {
-    const { text, body } = await listIssues(name, where, status);
-    if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;
-    const issues = (body.issues as Issue[] | undefined) ?? [];
-    for (const line of withTextLine(body.text_mode, [])) console.log(line);
-    if (!issues.length) console.log(`No ${status === "all" ? "" : `${status} `}issues.`);
-    else {
-      const rows = issues.map((i) => [i.id, i.status ?? "", String(i.conversations ?? ""), when(i.last_seen), i.title ?? ""]);
-      const [header, ...lines] = table(["ID", "STATUS", "CONVERSATIONS", "LAST SEEN", "TITLE"], rows);
-      const fix = (i: Issue) => (i.suggested_fix ? indent(i.suggested_fix, "    fix: ", "         ") : []);
-      console.log([header, ...lines.flatMap((line, n) => [line, ...fix(issues[n]!)])].join("\n"));
-    }
-    let feedback: Feedback[] = [];
-    try {
-      feedback = ((await get(name, where, "/v1/agent/feedback?days=30")).body.feedback as Feedback[] | undefined) ?? [];
-    } catch (error) {
-      if (!(error instanceof Failed)) throw error; // an older Flow without the route: nothing more to print
-    }
-    if (feedback.length) console.log(["", `Feedback from your team (last 30 days): ${feedback.length}`, ...feedback.flatMap(feedbackLines)].join("\n"));
-    return 0;
+    return await withHosted(hosted, "issues", (read) => printIssues(name, json, status, where, read));
   } catch (error) {
     if (error instanceof Failed) return failed(json, error);
     throw error;
   }
+}
+
+/** flow issues' reads and lines: locally with the folder's key (`where`), else over the hosted Flow MCP (`read`). */
+async function printIssues(name: string, json: boolean, status: string, where: Access | undefined, read: HostedRead | undefined): Promise<number> {
+  const { text, body } = read ? answerOf(await read("list_issues", { status })) : await listIssues(name, where!, status);
+  if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;
+  const issues = (body.issues as Issue[] | undefined) ?? [];
+  for (const line of withTextLine(body.text_mode, [])) console.log(line);
+  if (!issues.length) console.log(`No ${status === "all" ? "" : `${status} `}issues.`);
+  else {
+    const rows = issues.map((i) => [i.id, i.status ?? "", String(i.conversations ?? ""), when(i.last_seen), i.title ?? ""]);
+    const [header, ...lines] = table(["ID", "STATUS", "CONVERSATIONS", "LAST SEEN", "TITLE"], rows);
+    const fix = (i: Issue) => (i.suggested_fix ? indent(i.suggested_fix, "    fix: ", "         ") : []);
+    console.log([header, ...lines.flatMap((line, n) => [line, ...fix(issues[n]!)])].join("\n"));
+  }
+  let feedback: Feedback[] = [];
+  try {
+    feedback = ((read ? await read("team_feedback", {}) : (await get(name, where!, "/v1/agent/feedback?days=30")).body).feedback as Feedback[] | undefined) ?? [];
+  } catch (error) {
+    if (!(error instanceof Failed)) throw error; // an older Flow without the route: nothing more to print
+  }
+  if (feedback.length) console.log(["", `Feedback from your team (last 30 days): ${feedback.length}`, ...feedback.flatMap(feedbackLines)].join("\n"));
+  return 0;
 }
 
 /** rule_id, from and expectations are the server's; from is null when no stored reply is behind it. */
@@ -468,13 +531,13 @@ interface TestCase {
 
 /** `flow issues test-case <id>`: the proposed test case's fields as the server sends them. A scenario also needs the
  * person, the opening and the channels, which the test case does not carry, so it is not printed as a scenario file. */
-async function issueTestCase(name: string, id: string, values: { json?: boolean; cloud?: string; dotenv?: string }): Promise<number> {
+async function issueTestCase(name: string, id: string, values: { json?: boolean; cloud?: string; dotenv?: string }, hosted: Hosted | undefined): Promise<number> {
   const json = values.json === true;
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(id)) return usageFailed(json, `"${id}" is not an issue id: use one from flow issues.`);
-  const where = access(name, values);
+  const where = hosted ? undefined : access(name, values);
   if (where instanceof Failed) return failed(json, where);
   try {
-    const { text, body } = await get(name, where, `/v1/agent/issues/${id}/test-case`);
+    const { text, body } = await withHosted(hosted, "issues test-case", async (read) => (read ? answerOf(await read("issue_test_case", { issue: id })) : await get(name, where!, `/v1/agent/issues/${id}/test-case`)));
     if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;
     const tc = (body.test_case ?? {}) as TestCase;
     const e = tc.expectations ?? {};
@@ -712,7 +775,7 @@ async function insightsGet(name: string, where: Access, path: string, finding: b
   } catch (error) {
     if (!(error instanceof Failed)) throw error;
     // A live key refused for a scope is the right key without that grant: its own message (Flow's hint, the grant) stands.
-    const words = error.status === 403 && error.code === "scope" && where.key.kind !== "live_key"
+    const words = error.status === 403 && error.code === "scope" && where.key.kind === "flow_key"
       ? `Insights reads production conversations, so it needs a live key: ${SETUP_LIVE} writes the live key FLOW_LIVE_KEY, which Insights then reads with (flow setup writes only a test key, flow_test_).`
       // Both routes answer not_found until Insights is open to the workspace; a finding's also for one not the agent's.
       : error.code === "not_found" && !finding ? "Insights is not open to this workspace yet." : undefined;
@@ -755,12 +818,23 @@ export async function insightsCli(args: string[]): Promise<number> {
   if (!["open", "fixed", "muted", "all"].includes(status)) return usageFailed(json, `--status is open, fixed, muted or all (got "${status}").`);
   const id = positionals[1];
   if (show && !/^[A-Za-z0-9_-]{1,100}$/.test(id!)) return usageFailed(json, `"${id}" is not a finding id: use one from flow insights.`);
-  const where = access(name, values, "production");
+  const hosted = hostedOf(values);
+  if (typeof hosted === "string") return usageFailed(json, hosted, INSIGHTS_USAGE);
+  const where = hosted ? undefined : access(name, values, "production");
   if (where instanceof Failed) return failed(json, where);
   try {
-    const { text, body } = show
-      ? await insightConversations(name, where, id!, Number(days) as 7 | 30)
-      : await listInsights(name, where, { days: Number(days) as 7 | 30, status: status as "open" });
+    const { text, body } = await withHosted(hosted, show ? "insights show" : "insights", async (read) => {
+      if (!read) {
+        return show
+          ? await insightConversations(name, where!, id!, Number(days) as 7 | 30)
+          : await listInsights(name, where!, { days: Number(days) as 7 | 30, status: status as "open" });
+      }
+      if (show) return answerOf(await read("insight_conversations", { finding: id!, days: Number(days) }));
+      // --json prints the whole answer, as Flow sent it; the lines only the findings of the status.
+      const all = answerOf(await read("list_insights", { days: Number(days), status: "all" }));
+      if (status === "all" || !Array.isArray(all.body.findings)) return all;
+      return { text: all.text, body: { ...all.body, findings: (all.body.findings as Finding[]).filter((f) => f.status === status) } };
+    });
     if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;
     console.log(withTextLine(body.text_mode, show ? findingLines(body, days) : insightsLines(body, status)).join("\n"));
     return 0;

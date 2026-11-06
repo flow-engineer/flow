@@ -8,7 +8,7 @@
 // { ok: false, error, next } when it did not work. Exit status: 0 printed, 1 not read, 2 a wrong flag.
 
 import type { TemplateDefinition } from "../../src/types.ts";
-import { access, Failed, failed, get, parse, table, usageFailed, USAGE_EXIT } from "./conversations.ts";
+import { access, answerOf, Failed, failed, get, hostedOf, parse, table, usageFailed, USAGE_EXIT, withHosted } from "./conversations.ts";
 import { KEYS_HELP, type FoundKey } from "./cloud-call.ts";
 import { OBSERVE_URL } from "../../src/traces.ts";
 
@@ -33,6 +33,9 @@ Options:
   --env, --environment     Taken and ignored: the templates are the project's, in both
   --cloud <url>            Flow's address (default: FLOW_FRAMEWORK_CLOUD, else ${OBSERVE_URL})
   --dotenv <path>          Read the environment from this file instead of the folder's .env
+  --server <url>           Read over a hosted Flow MCP as you (flow mcp login), not with this
+                           folder's keys (default: FLOW_MCP_SERVER)
+  --agent <id|name>        With --server: which of your agents (default: your only one)
   -h, --help               Show this help
 
 Reads with the agent's Flow key, FLOW_KEY (flow setup writes it into .env); it is never printed.
@@ -66,15 +69,18 @@ export async function templatesCli(args: string[]): Promise<number> {
   if (values.help) return console.log(USAGE), 0;
   if (positionals.length) return usageFailed(json, `${name} takes no arguments.`, USAGE);
   if (values.declare && (values.all || json)) return usageFailed(json, `--declare prints the approved templates only: give it alone.`, USAGE);
-  const where = access(name, values);
+  const hosted = hostedOf(values);
+  if (typeof hosted === "string") return usageFailed(json, hosted, USAGE);
+  const where = hosted ? undefined : access(name, values);
   if (where instanceof Failed) return failed(json, where);
   let text: string;
   let body: Record<string, unknown>;
   try {
-    ({ text, body } = await get(name, where, "/v1/agent/templates"));
+    // Over a hosted Flow MCP, list_templates says a dashboard without templates in these words itself.
+    ({ text, body } = await withHosted(hosted, "templates", async (read) => (read ? answerOf(await read("list_templates", { status: "all" })) : await get(name, where!, "/v1/agent/templates"))));
   } catch (error) {
     if (!(error instanceof Failed)) throw error;
-    const notServed = error.status === 404;
+    const notServed = where !== undefined && error.status === 404;
     return failed(json, notServed ? Object.assign(new Failed(`${name}: ${NOT_SERVED} (${where.cloud} answered 404).`, "not_available"), { status: 404 }) : error);
   }
   if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;

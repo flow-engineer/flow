@@ -515,7 +515,7 @@ async function callTool(t: Tool, input: unknown, context: ToolContext): Promise<
   if (!t.format) return { result: data };
   // The tool has run: a formatter that fails sends the data as JSON, never an error.
   try {
-    const text: unknown = t.format(checked.data);
+    const text: unknown = t.format(checked.data, input);
     if (typeof text !== "string") return { result: data, formatError: `format returned ${typeof text}, not text` };
     return { result: { ...data, content: [{ type: "text", text }], _meta: { [FORMATTED]: true } } };
   } catch (error) {

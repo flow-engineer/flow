@@ -28,7 +28,9 @@
 // (testing/src/conversations.ts); `flow templates` the
 // project's approved WhatsApp templates (testing/src/templates.ts), which `flow test` compares with
 // the declared ones. `flow mcp serve` serves those reads, and logs and deploy status, as read-only MCP
-// tools on stdio for the coding agent in the agent's folder (testing/src/mcp-serve.ts). `flow test pull` writes the test drafts Flow made from the hosted agent's
+// tools on stdio for the coding agent in the agent's folder (testing/src/mcp-serve.ts, on the tools
+// in testing/src/flow-tools.ts); with --server those commands read over a hosted Flow MCP, signed
+// in with `flow mcp login`. `flow test pull` writes the test drafts Flow made from the hosted agent's
 // conversations into tests/drafts/, which flow test never reads (testing/src/pull.ts).
 
 import { mkdirSync, existsSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
@@ -88,7 +90,11 @@ const MCP_LINE = `  flow mcp update        Write the tools of the MCP servers th
   flow mcp serve [--dir <folder>] [--cloud <url>]
                             This agent's conversations, issues, templates, logs and deploys as
                             read-only MCP tools for your coding agent (flow mcp serve --help):
-                            claude mcp add flow -- npx @flow-engineer/flow mcp serve`;
+                            claude mcp add flow -- npx @flow-engineer/flow mcp serve
+  flow mcp login --server <url>
+                            Sign in to a hosted Flow MCP, so flow conversations, issues, insights,
+                            templates, logs and deploy status read over it with --server <url>
+                            (or FLOW_MCP_SERVER), as you; flow mcp logout forgets it`;
 const CLI_LINE = `  flow cli --server <url> <command>
                             Any MCP server's tools as commands (flow cli --server <url> --help)`;
 const INSPECT_LINE = `  flow inspect <url> <command>
@@ -223,6 +229,11 @@ if (process.argv[2] === "mcp") {
     // Loaded only here, so the other commands never load the MCP SDK (a dependency of Flow Framework).
     const { mcpServeCli } = await import("./mcp-serve.ts");
     process.exit(await mcpServeCli(process.argv.slice(4)));
+  }
+  if (process.argv[3] === "login" || process.argv[3] === "logout") {
+    // Loaded only here: signing in to a hosted Flow MCP needs @modelcontextprotocol/client and @stricli/core, optional peers.
+    const [{ defineCli, runCli }, { FLOW_MCP_CLI }] = await withPeers(`mcp ${process.argv[3]}`, () => Promise.all([import("../../cli/src/index.ts"), import("./flow-tools.ts")]));
+    await exitFlushed(await runCli(defineCli(FLOW_MCP_CLI), ["mcp", ...process.argv.slice(3)]));
   }
   if (process.argv[3] !== "update") {
     console.error(`Usage:\n${MCP_LINE}`);

@@ -83,6 +83,22 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   words), to word a failure for a person at a terminal. The client says it: wording only, never access.
 - A tool kept to some clients (`mcp: { clients: ["cli"] }`) no longer needs `mcpServer({ auth })`:
   without auth it reaches only the CLI in the same process.
+- **Flow's read tools, `flowReadTools()`** (`@flow-engineer/flow/testing`): what `flow conversations`,
+  `issues`, `insights`, `templates`, `logs` and `deploy status` read, as Flow Framework tools, for
+  `mcpServer({ tools, instructions })`. `flowReadTools({ dir?, cloud?, env? })` reads with the
+  folder's keys as the commands do; `flowReadTools({ hosted: { credential?, cloud? } })` gives every
+  tool an `agent` input (a `flow_agent_id` or name; optional when the person has one) and adds
+  `list_agents`, and each call takes its key from `context.credentials.get(credential)` (default
+  `"flow"`), a `FlowAgentAccess` (`agents()`, `key(agent)`), never from the model. Failures are
+  `ToolError` documents. `flow mcp serve` is now that, on `mcpServer(...).stdio()`: the same 8 tools,
+  descriptors and instructions, byte for byte.
+- **`--server <url>` (or `FLOW_MCP_SERVER`) and `--agent`** on `flow conversations [show]`, `issues
+  [test-case]`, `insights [show]`, `templates`, `logs [--follow]` and `deploy status`: they read over
+  a hosted Flow MCP as the person signed in with **`flow mcp login --server <url>`** (`flow mcp
+  logout` forgets it; `FLOW_MCP_TOKEN` for CI), through its tools, and print what they print today.
+  `--cloud`, `--dotenv` and `--dir` do not go with it. Without `--server` nothing changes: they read
+  with the folder's keys as before and load no MCP SDK.
+- `Tool.format(output, input)` also gets the input the tool was called with.
 
 - **A simulated conversation reaches a Flow Messaging agent.** Flow Messaging's simulated contacts
   (`POST /v0/test/conversations`, test keys) write on the app's simulated sender, never the
@@ -126,6 +142,9 @@ working unchanged: it is offered no videos until its `features` say `videos: tru
 now `string | McpServerHandle`: code that reads `cli.server` as a string narrows it first. An
 `mcpServer` with a tool kept to some clients and no `auth` no longer throws; it serves the tool to
 no host.
+`flow mcp serve`'s tools/list, instructions and results are unchanged; it now runs on the
+framework's `mcpServer`. A `FLOW_MCP_SERVER` set in the environment sends the read commands to that
+hosted Flow MCP, so leave it unset to read with the folder's keys.
 
 ## 0.16.0 (2026-11-05)
 
