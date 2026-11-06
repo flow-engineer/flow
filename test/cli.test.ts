@@ -1126,7 +1126,7 @@ test("logout ends the sign-in on the server too: the refresh token, then the acc
     const signedIn = async (access: string, revocation: boolean) => {
       const provider = storedProvider(cli, server);
       await provider.saveDiscoveryState!({ authorizationServerUrl: origin, authorizationServerMetadata: { issuer: origin, authorization_endpoint: `${origin}/auth`, token_endpoint: `${origin}/token`, response_types_supported: ["code"], ...(revocation ? { revocation_endpoint: `${origin}/token/revocation` } : {}) } });
-      await provider.saveClientInformation({ client_id: `${origin}/.well-known/oauth-client/cli` });
+      await provider.saveClientInformation!({ client_id: `${origin}/.well-known/oauth-client/cli` });
       await provider.saveTokens({ access_token: access, refresh_token: `r-${access}`, token_type: "Bearer" });
     };
 

@@ -151,7 +151,7 @@ export function isSignedIn(config: CliConfig, server: string): boolean {
  */
 export async function revokeStored(config: CliConfig, server: string, signal?: AbortSignal): Promise<boolean> {
   const saved = readAll(config)[server];
-  const endpoint = saved?.discovery?.authorizationServerMetadata?.revocation_endpoint;
+  const endpoint = (saved?.discovery?.authorizationServerMetadata as { revocation_endpoint?: string } | undefined)?.revocation_endpoint;
   const clientId = config.clientId ?? saved?.client?.client_id;
   const tokens = ([["refresh_token", saved?.tokens?.refresh_token], ["access_token", saved?.tokens?.access_token]] as const)
     .filter((pair): pair is readonly [typeof pair[0], string] => typeof pair[1] === "string" && pair[1] !== "");
