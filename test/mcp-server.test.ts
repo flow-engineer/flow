@@ -7,7 +7,7 @@ import { isSpecType } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { tools as cafeTools } from "../examples/cafe/src/tools.ts";
 import { mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
-import { createAgent, flowEvents, tool, type ToolContext } from "../src/index.ts";
+import { createAgent, flowEvents, jsonText, tool, type ToolContext } from "../src/index.ts";
 
 const servers: Server[] = [];
 after(() => servers.forEach((s) => s.close()));
@@ -265,6 +265,18 @@ test("a tool's format is the result's text beside its structured content; a form
   assert.deepEqual(await c.callTool({ name: "broken", arguments: {} }), { content: [{ type: "text", text: '{"order_id":"BL-2"}' }], structuredContent: { order_id: "BL-2" } });
   const ended = events.filter((e): e is { type: string; ok: boolean; formatError?: string } => (e as { type: string }).type === "tool.end");
   assert.deepEqual(ended.map(({ ok, formatError }) => ({ ok, formatError })), [{ ok: true, formatError: undefined }, { ok: true, formatError: "no template" }]);
+  await c.close();
+});
+
+test("a tool's output given with its JSON text (jsonText) is sent as that text, byte for byte, beside the structured content; formatted, only a CLI gets the text", async () => {
+  const raw = '{\n  "id": "BL-1",\n  "note": "2 \\u003c 3"\n}\n';
+  const answer = tool({ name: "answer", description: "An order as the shop's API said it.", input: z.object({}), output: z.object({ id: z.string(), note: z.string() }), signIn: "none", run: () => jsonText(raw) });
+  const formatted = tool({ ...answer, name: "formatted", format: (o) => `Order ${o.id}` });
+  const c = await client(await serve({ name: "cafe", version: "1", tools: [answer, formatted], feedback: false }));
+  assert.deepEqual(await c.callTool({ name: "answer", arguments: {} }), { content: [{ type: "text", text: raw }], structuredContent: { id: "BL-1", note: "2 < 3" }, _meta: { "flow.engineer/json-text": true } });
+  // A host reads the tool's own text; the JSON text rides along only for a CLI, which prints it with --json.
+  assert.deepEqual(await c.callTool({ name: "formatted", arguments: {} }), { content: [{ type: "text", text: "Order BL-1" }], structuredContent: { id: "BL-1", note: "2 < 3" }, _meta: { "chinwag/formatted": true } });
+  assert.deepEqual((await c.callTool({ name: "formatted", arguments: {}, _meta: { "chinwag/surface": "cli", "chinwag/command": "formatted" } }))._meta, { "chinwag/formatted": true, "flow.engineer/json-text": raw });
   await c.close();
 });
 

@@ -20,7 +20,7 @@ import { palette } from "../cli/src/colors.ts";
 import { feedbackUsage } from "../cli/src/commands.ts";
 import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
 import { scriptedModel, respond, call } from "./helpers.ts";
-import { createAgent, tool, ToolError } from "../src/index.ts";
+import { createAgent, jsonText, jsonTextOf, tool, ToolError } from "../src/index.ts";
 
 // These tests drive chat as a person would; a coding agent running them must not switch chat to plain.
 for (const name of ["CLAUDECODE", "CURSOR_AGENT", "CODEX_CI", "AI_AGENT"]) delete process.env[name];
@@ -151,6 +151,29 @@ test("over a handle in this process the CLI needs no network or sign-in, sees th
   assert.equal(JSON.parse(named.out).orders.length, 2);
   const byEnv = await connectCli(cli, { env: { ACME_SERVER: "http://127.0.0.1:9/mcp" } }).catch((error: Error & { code?: number }) => error);
   assert.equal((byEnv as { code?: number }).code, 5);
+});
+
+test("a tool's JSON text (jsonText) is what --json prints, byte for byte, over a handle or a URL; --fields and connectCli read its data", async () => {
+  const raw = '{\n  "order_id": "BL-1",\n  "note": "2 \\u003c 3"\n}';
+  const answer = tool({ name: "get_answer", description: "An order as the shop's API said it.", input: z.object({}), output: z.object({ order_id: z.string(), note: z.string() }), signIn: "none", hints: { readOnly: true }, run: () => jsonText(raw), format: (o) => `Order ${o.order_id}` });
+  const handle = mcpServer({ name: "acme", version: "1", tools: [answer], feedback: false });
+  for (const server of [handle, await serve({ tools: [answer], feedback: false })]) {
+    const cli = defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-json-text-")), server });
+    const json = io();
+    assert.equal(await runCli(cli, ["get-answer", "--json"], json.channel), 0, json.err);
+    assert.equal(json.out, `${raw}\n`);
+    const fields = io();
+    assert.equal(await runCli(cli, ["get-answer", "--json", "--fields", "note"], fields.channel), 0, fields.err);
+    assert.equal(fields.out, '{"note":"2 < 3"}\n');
+    const said = io();
+    assert.equal(await runCli(cli, ["get-answer"], said.channel), 0, said.err);
+    assert.equal(said.out, "Order BL-1\n");
+    const connection = await connectCli(cli, { env: {} });
+    const value = await connection.call("get_answer", {}, { command: "get-answer" });
+    assert.deepEqual(value, { order_id: "BL-1", note: "2 < 3" });
+    assert.equal(jsonTextOf(value), raw);
+    await connection.close();
+  }
 });
 
 test("commands include MCP-deferred tools: positionals, flags, --json and --fields", async () => {

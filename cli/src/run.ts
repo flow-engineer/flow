@@ -20,7 +20,7 @@ import { configDir, isSignedIn, signedInAsOtherClient, signIn, signOut, storedAc
 import { colorsAt, painter, severity, type Paint } from "./colors.ts";
 import { chooseAtTerminal, person, signInQuestion, tips, waitsForSignIn, welcomeScreen } from "./welcome.ts";
 import { SKILLS_META } from "../../src/skills.ts";
-import { FORMATTED, ToolError } from "../../src/tools.ts";
+import { FORMATTED, JSON_TEXT, jsonText, jsonTextOf, ToolError } from "../../src/tools.ts";
 import { FULL_CATALOG_META, IN_PROCESS } from "../../mcp/src/describe.ts";
 import type { McpServerHandle } from "../../mcp/src/server.ts";
 import {
@@ -1163,8 +1163,14 @@ function textOf(content: Block[]): string {
 function valueOf(result: { content?: unknown; structuredContent?: unknown; isError?: unknown }): unknown {
   // A failure document comes back as the ToolError it was, for a command of the team's own to act on.
   if (result.isError) throw ToolError.from(result.structuredContent) ?? new CliExit(EXIT.failed, textOf(result.content as Block[]) || "The tool failed.");
-  if (result.structuredContent !== undefined) return result.structuredContent;
   const text = textOf((result.content ?? []) as Block[]);
+  // The JSON as the tool gave it (jsonText): --json prints it byte for byte.
+  const given = (result as { _meta?: Record<string, unknown> })._meta?.[JSON_TEXT];
+  const raw = given === true ? text : typeof given === "string" ? given : undefined;
+  if (result.structuredContent !== undefined) return raw !== undefined && result.structuredContent && typeof result.structuredContent === "object" ? jsonText(raw, result.structuredContent) : result.structuredContent;
+  if (raw !== undefined) {
+    try { return jsonText(raw); } catch {}
+  }
   try {
     return JSON.parse(text);
   } catch {
@@ -1192,7 +1198,7 @@ function pick(value: unknown, fields: string[]): unknown {
 
 function render(value: unknown, options: { json?: boolean; fields?: string[]; columns?: string[]; view?: string[] }): string {
   const shown = options.fields ? pick(value, options.fields) : value;
-  if (options.json) return JSON.stringify(shown);
+  if (options.json) return jsonTextOf(shown) ?? JSON.stringify(shown);
   return human(shown, options.fields ?? options.columns, options.fields ?? options.view);
 }
 

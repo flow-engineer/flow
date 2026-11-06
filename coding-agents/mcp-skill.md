@@ -64,7 +64,7 @@ createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamabl
   client for testing, whether or not the agent has a CLI, and installs nothing into it. Start `npm run mcp` as a
   process that outlives your turn (`mkdir -p .flow && nohup npm run mcp > .flow/mcp.log 2>&1 &`; a
   coding agent's background tasks can be stopped), then, with
-  `inspect` standing for `npx -y -p @flow-engineer/flow -p @modelcontextprotocol/client@2.3.1 flow inspect http://127.0.0.1:8790/mcp`:
+  `inspect` standing for `npx -y @flow-engineer/flow inspect http://127.0.0.1:8790/mcp`:
   `inspect tools` lists what a host sees, schemas included, and `inspect call <tool> '<json>'` calls a
   tool as a host would and prints the raw result (`resources`, `read <uri>`, `prompts` and `prompt <name>` too).
   Tools that need sign-in: run `inspect auth` in the background (it prints what the server
@@ -163,9 +163,8 @@ Which commands get short forms (a group's default, positional arguments, short f
 The same tools as commands, over the organization's MCP server, with the same sign-in and gating.
 It runs on Stricli (`@stricli/core`, the framework Sentry's CLI is built on). Every tool is already a
 command under its own name (`place_order` is `acme place-order`); a CLI file adds what needs
-judgement. Install `@modelcontextprotocol/client@2.3.1` and `@stricli/core@1.3.0`, plus
-`marked@12.0.2` and `marked-terminal@7.3.0` to render tools' Markdown in a terminal (the versions
-Flow Framework pins), and write `src/cli.ts`:
+judgement. Stricli and the MCP client SDK come with Flow Framework; install `marked@12.0.2` and `marked-terminal@7.3.0` to
+render tools' Markdown in a terminal (the versions Flow Framework pins), and write `src/cli.ts`:
 
 ```ts
 #!/usr/bin/env node

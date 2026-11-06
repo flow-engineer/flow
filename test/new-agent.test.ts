@@ -39,7 +39,9 @@ test("flow new makes an agent of its own: @flow-engineer/flow imports, a package
   assert.equal(pkg.name, "my-agent");
   assert.equal(pkg.dependencies["@flow-engineer/flow"], own.version, "pinned exactly, as the docs say for production");
   assert.deepEqual(pkg.allowScripts, { esbuild: true, koffi: true }, "the install scripts it needs are allowed, so a fresh npm install warns about none");
-  assert.equal(pkg.dependencies["@modelcontextprotocol/client"], own.peerDependencies["@modelcontextprotocol/client"], "the MCP client SDK at the version Flow Framework pins");
+  // The MCP client SDK and Stricli come with Flow Framework (its dependencies since 0.16.1), as the server SDK does.
+  assert.deepEqual([own.dependencies["@modelcontextprotocol/client"], own.dependencies["@stricli/core"]], ["2.3.1", "1.3.0"]);
+  assert.deepEqual([pkg.dependencies["@modelcontextprotocol/client"], pkg.dependencies["@stricli/core"]], [undefined, undefined]);
   // flow mcp serve and src/mcp.ts run on the MCP server SDK, a dependency of Flow Framework itself: an agent folder made on 0.15 without it still serves.
   assert.equal(own.dependencies["@modelcontextprotocol/server"], "2.3.1");
   assert.equal(pkg.dependencies["@modelcontextprotocol/server"], undefined);

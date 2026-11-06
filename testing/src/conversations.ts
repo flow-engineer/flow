@@ -19,14 +19,17 @@
 // network error or a 5xx (testing/src/cloud-call.ts). With --json, stdout is one JSON document: the
 // server's, or { ok: false, error: { code, message, hint? }, next } when it did not work.
 // Exit status: 0 printed, 1 the server refused or could not be reached, or no key, 2 a wrong flag.
-// listConversations, showConversation, listIssues, listInsights and insightConversations return the
-// data, for callers other than the CLI.
+// The commands read through Flow's read tools (testing/src/flow-tools.ts) over the CLI layer, in this
+// process with the folder's keys or over a hosted Flow MCP with --server, as any CLI built on the
+// framework does; showConversation, listIssues, listInsights and insightConversations are the tools' reads.
 
 import { parseArgs } from "node:util";
 import { OBSERVE_URL, setting } from "../../src/traces.ts";
 import { cloudCall, failureDocument, keyHelp, keyRefused, KEYS_HELP, NetworkError, SETUP_LIVE, textLine, type FoundKey, type Waits } from "./cloud-call.ts";
 import { sinceSeconds } from "./deploy.ts";
 import { loadEnv } from "./report.ts";
+import { jsonTextOf } from "../../src/tools.ts";
+import type { Reads } from "./flow-tools.ts";
 
 export const CONVERSATIONS_LINES = `  flow conversations [--env staging|production] [--grade wrong|unhelpful|good] [--contact <label>] [--since 24h] [--limit n] [--json]
                             The hosted agent's conversations, with how many of its replies were
@@ -253,21 +256,45 @@ export function hostedOf(values: { server?: string; agent?: string; cloud?: stri
   return { server, ...(values.agent ? { agent: values.agent.trim() } : {}) };
 }
 
-/** A hosted tool's result as the commands print a read: --json's text, its JSON and its text mode. */
+/** A read tool's result as the commands print a read: --json's text (the server's own, when the tool kept it), its JSON and its text mode. */
 export function answerOf(body: Record<string, unknown>): { text: string; body: Record<string, unknown>; textMode?: string } {
-  return { text: JSON.stringify(body), body, ...(typeof body.text_mode === "string" && body.text_mode ? { textMode: body.text_mode } : {}) };
+  return { text: jsonTextOf(body) ?? JSON.stringify(body), body, ...(typeof body.text_mode === "string" && body.text_mode ? { textMode: body.text_mode } : {}) };
 }
 
-/** Runs `run` with the hosted Flow MCP's reads when the command has one (else with none), closing them after. */
-export async function withHosted<T>(hosted: Hosted | undefined, command: string, run: (read: HostedRead | undefined) => Promise<T>): Promise<T> {
-  if (!hosted) return run(undefined);
-  const { connectHosted } = await import("./flow-tools.ts");
-  const read = await connectHosted(hosted.server, hosted.agent, command);
+/**
+ * Runs `run` with Flow's read tools, closing them after: over the hosted Flow MCP when the command
+ * has one, else in this process over `local` (the folder's keys). The commands read through the
+ * tools as any CLI built on the framework does.
+ */
+export async function withReads<T>(hosted: Hosted | undefined, command: string, local: () => Reads, run: (read: HostedRead) => Promise<T>): Promise<T> {
+  const { connectReads } = await import("./flow-tools.ts");
+  const read = await connectReads(command, hosted ?? { reads: local() });
   try {
     return await run(read);
   } finally {
     await read.close();
   }
+}
+
+/** The reads of a command run in a folder: `where` (its keys for `environment`), another environment's found as the command finds them. */
+export function folderAccess(name: string, values: { cloud?: string; dotenv?: string }, where: Access | undefined, environment?: "staging" | "production"): () => Reads {
+  return () => {
+    const found = new Map<string, Access>(where ? [[environment ?? "", where]] : []);
+    return {
+      async flow(environment) {
+        let at = found.get(environment ?? "");
+        if (!at) {
+          const got = access(name, values, environment);
+          if (got instanceof Failed) throw got;
+          found.set(environment ?? "", (at = got));
+        }
+        return at;
+      },
+      async ci() {
+        throw new Failed(`${name} reads no CI key.`, "internal");
+      },
+    };
+  };
 }
 
 /** One of the hosted Flow MCP's tools, called for a command: its result, or Failed. */
@@ -365,15 +392,11 @@ export interface ListQuery {
 const contactCode = (label: string) => label.trim().replace(/^contact\s+/i, "").toLowerCase();
 
 /**
- * The conversations a query matches, newest first: pages of 100 followed by next_cursor until the
- * limit or the last page; with a contact, only that contact's (read over at most 100 pages). The
- * last page's fields, the conversations, and the cursor of the pages not read (null: none).
+ * The conversations a query matches, newest first, over any reader of one page (`page`: its query,
+ * as sent): pages of 100 followed by next_cursor until the limit or the last page; with a contact,
+ * only that contact's (read over at most 100 pages). The last page's fields, the conversations, and
+ * the cursor of the pages not read (null: none).
  */
-export function listConversations(name: string, where: Access, query: ListQuery): Promise<{ last: Record<string, unknown>; conversations: Conversation[]; cursor: string | null }> {
-  return collectConversations(async (page) => (await get(name, where, `/v1/agent/conversations?${page}`)).body, query);
-}
-
-/** listConversations' pages and filter over any reader of one page (`page`: its query, as sent). */
 export async function collectConversations(read: (page: URLSearchParams) => Promise<Record<string, unknown>>, query: ListQuery): Promise<{ last: Record<string, unknown>; conversations: Conversation[]; cursor: string | null }> {
   const params = new URLSearchParams();
   if (query.environment) params.set("environment", query.environment);
@@ -457,15 +480,15 @@ export async function conversationsCli(args: string[]): Promise<number> {
   const where = hosted ? undefined : access(name, values, values.environment as ListQuery["environment"]);
   if (where instanceof Failed) return failed(json, where);
   try {
-    return await withHosted(hosted, show ? "conversations show" : "conversations", async (read) => {
+    return await withReads(hosted, show ? "conversations show" : "conversations", folderAccess(name, values, where, values.environment as ListQuery["environment"]), async (read) => {
       if (show) {
         const environment = values.environment ? { environment: values.environment } : {};
-        const { text, body, textMode } = read ? answerOf(await read("show_conversation", { id: id!, ...environment })) : await showConversation(name, where!, id!);
+        const { text, body, textMode } = answerOf(await read("show_conversation", { id: id!, ...environment }));
         if (json) process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
         else console.log(withTextLine(textMode, transcript(body)).join("\n"));
         return 0;
       }
-      const { last, conversations, cursor } = read ? await collectConversations((page) => read("conversations_page", pageInput(page)), query) : await listConversations(name, where!, query);
+      const { last, conversations, cursor } = await collectConversations((page) => read("conversations_page", pageInput(page)), query);
       if (json) return process.stdout.write(`${JSON.stringify({ ...last, conversations, next_cursor: cursor })}\n`), 0;
       console.log(withTextLine(last.text_mode, list(conversations, cursor !== null)).join("\n"));
       return 0;
@@ -493,16 +516,16 @@ export async function issuesCli(args: string[]): Promise<number> {
   const where = hosted ? undefined : access(name, values);
   if (where instanceof Failed) return failed(json, where);
   try {
-    return await withHosted(hosted, "issues", (read) => printIssues(name, json, status, where, read));
+    return await withReads(hosted, "issues", folderAccess(name, values, where), (read) => printIssues(json, status, read));
   } catch (error) {
     if (error instanceof Failed) return failed(json, error);
     throw error;
   }
 }
 
-/** flow issues' reads and lines: locally with the folder's key (`where`), else over the hosted Flow MCP (`read`). */
-async function printIssues(name: string, json: boolean, status: string, where: Access | undefined, read: HostedRead | undefined): Promise<number> {
-  const { text, body } = read ? answerOf(await read("list_issues", { status })) : await listIssues(name, where!, status);
+/** flow issues' reads and lines. */
+async function printIssues(json: boolean, status: string, read: HostedRead): Promise<number> {
+  const { text, body } = answerOf(await read("list_issues", { status }));
   if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;
   const issues = (body.issues as Issue[] | undefined) ?? [];
   for (const line of withTextLine(body.text_mode, [])) console.log(line);
@@ -515,7 +538,7 @@ async function printIssues(name: string, json: boolean, status: string, where: A
   }
   let feedback: Feedback[] = [];
   try {
-    feedback = ((read ? await read("team_feedback", {}) : (await get(name, where!, "/v1/agent/feedback?days=30")).body).feedback as Feedback[] | undefined) ?? [];
+    feedback = ((await read("team_feedback", {})).feedback as Feedback[] | undefined) ?? [];
   } catch (error) {
     if (!(error instanceof Failed)) throw error; // an older Flow without the route: nothing more to print
   }
@@ -537,7 +560,7 @@ async function issueTestCase(name: string, id: string, values: { json?: boolean;
   const where = hosted ? undefined : access(name, values);
   if (where instanceof Failed) return failed(json, where);
   try {
-    const { text, body } = await withHosted(hosted, "issues test-case", async (read) => (read ? answerOf(await read("issue_test_case", { issue: id })) : await get(name, where!, `/v1/agent/issues/${id}/test-case`)));
+    const { text, body } = await withReads(hosted, "issues test-case", folderAccess(name, values, where), async (read) => answerOf(await read("issue_test_case", { issue: id })));
     if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;
     const tc = (body.test_case ?? {}) as TestCase;
     const e = tc.expectations ?? {};
@@ -823,12 +846,7 @@ export async function insightsCli(args: string[]): Promise<number> {
   const where = hosted ? undefined : access(name, values, "production");
   if (where instanceof Failed) return failed(json, where);
   try {
-    const { text, body } = await withHosted(hosted, show ? "insights show" : "insights", async (read) => {
-      if (!read) {
-        return show
-          ? await insightConversations(name, where!, id!, Number(days) as 7 | 30)
-          : await listInsights(name, where!, { days: Number(days) as 7 | 30, status: status as "open" });
-      }
+    const { text, body } = await withReads(hosted, show ? "insights show" : "insights", folderAccess(name, values, where, "production"), async (read) => {
       if (show) return answerOf(await read("insight_conversations", { finding: id!, days: Number(days) }));
       // --json prints the whole answer, as Flow sent it; the lines only the findings of the status.
       const all = answerOf(await read("list_insights", { days: Number(days), status: "all" }));

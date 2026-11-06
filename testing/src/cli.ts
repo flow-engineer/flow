@@ -231,27 +231,25 @@ if (process.argv[2] === "mcp") {
     process.exit(await mcpServeCli(process.argv.slice(4)));
   }
   if (process.argv[3] === "login" || process.argv[3] === "logout") {
-    // Loaded only here: signing in to a hosted Flow MCP needs @modelcontextprotocol/client and @stricli/core, optional peers.
-    const [{ defineCli, runCli }, { FLOW_MCP_CLI }] = await withPeers(`mcp ${process.argv[3]}`, () => Promise.all([import("../../cli/src/index.ts"), import("./flow-tools.ts")]));
+    // Loaded only here, so the other commands never load the MCP client SDK or Stricli.
+    const [{ defineCli, runCli }, { FLOW_MCP_CLI }] = await Promise.all([import("../../cli/src/index.ts"), import("./flow-tools.ts")]);
     await exitFlushed(await runCli(defineCli(FLOW_MCP_CLI), ["mcp", ...process.argv.slice(3)]));
   }
   if (process.argv[3] !== "update") {
     console.error(`Usage:\n${MCP_LINE}`);
     process.exit(1);
   }
-  // Loaded here first, so a missing optional peer is one line; mcpUpdateCli's own import of it is then cached.
-  await withPeers("mcp update", () => import("../../mcp/src/client.ts"));
   process.exit(await mcpUpdateCli());
 }
 if (process.argv[2] === "cli" && ["pack", "publish", "rollback", "status"].includes(process.argv[3] ?? "")) await exitFlushed(await cliReleaseCli(process.argv.slice(3)));
 if (process.argv[2] === "cli") {
-  // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client and @stricli/core, optional peers.
-  const { defineCli, runCli } = await withPeers("cli", () => import("../../cli/src/index.ts"));
+  // Loaded only here, so the other commands never load the MCP client SDK or Stricli.
+  const { defineCli, runCli } = await import("../../cli/src/index.ts");
   await exitFlushed(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
 }
 if (process.argv[2] === "inspect") {
-  // Loaded only here: it needs @modelcontextprotocol/client, an optional peer.
-  const { inspectCli } = await withPeers("inspect", () => import("./inspect.ts"));
+  // Loaded only here, so the other commands never load the MCP client SDK.
+  const { inspectCli } = await import("./inspect.ts");
   await exitFlushed(await inspectCli(process.argv.slice(3)));
 }
 if (process.argv[2] === "deploy") await exitFlushed(await deployCli(process.argv.slice(3)));
@@ -816,20 +814,6 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
 async function exitFlushed(code: number): Promise<never> {
   await Promise.all([process.stdout, process.stderr].map((stream) => new Promise<void>((done) => stream.write("", () => done()))));
   process.exit(code);
-}
-
-/** A command's module, or exits 1 with one line when an optional peer it needs is not installed where
- * flow runs from (npx's cache, say, rather than the agent's folder). */
-async function withPeers<T>(command: string, load: () => Promise<T>): Promise<T> {
-  try {
-    return await load();
-  } catch (error) {
-    const missing = /Cannot find package '([^']+)'/.exec((error as Error).message)?.[1];
-    const peers = JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).peerDependencies as Record<string, string>;
-    if ((error as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND" || !missing || !(missing in peers)) throw error;
-    console.error(`flow ${command} needs ${missing}: run it from your agent's folder (npx @flow-engineer/flow ${command}), or npm install ${missing}.`);
-    return exitFlushed(1);
-  }
 }
 
 /** Nothing was sent: prints what is wrong and exits 1 (with --json, after the report). */

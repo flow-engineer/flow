@@ -2,21 +2,23 @@
 // `insights`, `templates`, `logs` and `deploy status` read. They serve two ways:
 //   - in an agent's folder (`flowReadTools({ dir })`): the folder's keys (FLOW_KEY, FLOW_LIVE_KEY,
 //     FLOW_FRAMEWORK_CLOUD_KEY; the environment first, then the folder's .env, read again on every
-//     call). `flow mcp serve` serves them on stdio, and the read commands call them in the same
-//     process (testing/src/conversations.ts, templates.ts, deploy.ts);
+//     call). `flow mcp serve` serves them on stdio, and the read commands call them through the CLI
+//     layer (connectCli) over the server's in-process handle (testing/src/conversations.ts,
+//     templates.ts, deploy.ts: connectReads), as any CLI built on the framework reaches its tools;
 //   - hosted (`flowReadTools({ hosted: {} })`): each call names an agent of the signed-in person
 //     (or they have one), and its key comes from the server's credentials, never the model.
 // Eight tools every host sees, the CLI's own four (pages of conversations and logs, the team's
 // feedback, an issue's test case: kept to the CLI, mcp.clients), and hosted, list_agents. A result
-// is structured content and the same data as text under a one-line summary; a failure a ToolError
-// with --json's failure document. No key value is ever returned, only its prefix and last 4.
+// is structured content and the same data as text under a one-line summary; when the data is Flow's
+// answer as it came, the tool returns it with jsonText, so the CLI's --json prints Flow's own text,
+// locally and over --server alike. A failure is a ToolError with --json's failure document. No key value is ever returned, only its prefix and last 4.
 
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { RUN } from "../../src/names.ts";
-import { ToolError, type Tool, type ToolContext } from "../../src/tools.ts";
+import { jsonText, ToolError, type Tool, type ToolContext } from "../../src/tools.ts";
 import { ADVISORY, CLOUDS, NetworkError, textLine, type FoundKey, type Waits } from "./cloud-call.ts";
 import { collectConversations, Failed, get, insightConversations, listInsights, listIssues, noKey, readKey, showConversation, sinceTime, type Access } from "./conversations.ts";
 import { cloudApi, cloudOf, deployStatus, logReader, logsPage, logsWindow, NotAvailable, Refused, SEVERITIES, type Api, type LogsQuery } from "./deploy.ts";
@@ -105,6 +107,8 @@ interface Read<S extends z.ZodObject = z.ZodObject> {
 interface Say {
   name: string;
   cli: boolean;
+  /** The whole command ("flow deploy status"), else the tool's name: who failed, when it was not the cloud. */
+  command: string;
 }
 
 const read = <S extends z.ZodObject>(r: Read<S>): Read => r as unknown as Read;
@@ -152,7 +156,8 @@ const READS: Read[] = [
       environment: ENVIRONMENT.optional().describe("staging or production"),
     }),
     async run({ id, environment }, reads, say) {
-      return (await showConversation(say.name, await reads.flow(environment), id)).body;
+      const { text, body } = await showConversation(say.name, await reads.flow(environment), id);
+      return jsonText(text, body);
     },
     summary(body, { id }) {
       const messages = (body.messages as Array<{ tools?: Array<{ ok?: boolean | null } | string>; delivery?: { state?: string } | null }> | undefined) ?? [];
@@ -167,7 +172,8 @@ const READS: Read[] = [
     description: (hosted) => `The problems the grades of the agent's replies add up to, across both environments: id, status, how many conversations, last seen, title and a suggested fix. Use it to find what to fix in the agent first; show_conversation reads the conversations behind one. ${keyed(FLOW_KEY_NOTE)(hosted)}`,
     input: z.object({ status: z.enum(["open", "resolved", "ignored", "all"]).default("open").describe("Which issues") }),
     async run({ status }, reads, say) {
-      return (await listIssues(say.name, await reads.flow(), status)).body;
+      const { text, body } = await listIssues(say.name, await reads.flow(), status);
+      return jsonText(text, body);
     },
     summary(body, { status }) {
       const n = ((body.issues as unknown[] | undefined) ?? []).length;
@@ -183,7 +189,9 @@ const READS: Read[] = [
       status: z.enum(["open", "fixed", "muted", "all"]).default("open").describe("Which findings"),
     }),
     async run({ days, status }, reads, say) {
-      return (await listInsights(say.name, await reads.flow("production"), { days, status })).body;
+      const { text, body } = await listInsights(say.name, await reads.flow("production"), { days, status });
+      // Every status is the whole answer, as Flow sent it; another is only its findings.
+      return status === "all" ? jsonText(text, body) : body;
     },
     summary(body, { days, status }) {
       const n = ((body.findings as unknown[] | undefined) ?? []).length;
@@ -199,7 +207,8 @@ const READS: Read[] = [
       days: z.union([z.literal(7), z.literal(30)]).default(7).describe("The window: 7 or 30 days"),
     }),
     async run({ finding, days }, reads, say) {
-      return (await insightConversations(say.name, await reads.flow("production"), finding, days)).body;
+      const { text, body } = await insightConversations(say.name, await reads.flow("production"), finding, days);
+      return jsonText(text, body);
     },
     summary(body, { finding, days }) {
       const n = Array.isArray(body.data) ? body.data.length : 0;
@@ -213,15 +222,16 @@ const READS: Read[] = [
     input: z.object({ status: z.enum(["approved", "all"]).default("approved").describe("approved only, or every status (pending, rejected, ...)") }),
     async run({ status }, reads, say) {
       const where = await reads.flow();
-      let body: Record<string, unknown>;
+      let text: string, body: Record<string, unknown>;
       try {
-        ({ body } = await get(say.name, where, "/v1/agent/templates"));
+        ({ text, body } = await get(say.name, where, "/v1/agent/templates"));
       } catch (error) {
         // flow templates' own words for a dashboard without the route.
         if (say.cli && error instanceof Failed && error.status === 404) throw new ToolError("not_available", `${say.name}: the dashboard does not serve templates yet (${where.cloud} answered 404).`);
         throw error;
       }
-      const templates = ((body.templates as Array<{ status?: string }> | undefined) ?? []).filter((t) => status === "all" || t.status === "approved");
+      if (status === "all" && Array.isArray(body.templates)) return jsonText(text, body);
+      const templates = ((body.templates as Array<{ status?: string }> | undefined) ?? []).filter((t) => t.status === "approved");
       return { ...body, templates };
     },
     summary(data, { status }) {
@@ -338,7 +348,8 @@ const READS: Read[] = [
     description: () => "The test case Flow proposes for an issue, for flow issues test-case.",
     input: z.object({ issue: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/) }),
     async run({ issue }, reads, say) {
-      return (await get(say.name, await reads.flow(), `/v1/agent/issues/${issue}/test-case`)).body;
+      const { text, body } = await get(say.name, await reads.flow(), `/v1/agent/issues/${issue}/test-case`);
+      return jsonText(text, body);
     },
   }),
   read({
@@ -369,13 +380,13 @@ function failure(error: unknown, say: Say): ToolError {
   if (error instanceof Refused) return new ToolError(error.code, `Refused: ${error.message}`, error.next ? { next: error.next } : {});
   if (error instanceof NotAvailable) return new ToolError("not_available", error.message);
   if (error instanceof NetworkError) return new ToolError("network", `Could not reach the cloud: ${error.message}.`);
-  return new ToolError("internal", `${say.name} failed: ${(error as Error).message}`);
+  return new ToolError("internal", `${say.command} failed: ${(error as Error).message}`);
 }
 
 /** The words a failure names its caller by: "flow conversations" for the CLI's `conversations show`, else the tool. */
 function sayFor(tool: string, context: ToolContext): Say {
   const command = context.cli?.command;
-  return command ? { name: `flow ${command.split(" ")[0]}`, cli: true } : { name: tool, cli: false };
+  return command ? { name: `flow ${command.split(" ")[0]}`, cli: true, command: `flow ${command}` } : { name: tool, cli: false, command: tool };
 }
 
 /** The read tools over `reads` (each call's keys), or hosted. */
@@ -495,35 +506,31 @@ export const FLOW_MCP_CLI: CliConfig = {
   discoveryCache: false,
 };
 
-/** One command's reads over a hosted Flow MCP: a tool's result, or Failed as the command prints one. */
+/** One command's reads over Flow's read tools: a tool's result, or Failed as the command prints one. */
 export interface HostedReads {
   (tool: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;
   close(): Promise<void>;
 }
 
 /**
- * Connects `command` ("conversations show") to the hosted Flow MCP at `server`, as the person signed
- * in with flow mcp login (or FLOW_MCP_TOKEN), reading `agent` (else their only one). Loaded only
- * with --server: it needs @modelcontextprotocol/client and @stricli/core, the CLI's optional peers.
+ * Connects `command` ("conversations show") to Flow's read tools through the CLI layer, as any CLI
+ * built on the framework reaches its tools. Hosted (`server`), as the person signed in with flow mcp
+ * login (or FLOW_MCP_TOKEN), reading `agent` (else their only one); else in this process, over
+ * `reads` (the folder's keys).
  */
-export async function connectHosted(server: string, agent: string | undefined, command: string): Promise<HostedReads> {
-  const name = `flow ${command.split(" ")[0]}`;
-  let cli: typeof import("../../cli/src/run.ts");
-  try {
-    cli = await import("../../cli/src/run.ts");
-  } catch (error) {
-    const missing = /Cannot find package '([^']+)'/.exec((error as Error).message)?.[1];
-    if ((error as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND" || !missing) throw error;
-    throw new Failed(`${name} --server needs ${missing}: run it from your agent's folder, or npm install ${missing}.`, "missing_peer");
-  }
+export async function connectReads(command: string, to: { server: string; agent?: string } | { reads: Reads }): Promise<HostedReads> {
+  const [cli, { mcpServer }] = await Promise.all([import("../../cli/src/run.ts"), import("../../mcp/src/server.ts")]);
   // Sign-in (3), a server out of reach (5) and wrong arguments (2) are said as the CLI says them; the command exits 1.
   const said = (error: unknown) =>
     error instanceof ToolError ? new Failed(error.message, error.code, error.hint, error.next)
     : error instanceof cli.CliExit ? new Failed(error.message, error.code === 3 ? "signed_out" : error.code === 5 ? "network" : error.code === 2 ? "usage" : "failed")
     : error;
+  const agent = "server" in to ? to.agent : undefined;
   let connection: Awaited<ReturnType<typeof cli.connectCli>>;
   try {
-    connection = await cli.connectCli(FLOW_MCP_CLI, { server });
+    connection = "server" in to
+      ? await cli.connectCli(FLOW_MCP_CLI, { server: to.server })
+      : await cli.connectCli({ ...FLOW_MCP_CLI, server: mcpServer({ name: "flow", version: flowVersion(), tools: readTools(async () => to.reads, false), feedback: false, traces: false }) }, { env: {} });
   } catch (error) {
     throw said(error);
   }

@@ -32,7 +32,7 @@ import { unavailableRecords, type Records } from "../../src/records.ts";
 import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, SKILLS_META, type AgentFiles } from "../../src/skills.ts";
 import { serveNode } from "../../src/http.ts";
 import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
-import { FORMATTED, render, toolContext, ToolError, type CredentialProvider, type McpClientKind, type Tool, type ToolContext } from "../../src/tools.ts";
+import { FORMATTED, JSON_TEXT, jsonTextOf, render, toolContext, ToolError, type CredentialProvider, type McpClientKind, type Tool, type ToolContext } from "../../src/tools.ts";
 import { terminalServer } from "./terminal.ts";
 import { describe, FULL_CATALOG_META, IN_PROCESS, MCP_CLIENT_KINDS, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
 
@@ -508,16 +508,20 @@ async function callTool(t: Tool, input: unknown, context: ToolContext): Promise<
     }
     return { result: { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] } };
   }
-  if (!t.output) return { result: { content: [{ type: "text", text: render(output) }] } };
+  // Output given with its JSON as text (jsonText) is sent as that text, byte for byte.
+  const raw = jsonTextOf(output);
+  const marked = raw === undefined ? {} : { _meta: { [JSON_TEXT]: true } };
+  if (!t.output) return { result: { content: [{ type: "text", text: render(output) }], ...marked } };
   const checked = t.output.safeParse(output);
   if (!checked.success) return { result: { isError: true, content: [{ type: "text", text: `${t.name} returned a result that does not match its output schema.` }] } };
-  const data = { content: [{ type: "text" as const, text: render(checked.data) }], structuredContent: checked.data as CallToolResult["structuredContent"] };
+  const data = { content: [{ type: "text" as const, text: raw ?? render(checked.data) }], structuredContent: checked.data as CallToolResult["structuredContent"], ...marked };
   if (!t.format) return { result: data };
   // The tool has run: a formatter that fails sends the data as JSON, never an error.
   try {
     const text: unknown = t.format(checked.data, input);
     if (typeof text !== "string") return { result: data, formatError: `format returned ${typeof text}, not text` };
-    return { result: { ...data, content: [{ type: "text", text }], _meta: { [FORMATTED]: true } } };
+    // A CLI prints the JSON text with --json, so it rides beside the tool's own text; hosts read the text.
+    return { result: { ...data, content: [{ type: "text", text }], _meta: { [FORMATTED]: true, ...(raw !== undefined && context.cli ? { [JSON_TEXT]: raw } : {}) } } };
   } catch (error) {
     return { result: data, formatError: error instanceof Error ? error.message : String(error) };
   }
