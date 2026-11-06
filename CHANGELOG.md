@@ -6,6 +6,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **`flow mcp login` ends on a page in flow.engineer's look.** Flow's own CLI now sets
+  `signInPage` (and `brand.name` "Flow"): the browser lands on Flow's logo and the site's card on
+  its gradient, after flow.engineer's Allow page, in light and dark. The copy and behaviour are the
+  same (the tab tries to close after 1.5 s; the code leaves the address bar), and the page names its
+  own style and script by hash in a CSP meta tag. Teams' CLIs keep the framework's branded page;
+  nothing changes for them.
+
 - **`logout` ends the sign-in on the server, not only on this computer.** A `defineCli` CLI's
   `logout` (and `flow mcp logout`) now revokes the stored refresh token, then the access token, at
   the authorization server's advertised `revocation_endpoint` (RFC 7009) before forgetting them, so

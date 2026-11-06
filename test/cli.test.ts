@@ -1,7 +1,8 @@
-// covers: cli/src/chat-ui.ts cli/src/colors.ts cli/src/welcome.ts cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/skills.ts src/agent.ts src/channels.ts
+// covers: cli/src/chat-ui.ts cli/src/colors.ts cli/src/welcome.ts cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/skills.ts src/agent.ts src/channels.ts testing/src/sign-in-page.ts testing/src/flow-tools.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer, type RequestListener, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,7 @@ import { feedbackUsage } from "../cli/src/commands.ts";
 import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
 import { scriptedModel, respond, call } from "./helpers.ts";
 import { createAgent, jsonText, jsonTextOf, tool, ToolError } from "../src/index.ts";
+import { FLOW_MCP_CLI } from "../testing/src/flow-tools.ts";
 
 // These tests drive chat as a person would; a coding agent running them must not switch chat to plain.
 for (const name of ["CLAUDECODE", "CURSOR_AGENT", "CODEX_CI", "AI_AGENT"]) delete process.env[name];
@@ -1004,6 +1006,24 @@ test("a failed code exchange shows the failure page; a team's own page gets only
   const plain: CliConfig = { ...cli, signInPage: undefined };
   assert.notEqual(await runCli(plain, ["login"], io().channel), 0);
   assert.match(await (await answered())[1]!.text(), /Sign-in didn't finish[\s\S]*acme login/);
+});
+
+test("flow mcp login ends on Flow's own page, whose CSP lets only its own style and script run", async () => {
+  const sha = (text: string) => `'sha256-${createHash("sha256").update(text).digest("base64")}'`;
+  for (const [status, words] of [[200, /Head back to your terminal[\s\S]*Flow is ready\.[\s\S]*window\.close\(\)/], [400, /Sign-in didn't finish[\s\S]*Run <code>flow mcp login<\/code>/]] as const) {
+    const { server, openUrl, answered } = await signInServers(() => status);
+    const cli: CliConfig = { ...FLOW_MCP_CLI, server, directory: mkdtempSync(join(testDirectory, "flow-mcp-page-")), openUrl };
+    assert.equal(await runCli(defineCli(cli), ["mcp", "login"], io().channel) === 0, status === 200);
+    const page = (await answered())[0]!;
+    assert.equal(page.headers.get("cache-control"), "no-store");
+    const html = await page.text();
+    assert.match(html, words);
+    if (status === 400) assert.doesNotMatch(html, /window\.close/, "a failed sign-in's tab stays open");
+    const csp = html.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)![1]!;
+    const style = html.match(/<style>([\s\S]*?)<\/style>/)![1]!, script = html.match(/<script>([\s\S]*?)<\/script>/)![1]!;
+    assert.equal(csp, `default-src 'none'; style-src ${sha(style)} https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src ${sha(script)}; base-uri 'none'; form-action 'none'`);
+    assert.match(script, /^history\.replaceState\(null, "", location\.pathname\);/, "the code leaves the address bar");
+  }
 });
 
 test("flow check refuses a brand color or logo a browser cannot use", () => {
