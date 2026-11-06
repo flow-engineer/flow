@@ -11,7 +11,6 @@
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { mcpServer } from "../../mcp/src/server.ts";
-import type { McpToolDescriptor } from "../../mcp/src/describe.ts";
 import { ADVISORY } from "./cloud-call.ts";
 import { flowReadTools, flowVersion } from "./flow-tools.ts";
 
@@ -72,7 +71,7 @@ export async function mcpServeCli(args: string[]): Promise<number> {
     feedback: false,
     traces: false,
     // tools/list as before the tools were the framework's: no output schema, no per-tool sign-in note.
-    descriptor: (_tool, { outputSchema: _output, _meta: _ignored, ...descriptor }) => descriptor as McpToolDescriptor,
+    descriptor: (_tool, { outputSchema: _output, _meta: _ignored, ...descriptor }) => descriptor,
   });
   await server.stdio({ onerror: (error) => console.error(`flow mcp serve: ${error.message}`) });
   return 0;

@@ -122,6 +122,18 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   optional peers: the read commands run on them, and `flow inspect`, `flow cli` and `flow mcp
   login` need nothing more installed (`npx -y @flow-engineer/flow inspect <url> tools`). `flow new`
   no longer writes them into a new agent's package.json, as for `@modelcontextprotocol/server`.
+- **`mcpServer(...).fetch(request)` takes a request with no `Host` header**, as an MCP client in
+  your own code sends one (its transport's `fetch` calling `handle.fetch(new Request(url, init))`):
+  the URL's host is used. It failed with "Missing Host header"; a `Host` naming another host is still
+  refused on localhost (DNS rebinding).
+- **A CLI's `login` against a server it cannot reach** (`flow mcp login` too) exits 5 with
+  `Could not reach <server>: ...`, as every other command says it; it printed `Command failed,
+  TypeError: fetch failed` and exited 1. **`logout` with nobody signed in** says `Not signed in to
+  <server>.`, not `Signed out of <server>.` (still exit 0).
+- `McpToolDescriptor._meta` is optional, so a `descriptor` can leave it out without a cast.
+- `flow check`'s warning for a tool kept to the CLI in a project with no `src/cli.ts` now says that
+  only a CLI signed in as the server's CLI client sees it, such as `npx @flow-engineer/flow
+  <command> --server <url>` for Flow's own MCP server, instead of that no client sees it.
 
 - **A simulated conversation reaches a Flow Messaging agent.** Flow Messaging's simulated contacts
   (`POST /v0/test/conversations`, test keys) write on the app's simulated sender, never the
@@ -176,6 +188,9 @@ their dependencies: a fresh install of the package grows from 6 to 18 packages a
 49.0 MB of files (55 MB to 63 MB on disk); the package itself stays 760 KB packed. An agent that lists
 them in its own package.json can keep them at the same versions or drop them; another version there
 installs a second copy, and its own imports use that one.
+Code that reads `McpToolDescriptor._meta` (a `descriptor` function's `generated._meta`) handles it
+being undefined. A script that matched `Signed out of` after a logout with nobody signed in now
+reads `Not signed in to`.
 
 ## 0.16.0 (2026-11-05)
 

@@ -248,7 +248,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     if (config.welcome !== false) (bare ? io.write : io.writeError)(welcomeScreen(config, { server, signedIn, tokenEnv: tokenEnvOf(config) }, io, true));
     const chosen = io.choose ? await io.choose(signInQuestion(config), ["Sign in", "Exit"], (text) => painter(colorsAt(config, io))(["bold", "accent"], text)) : (await io.confirm(`${signInQuestion(config)} Sign in now?`) ? 0 : undefined);
     if (chosen !== 0) { io.writeError(`Not signed in. Run \`${login}\` when you are ready.\n`); return EXIT.signIn; }
-    try { await signIn(config, server, io.signal, (text) => io.writeError(text)); }
+    try { await signInHere(config, server, io); }
     catch (error) { const problem = error instanceof CliExit ? error : explain(config, server, error); io.writeError(`${paint(severity(problem.code), problem.message)}\n`); return problem.code; }
     forgetChat(config, server);
     io.writeError(`Signed in to ${server}.\n`);
@@ -584,6 +584,15 @@ if (refreshWorker) {
     const tools = await listTools(client);
     writeDiscovery(await discoveryFile(job.config, job.server, job.token), { format: 2, at: started, server: serverVersion(client), tools });
   } catch {} finally { await client?.close(); clearTimeout(timeout); release(); }
+}
+
+/** Signs in to `server`; a server out of reach is said as any command says it (explain: exit 5), never as a crash. */
+async function signInHere(config: CliConfig, server: string, io: CliIO): Promise<void> {
+  try {
+    await signIn(config, server, io.signal, (text) => io.writeError(text));
+  } catch (error) {
+    throw error instanceof CliExit ? error : explain(config, server, error);
+  }
 }
 
 /** Why the server could not be used, as one line and an exit code. */
@@ -1115,20 +1124,22 @@ function signInRoutes(config: CliConfig, server: string | undefined, io: CliIO) 
     return server;
   };
   const login = async () => {
-    await signIn(config, need(), io.signal, (text) => io.writeError(text));
+    await signInHere(config, need(), io);
     forgetChat(config, need());
     io.writeError(`Signed in to ${need()}.\n`);
   };
   const logout = async () => {
     const s = need();
     let warned = false;
-    if (config.signIn?.beforeLogout && isSignedIn(config, s)) {
+    const signedIn = isSignedIn(config, s);
+    if (config.signIn?.beforeLogout && signedIn) {
       try { await config.signIn.beforeLogout({ server: s, token: await storedAccessToken(config, s, false, io.signal) }); }
       catch (error) { warned = true; io.writeError(`${painter(colorsAt(config, io))("warning", error instanceof Error ? error.message : String(error))}\n`); }
     }
     signOut(config, s);
     forgetChat(config, s);
-    io.writeError(`Signed out of ${s}${warned ? " on this computer only" : ""}.\n`);
+    // With nobody signed in here it says so (a token in the environment is not a sign-in to forget).
+    io.writeError(signedIn ? `Signed out of ${s}${warned ? " on this computer only" : ""}.\n` : `Not signed in to ${s}.\n`);
   };
   const status = async (flags: { json?: boolean }) => {
     const s = need();

@@ -156,7 +156,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   for (const name of deferred) if (!tools.some(t => t.name === name)) throw new Error(`@flow-engineer/flow/mcp: deferred tool ${name} does not exist`);
   const sourceDescriptors = tools.map(t => {
     const generated = describe(t, scopes);
-    if (t.name === "read_skill" && skills.length) generated._meta[SKILLS_META] = skills.map(({ name, description }) => ({ name, description }));
+    if (t.name === "read_skill" && skills.length) (generated._meta ??= {})[SKILLS_META] = skills.map(({ name, description }) => ({ name, description }));
     return options.descriptor ? options.descriptor(t, generated) : generated;
   });
   const path = options.path ?? "/mcp";
@@ -344,7 +344,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   }
 
   const handle: McpServerHandle = {
-    fetch: (request) => serve(request),
+    fetch: (request) => serve(withHost(request)),
     node: (req, res) => serveNode((request) => serve(request), req, res),
     descriptors,
     flushTraces: () => trace?.flush() ?? Promise.resolve(),
@@ -355,6 +355,17 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   // The CLI in this process reaches the standalone endpoint here, never over the network.
   Object.defineProperty(handle, IN_PROCESS, { value: { path, fetch: (request: Request) => serve(request, true) }, enumerable: false });
   return handle;
+}
+
+/**
+ * A request made in code (a client's own fetch to handle.fetch) has no Host header: its URL's host
+ * is the one it is for. A browser always sends Host, so the DNS-rebinding check still reads the browser's.
+ */
+function withHost(request: Request): Request {
+  if (request.headers.has("host")) return request;
+  const headers = new Headers(request.headers);
+  headers.set("host", new URL(request.url).host);
+  return new Request(request, { headers });
 }
 
 /** The terminal route mcpServer serves, with its auth; its channel is added to the agent before the first turn. */

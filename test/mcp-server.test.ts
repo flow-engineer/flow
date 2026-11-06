@@ -268,6 +268,16 @@ test("a tool's format is the result's text beside its structured content; a form
   await c.close();
 });
 
+test("a client calling handle.fetch with its own fetch needs no Host header: its URL's host is used, and a Host naming another host is still refused", async () => {
+  const handle = mcpServer({ name: "cafe", version: "1", tools: cafeTools, feedback: false });
+  const c = new Client({ name: "plain", version: "1" });
+  await c.connect(new StreamableHTTPClientTransport(new URL("http://127.0.0.1/mcp"), { fetch: (url, init) => handle.fetch(new Request(url, init)) }));
+  assert.ok((await c.listTools()).tools.length > 0);
+  await c.close();
+  const rebound = await handle.fetch(new Request("http://127.0.0.1/mcp", { method: "POST", headers: { host: "evil.example", "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{}" }));
+  assert.equal(rebound.status, 403);
+});
+
 test("a tool's output given with its JSON text (jsonText) is sent as that text, byte for byte, beside the structured content; formatted, only a CLI gets the text", async () => {
   const raw = '{\n  "id": "BL-1",\n  "note": "2 \\u003c 3"\n}\n';
   const answer = tool({ name: "answer", description: "An order as the shop's API said it.", input: z.object({}), output: z.object({ id: z.string(), note: z.string() }), signIn: "none", run: () => jsonText(raw) });

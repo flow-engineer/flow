@@ -1029,13 +1029,33 @@ test("the sign-in commands are where signIn puts them, beside the team's own, an
   assert.match(skillFile(cli, []), /Sign in once with `acme auth login`/);
   const out = io();
   assert.equal(await runCli(cli, ["auth", "logout"], out.channel), 0, "the sign-in commands never wait for sign-in");
-  assert.match(out.err, /^Signed out of /);
+  assert.match(out.err, /^Not signed in to /);
 
   const login = buildCommand({ docs: { brief: "Mine" }, parameters: {}, func() {} });
   assert.throws(() => defineCli({ name: "acme", commands: { login: { command: login } } }), /command "login": it is the CLI's login command \(signIn\.login\)/);
   assert.throws(() => defineCli({ name: "acme", signIn: { login: "auth login" }, commands: { auth: { command: login } } }), /command "auth": it is the group of the CLI's login command/);
   assert.deepEqual(cliProblems({ name: "acme" }, [{ name: "logout", inputSchema: {} }]).errors, ['command "logout": it is the CLI\'s logout command (signIn.logout); name yours something else, or move logout with signIn.logout']);
   assert.deepEqual(cliProblems({ name: "acme", signIn: { login: "Sign In", logout: "login" } }, []).errors, ['signIn.login must be words of lowercase letters, digits and -, such as "login" or "auth login"']);
+});
+
+test("logout says Signed out only when someone was signed in on this computer, else Not signed in", async () => {
+  const cli = defineCli({ name: "acme", server: "http://127.0.0.1:9/mcp", directory: mkdtempSync(join(testDirectory, "flow-cli-logout-")) });
+  const nobody = io();
+  assert.equal(await runCli(cli, ["logout"], nobody.channel), 0);
+  assert.equal(nobody.err, "Not signed in to http://127.0.0.1:9/mcp.\n");
+  await storedProvider(cli, cli.server as string).saveTokens({ access_token: "kept", token_type: "Bearer" });
+  const someone = io();
+  assert.equal(await runCli(cli, ["logout"], someone.channel), 0);
+  assert.equal(someone.err, "Signed out of http://127.0.0.1:9/mcp.\n");
+  assert.equal(isSignedIn(cli, cli.server as string), false);
+});
+
+test("login to a server out of reach says so as every command does, exit 5, never a crash", async () => {
+  const cli = defineCli({ name: "acme", server: "http://127.0.0.1:9/mcp", directory: mkdtempSync(join(testDirectory, "flow-cli-login-down-")) });
+  const down = io();
+  assert.equal(await runCli(cli, ["login"], down.channel), 5);
+  assert.match(down.err, /^Could not reach http:\/\/127\.0\.0\.1:9\/mcp: /);
+  assert.doesNotMatch(down.err, /Command failed|TypeError/);
 });
 
 test("the old auth words keep working for a release, hidden from help, saying what replaces them", async () => {

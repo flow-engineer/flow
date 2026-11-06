@@ -13,7 +13,8 @@ export interface McpToolDescriptor {
   inputSchema: { type: "object"; [key: string]: unknown };
   outputSchema?: { [key: string]: unknown };
   annotations: { title: string; readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean };
-  _meta: Record<string, unknown>;
+  /** Hosts' extra keys (ChatGPT's per-tool sign-in and status lines, read_skill's skills); a `descriptor` may leave it out. */
+  _meta?: Record<string, unknown>;
 }
 
 /** The scopes an MCP server asks for: reads need `read`, writes `write` (both when given). */
