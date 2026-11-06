@@ -137,7 +137,7 @@ test("a video arrives as an attachment the model can watch; one Flow says is ove
   assert.deepEqual(first.request.messages.filter((m) => m.role === "user").at(-1), {
     role: "user",
     content: "[whatsapp · msg_1] [video] the leak",
-    media: [{ kind: "video", mime: "video/mp4", data: "AQID" }],
+    media: [{ kind: "video", mime: "video/mp4", data: "AQID", ref: "file_v" }],
   });
   first.answer(respond(call("send_whatsapp", { text: "I see it" })));
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
@@ -150,6 +150,49 @@ test("a video arrives as an attachment the model can watch; one Flow says is ove
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
+
+test("a video the model watched and no longer sees is fetched again from Flow by its file id when the agent asks about it; once Flow no longer keeps it, the agent is told", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  live.model.reads = { videos: true };
+  flow.contacts.ct_maya = { address: { phone: "+15550100100" } };
+  flow.files.file_a = Buffer.from([1, 2, 3]);
+  flow.files.file_b = Buffer.from([4, 5, 6]);
+  const video = (id: string) => ({ kind: "basic", text: "", media: { type: "video", url: `${flow.url}/v0/files/${id}`, file_id: id, mime_type: "video/mp4", size_bytes: 3 } });
+  const tools = (n: number) => live.calls[n].request.tools.map((tool) => tool.name);
+
+  await live.deliver(received(WA, "msg_1", video("file_a")));
+  const first = await live.nextCall(0);
+  assert.equal(tools(0).includes("ask_about_video"), false); // it watches this one now
+  first.answer(respond(call("send_whatsapp", { text: "Got it" })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+
+  // Only one video stays shown: the first one now needs a question to be seen again.
+  await live.deliver(received(WA, "msg_2", video("file_b")));
+  const second = await live.nextCall(1);
+  assert.ok(tools(1).includes("ask_about_video"));
+  const ask = call("ask_about_video", { message: "msg_1", question: "Where is the water coming from?" });
+  second.answer(respond(call("send_whatsapp", { text: "Checking the first one" }), ask));
+
+  // The agent's own model, which watches videos, answers with the first video fetched again and no tools.
+  const watched = await live.nextCall(2);
+  assert.deepEqual(watched.request.tools, []);
+  assert.ok(watched.request.system.endsWith("\nQuestion: Where is the water coming from?"));
+  assert.deepEqual(watched.request.messages, [{ role: "user", content: "[video]", media: [{ kind: "video", mime: "video/mp4", data: "AQID" }] }]);
+  assert.equal(flow.requests.filter((r) => r.path === "/v0/files/file_a").length, 2);
+  watched.answer({ text: "From the pipe under the sink.", toolCalls: [] });
+  const third = await live.nextCall(3);
+  assert.equal(third.request.messages.find((m) => m.role === "tool" && m.toolCallId === ask.id)?.content, '{"video":"msg_1","answer":"From the pipe under the sink."}');
+
+  delete flow.files.file_a; // past Flow's retention: 404
+  const again = call("ask_about_video", { message: "msg_1", question: "Is the pipe cracked?" });
+  third.answer(respond(again));
+  const fourth = await live.nextCall(4);
+  assert.equal(fourth.request.messages.find((m) => m.role === "tool" && m.toolCallId === again.id)?.content, "Failed: The video in msg_1 is no longer kept by whatsapp, so it can't be watched again. Ask them to send it again if you need it.");
+  fourth.answer(respond(call("send_whatsapp", { text: "It's the pipe under the sink." })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+});
 test("taps come as choices, with the button's id (info.buttonIds says so), and reactions to the agent's messages as reactions", async (t) => {
   const fm = flowMessaging({ apiKey: "fk_test_key" });
   assert.equal(fm.whatsapp({ sender: "snd_wa" }).info.buttonIds, true);

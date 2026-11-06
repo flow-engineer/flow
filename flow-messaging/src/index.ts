@@ -625,13 +625,13 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     const route = register("whatsapp", o);
     const channel = whatsappChannel({ ...provider(route), features: { videos: true } }, { name: route.name, disable: o.disable, instructions: o.instructions });
     // Flow Messaging sends every reply button's own id and gives it back on the tap.
-    return { ...channel, info: { ...channel.info, ...(channel.info.buttons ? { buttonIds: true } : {}) } };
+    return { ...channel, info: { ...channel.info, ...(channel.info.buttons ? { buttonIds: true } : {}) }, file: fileAgain };
   }
 
   /** US SMS from a Flow number: plain text; STOP, START and HELP are Flow's. */
   function sms(o: FlowChannelOptions = {}): Channel {
     const route = register("sms", o);
-    return smsChannel(provider(route), { name: route.name, instructions: o.instructions });
+    return { ...smsChannel(provider(route), { name: route.name, instructions: o.instructions }), file: fileAgain };
   }
 
   /** A Telegram bot connected to Flow. Flow Framework has no Telegram kind yet, so it is a custom channel. */
@@ -675,6 +675,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       traceChannel: route.kind,
       info,
       instructions: o.instructions,
+      file: fileAgain,
       send: (to, outbound, context) => {
         const latest = context?.lastMessageId;
         switch (outbound.type) {
@@ -737,6 +738,16 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     return address;
   }
 
+  /** A file the person sent, fetched again by its file id (ask_about_video): null once Flow no longer keeps it (404 or 410, past its retention). */
+  async function fileAgain(fileId: string): Promise<Uint8Array | null> {
+    try {
+      return await client.download(fileId);
+    } catch (error) {
+      if (error instanceof FlowMessagingError && (error.status === 404 || error.status === 410)) return null;
+      throw error;
+    }
+  }
+
   async function quoted(id: string): Promise<{ text: string; fromAgent: boolean } | undefined> {
     try {
       const m = await client.get<FlowMessage>(`/v0/messages/${idSegment("msg", id)}`);
@@ -764,7 +775,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       const kind = c.kind === "voice" || file.type === "audio" ? "audio" : file.type === "image" ? "image" : file.type === "video" ? "video" : "document";
       const fileId = String(file.file_id);
       const size = Number(file.size_bytes);
-      const attachment: Attachment = { kind, mime: String(file.mime_type ?? "application/octet-stream"), ...(file.filename ? { name: String(file.filename) } : {}), ...(Number.isFinite(size) && size > 0 ? { size } : {}), data: () => client.download(fileId) };
+      const attachment: Attachment = { kind, mime: String(file.mime_type ?? "application/octet-stream"), ...(file.filename ? { name: String(file.filename) } : {}), ...(Number.isFinite(size) && size > 0 ? { size } : {}), ref: fileId, data: () => client.download(fileId) };
       base = { text: caption, attachments: [attachment] };
     } else if (media || c.kind === "file_blocked") {
       // A file with no file id, or one Flow did not keep: the caption, and what it was.

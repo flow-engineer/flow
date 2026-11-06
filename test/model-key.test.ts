@@ -171,11 +171,13 @@ test("under flow test a model call to Flow's address carries the session id, rea
   ]);
 });
 
-test("under flow test flowTranscribe and describeVideoWith through Flow carry the session id too", async (t) => {
+test("under flow test flowTranscribe and describeVideoWith (describing and asking) through Flow carry the session id too", async (t) => {
   const { base, seen } = await gateway(t);
   await withEnv({ FLOW_KEY: FAKE, FLOW_MODEL_URL: `${base}/llm/framework/v1`, FLOW_FRAMEWORK_RUN_KIND: "test", FLOW_FRAMEWORK_TEST_SESSION: SESSION }, async () => {
     assert.deepEqual(await flowTranscribe(new Uint8Array([1])), { text: "hi" });
-    assert.equal(await describeVideoWith("google/gemini-3.8-flash")({ mime: "video/mp4", data: new Uint8Array([1]) }), "ok");
+    const describe = describeVideoWith("google/gemini-3.8-flash");
+    assert.equal(await describe({ mime: "video/mp4", data: new Uint8Array([1]) }), "ok");
+    assert.equal(await describe.ask!({ mime: "video/mp4", data: new Uint8Array([1]) }, "What colour is it?"), "ok");
   });
-  assert.deepEqual(seen, [["/audio/transcriptions", SESSION], ["/chat/completions", SESSION]]);
+  assert.deepEqual(seen, [["/audio/transcriptions", SESSION], ["/chat/completions", SESSION], ["/chat/completions", SESSION]]);
 });

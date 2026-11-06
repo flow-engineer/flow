@@ -268,6 +268,25 @@ Exit codes: 0 done; 1 usage, not signed in (`not_signed_in`: run `next`), no suc
 flow.engineer could not be reached or could not reach its projects (try again); 3 refused:
 `owner_only`, or the sign-in ended (`signed_out`: run `next`).
 
+## Videos people send
+
+A video reaches the agent one of three ways: watched by its model (`openAICompatible({ videos: true })`),
+described once (`createAgent({ describeVideo: describeVideoWith("google/gemini-3.8-flash") })`), or
+named as one it can't watch. With a describer that has `ask` (describeVideoWith's does) or a model
+that watches videos, the agent also gets `ask_about_video` for a video it can't see now, such as
+"is there a scratch near the charging port?" about a video described earlier, or one its model saw
+several turns ago (only the latest 3 photos, PDFs and videos, one of them a video, stay shown):
+
+- Input: `question`, and `message`, the id of the message the video came in (`m3`, `msg_...`); the
+  latest video when left out. Its result is `{ video, answer }`.
+- The video is fetched again from its channel by the attachment's `ref` (Flow Messaging's file id)
+  each time, up to 10 MB, and never kept. Once the channel no longer keeps it, the agent is told
+  to ask for it again.
+- 3 questions a turn and 10 a video; every failure is a `ToolError` the agent reads, and an
+  `attachment.failed` event (`kind: "video"`, `messageId`).
+- Under `flow test`, a scenario sends one with `attach: { kind: video, file: fixtures/clip.mp4 }`, and
+  `expect: { calls: [ask_about_video] }` checks the agent asked.
+
 ## Messages the business starts
 
 A nudge, a scheduled message or any turn the person did not start goes with link previews off

@@ -19,7 +19,7 @@ function fakeAgent(channels?: ChannelSummary[]) {
     conversationIds: [] as string[],
     reactions: [] as { conversationId: string; emoji: string; toText: string }[],
     count: 0,
-    options: [] as Array<{ channel: ChannelInfo; channelName?: string }>,
+    options: [] as Array<{ channel: ChannelInfo; channelName?: string; file?: (ref: string) => Promise<Uint8Array | null> }>,
     incomings: [] as Incoming[],
   };
   const connection: AgentConnection = {
@@ -175,7 +175,8 @@ test("the web simulator plays the agent's own custom UI, and shows the params it
   const { fake, server, send, lines } = await start(undefined, [app]);
   try {
     await send("web", "show my progress");
-    assert.deepEqual(fake.options.at(-1), { channel: app.info, channelName: "app" });
+    const { file: _file, ...options } = fake.options.at(-1)!;
+    assert.deepEqual(options, { channel: app.info, channelName: "app" });
     await fake.deliver!({ type: "message", text: "Here it is.", fields: { app_link: { url: "https://app.example/progress", screen: "progress" } } });
     const out = (await lines("web")).at(-1);
     assert.ok(out?.kind === "out");
@@ -324,7 +325,7 @@ test("independent local playgrounds keep separate operator cookies", async () =>
   } finally { await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve())))); }
 });
 
-test("a video sent from a simulator reaches the agent as a video, and the simulator plays it inline", async () => {
+test("a video sent from a simulator reaches the agent as a video it can fetch again by its ref, and the simulator plays it inline", async () => {
   const { fake, server, post, lines } = await start();
   try {
     const bytes = new Uint8Array(2_000).fill(3);
@@ -332,6 +333,9 @@ test("a video sent from a simulator reaches the agent as a video, and the simula
     const [file] = fake.incomings[0].attachments ?? [];
     assert.deepEqual({ kind: file.kind, mime: file.mime }, { kind: "video", mime: "video/mp4" });
     assert.deepEqual(await file.data(), bytes);
+    // The agent can fetch it again by its ref (to ask about it later); one the simulator does not keep is null.
+    assert.deepEqual(await fake.options[0].file!(file.ref!), bytes);
+    assert.equal(await fake.options[0].file!("gone"), null);
     const [line] = await lines("telegram");
     assert.ok(line.kind === "in" && line.attachments);
     const again = await fetch(server.url + line.attachments[0].url);

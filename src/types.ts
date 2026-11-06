@@ -31,6 +31,8 @@ export interface PersonMessage {
   choice?: boolean;
   /** The id of what they tapped, when it is not its label. */
   choiceId?: string;
+  /** A video in it the agent can ask about later (ask_about_video): its type and its channel's `ref`. */
+  video?: { mime: string; ref: string };
 }
 
 /**
@@ -42,6 +44,8 @@ export interface Media {
   mime: string;
   name?: string;
   data?: string;
+  /** A video's `ref` on its channel (Attachment.ref), so Flow Framework knows which video is shown; never sent to the model. */
+  ref?: string;
 }
 
 export interface ToolSpec {
@@ -381,6 +385,12 @@ export interface Attachment {
   name?: string;
   /** Its size in bytes, when the channel says: a file over what the agent reads is then never fetched. */
   size?: number;
+  /**
+   * The file's id on its channel (Flow Messaging's file_..., a provider's media id, a URL): kept with
+   * the conversation, never shown to the model, so a video is fetched again with the channel's
+   * `file(ref)` when the agent asks about it later (ask_about_video). Without it a video is read once.
+   */
+  ref?: string;
   /** The bytes. A provider fetches its media here with its own credentials: no URL reaches the model. */
   data(): Promise<Uint8Array>;
 }
@@ -392,4 +402,12 @@ export type Transcribe = (audio: { mime: string; data: Uint8Array }) => Promise<
  * Turns a video into text for a model that can't watch it: what it shows and what is said in it,
  * with whatever the agent's author chose (describeVideoWith(model) is Flow Framework's own).
  */
-export type DescribeVideo = (video: { mime: string; data: Uint8Array }) => Promise<string>;
+export interface DescribeVideo {
+  (video: { mime: string; data: Uint8Array }): Promise<string>;
+  /**
+   * Answers one question about the video, from what it shows and what is said in it. With it the
+   * agent can ask about a video in the conversation whenever it needs to (ask_about_video);
+   * describeVideoWith's has it. A describer without it only describes.
+   */
+  ask?(video: { mime: string; data: Uint8Array }, question: string): Promise<string>;
+}

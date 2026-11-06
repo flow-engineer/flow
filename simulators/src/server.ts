@@ -81,7 +81,7 @@ import { PLATFORMS, channelOf, platform as platformOf, smsSegments, wirePayload,
 /** What the test cloud's simulators need from an agent. */
 export interface AgentConnection {
   /** A person's message; returns its id, or null when the agent answered it without a turn. */
-  receive(conversationId: string, incoming: Incoming, deliver: Deliver, options: { channel: ChannelInfo; channelName?: string }): string | null;
+  receive(conversationId: string, incoming: Incoming, deliver: Deliver, options: { channel: ChannelInfo; channelName?: string; file?: (ref: string) => Promise<Uint8Array | null> }): string | null;
   /**
    * The agent's own channels, if it has any: a simulator plays the one of its kind (SMS, WhatsApp,
    * and the web simulator for a custom UI) with its definition.
@@ -746,15 +746,16 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     const replyId = replies && typeof body?.replyTo === "string" ? body.replyTo : undefined;
     const quoted = replyId ? findLine(k, replyId) : undefined;
     const choice = body?.choice && typeof body.choice === "object" ? (body.choice as { id?: string; title?: string }) : undefined;
-    const sent = filesOf(body);
-    const attachments: Attachment[] = sent.map(({ bytes, ...a }) => ({ ...a, data: async () => bytes }));
+    // Each file is kept by an id first: the line shows it, and the agent may fetch it again by it (its ref).
+    const sent = filesOf(body).map((f) => ({ ...f, id: keep(f) }));
+    const attachments: Attachment[] = sent.map(({ bytes, id, ...a }) => ({ ...a, ref: id, data: async () => bytes }));
     const incoming: Incoming = {
       text,
       ...(quoted && (quoted.kind === "in" || quoted.kind === "out") ? { replyTo: { text: quoted.text, fromAgent: quoted.kind === "out" } } : {}),
       ...(choice?.title ? { choice: { ...(choice.id ? { id: String(choice.id) } : {}), title: String(choice.title) } } : {}),
       ...(attachments.length ? { attachments } : {}),
     };
-    const files = sent.map((f) => ({ kind: f.kind, ...(f.name ? { name: f.name } : {}), mime: f.mime, size: f.bytes.length, url: `/api/media/${keep(f)}` }));
+    const files = sent.map((f) => ({ kind: f.kind, ...(f.name ? { name: f.name } : {}), mime: f.mime, size: f.bytes.length, url: `/api/media/${f.id}` }));
     const line: Extract<Line, { kind: "in" }> = { kind: "in", id: null, text, at: Date.now(), ...(quoted ? { replyTo: replyId } : {}), ...(choice?.title ? { choice: true } : {}), ...(choice?.title && choice.id && choice.id !== choice.title ? { choiceId: String(choice.id) } : {}), ...(files.length ? { attachments: files } : {}) };
     return { incoming, line };
   }
@@ -834,7 +835,9 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
         const id = conversationId(k);
         const own = ownChannel(agent, p, id);
         const who = { name: person, phone: person };
-        const messageId = agent.receive(id, incoming, deliverer(p, k, [], who), own ? { channel: own.info, channelName: own.name } : { channel: channelOf(p) });
+        // A file the person sent is fetched again from what the simulator keeps, until it is dropped for newer ones.
+        const file = async (ref: string) => media.get(ref)?.bytes ?? null;
+        const messageId = agent.receive(id, incoming, deliverer(p, k, [], who), own ? { channel: own.info, channelName: own.name, file } : { channel: channelOf(p), file });
         line.id = messageId;
         push(k, { type: "id", at: line.at, messageId, api: wired(p, line, who, k).api });
         return json(res, 202, { messageId, at: line.at });

@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createAgent, describeVideoWith, openAICompatible, sqlite, type Attachment, type ChatMessage, type Database, type DescribeVideo, type FlowEvent, type Media, type Model, type Transcribe } from "../src/index.ts";
-import { gate, respond, say, scriptedModel } from "./helpers.ts";
+import { call, gate, respond, say, scriptedModel } from "./helpers.ts";
 
 function agentWith(options: { reads?: Model["reads"]; transcribe?: Transcribe; describeVideo?: DescribeVideo; database?: Database; dir?: string } = {}) {
   const dir = options.dir ?? mkdtempSync(join(tmpdir(), "flow-"));
@@ -204,6 +204,83 @@ test("with neither a video model nor describeVideo, the agent is told a video ca
   await t.agent.conversation("v3")!.whenIdle();
 });
 
+/** A describer that also answers questions (DescribeVideo's ask), recording each one. */
+function asker(answer = "Yes: a thin scratch just left of the charging port.") {
+  const questions: Array<{ question: string; bytes: number }> = [];
+  const describe: DescribeVideo = Object.assign(async () => "A black phone, turned in the light.", {
+    ask: async (video: { mime: string; data: Uint8Array }, question: string) => (questions.push({ question, bytes: video.data.length }), answer),
+  });
+  return { describe, questions };
+}
+
+const tools = (request: { tools: Array<{ name: string }> }) => request.tools.map((t) => t.name);
+const toolResult = (messages: ChatMessage[], id: string) => (messages.find((m) => m.role === "tool" && m.toolCallId === id) as { content: string } | undefined)?.content;
+
+test("the agent can ask about a described video whenever it needs to: describeVideo's ask answers from the video fetched again by its ref, offered only once the conversation has one", async () => {
+  const { describe, questions } = asker();
+  const t = agentWith({ describeVideo: describe });
+  const fetched: string[] = [];
+  const again = async (ref: string) => (fetched.push(ref), new Uint8Array(40));
+  t.agent.receive("q1", "hi, is this phone still for sale?", () => undefined, { file: again });
+  const first = await t.nextCall(0);
+  assert.equal(tools(first.request).includes("ask_about_video"), false);
+  first.answer(respond(say("It is! Want a video of it?")));
+  await t.agent.conversation("q1")!.whenIdle();
+
+  const video = Object.assign(file("video", "video/mp4", 40), { ref: "file_v1" });
+  t.agent.receive("q1", { text: "here's mine for the trade-in", attachments: [video] }, () => undefined, { file: again });
+  const second = await t.nextCall(1);
+  assert.ok(lastUser(second.request.messages).content.startsWith("[m2] [video, described: A black phone, turned in the light.]"));
+  assert.ok(tools(second.request).includes("ask_about_video"));
+  const ask = call("ask_about_video", { question: "Is there a scratch near the charging port?" });
+  second.answer(respond(say("Let me look closer."), ask));
+
+  const third = await t.nextCall(2);
+  assert.deepEqual(JSON.parse(toolResult(third.request.messages, ask.id)!), { video: "m2", answer: "Yes: a thin scratch just left of the charging port." });
+  assert.deepEqual(questions, [{ question: "Is there a scratch near the charging port?", bytes: 40 }]);
+  // Read once as it arrived, then fetched again by its ref for the question.
+  assert.deepEqual([video.loaded.count, fetched], [1, ["file_v1"]]);
+  third.answer(respond(say("There is a small scratch by the port.")));
+  await t.agent.conversation("q1")!.whenIdle();
+
+  // A describer that only describes cannot answer, so the agent is not offered the tool.
+  const only = agentWith({ describeVideo: async () => "A black phone." });
+  only.agent.receive("q2", { text: "mine", attachments: [Object.assign(file("video", "video/mp4", 40), { ref: "file_v2" })] }, () => undefined, { file: again });
+  const call0 = await only.nextCall(0);
+  assert.equal(tools(call0.request).includes("ask_about_video"), false);
+  call0.answer(respond(say("Thanks.")));
+  await only.agent.conversation("q2")!.whenIdle();
+});
+
+test("questions about videos are capped per turn, and a video its channel no longer keeps is a failure the agent reads, with what to do", async () => {
+  const { describe, questions } = asker("No.");
+  const t = agentWith({ describeVideo: describe });
+  let kept = true;
+  const again = async () => (kept ? new Uint8Array(40) : null);
+  t.agent.receive("q3", { text: "the dent", attachments: [Object.assign(file("video", "video/mp4", 40), { ref: "file_v3" })] }, () => undefined, { file: again });
+  const first = await t.nextCall(0);
+  const asks = [1, 2, 3, 4].map((n) => call("ask_about_video", { question: `Question ${n}?`, message: "m1" }));
+  first.answer(respond(say("Looking."), ...asks));
+  const second = await t.nextCall(1);
+  const results = asks.map((a) => toolResult(second.request.messages, a.id)!);
+  assert.equal(results.filter((r) => r === '{"video":"m1","answer":"No."}').length, 3);
+  assert.equal(results.filter((r) => r.startsWith("Failed: Not asked: 3 questions about videos is the most a turn has.")).length, 1);
+  assert.equal(questions.length, 3);
+  second.answer(respond(say("No dent that I can see.")));
+  await t.agent.conversation("q3")!.whenIdle();
+
+  kept = false;
+  t.agent.receive("q3", "look again at the corner?", () => undefined, { file: again });
+  const third = await t.nextCall(2);
+  const ask = call("ask_about_video", { question: "Is the corner dented?" });
+  third.answer(respond(say("Checking."), ask));
+  const fourth = await t.nextCall(3);
+  assert.equal(toolResult(fourth.request.messages, ask.id), "Failed: The video in m1 is no longer kept by chat, so it can't be watched again. Ask them to send it again if you need it.");
+  assert.ok(t.events.some((e) => e.type === "attachment.failed" && e.kind === "video" && e.messageId === "m1"));
+  fourth.answer(respond(say("Could you send the video again?")));
+  await t.agent.conversation("q3")!.whenIdle();
+});
+
 test("openAICompatible sends photos as image_url parts, PDFs as file parts and videos as video_url parts", async () => {
   let body: any = null;
   const server = createServer((req, res) => {
@@ -234,7 +311,7 @@ test("openAICompatible sends photos as image_url parts, PDFs as file parts and v
   assert.deepEqual(openAICompatible({ model: "m", apiKey: "k", videos: true }).reads, { images: true, pdfs: true, videos: true });
 });
 
-test("describeVideoWith asks its model through the agent's key: a video_url part on OpenRouter or Flow, generateContent on Gemini, and no key that reaches one is refused", async (t) => {
+test("describeVideoWith asks its model through the agent's key, to describe a video or answer a question about it: a video_url part on OpenRouter or Flow, generateContent on Gemini, and no key that reaches one is refused", async (t) => {
   const saved = Object.fromEntries(["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "FLOW_KEY"].map((k) => [k, process.env[k]]));
   const realFetch = globalThis.fetch;
   t.after(() => {
@@ -258,6 +335,10 @@ test("describeVideoWith asks its model through the agent's key: a video_url part
   const describe = describeVideoWith("google/gemini-3.8-flash", { apiKey: "k", baseURL: `http://127.0.0.1:${(server.address() as AddressInfo).port}` });
   assert.equal(await describe({ mime: "video/mp4", data: new Uint8Array([1]) }), "A dog on a beach.");
   assert.equal(body.model, "google/gemini-3.8-flash");
+  assert.deepEqual(body.messages[0].content[1], { type: "video_url", video_url: { url: "data:video/mp4;base64,AQ==" } });
+  // Its ask puts the agent's question to the same model, with the video.
+  assert.equal(await describe.ask!({ mime: "video/mp4", data: new Uint8Array([1]) }, "Is the dog wet?"), "A dog on a beach.");
+  assert.ok(body.messages[0].content[0].text.endsWith("\nQuestion: Is the dog wet?"));
   assert.deepEqual(body.messages[0].content[1], { type: "video_url", video_url: { url: "data:video/mp4;base64,AQ==" } });
 
   process.env.OPENAI_API_KEY = "sk-openai";
