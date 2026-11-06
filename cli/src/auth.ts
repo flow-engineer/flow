@@ -143,6 +143,33 @@ export function isSignedIn(config: CliConfig, server: string): boolean {
   return Boolean(readAll(config)[server]?.tokens);
 }
 
+/**
+ * Ends this computer's sign-in at the authorization server too (RFC 7009), when its discovery
+ * advertised a revocation_endpoint: the refresh token first (the server then ends the whole grant),
+ * then the access token. Returns false with nothing to revoke; throws when the server refused or
+ * could not be reached, so logout can say it signed out on this computer only.
+ */
+export async function revokeStored(config: CliConfig, server: string, signal?: AbortSignal): Promise<boolean> {
+  const saved = readAll(config)[server];
+  const endpoint = saved?.discovery?.authorizationServerMetadata?.revocation_endpoint;
+  const clientId = config.clientId ?? saved?.client?.client_id;
+  const tokens = ([["refresh_token", saved?.tokens?.refresh_token], ["access_token", saved?.tokens?.access_token]] as const)
+    .filter((pair): pair is readonly [typeof pair[0], string] => typeof pair[1] === "string" && pair[1] !== "");
+  if (!endpoint || !clientId || !tokens.length) return false;
+  for (const [hint, token] of tokens) {
+    let status: number;
+    try {
+      const answer = await fetch(endpoint, { method: "POST", signal, headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ token, token_type_hint: hint, client_id: clientId }) });
+      status = answer.status;
+    } catch (error) {
+      throw new Error(`Could not reach ${new URL(endpoint).origin} to end the sign-in: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    // RFC 7009 answers 200 for a token it revoked and for one it no longer knows.
+    if (status !== 200) throw new Error(`${new URL(endpoint).origin} did not end the sign-in (HTTP ${status}).`);
+  }
+  return true;
+}
+
 export function signOut(config: CliConfig, server: string): void {
   const all = readAll(config);
   delete all[server];

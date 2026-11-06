@@ -16,7 +16,7 @@ import { createInterface } from "node:readline/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider, type Tool as McpTool } from "@modelcontextprotocol/client";
 import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
-import { configDir, isSignedIn, signedInAsOtherClient, signIn, signOut, storedAccessToken, storedProvider } from "./auth.ts";
+import { configDir, isSignedIn, revokeStored, signedInAsOtherClient, signIn, signOut, storedAccessToken, storedProvider } from "./auth.ts";
 import { colorsAt, painter, severity, type Paint } from "./colors.ts";
 import { chooseAtTerminal, person, signInQuestion, tips, waitsForSignIn, welcomeScreen } from "./welcome.ts";
 import { SKILLS_META } from "../../src/skills.ts";
@@ -1132,9 +1132,15 @@ function signInRoutes(config: CliConfig, server: string | undefined, io: CliIO) 
     const s = need();
     let warned = false;
     const signedIn = isSignedIn(config, s);
+    const warn = (error: unknown) => { warned = true; io.writeError(`${painter(colorsAt(config, io))("warning", error instanceof Error ? error.message : String(error))}\n`); };
     if (config.signIn?.beforeLogout && signedIn) {
       try { await config.signIn.beforeLogout({ server: s, token: await storedAccessToken(config, s, false, io.signal) }); }
-      catch (error) { warned = true; io.writeError(`${painter(colorsAt(config, io))("warning", error instanceof Error ? error.message : String(error))}\n`); }
+      catch (error) { warn(error); }
+    }
+    // The server's own session ends too, where its authorization server takes revocations (the OAuth bridge does).
+    if (signedIn) {
+      try { await revokeStored(config, s, io.signal); }
+      catch (error) { warn(error); }
     }
     signOut(config, s);
     forgetChat(config, s);
