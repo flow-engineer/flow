@@ -1,6 +1,7 @@
 // covers: src/conversation.ts src/talk.ts src/agent.ts src/store.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { format } from "node:util";
 import { z } from "zod";
 import { defaultHistoryTokens } from "../src/agent.ts";
 import { tool } from "../src/index.ts";
@@ -63,7 +64,8 @@ test("saying it acts next twice with no tool between ends the turn", async () =>
   assert.equal(h.calls.length, 2);
 });
 
-test("a message that fails to arrive comes back to the agent", async () => {
+test("a message that fails to arrive comes back to the agent; a turn that still sent them nothing is logged", async (t) => {
+  const warn = t.mock.method(console, "warn", () => {});
   const h = harness();
   h.send("c9", "hello");
   h.failNext("the number opted out");
@@ -77,6 +79,7 @@ test("a message that fails to arrive comes back to the agent", async () => {
   third.answer(respond());
   await h.agent.conversation("c9")!.whenIdle();
   assert.equal(h.calls.length, 3);
+  assert.deepEqual(warn.mock.calls.map((c) => format(...c.arguments)), ["flow: conversation c9 turn 1 ended with nothing sent to them on chat, where they were owed a reply"]);
 });
 
 test("a message the channel refuses goes back to the agent to fix", async () => {

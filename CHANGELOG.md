@@ -161,6 +161,22 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `"allowScripts": { "esbuild": true, "koffi": true }` into `package.json`, so a fresh `npm install`
   on npm 11 no longer warns `2 packages have install scripts not yet covered by allowScripts` (and
   keeps working when npm starts blocking unreviewed scripts).
+- **A message two runners receive at once is answered.** When one provider message reached two
+  processes of an agent on one store (a replaced Cloud Run instance still reading Flow Messaging's
+  stream beside the new one), the process whose store write lost the message's id kept the id, and
+  if it then took the conversation it marked the other's stored copy done as already answered: no
+  reply, no read receipt. That process now forgets the id, so whichever process holds the
+  conversation answers it once; a stored message counts as already answered only when it is in the
+  history. Typing for a message with a provider id now starts once this process's store write has
+  taken it (a voice note's typing after it is read), so only the process that has the message types.
+- **A turn owed a reply never ends in silence when the model answers in plain text twice.** After
+  the one reminder that plain text never reaches them, a second step of plain text is sent as the
+  reply on the channel they are owed one on (the latest), as the send tool would have sent it, and
+  the history keeps it as that send; with no text in that step, the text the reminder was about is
+  sent. It is logged as a `WARNING` with ids only (conversation, turn, channel). A turn that still
+  ends with nothing sent where a reply was owed (a model that wrote nothing twice) is now logged as a
+  `WARNING` too: `flow: conversation <id> turn <n> ended with nothing sent to them on <channel>,
+  where they were owed a reply`.
 
 ### Migration notes
 
@@ -191,6 +207,8 @@ installs a second copy, and its own imports use that one.
 Code that reads `McpToolDescriptor._meta` (a `descriptor` function's `generated._meta`) handles it
 being undefined. A script that matched `Signed out of` after a logout with nobody signed in now
 reads `Not signed in to`.
+A model that answers in plain text after the reminder now has that text sent to the person: an
+agent whose instructions use plain text for notes to itself should keep them out of the reply step.
 
 ## 0.16.0 (2026-11-05)
 

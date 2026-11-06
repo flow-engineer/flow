@@ -94,6 +94,70 @@ test("while a deploy runs the old and new runner side by side, each message is a
   assert.deepEqual([...old.texts("sms"), ...next.texts("sms")], ["Thursday at 10.", "At the studio.", "Any time."]);
 });
 
+test("a message both runners are sent at once is answered once: the runner whose store write lost types nothing, and holding the conversation answers the other's copy", async () => {
+  const path = file();
+  // The order seen on Cloud Run with a replaced instance still reading the stream: both check the
+  // id before either stores it; the old runner's write takes it; the new runner takes the lease.
+  let racing = false;
+  const checked = gate<void>();
+  const stored = gate<void>();
+  const claimed = gate<void>();
+  class OldStore extends Store {
+    override async addMessage(...args: Parameters<Store["addMessage"]>) {
+      if (racing) await checked.promise;
+      return super.addMessage(...args);
+    }
+    // Its message's last write (SQLite takes one writer at a time: the other runner waits for it).
+    override async touchIdentity(...args: Parameters<Store["touchIdentity"]>) {
+      await super.touchIdentity(...args);
+      if (racing) stored.open();
+    }
+    override async claimConversation(...args: Parameters<Store["claimConversation"]>) {
+      if (racing) await claimed.promise;
+      return super.claimConversation(...args);
+    }
+  }
+  class NewStore extends Store {
+    override async inboundTaken(...args: Parameters<Store["inboundTaken"]>) {
+      const taken = await super.inboundTaken(...args);
+      if (racing) checked.open();
+      return taken;
+    }
+    override async addMessage(...args: Parameters<Store["addMessage"]>) {
+      if (racing) await stored.promise;
+      return super.addMessage(...args);
+    }
+    override async claimConversation(...args: Parameters<Store["claimConversation"]>) {
+      if (racing) await stored.promise;
+      const epoch = await super.claimConversation(...args);
+      if (racing) claimed.open();
+      return epoch;
+    }
+  }
+  const old = multi({ channels: CHANNELS, store: new OldStore(sqlite(path), "default") });
+  await old.agent.resume();
+  const sms = (messageId: string) => ({ channel: "sms", from: "+15550100100", message: "is Friday free?", messageId });
+  const a = await old.agent.message(sms("SM0"));
+  (await old.nextCall(0)).answer(respond(call("send_sms", { text: "Let me look." })));
+  await old.agent.conversation(a!.conversationId)!.whenIdle();
+  const next = multi({ channels: CHANNELS, store: new NewStore(sqlite(path), "default"), dir: old.dir });
+  await next.agent.resume();
+  const oldBefore = old.out.length;
+
+  racing = true;
+  await Promise.all([old.agent.message(sms("SM1")), next.agent.message(sms("SM1"))]);
+  const turn = await next.nextCall(0);
+  assert.equal(users(turn.request.messages).at(-1), "[SM1] is Friday free?");
+  turn.answer(respond(call("send_sms", { text: "Friday is free." })));
+  await next.agent.conversation(a!.conversationId)!.whenIdle();
+  await old.agent.conversation(a!.conversationId)?.whenIdle();
+
+  assert.equal(old.calls.length, 1, "the old runner ran no turn for it");
+  assert.deepEqual(next.texts("sms"), ["Friday is free."]);
+  assert.deepEqual(next.out.filter((o) => o.outbound.type === "typing"), [], "the runner whose write lost typed nothing");
+  assert.deepEqual(old.out.slice(oldBefore).map((o) => o.outbound), [{ type: "typing", on: true }, { type: "typing", on: false }], "the one whose write took it typed, then left it to the other");
+});
+
 test("a runner that dies mid-turn leaves the turn to another once its lease runs out, and it runs there once", async () => {
   const path = file();
   const database = killable(sqlite(path));
