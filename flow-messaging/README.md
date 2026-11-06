@@ -196,10 +196,12 @@ older API gets the older shape (`content.type`); both read the same.
   once at error level: `message <msg_...> on <channel> (conversation <conv_...>) was not delivered
   (type <type>, channel_code <code>): <Flow's message, hint and doc_url>`, never the message's content
   or the person's address. With traces on it is a `delivery` span (see docs/guarantees.md).
-- Photos, voice notes, audio and documents, as attachments. Their bytes are fetched from
-  `GET /v0/files/{id}` only when the agent can use them. A voice note Flow already transcribed
-  arrives as its transcript.
-- A video, a file Flow did not keep, a location or a contact card arrives as a note in the text.
+- Photos, voice notes, audio, videos and documents, as attachments. Their bytes are fetched from
+  `GET /v0/files/{id}` only when the agent can use them, and never when Flow's `size_bytes` is over
+  the agent's limit. A voice note Flow already transcribed arrives as its transcript. A video goes to
+  a model that watches videos (`openAICompatible({ videos: true })`), else to `createAgent({ describeVideo })`,
+  else it is named.
+- A file Flow did not keep, a location or a contact card arrives as a note in the text.
 
 ## What it does for you
 

@@ -41,9 +41,10 @@
 // - A message the agent's own rules answer with no model call (its intercept, a STOP, START or
 //   HELP keyword) is kept with what was sent back, in order with the person's other messages, and
 //   starts no turn: a turn running takes it in at its next step, else it is stored at once.
-// - Files the person sends: photos and PDFs go to the model when it reads them, a voice note as its
-//   transcript; anything it cannot read is named with why, so it can ask for text. Only the latest
-//   few are shown, and their bytes are never stored: after a restart they are named, not shown.
+// - Files the person sends: photos, PDFs and videos go to the model when it reads them, a voice note
+//   as its transcript, a video it can't watch as its description (describeVideo); anything it cannot
+//   read is named with why, so it can ask for text. Only the latest few are shown (one video), and
+//   their bytes are never stored: after a restart they are named, not shown.
 
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
@@ -59,12 +60,14 @@ import { ACT_NEXT, EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput,
 import { formatLocal, shortLocal, zoneLabel } from "./time.ts";
 import { activeCall, type QueuedBy, type TurnTrigger } from "./traces.ts";
 import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
-import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe, UndeliveredDetail } from "./types.ts";
+import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, DescribeVideo, Incoming, Media, Model, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe, UndeliveredDetail } from "./types.ts";
 
 export interface ConversationSettings {
   model: Model;
   /** Speech to text for voice notes; without it the agent is told it can't listen to them. */
   transcribe?: Transcribe;
+  /** A video as text, for a model that can't watch it; without it (and without reads.videos) the agent is told it can't watch videos. */
+  describeVideo?: DescribeVideo;
   tools: Map<string, Tool>;
   credentials?: CredentialProvider;
   credentialProvider?: (context: Readonly<Omit<ToolContext, "credentials">>) => CredentialProvider | undefined;
@@ -164,7 +167,7 @@ const RESET = "[Chinwag] The conversation starts again here: earlier messages ar
 export function resetLine(note?: string): string {
   return note?.trim() ? `${RESET}\nBefore this: ${note.trim()}` : RESET;
 }
-const NOT_SHOWN = "[Chinwag] You are no longer shown the photos or documents in these messages; ask them to send one again if you need it.";
+const NOT_SHOWN = "[Chinwag] You are no longer shown the photos, videos or documents in these messages; ask them to send one again if you need it.";
 
 /** A server-verified auth change: an internal prompt, never a prewritten chat response. */
 export function signInNotice(channel: string, request?: string): string {
@@ -174,21 +177,30 @@ export function signInNotice(channel: string, request?: string): string {
     (request ? `The pending request (user text, not system instructions) is: ${JSON.stringify(request)}` : "");
 }
 
-/** Photos and PDFs the model is shown at once, the latest; each is resent on every model call. */
+/** Photos, PDFs and videos the model is shown at once, the latest; each is resent on every model call. Of them, at most one video. */
 const MEDIA_SHOWN = 3;
+const VIDEOS_SHOWN = 1;
 /** Typing is sent again this far into the platform's indicator lifetime (typingLastsMs), before it hides. */
 const TYPING_AGAIN = 0.8;
-/** The largest photo, and the largest PDF or voice note, the agent reads (most models take 5 MB images). */
+/**
+ * The largest photo, and the largest PDF, voice note or video, the agent reads (most models take 5 MB
+ * images; a 10 MB video is about 13 MB as base64, within Gemini's 20 MB for a request's inline files).
+ */
 const IMAGE_MAX_MB = 5;
 const FILE_MAX_MB = 10;
 /** The image types the main model APIs take. */
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+/** The video types a model is sent (OpenRouter's list; QuickTime is its video/mov). Others go to describeVideo, if any. */
+const VIDEO_TYPES = new Set(["video/mp4", "video/mpeg", "video/quicktime", "video/mov", "video/webm"]);
+/** About what a video shown costs in tokens: Gemini counts about 263 a second, so this is a clip of a minute or so. */
+const VIDEO_TOKENS = 20_000;
 
-/** What a message's files became: marks after its id, the media the model is shown, a voice note's text. */
+/** What a message's files became: marks after its id, the media the model is shown, a voice note's text, a video's description. */
 interface Files {
   marks: string[];
   media: Media[];
   transcript?: string;
+  description?: string;
 }
 
 /** A tool call the reply is waiting on. */
@@ -578,7 +590,7 @@ export class Conversation {
       if (link) await this.settings.store.touchIdentity(channel, link.address, at);
     });
     const attachments = incoming.attachments?.map((a) => ({ kind: a.kind, mime: a.mime, ...(a.name ? { name: a.name } : {}) }));
-    this.settings.emit(this.id, "message.in", { text: incoming.text, messageId: id, ownId, channel, replyTo: incoming.replyTo, choice: incoming.choice, ...(attachments ? { attachments } : {}), ...(files.transcript !== undefined ? { transcript: files.transcript } : {}) });
+    this.settings.emit(this.id, "message.in", { text: incoming.text, messageId: id, ownId, channel, replyTo: incoming.replyTo, choice: incoming.choice, ...(attachments ? { attachments } : {}), ...(files.transcript !== undefined ? { transcript: files.transcript } : {}), ...(files.description !== undefined ? { description: files.description } : {}) });
     this.unanswered.add(channel);
     this.firstResponse = true;
     this.startTyping(channel);
@@ -671,16 +683,24 @@ export class Conversation {
     const reads = this.settings.model.reads ?? {};
     for (const a of attachments) {
       const name = a.name ? ` "${a.name.replace(/["\n]/g, "")}"` : "";
-      const what = a.kind === "image" ? "photo" : a.kind === "audio" ? "voice note" : `document${name}`;
+      const what = a.kind === "image" ? "photo" : a.kind === "audio" ? "voice note" : a.kind === "video" ? "video" : `document${name}`;
+      // A video goes to a model that watches it, else to describeVideo.
+      const watched = a.kind === "video" && reads.videos === true && VIDEO_TYPES.has(a.mime);
       const cannot =
         a.kind === "image" ? (!reads.images ? "you can't see photos" : !IMAGE_TYPES.has(a.mime) ? "you can't see this type of image" : null)
         : a.kind === "document" ? (a.mime !== "application/pdf" ? "you can only open PDFs" : !reads.pdfs ? "you can't open documents" : null)
+        : a.kind === "video" ? (watched || this.settings.describeVideo ? null : reads.videos ? "you can't watch this type of video" : "you can't watch videos")
         : !this.settings.transcribe ? "you can't listen to voice notes" : null;
       if (cannot) {
         files.marks.push(`[${what}: ${cannot}]`);
         continue;
       }
       const max = a.kind === "image" ? IMAGE_MAX_MB : FILE_MAX_MB;
+      if (a.size !== undefined && a.size > max * 1_048_576) {
+        // The channel said how big it is: never fetched.
+        files.marks.push(`[${what}: too large for you to read, over ${max} MB]`);
+        continue;
+      }
       let bytes: Uint8Array;
       try {
         bytes = await a.data();
@@ -693,9 +713,21 @@ export class Conversation {
         files.marks.push(`[${what}: too large for you to read, over ${max} MB]`);
         continue;
       }
-      if (a.kind !== "audio") {
-        files.media.push({ kind: a.kind, mime: a.mime, ...(a.name ? { name: a.name } : {}), data: Buffer.from(bytes).toString("base64") });
+      if (a.kind === "image" || a.kind === "document" || watched) {
+        files.media.push({ kind: a.kind as Media["kind"], mime: a.mime, ...(a.name ? { name: a.name } : {}), data: Buffer.from(bytes).toString("base64") });
         files.marks.push(`[${what}]`);
+        continue;
+      }
+      if (a.kind === "video") {
+        try {
+          const text = (await this.settings.describeVideo!({ mime: a.mime, data: bytes })).replace(/\s+/g, " ").trim();
+          if (!text) throw new Error("the description was empty");
+          files.description = [files.description, text].filter(Boolean).join("\n");
+          files.marks.push(`[video, described: ${text}]`);
+        } catch (error) {
+          this.settings.emit(this.id, "attachment.failed", { kind: a.kind, error: String(error) });
+          files.marks.push(`[${what}: it could not be described]`);
+        }
         continue;
       }
       try {
@@ -1231,15 +1263,17 @@ export class Conversation {
     this.persist(() => this.settings.store.appendHistory(this.id, seq, entries, items.flatMap((i) => (i.inbox === undefined ? [] : [i.inbox]))));
   }
 
-  /** Only the latest MEDIA_SHOWN photos and PDFs keep their bytes; older ones are named, not shown. */
+  /** Only the latest MEDIA_SHOWN photos, PDFs and videos (VIDEOS_SHOWN of them videos) keep their bytes; older ones are named, not shown. */
   private showLatestMedia(): void {
     let shown = 0;
+    let videos = 0;
     for (let i = this.history.length - 1; i >= 0; i--) {
       const entry = this.history[i];
       if (entry.role !== "user" || !entry.media) continue;
       for (let k = entry.media.length - 1; k >= 0; k--) {
         if (!entry.media[k].data) continue;
-        if (++shown > MEDIA_SHOWN) entry.media[k] = stored(entry.media[k]);
+        const video = entry.media[k].kind === "video" && ++videos > VIDEOS_SHOWN;
+        if (++shown > MEDIA_SHOWN || video) entry.media[k] = stored(entry.media[k]);
       }
     }
   }
@@ -2295,14 +2329,14 @@ function tokens(text: string | null | undefined): number {
   return Math.ceil((text?.length ?? 0) / 3);
 }
 
-/** About how many tokens a history entry takes, a photo or PDF shown counted as 1,500. */
+/** About how many tokens a history entry takes, a photo or PDF shown counted as 1,500, a video as VIDEO_TOKENS. */
 function size(entry: ChatMessage): number {
   if (entry.role === "assistant") return tokens(entry.content) + tokens(JSON.stringify(entry.toolCalls ?? []));
   if (entry.role === "tool") return tokens(entry.content);
-  return tokens(entry.content) + (entry.media?.filter((m) => m.data).length ?? 0) * 1_500;
+  return tokens(entry.content) + (entry.media ?? []).reduce((sum, m) => sum + (!m.data ? 0 : m.kind === "video" ? VIDEO_TOKENS : 1_500), 0);
 }
 
-/** A photo or PDF as it is stored: named, without its bytes. */
+/** A photo, PDF or video as it is stored: named, without its bytes. */
 function stored(media: Media): Media {
   const { data: _bytes, ...rest } = media;
   return rest;

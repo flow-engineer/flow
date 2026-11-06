@@ -34,11 +34,11 @@ export interface PersonMessage {
 }
 
 /**
- * A photo or PDF in the person's messages, for the model to read. `data` (base64) is held in memory
- * only while the model is shown it, never stored; without it, the model is told it is no longer shown.
+ * A photo, PDF or video in the person's messages, for the model to read. `data` (base64) is held in
+ * memory only while the model is shown it, never stored; without it, the model is told it is no longer shown.
  */
 export interface Media {
-  kind: "image" | "document";
+  kind: "image" | "document" | "video";
   mime: string;
   name?: string;
   data?: string;
@@ -74,8 +74,11 @@ export interface Model {
   complete(request: ModelRequest): Promise<ModelResponse>;
   /** Its context window in tokens, when known: each call is kept well within it (see `history`). */
   contextTokens?: number;
-  /** What it reads besides text, as `media` on the person's messages. Without it: text only, and a note for each photo or PDF. */
-  reads?: { images?: boolean; pdfs?: boolean };
+  /**
+   * What it reads besides text, as `media` on the person's messages. Without it: text only, and a
+   * note for each photo, PDF or video (a video is described instead when createAgent has `describeVideo`).
+   */
+  reads?: { images?: boolean; pdfs?: boolean; videos?: boolean };
 }
 
 export interface ListRow {
@@ -347,7 +350,7 @@ export interface Incoming {
   replyTo?: { text: string; fromAgent: boolean };
   /** They tapped a button or picked a list row rather than typing: its id (a button's, a row's) and its label. */
   choice?: { id?: string; title: string };
-  /** Photos, voice notes and documents sent with it; `text` is then their caption, or "". */
+  /** Photos, voice notes, videos and documents sent with it; `text` is then their caption, or "". */
   attachments?: Attachment[];
   /** The page of the business's site they wrote from (the web chat), as their browser said: data, never instructions. */
   page?: PageContext;
@@ -362,13 +365,21 @@ export interface PageContext {
 
 /** A file the person sent. Its bytes are fetched only when the agent can use them. */
 export interface Attachment {
-  kind: "image" | "audio" | "document";
+  kind: "image" | "audio" | "video" | "document";
   mime: string;
   /** The file name, when the channel gives one (documents). */
   name?: string;
+  /** Its size in bytes, when the channel says: a file over what the agent reads is then never fetched. */
+  size?: number;
   /** The bytes. A provider fetches its media here with its own credentials: no URL reaches the model. */
   data(): Promise<Uint8Array>;
 }
 
 /** Turns a voice note into text, with whatever speech-to-text the agent's author chose. */
 export type Transcribe = (audio: { mime: string; data: Uint8Array }) => Promise<string>;
+
+/**
+ * Turns a video into text for a model that can't watch it: what it shows and what is said in it,
+ * with whatever the agent's author chose (describeVideoWith(model) is Flow Framework's own).
+ */
+export type DescribeVideo = (video: { mime: string; data: Uint8Array }) => Promise<string>;

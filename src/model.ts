@@ -1,11 +1,13 @@
 // Models over the OpenAI-compatible chat API: OpenRouter by default; OpenAI, Gemini, Anthropic or a
 // local server by changing the base URL; or Flow, with the agent's FLOW_KEY that `flow setup` writes,
 // which needs no provider key and spends the account's Flow trial credit. Flow also turns audio into
-// text with the same key (flowTranscribe).
+// text with the same key (flowTranscribe), and describeVideoWith has a video model describe a video
+// for one that can't watch it, through the same key.
 
+import { Buffer } from "node:buffer";
 import OpenAI from "openai";
 import { setting } from "./names.ts";
-import type { ChatMessage, Model, ModelRequest, ModelResponse } from "./types.ts";
+import type { ChatMessage, DescribeVideo, Model, ModelRequest, ModelResponse } from "./types.ts";
 
 export interface OpenAICompatibleOptions {
   /** The provider's model id. When omitted, the key in the environment picks a default. */
@@ -17,6 +19,11 @@ export interface OpenAICompatibleOptions {
   images?: boolean;
   /** The model reads PDFs (file parts). Default true on OpenRouter, which reads them for any model; false elsewhere. */
   pdfs?: boolean;
+  /**
+   * The model watches videos (OpenRouter's video_url parts, a base64 data URL): true for one that
+   * does, such as google/gemini-3.8-flash through OpenRouter or Flow. Default false.
+   */
+  videos?: boolean;
   /** Its context window in tokens, so the history sent is kept within it. */
   contextTokens?: number;
 }
@@ -93,7 +100,7 @@ export function openAICompatible(options: OpenAICompatibleOptions = {}): Model {
   // Flow reads PDFs for every model it offers, as OpenRouter (behind it) does.
   const readsPdfs = baseURL.startsWith("https://openrouter.ai/") || baseURL === flowModelURL(process.env);
   return {
-    reads: { images: options.images ?? true, pdfs: options.pdfs ?? readsPdfs },
+    reads: { images: options.images ?? true, pdfs: options.pdfs ?? readsPdfs, videos: options.videos ?? false },
     ...(options.contextTokens ? { contextTokens: options.contextTokens } : {}),
     async complete(request: ModelRequest): Promise<ModelResponse> {
       let completion: OpenAI.Chat.ChatCompletion;
@@ -210,6 +217,7 @@ function toWire(message: ChatMessage): OpenAI.Chat.ChatCompletionMessageParam {
       content: [
         { type: "text", text: message.content },
         ...media.map((m): OpenAI.Chat.ChatCompletionContentPart => {
+          if (m.kind === "video") return videoPart(m.mime, m.data!);
           const url = `data:${m.mime};base64,${m.data}`;
           return m.kind === "image" ? { type: "image_url", image_url: { url } } : { type: "file", file: { filename: m.name ?? "document.pdf", file_data: url } };
         }),
@@ -228,6 +236,84 @@ function toWire(message: ChatMessage): OpenAI.Chat.ChatCompletionMessageParam {
           })),
         }
       : {}),
+  };
+}
+
+/** OpenRouter's video part (not in the OpenAI SDK's types): the video as a base64 data URL. */
+function videoPart(mime: string, base64: string): OpenAI.Chat.ChatCompletionContentPart {
+  return { type: "video_url", video_url: { url: `data:${videoMime(mime)};base64,${base64}` } } as unknown as OpenAI.Chat.ChatCompletionContentPart;
+}
+
+/** A video's type as OpenRouter and Gemini name it: QuickTime is video/mov. */
+const videoMime = (mime: string) => (mime === "video/quicktime" ? "video/mov" : mime);
+
+/** What the video model is asked (model-facing text, kept short). */
+const DESCRIBE_VIDEO = "Describe this video for an assistant that cannot watch it, in a few sentences: what it shows, any text on screen, and what is said in it (word for word when it is short). Say only what is in the video.";
+
+export interface DescribeVideoOptions {
+  /** The key, and the address it goes to; when both are omitted, the agent's model key in the environment. */
+  apiKey?: string;
+  baseURL?: string;
+}
+
+/** The keys a video model is reached with, in the order the agent's model reads them: OpenAI's and Anthropic's APIs take no video. */
+const VIDEO_KEYS = KEYS.filter((k) => k.env !== "OPENAI_API_KEY" && k.env !== "ANTHROPIC_API_KEY");
+const GEMINI = "https://generativelanguage.googleapis.com/";
+
+/**
+ * Flow Framework's own `describeVideo`: `model` (a video model, such as google/gemini-3.8-flash)
+ * describes each video the agent's model can't watch, what it shows and what is said, and the agent
+ * reads that text in its place. It goes through the agent's model key, so it needs no other: Flow's
+ * FLOW_KEY or an OpenRouter key (video_url parts), or a Gemini key (Gemini's generateContent, the
+ * model's id without "google/"). With only an OpenAI or Anthropic key it fails when made, naming the
+ * key to add. The video is sent once, as base64; nothing is kept.
+ */
+export function describeVideoWith(model: string, options: DescribeVideoOptions = {}): DescribeVideo {
+  const id = model.trim();
+  if (!id) throw new Error("describeVideoWith: name a model that watches videos, such as google/gemini-3.8-flash.");
+  let { apiKey, baseURL } = options;
+  if (apiKey === undefined && baseURL === undefined) {
+    const found = VIDEO_KEYS.find((k) => process.env[k.env]?.trim());
+    if (!found) {
+      const has = MODEL_KEY_NAMES.find((name) => process.env[name]?.trim());
+      throw Object.assign(
+        new Error(`describeVideoWith needs a key that reaches a video model${has ? ` (${has} does not: OpenAI's and Anthropic's APIs take no video)` : ""}: FLOW_KEY (npx @flow-engineer/flow setup writes it), OPENROUTER_API_KEY= or GEMINI_API_KEY= in the agent's .env.\nNext: run ${NO_MODEL_KEY.next}, or add one of those keys.`),
+        { code: "no_video_key", next: NO_MODEL_KEY.next },
+      );
+    }
+    apiKey = process.env[found.env]!.trim();
+    baseURL = found.env === "FLOW_KEY" ? flowModelURL(process.env) : found.baseURL;
+  }
+  const url = baseURL ?? KEYS[0].baseURL;
+  if (url.startsWith(GEMINI)) return geminiDescriber(id.replace(/^google\//, ""), apiKey ?? "");
+  const client = new OpenAI({ apiKey: apiKey || "none", baseURL: url, maxRetries: 1, timeout: 120_000 });
+  return async (video) => {
+    let completion: OpenAI.Chat.ChatCompletion;
+    try {
+      completion = await client.chat.completions.create({
+        model: id,
+        max_tokens: 1_024,
+        messages: [{ role: "user", content: [{ type: "text", text: DESCRIBE_VIDEO }, videoPart(video.mime, Buffer.from(video.data).toString("base64"))] }],
+      });
+    } catch (error) {
+      throw flowError(error) ?? error;
+    }
+    return completion.choices[0]?.message?.content?.trim() ?? "";
+  };
+}
+
+/** The describer on a Gemini key: Gemini's own generateContent with the video inline (its OpenAI-compatible API takes no video). */
+function geminiDescriber(model: string, apiKey: string): DescribeVideo {
+  return async (video) => {
+    const response = await fetch(`${GEMINI}v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: DESCRIBE_VIDEO }, { inlineData: { mimeType: videoMime(video.mime), data: Buffer.from(video.data).toString("base64") } }] }] }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    const body = (await response.json().catch(() => undefined)) as { candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>; error?: { message?: unknown } } | undefined;
+    if (!response.ok) throw new Error(`Gemini could not describe the video (HTTP ${response.status})${typeof body?.error?.message === "string" ? `: ${body.error.message}` : "."}`);
+    return (body?.candidates?.[0]?.content?.parts ?? []).map((p) => (typeof p.text === "string" ? p.text : "")).join("").trim();
   };
 }
 

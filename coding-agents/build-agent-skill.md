@@ -200,14 +200,21 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   running are reported as interrupted (never rerun).
 - `agent.receive(conversationId, message, deliver)` still works for one channel at a time (the
   test cloud uses it).
-- Photos, voice notes and documents: hand them in on the message, `message: { text: caption, attachments: [{ kind: "image" | "audio" | "document", mime, name?, data: () => provider.download(id) }] }`.
+- Photos, voice notes, videos and documents: hand them in on the message, `message: { text: caption, attachments: [{ kind: "image" | "audio" | "video" | "document", mime, name?, size?, data: () => provider.download(id) }] }`.
   `data` is a loader your provider fetches with its own credentials; never put a media URL where
-  the model sees it. Photos (JPEG, PNG, WebP, GIF, up to 5 MB) and PDFs (up to 10 MB) go to the
+  the model sees it. `size` (bytes, when the platform says) keeps a file over the limit from being
+  fetched at all. Photos (JPEG, PNG, WebP, GIF, up to 5 MB) and PDFs (up to 10 MB) go to the
   model when it reads them (`openAICompatible({ images, pdfs })`: images default on, PDFs on with
   OpenRouter; set `images: false` for a text-only model). Voice notes need
   `createAgent({ transcribe: async ({ mime, data }) => text })` with the speech-to-text the owner
-  picks; Flow Framework has none. Anything the agent can't read reaches it named, with why, so it asks
-  for text. The latest 3 photos and PDFs stay shown; their bytes are never stored.
+  picks; Flow Framework has none. Videos (up to 10 MB) go to a model that watches them:
+  `openAICompatible({ model: "google/gemini-3.8-flash", videos: true })` on FLOW_KEY or an OpenRouter
+  key (MP4, MPEG, MOV, WebM). Otherwise `createAgent({ describeVideo })` turns each into text the
+  agent reads in its place: `describeVideoWith("google/gemini-3.8-flash")` uses the agent's own key
+  (FLOW_KEY, OpenRouter or Gemini; not OpenAI or Anthropic, whose APIs take no video), or write your
+  own `async ({ mime, data }) => text`. With neither, the agent is told a video came that it can't watch.
+  Anything the agent can't read reaches it named, with why, so it asks for text. The latest 3 photos,
+  PDFs and videos (one video at most) stay shown; their bytes are never stored.
 
 Built in, so don't build them as tools: what the business knows about the person (`profile`, as
 `get_user_profile`), scheduled messages (`schedule_message`, `list_scheduled`,

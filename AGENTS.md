@@ -69,7 +69,8 @@ across these surfaces. A project can start with any one of them.
 ## Model-facing text
 - Flow Framework's own text for the model lives in `src/talk.ts`, `src/conversation.ts`, `src/skills.ts`
   (also what an MCP host is told about the skills, and `read_skill`),
-  and the built-in tools' descriptions and notes in `src/schedules.ts` and `src/nudges.ts`. Keep it
+  the built-in tools' descriptions and notes in `src/schedules.ts` and `src/nudges.ts`, and what
+  `describeVideoWith` asks its video model in `src/model.ts`. Keep it
   short; every line costs every turn.
 - `testing/` is the developer's side of testing: the test file formats (`suite.ts`), and the CLI
   and protocol that send an agent's tests to the test cloud. The cloud plays the person and the

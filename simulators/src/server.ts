@@ -1280,7 +1280,7 @@ function asDeclared(d: TemplateDefinition): Omit<FilledTemplate, "body"> {
 function filesOf(body: Record<string, unknown> | null): Array<{ kind: Attachment["kind"]; mime: string; name?: string; bytes: Uint8Array }> {
   if (!Array.isArray(body?.attachments)) return [];
   return body.attachments.slice(0, MAX_FILES).flatMap((a) => {
-    if (!a || typeof a !== "object" || typeof a.mime !== "string" || typeof a.data !== "string" || !["image", "audio", "document"].includes(a.kind)) return [];
+    if (!a || typeof a !== "object" || typeof a.mime !== "string" || typeof a.data !== "string" || !["image", "audio", "video", "document"].includes(a.kind)) return [];
     const bytes = new Uint8Array(Buffer.from(a.data, "base64"));
     return [{ kind: a.kind as Attachment["kind"], mime: a.mime.slice(0, 100), ...(typeof a.name === "string" && a.name ? { name: a.name.slice(0, 200) } : {}), bytes }];
   });
