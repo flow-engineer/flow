@@ -24,6 +24,7 @@ import { collectConversations, Failed, get, insightConversations, listInsights, 
 import { cloudApi, cloudOf, deployStatus, logReader, logsPage, logsWindow, NotAvailable, Refused, SEVERITIES, type Api, type LogsQuery } from "./deploy.ts";
 import { packageRoot } from "./new.ts";
 import type { CliConfig } from "../../cli/src/commands.ts";
+import { flowSignInPage } from "./sign-in-page.ts";
 
 /** The advisory tiers in flow.engineer's words, for the instructions and the tool descriptions. */
 const KEY_TIERS = `${ADVISORY.default} ${ADVISORY.ask_user} ${ADVISORY.critical}`;
@@ -495,9 +496,12 @@ export function flowVersion(): string {
  * The CLI that reaches a hosted Flow MCP: `flow mcp login` and `logout` sign in to it, and the read
  * commands' --server call its tools. Its sign-ins are kept apart from `flow login`'s, in
  * ~/.config/flow-mcp; FLOW_MCP_TOKEN is a token for CI and agents, FLOW_MCP_SERVER the default --server.
+ * Its sign-in ends on Flow's own page, in flow.engineer's look.
  */
 export const FLOW_MCP_CLI: CliConfig = {
   name: "flow",
+  brand: { name: "Flow" },
+  signInPage: flowSignInPage,
   signIn: { login: "mcp login", logout: "mcp logout" },
   tokenEnv: "FLOW_MCP_TOKEN",
   serverEnv: "FLOW_MCP_SERVER",
