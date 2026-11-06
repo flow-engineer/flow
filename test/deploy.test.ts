@@ -6,7 +6,7 @@
 // restart, logs filtered and their start said, and a 429 waited out.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -157,6 +157,22 @@ test("deploy packs the folder, uploads it, starts the build and follows it to li
   assert.match(printed, /Live in staging\.\nURL: https:\/\/agent-staging\.example\.com\n/);
   assert.match(printed, /Next: .*npx @flow-engineer\/flow deploy promote/);
   assert.ok(!printed.includes("oci_key"), "the key is never printed");
+});
+
+test("an MCP server alone (src/mcp.ts, no src/agent.ts) deploys; a folder with neither stops before any call", async () => {
+  const fake = await cloud();
+  const dir = agentFolder();
+  rmSync(join(dir, "src", "agent.ts"));
+  writeFileSync(join(dir, "src", "mcp.ts"), "export const mcp = { fetch: () => new Response(null, { status: 404 }) };");
+  const { code, printed } = await run(["--dir", dir, "--no-secrets"], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url });
+  assert.equal(code, 0, printed);
+  assert.ok(fake.calls.some((c) => c.method === "PUT" && c.path === "/upload/hdp_1" && c.bytes > 0), "the folder is uploaded");
+  rmSync(join(dir, "src", "mcp.ts"));
+  const calls = fake.calls.length;
+  const neither = await run(["--dir", dir, "--no-secrets"], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url });
+  assert.equal(neither.code, 2);
+  assert.match(neither.printed, /src\/agent\.ts is missing: .*an MCP server alone needs only src\/mcp\.ts/);
+  assert.equal(fake.calls.length, calls);
 });
 
 test("deploy --json prints one answer on stdout; a cloud without the address route still works", async () => {

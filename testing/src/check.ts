@@ -1,7 +1,8 @@
 // `flow check`, from an agent's folder: whether its tools can be served over MCP exactly as
 // declared, whether its CLI file (src/cli.ts) still matches them, and whether the skills it would
 // send to MCP hosts name tools only chats have. Rules only, no model: what it reports is
-// objectively wrong (errors, exit 1) or worth a look (warnings).
+// objectively wrong (errors, exit 1) or worth a look (warnings). The tools are src/agent.ts's
+// `tools`; an MCP server alone (src/mcp.ts and no src/agent.ts) exports them from src/mcp.ts.
 
 import { existsSync } from "node:fs";
 import { pluginProblems } from "./plugin.ts";
@@ -91,12 +92,19 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
     console.error(message);
     return 1;
   };
-  const agentFile = join(dir, "src/agent.ts");
-  if (!existsSync(agentFile)) return stop("no_agent", `No src/agent.ts in ${dir}. Run flow check from the agent's folder.`);
-  const agent = await load(agentFile);
+  const toolsFile = toolsFileOf(dir);
+  if (!toolsFile) return stop("no_agent", `No src/agent.ts (or src/mcp.ts, for an MCP server alone) in ${dir}. Run flow check from the agent's folder.`);
+  let agent: Record<string, unknown> | string;
+  try {
+    agent = await load(join(dir, toolsFile));
+  } catch (error) {
+    // An MCP server alone has nothing else to check; a chat agent's src/agent.ts throws as it always did.
+    if (toolsFile === "src/agent.ts") throw error;
+    return stop("not_loaded", `src/mcp.ts: ${(error as Error).message.split("\n")[0]}`);
+  }
   if (typeof agent === "string") return stop("not_loaded", agent);
   const tools: Tool[] = Array.isArray(agent.tools) ? agent.tools : [];
-  if (!Array.isArray(agent.tools)) errors.push("src/agent.ts exports no tools array");
+  if (!Array.isArray(agent.tools)) errors.push(toolsFile === "src/agent.ts" ? "src/agent.ts exports no tools array" : "src/mcp.ts exports no tools array: with no src/agent.ts, export the tools it serves beside mcp (export { tools })");
   errors.push(...toolsProblems(tools));
 
   if (existsSync(join(dir, "agent"))) {
@@ -143,16 +151,25 @@ export async function checkCli(argv: string[], dir = process.cwd()): Promise<num
   return errors.length ? 1 : 0;
 }
 
-/** `flow mcp update`: loads the agent with every mcpTools call writing its server's current tools to mcp.lock.json. */
+/**
+ * The file whose `tools` are the agent's: src/agent.ts, else src/mcp.ts for an MCP server alone (no
+ * chat agent); undefined when the folder has neither.
+ */
+function toolsFileOf(dir: string): "src/agent.ts" | "src/mcp.ts" | undefined {
+  if (existsSync(join(dir, "src/agent.ts"))) return "src/agent.ts";
+  return existsSync(join(dir, "src/mcp.ts")) ? "src/mcp.ts" : undefined;
+}
+
+/** `flow mcp update`: loads the agent (or an MCP server alone's src/mcp.ts) with every mcpTools call writing its server's current tools to mcp.lock.json. */
 export async function mcpUpdateCli(dir = process.cwd()): Promise<number> {
-  const agentFile = join(dir, "src/agent.ts");
-  if (!existsSync(agentFile)) {
-    console.error(`No src/agent.ts in ${dir}. Run flow mcp update from the agent's folder.`);
+  const file = toolsFileOf(dir);
+  if (!file) {
+    console.error(`No src/agent.ts (or src/mcp.ts, for an MCP server alone) in ${dir}. Run flow mcp update from the agent's folder.`);
     return 1;
   }
   const { UPDATE_ENV } = await import("../../mcp/src/client.ts");
   process.env[UPDATE_ENV] = "1";
-  await import(pathToFileURL(agentFile).href);
+  await import(pathToFileURL(join(dir, file)).href);
   console.error(`Updated ${join(dir, "mcp.lock.json")}. Run flow check and the tests, then commit it.`);
   return 0;
 }
