@@ -93,7 +93,10 @@ redelivers events it is not sure arrived. The agent takes each message once:
   so Flow delivers it again.
 - A message whose id the conversation has already taken is a `message.duplicate` and starts no
   turn. With a database (`sqlite(file)`, `postgres(...)`) that holds across restarts and runners;
-  with the default in-memory store it holds until the process stops.
+  with the default in-memory store it holds until the process stops. Two runners sent the same
+  message at once (a replaced instance still reading the stream beside the new one) answer it once:
+  the runner whose store write lost its id leaves it to the stored copy and types nothing, and the
+  runner that holds the conversation answers it.
 
 ## Outbound: when exactly once is true, and when it is not
 

@@ -541,7 +541,9 @@ export class Conversation {
     }
     const id = options.messageId ?? `m${++this.messageCount}`;
     this.messageIds.set(id, channel);
-    this.startTyping(channel);
+    // A provider's message may reach two runners at once (each reads the event stream): typing
+    // waits until this runner's store write takes its id (arrive), so only the one that has it types.
+    if (options.messageId === undefined) this.startTyping(channel);
     // A file or voice note is read before message.in. Say the message arrived first, so a test
     // run is not settled as silence while the transcript is still being made.
     if (incoming.attachments?.length) this.settings.emit(this.id, "message.arrived", { messageId: id, channel });
@@ -580,12 +582,16 @@ export class Conversation {
       const inbox = await this.settings.store.addMessage(this.id, payload, ownId ? { channel, messageId: id } : undefined);
       if (inbox === null) {
         // Another runner took this provider id first (a retry reached both): the message is theirs.
+        // Its id is forgotten here too, so if this runner takes the conversation next, the other
+        // runner's inbox row is answered (takeOpen), not marked done as if it were in the history.
         this.pending = this.pending.filter((waiting) => waiting !== item);
+        if (!this.pending.some((waiting) => waiting.id === id && waiting.channel === channel) && !this.inHistory(id, channel)) this.messageIds.delete(id);
         this.settings.emit(this.id, "message.duplicate", { messageId: id, channel });
         return;
       }
       item.inbox = inbox;
       this.knownInbox.add(item.inbox);
+      if (ownId && !this.gone) this.startTyping(channel);
       await this.settings.store.updateConversation(this.id, fields);
       if (link) await this.settings.store.touchIdentity(channel, link.address, at);
     });
@@ -593,7 +599,7 @@ export class Conversation {
     this.settings.emit(this.id, "message.in", { text: incoming.text, messageId: id, ownId, channel, replyTo: incoming.replyTo, choice: incoming.choice, ...(attachments ? { attachments } : {}), ...(files.transcript !== undefined ? { transcript: files.transcript } : {}), ...(files.description !== undefined ? { description: files.description } : {}) });
     this.unanswered.add(channel);
     this.firstResponse = true;
-    this.startTyping(channel);
+    if (!ownId) this.startTyping(channel);
     if (this.running) {
       // Fold it in: a model step in flight is thrown away and run again with this message, and
       // tools being waited on move to the background so the agent reads it now.
@@ -1011,7 +1017,7 @@ export class Conversation {
     for (const row of rows) {
       if (this.knownInbox.has(row.id)) continue;
       const p = row.payload as Record<string, any>;
-      if (row.kind === "message" && this.messageIds.get(p.id) === p.channel) {
+      if (row.kind === "message" && this.inHistory(p.id, p.channel)) {
         this.knownInbox.add(row.id);
         this.persist(() => this.settings.store.doneInbox([row.id]));
         continue;
@@ -1054,13 +1060,27 @@ export class Conversation {
     }
     for (const row of await store.openInbox(this.id)) {
       // Already in the history (its row was not marked done): answered, so not answered again.
+      // The history, not messageIds: a message arriving here meanwhile with this id may be another runner's.
       const p = row.payload as Record<string, any>;
-      if (row.kind === "message" && this.messageIds.get(p.id) === p.channel) this.persist(() => store.doneInbox([row.id]));
+      if (row.kind === "message" && this.inHistory(p.id, p.channel)) this.persist(() => store.doneInbox([row.id]));
       else this.enqueue(row);
     }
     const row = await store.conversation(this.id);
     this.resumeTurn = row?.turnOpen === true;
     if ((this.resumeTurn || this.hasWork()) && !this.running) this.schedule(0);
+  }
+
+  /** The id of the person's latest message on `channel` this conversation knows (its history included), if any. */
+  lastMessageId(channel: string): string | undefined {
+    let last: string | undefined;
+    for (const [id, on] of this.messageIds) if (on === channel) last = id;
+    return last;
+  }
+
+  /** Whether the person's message `id` on `channel` is in the history already. */
+  private inHistory(id: string, channel: string): boolean {
+    const only = [...this.channels.keys()][0] ?? "chat";
+    return this.history.some((e) => e.role === "user" && personMessages(e, only).some((m) => m.id === id && m.channel === channel));
   }
 
   /** Messages from the person the agent has yet to answer (not those answered with no model call). */
@@ -1347,6 +1367,8 @@ export class Conversation {
     this.absorb();
     let restarts = 0;
     let reminded = false;
+    /** The plain text it was reminded about: what reached nobody. */
+    let hidden = "";
     let followedUp = false;
     this.sentThisTurn.clear();
     for (let step = 0; step < this.settings.maxSteps; step++) {
@@ -1413,9 +1435,26 @@ export class Conversation {
       }
 
       if (!response.toolCalls.length) {
+        const owes = this.owes();
+        const text = response.text?.trim() || hidden;
+        if (reminded && owes.length && text) {
+          // Reminded once that plain text never reaches them, it answered in plain text again: that
+          // text is its reply, sent as its send tool would have, so a turn they are owed never ends
+          // in silence. (Another reminder costs a model call and is as likely to be ignored.)
+          const channel = owes.includes(this.currentChannel()) ? this.currentChannel() : owes[0];
+          const call: ToolCall = { id: `flow_${randomUUID().slice(0, 8)}`, name: sendToolName(channel), arguments: JSON.stringify({ text }) };
+          this.history.push({ role: "assistant", content: null, toolCalls: [call] });
+          const said = await this.talk(call);
+          this.history.push({ role: "tool", toolCallId: call.id, content: said.content });
+          logFields("WARNING", { conversationId: this.id, turn: turns, channel, sent: !said.refused }, "flow: conversation %s turn %d: the agent wrote its reply as plain text again after the reminder; Flow Framework %s that text on %s", this.id, turns, said.refused ? "could not send" : "sent", channel);
+          this.flush();
+          if (this.absorb()) continue;
+          break;
+        }
         this.history.push({ role: "assistant", content: response.text });
         if (!reminded && this.remind(response.text, several)) {
           reminded = true;
+          hidden = response.text?.trim() || "";
           continue;
         }
         // After a returned result, only new plain text is sent back: silence may be the answer, and
@@ -1473,6 +1512,8 @@ export class Conversation {
       }
       this.absorb();
     }
+    const unsent = this.closed ? [] : this.owes();
+    if (unsent.length) logFields("WARNING", { conversationId: this.id, turn: turns, channels: unsent }, "flow: conversation %s turn %d ended with nothing sent to them on %s, where they were owed a reply", this.id, turns, unsent.join(", "));
     for (const o of this.owed.splice(0)) {
       const link = o.windowClosed && o.nudge ? this.channels.get(o.channel) : undefined;
       if (link) {
@@ -1493,7 +1534,7 @@ export class Conversation {
    * in this turn: the note asking for it goes in the history (true), else nothing (false).
    */
   private remind(text: string | null, several: boolean): boolean {
-    const owes = [...new Set([...this.unanswered, ...this.owed.filter((o) => o.mode === "message").map((o) => o.channel)])];
+    const owes = this.owes();
     if (!owes.length) return false;
     this.history.push({
       role: "user",
@@ -1503,6 +1544,11 @@ export class Conversation {
     });
     this.flush();
     return true;
+  }
+
+  /** The channels they are owed a message on: they wrote there, or the business asked for one, and nothing has reached them in this turn. */
+  private owes(): string[] {
+    return [...new Set([...this.unanswered, ...this.owed.filter((o) => o.mode === "message").map((o) => o.channel)])];
   }
 
   private isTalk(name: string): boolean {

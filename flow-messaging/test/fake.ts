@@ -144,8 +144,8 @@ function gateOf() {
 }
 
 /** An agent on the three Flow channels, with its webhook served, driven by a scripted model. */
-export async function liveAgent(flow: { url: string }, options: { database?: Database; messaging?: Pick<FlowMessagingOptions, "waitFor" | "waitTimeoutMs"> } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), "flow-fm-"));
+export async function liveAgent(flow: { url: string }, options: { database?: Database; messaging?: Pick<FlowMessagingOptions, "waitFor" | "waitTimeoutMs">; dir?: string; telegramSender?: string | null; now?: () => number } = {}) {
+  const dir = options.dir ?? mkdtempSync(join(tmpdir(), "flow-fm-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
   const events: FlowEvent[] = [];
@@ -153,8 +153,9 @@ export async function liveAgent(flow: { url: string }, options: { database?: Dat
   const agent = createAgent({
     dir,
     model: scripted.model,
-    channels: [fm.whatsapp({ sender: SENDERS.whatsapp }), fm.telegram({ sender: SENDERS.telegram }), fm.sms({ sender: SENDERS.sms })],
+    channels: [fm.whatsapp({ sender: SENDERS.whatsapp }), fm.telegram(options.telegramSender === null ? {} : { sender: options.telegramSender ?? SENDERS.telegram }), fm.sms({ sender: SENDERS.sms })],
     database: options.database,
+    now: options.now,
     debounceMs: 0,
     deadlineMs: 50,
     scheduleCheckMs: 0,
@@ -171,7 +172,7 @@ export async function liveAgent(flow: { url: string }, options: { database?: Dat
     const response = await fetch(hook, { method: "POST", headers: { "content-type": "application/json", "flow-signature": signature ?? sign(body) }, body });
     return { status: response.status, body: await response.text() };
   }
-  return { agent, events, deliver, close: () => server.close(), ...scripted };
+  return { agent, events, deliver, dir, close: () => server.close(), ...scripted };
 }
 
 let events = 0;

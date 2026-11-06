@@ -1,6 +1,11 @@
 // covers: flow-messaging/src/index.ts
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+import { sqlite } from "../../src/index.ts";
+import { LEASE_MS } from "../../src/conversation.ts";
 import { call, respond, users } from "./helpers.ts";
 import { event, fakeFlow, liveAgent, received, type Recorded } from "./fake.ts";
 
@@ -93,4 +98,28 @@ test("waitFor delivered waits past message.sent for message.delivered; waitFor q
   await queued.live.agent.conversation(queued.id)!.whenIdle();
   assert.equal(queued.outs(), 1);
   assert.equal(queued.live.events.filter((e) => e.type === "message.slow").length, 0);
+});
+
+test("a turn run again by a process that never saw their message is sent into their conversation, with no sender to start one", async (t) => {
+  const flow = await fakeFlow();
+  t.after(() => flow.close());
+  const path = join(mkdtempSync(join(tmpdir(), "flow-fm-db-")), "flow.db");
+  const TG = { id: "conv_tg", channel: "telegram", contact: "ct_tg" } as const;
+  flow.contacts.ct_tg = { address: { telegram_user_id: "777" } };
+  flow.messages.msg_1 = { id: "msg_1", conversation: "conv_tg", direction: "in", status: "received", content: { kind: "basic", text: "open today?" } };
+  const before = await liveAgent(flow, { database: sqlite(path), telegramSender: null });
+  t.after(() => before.close());
+  await before.deliver(received(TG, "msg_1", { kind: "basic", text: "open today?" }));
+  await before.nextCall(0); // the process is stopped while the model thinks
+  await before.agent.conversation(before.events[0]!.conversationId)!.stored();
+
+  // A new process, past the old one's lease: its adapter has never seen conv_tg.
+  const after = await liveAgent(flow, { database: sqlite(path), telegramSender: null, dir: before.dir, now: () => Date.now() + LEASE_MS });
+  t.after(() => after.close());
+  const rerun = await after.nextCall(0);
+  rerun.answer(respond(call("send_telegram", { text: "Yes, until 22:00." })));
+  const sent = await flow.request((r) => r.method === "POST" && r.path === "/v0/conversations/conv_tg/basic");
+  assert.equal(sent.body.text, "Yes, until 22:00.");
+  assert.ok(flow.requests.some((r) => r.method === "GET" && r.path === "/v0/messages/msg_1"), "found from their latest message");
+  assert.ok(!flow.requests.some((r) => r.method === "POST" && r.path === "/v0/messages"), "no new conversation was started");
 });

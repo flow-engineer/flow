@@ -17,6 +17,16 @@ import type { CarouselCard, ChannelInfo, Incoming, ListRow, Outbound, Photo, Rep
 
 export type ChannelKind = "sms" | "whatsapp" | "custom";
 
+/** What a send knows of the conversation it goes to, for a provider that keeps no record of it itself. */
+export interface ChannelSendContext {
+  /**
+   * The provider's id of the person's latest message on this channel, when they have written there:
+   * a provider can find its conversation from it in a process that never saw that message (a turn
+   * run again on another instance, after a restart).
+   */
+  lastMessageId?: string;
+}
+
 /** A channel as the agent uses it. Made by whatsapp(), sms() or customUI(), or written by hand. */
 export interface Channel {
   /** The agent's name for it; its send tool is always send_<name> (lowercase, other characters as _). "key" and "phone" are reserved. */
@@ -34,7 +44,7 @@ export interface Channel {
   /** Opt-out keywords this channel honours (SMS and WhatsApp have them by default). */
   keywords?: Keywords;
   /** Resolves once the channel has the outbound (the platform accepted it), optionally with a receipt; see Deliver. */
-  send(address: string, outbound: Outbound): Promise<void | SendReceipt> | void | SendReceipt;
+  send(address: string, outbound: Outbound, context?: ChannelSendContext): Promise<void | SendReceipt> | void | SendReceipt;
   /**
    * HTTP the channel serves itself (the web chat's), under `path` and every path below it: called
    * once, as createAgent makes the agent, and answered by `agent.fetch` beside the agent's `routes`.
