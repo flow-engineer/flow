@@ -451,10 +451,10 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
   (`FLOW_FRAMEWORK_JOIN_CODE`, `FLOW_FRAMEWORK_TRY_URL`, `FLOW_FRAMEWORK_WORKSPACE`) or a name Flow
   sets itself (`FLOW_FRAMEWORK_TRACES_*`, `FLOW_STORE_*`, `PORT`, ...). The
   `FLOW_MESSAGING_<CHANNEL>_SENDER` ids are sent: the hosted agent starts conversations from them.
-  A Flow key goes only to the environment its mode matches: a live one (`fk_live_`, `flow_live_`,
-  `otk_live_`) never to staging, a test one never to production. It is skipped with why (naming
-  only its prefix) and the environment keeps the value it has; Flow's hosting refuses it too.
-  `FLOW_KEY` goes to both: the host exchanges it for the environment's own runtime key.
+  A live Flow key (`fk_live_`, `flow_live_`, `otk_live_`) is never sent to staging: it is skipped
+  with why (naming only its prefix), staging keeps the value it has, and Flow's hosting refuses it
+  too. A test key sent to production goes, with a warning. `FLOW_KEY` goes to both: the host
+  exchanges it for the environment's own runtime key.
   An earlier deploy may have sent those three CLI names; they are harmless, and
   `npx @flow-engineer/flow deploy secret --unset FLOW_FRAMEWORK_JOIN_CODE --env staging` removes one.
   Later deploys send only the new or changed ones (`.flow/secrets.json` keeps a hash

@@ -267,7 +267,7 @@ test("secrets --from-env sends each value once, never the CI key or a name Flow 
   for (const value of ["oci_fromdotenv", "fk_test_messaging_value", "sk-ant-value", "line\nbreak", "never-sent", "refused-value"]) assert.ok(!printed.includes(value), `${value} is never printed`);
 });
 
-test("a Flow key goes only to the environment its mode matches: a live key never to staging, a test key never to production, FLOW_KEY to both", async () => {
+test("a live Flow key is never sent to staging; a test one goes to production with a warning; FLOW_KEY goes to both; only prefixes are printed", async () => {
   const fake = await cloud();
   const dir = agentFolder(
     ["FLOW_FRAMEWORK_CLOUD_KEY=oci_key", `FLOW_FRAMEWORK_CLOUD=${fake.url}`, "FLOW_MESSAGING_KEY=fk_live_messagingvalue", "OBSERVE_KEY=otk_test_tracevalue", "FLOW_KEY=flow_test_flowkeyvalue"].join("\n"),
@@ -277,12 +277,10 @@ test("a Flow key goes only to the environment its mode matches: a live key never
   const production = await run(["secrets", "--from-env", "--env", "production", "--dir", dir, "--json"], {});
   assert.equal(production.code, 0, production.printed);
   const puts = fake.calls.filter((c) => c.method === "PUT").map((c) => `${c.body!.environment} ${c.path.split("/").at(-1)}`);
-  assert.deepEqual(puts, ["staging OBSERVE_KEY", "staging FLOW_KEY", "production FLOW_MESSAGING_KEY", "production FLOW_KEY"]);
-  const skipped = [JSON.parse(staging.stdout).skipped, JSON.parse(production.stdout).skipped];
-  assert.deepEqual(skipped, [
-    [{ name: "FLOW_MESSAGING_KEY", why: "a live key (fk_live_) goes to production only; staging takes a test key (fk_test_), set with npx @flow-engineer/flow deploy secret FLOW_MESSAGING_KEY --env staging" }],
-    [{ name: "OBSERVE_KEY", why: "a test key (otk_test_) goes to staging only; production takes a live key (otk_live_), set with npx @flow-engineer/flow deploy secret OBSERVE_KEY --env production" }],
-  ]);
+  assert.deepEqual(puts, ["staging OBSERVE_KEY", "staging FLOW_KEY", "production FLOW_MESSAGING_KEY", "production OBSERVE_KEY", "production FLOW_KEY"]);
+  assert.deepEqual(JSON.parse(staging.stdout).skipped, [{ name: "FLOW_MESSAGING_KEY", why: "a live key (fk_live_) goes to production only; staging takes a test key (fk_test_), set with npx @flow-engineer/flow deploy secret FLOW_MESSAGING_KEY --env staging" }]);
+  assert.deepEqual(JSON.parse(production.stdout).skipped, []);
+  assert.match(production.printed, /Warning: OBSERVE_KEY is a test key \(otk_test_\) and goes to production as one; production should run on a live key \(otk_live_\)\./);
   for (const value of ["messagingvalue", "tracevalue", "flowkeyvalue"]) assert.ok(!staging.printed.includes(value) && !production.printed.includes(value), "only the prefix is printed");
 });
 
