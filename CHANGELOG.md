@@ -2,7 +2,7 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## 0.16.1 (unreleased)
+## 0.16.1 (6 Nov 2026)
 
 ### Changes
 
@@ -267,40 +267,10 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
-None. An agent made before 0.16.1 can add the starter's line itself, or run
-`npm approve-scripts esbuild koffi`. A script that matched `flow test`'s per-channel line
-(`<channel>: N of M passed`) now reads `<channel>: N of M counted runs passed`. A self-hosted traces
-endpoint must accept `Content-Encoding: gzip` for bodies over 64 KB (OTLP collectors do). A script that read only `ERROR` lines from `flow logs --json` now also gets those
-`DEFAULT` lines, as `ERROR`. An agent on the `flow-messaging` adapter now gets a video as an
-attachment: unless its model reads videos or it has `describeVideo`, the agent reads
-`[video: you can't watch videos]` where it read `[video]`. Code that switches over
-`Attachment["kind"]` or `Media["kind"]` meets the new `"video"`. A hand-written `WhatsAppProvider` keeps
-working unchanged: it is offered no videos until its `features` say `videos: true`.
-`ToolError` is new; tools that throw anything else behave as before. `CliConfig.server`'s type is
-now `string | McpServerHandle`: code that reads `cli.server` as a string narrows it first. An
-`mcpServer` with a tool kept to some clients and no `auth` no longer throws; it serves the tool to
-no host.
-`flow mcp serve`'s tools/list, instructions and results are unchanged; it now runs on the
-framework's `mcpServer`. A `FLOW_MCP_SERVER` set in the environment sends the read commands to that
-hosted Flow MCP, so leave it unset to read with the folder's keys.
-An MCP server alone that `flow check` should check exports its tools from `src/mcp.ts`
-(`export { tools }`); its `mcp(agent, host)` factory gets `undefined` for `agent` on Flow's hosting,
-as `mcpServer({ agent: undefined })` already takes it (no `/agent/terminal`).
-Installing Flow Framework now also installs `@modelcontextprotocol/client` and `@stricli/core` and
-their dependencies: a fresh install of the package grows from 6 to 18 packages and from 41.2 MB to
-49.0 MB of files (55 MB to 63 MB on disk); the package itself stays 760 KB packed. An agent that lists
-them in its own package.json can keep them at the same versions or drop them; another version there
-installs a second copy, and its own imports use that one.
-Code that reads `McpToolDescriptor._meta` (a `descriptor` function's `generated._meta`) handles it
-being undefined. A script that matched `Signed out of` after a logout with nobody signed in now
-reads `Not signed in to`.
-A channel's `send(address, outbound)` may now be called with a third argument,
-`{ lastMessageId }`; channels written for two arguments keep working unchanged.
-A model that answers in plain text after the reminder now has that text sent to the person: an
-agent whose instructions use plain text for notes to itself should keep them out of the reply step.
-A `.env` that held a live `FLOW_MESSAGING_KEY` and deployed to staging now leaves staging's key as it
-is: set staging's test key once with `flow deploy secret FLOW_MESSAGING_KEY --env staging`. Sending a
-live key to staging on purpose is refused by design (Flow's hosting refuses it too).
+**Tests: what 0.16.1 stopped playing.** For this release `given:`, `expect.state`, `origin:`, a
+`restart` opening step, `tests/tools/*.fake.ts` and `flow test --fresh` still parse (or are taken)
+and are ignored, and `flow test` and `flow check` print one line per file and field saying what to
+use instead (`--fresh` warns on `flow test`). The next release removes them. Each, with how to move:
 
 - **`given:` is no longer played.** Until the next release it parses, is ignored, and `flow test`
   and `flow check` name it. To move, put the data in `world:` and each tool's behaviour in its tool
@@ -351,6 +321,55 @@ live key to staging on purpose is refused by design (Flow's hosting refuses it t
   `FLOW_FRAMEWORK_FAKE_HINT` is no longer read.
 - **The starter's `tsconfig.json` includes `src` only** (it included `tests` for the fakes). An agent
   made before keeps its own; nothing needs to change.
+
+**Everything else that breaks or changes a default:**
+
+- **Live Flow keys no longer go to staging.** A `.env` that held a live `FLOW_MESSAGING_KEY` (or any
+  `fk_live_`, `flow_live_`, `otk_live_` value) and deployed to staging now leaves staging's key as it
+  is, listed under `skipped`. To move: set staging's test key once with
+  `flow deploy secret FLOW_MESSAGING_KEY --env staging`. Sending a live key to staging is refused by
+  design (Flow's hosting refuses it too).
+- **Plain text after the reminder is now sent.** A model that answers in plain text twice in a turn
+  owed a reply has that text sent to the person on the latest channel. To move: an agent whose
+  instructions use plain text for notes to itself keeps them out of the reply step.
+- **Videos reach the agent.** On the `flow-messaging` adapter a video is now an attachment: unless the
+  model reads videos (`openAICompatible({ videos: true })`) or the agent has `describeVideo`, the
+  agent reads `[video: you can't watch videos]` where it read `[video]`. Code that switches over
+  `Attachment["kind"]` or `Media["kind"]` handles the new `"video"`. A hand-written
+  `WhatsAppProvider` keeps working unchanged: it is offered no videos until its `features` say
+  `videos: true`.
+- **`@modelcontextprotocol/client` and `@stricli/core` are dependencies**, no longer optional peers.
+  A fresh install grows from 6 to 18 packages and from 41.2 MB to 49.0 MB of files (55 MB to 63 MB
+  on disk); the package stays 760 KB packed. An agent that lists them in its own `package.json` keeps
+  them at the same versions or drops them; another version there installs a second copy, which its
+  own imports use.
+- **`FLOW_MCP_SERVER` now redirects the read commands.** Set in the environment, it sends
+  `flow conversations`, `issues`, `insights`, `templates`, `logs` and `deploy status` to that hosted
+  Flow MCP. To read with the folder's keys, leave it unset. `flow mcp serve`'s tools/list,
+  instructions and results are unchanged.
+- **`logout` now calls the server.** A `defineCli` CLI's `logout` and `flow mcp logout` revoke the
+  tokens at the server's `revocation_endpoint` first; a failure is only a warning. A script that
+  matched `Signed out of` after a logout with nobody signed in now reads `Not signed in to`.
+- **`flow insights` prints a different line about unreadable text**: `Insights can't read N of M
+  conversations (P%)...`, only past Flow's threshold; the count of messages without text is no
+  longer printed. `--json` is unchanged.
+- **`flow logs --severity ERROR` returns more lines.** A script that read only `ERROR` lines from
+  `flow logs --json` now also gets a 0.15.x runtime's uncaught errors logged at `DEFAULT`, as `ERROR`.
+- **`flow test`'s per-channel line changed**: a script that matched `<channel>: N of M passed` now
+  reads `<channel>: N of M counted runs passed`.
+- **Traces over 64 KB are gzipped.** A self-hosted traces endpoint must accept
+  `Content-Encoding: gzip` (OTLP collectors do).
+- **Types:** `CliConfig.server` is now `string | McpServerHandle`, so code reading `cli.server` as a
+  string narrows it first. `McpToolDescriptor._meta` is optional, so code reading a `descriptor`'s
+  `generated._meta` handles undefined. A channel's `send(address, outbound)` may be called with a
+  third argument, `{ lastMessageId }`; channels written for two arguments keep working.
+- **An `mcpServer` with a tool kept to some clients and no `auth` no longer throws**; that tool
+  reaches only the CLI in the same process.
+- **An MCP server alone** that `flow check` should check exports its tools from `src/mcp.ts`
+  (`export { tools }`); its `mcp(agent, host)` factory gets `undefined` for `agent` on Flow's hosting.
+- **The starter allows its install scripts.** An agent made before 0.16.1 can add
+  `"allowScripts": { "esbuild": true, "koffi": true }` to its `package.json`, or run
+  `npm approve-scripts esbuild koffi`.
 
 ## 0.16.0 (2026-11-05)
 
