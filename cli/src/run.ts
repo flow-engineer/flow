@@ -20,7 +20,7 @@ import { configDir, isSignedIn, signedInAsOtherClient, signIn, signOut, storedAc
 import { colorsAt, painter, severity, type Paint } from "./colors.ts";
 import { chooseAtTerminal, person, signInQuestion, tips, waitsForSignIn, welcomeScreen } from "./welcome.ts";
 import { SKILLS_META } from "../../src/skills.ts";
-import { FORMATTED } from "../../src/tools.ts";
+import { FORMATTED, ToolError } from "../../src/tools.ts";
 import { FULL_CATALOG_META } from "../../mcp/src/describe.ts";
 import {
   BUILT_IN,
@@ -312,6 +312,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
           return paint("error", text_en.exceptionWhileParsingArguments.call(this, exc, ansiColor));
         }, exceptionWhileRunningCommand(exc, ansiColor) {
           if (exc instanceof CliReparse) return "";
+          if (exc instanceof ToolError) return paint("error", `${exc.message}${exc.next ? `\nNext: ${exc.next}` : ""}`);
           return paint(severity(exitOf(exc)), exc instanceof CliExit ? exc.message : refused(exc)?.message ?? text_en.exceptionWhileRunningCommand.call(this, exc, ansiColor));
         } } },
         determineExitCode: exitOf,
@@ -789,7 +790,14 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
       if (result.isError) {
         // Agents read stderr: a failure says where to report it, unless it is feedback's own.
         const report = tool.name === "feedback" ? undefined : feedback;
-        throw new CliExit(EXIT.failed, `${textOf(result.content as Block[]) || `${tool.name} failed.`}${report ? `\nIf this looks wrong, tell the team: ${report.replace("tooling|product", "tooling")}` : ""}`);
+        const reportLine = report ? `\nIf this looks wrong, tell the team: ${report.replace("tooling|product", "tooling")}` : "";
+        // A failure document (ToolError): --json prints it as the command's one output; stderr says it in words.
+        const failure = ToolError.from(result.structuredContent);
+        if (failure) {
+          if (parsed.json) io.write(`${JSON.stringify(failure.document)}\n`);
+          throw new CliExit(EXIT.failed, `${failure.message}${failure.next ? `\nNext: ${failure.next}` : ""}${reportLine}`);
+        }
+        throw new CliExit(EXIT.failed, `${textOf(result.content as Block[]) || `${tool.name} failed.`}${reportLine}`);
       }
       // The tool's own text, unless the person asked for data or the CLI file chose what to show.
       if (settings?.print && !parsed.json && !parsed.fields) return void io.write(`${(await settings.print(valueOf(result))).replace(/\n*$/, "")}\n`);
@@ -1094,7 +1102,8 @@ function textOf(content: Block[]): string {
 }
 
 function valueOf(result: { content?: unknown; structuredContent?: unknown; isError?: unknown }): unknown {
-  if (result.isError) throw new CliExit(EXIT.failed, textOf(result.content as Block[]) || "The tool failed.");
+  // A failure document comes back as the ToolError it was, for a command of the team's own to act on.
+  if (result.isError) throw ToolError.from(result.structuredContent) ?? new CliExit(EXIT.failed, textOf(result.content as Block[]) || "The tool failed.");
   if (result.structuredContent !== undefined) return result.structuredContent;
   const text = textOf((result.content ?? []) as Block[]);
   try {

@@ -31,6 +31,9 @@ export const findSlots = tool({
 - `input` is a zod schema; Flow Framework checks the model's input against it before `run` is called and
   sends the model the error if it doesn't fit.
 - `run` returns any JSON-able value; throw to report a failure (the agent sees `Failed: <message>`).
+  For a failure the caller should act on, throw `new ToolError(code, message, { hint, next })`
+  (from `@flow-engineer/flow`): over MCP it is the result's structured content `{ ok: false, error:
+  { code, message, hint }, next }`, and a CLI command prints it with `--json` and exits 1.
 - Don't make tools for talking to the person (send_<channel>, react, share_updates, edit_message, unsend_message), for reminders
   or scheduled messages, for waking the agent later (`wake_me_up`; from a tool, `context.wakeUps`),
   or for opting out of messages: Flow Framework has them.

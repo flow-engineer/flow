@@ -272,7 +272,9 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
 - Every tool command takes `--json` and `--fields a,b`; one that changes things takes `--dry-run`; one
   that may delete or overwrite asks first in a terminal and needs `--yes` without one. Exit codes: 0
   done, 1 the tool failed, 2 wrong command or arguments (with the help to read), 3 sign-in needed, 4
-  needs `--yes`, 5 the server could not be reached. `--server <url>` and `--token <token>` work on
+  needs `--yes`, 5 the server could not be reached. A tool that throws `ToolError` fails as a document:
+  `--json` prints `{ ok: false, error: { code, message, hint }, next }` on stdout, stderr the message and
+  `Next: ...`. `--server <url>` and `--token <token>` work on
   every command; `acme --version` prints the version, with no server or sign-in. `acme login` signs in on the organization's own login (tokens in
   `~/.config/acme/`, mode 600), `ACME_TOKEN` is for CI, `acme tools` lists every tool and schema, and
   `acme skill list` (or bare `skill`) lists the generated `acme-cli` guide and workflow skill names

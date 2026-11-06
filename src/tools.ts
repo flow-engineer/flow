@@ -161,6 +161,44 @@ export function tool<Input, Output = any>(definition: Tool<Input, Output>): Tool
   return definition;
 }
 
+/** A tool's failure as a document: what went wrong (`code`, `message`, `hint`) and what to do next. */
+export interface FailureDocument {
+  ok: false;
+  error: { code: string; message: string; hint?: string };
+  next: string | null;
+}
+
+/**
+ * A failure a tool throws on purpose, for whoever called it to act on: over MCP the result is an
+ * error whose structured content is its document ({ ok: false, error: { code, message, hint? },
+ * next }) and whose text is the message, a "Next: ..." line and the document; a command of the CLI
+ * (defineCli) prints the document on stdout with --json, the message and next on stderr, and exits 1.
+ * In a chat the model reads the message, as for any other throw.
+ */
+export class ToolError extends Error {
+  readonly code: string;
+  readonly hint?: string;
+  readonly next?: string;
+  constructor(code: string, message: string, options: { hint?: string; next?: string } = {}) {
+    super(message);
+    this.name = "ToolError";
+    this.code = code;
+    if (options.hint) this.hint = options.hint;
+    if (options.next) this.next = options.next;
+  }
+
+  get document(): FailureDocument {
+    return { ok: false, error: { code: this.code, message: this.message, ...(this.hint ? { hint: this.hint } : {}) }, next: this.next ?? null };
+  }
+
+  /** A failure document as a ToolError again (a CLI reading a tool's result); undefined when it is not one. */
+  static from(value: unknown): ToolError | undefined {
+    const d = value as Partial<FailureDocument> | null;
+    if (!d || typeof d !== "object" || d.ok !== false || !d.error || typeof d.error.code !== "string" || typeof d.error.message !== "string") return undefined;
+    return new ToolError(d.error.code, d.error.message, { ...(typeof d.error.hint === "string" ? { hint: d.error.hint } : {}), ...(typeof d.next === "string" ? { next: d.next } : {}) });
+  }
+}
+
 /**
  * Marks a tool whose input schema is given as JSON Schema (a tool another MCP server defines): the
  * model is shown that schema exactly, not one rebuilt from the zod that validates it.

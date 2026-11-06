@@ -20,7 +20,7 @@ import { palette } from "../cli/src/colors.ts";
 import { feedbackUsage } from "../cli/src/commands.ts";
 import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
 import { scriptedModel, respond, call } from "./helpers.ts";
-import { createAgent, tool } from "../src/index.ts";
+import { createAgent, tool, ToolError } from "../src/index.ts";
 
 // These tests drive chat as a person would; a coding agent running them must not switch chat to plain.
 for (const name of ["CLAUDECODE", "CURSOR_AGENT", "CODEX_CI", "AI_AGENT"]) delete process.env[name];
@@ -102,6 +102,29 @@ test("the CLI tells agents how to send feedback: in its help, its skill and a fa
   assert.equal(await runCli(cli, ["feedback", "--about", "product", "--message", "Let me refund part of an order", "--json"], sent.channel), 0, sent.err);
   assert.deepEqual(events.find(e => e.type === "tool.end" && e.tool === "feedback")?.feedback, { about: "product", message: "Let me refund part of an order" });
   assert.equal(feedbackUsage(cli, [{ name: "list_orders", inputSchema: {} }]), undefined, "a server without it is told nothing");
+});
+
+test("a ToolError is a failure document: MCP's structured content and text, the CLI's --json on stdout, its message and next on stderr, exit 1", async () => {
+  const refusing = tool({ name: "get_refund", description: "A refund.", input: z.object({ order_id: z.string() }), signIn: "none", hints: { readOnly: true },
+    run: () => { throw new ToolError("not_found", "No refund for BL-1.", { hint: "Refunds show a day after.", next: "acme order list" }); } });
+  const server = await serve({ tools: [refusing], feedback: false });
+  const document = { ok: false, error: { code: "not_found", message: "No refund for BL-1.", hint: "Refunds show a day after." }, next: "acme order list" };
+  const { Client, StreamableHTTPClientTransport } = await import("@modelcontextprotocol/client");
+  const client = new Client({ name: "test", version: "1" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(server)));
+  const result = await client.callTool({ name: "get_refund", arguments: { order_id: "BL-1" } });
+  await client.close();
+  assert.equal(result.isError, true);
+  assert.deepEqual(result.structuredContent, document);
+  assert.equal((result.content as Array<{ text: string }>)[0]!.text, `No refund for BL-1.\nNext: acme order list\n${JSON.stringify(document)}`);
+  const json = io();
+  assert.equal(await runCli(acme(server), ["get-refund", "--order-id", "BL-1", "--json"], json.channel), 1);
+  assert.deepEqual(JSON.parse(json.out), document);
+  assert.equal(json.err, "No refund for BL-1.\nNext: acme order list\n");
+  const words = io();
+  assert.equal(await runCli(acme(server), ["get-refund", "--order-id", "BL-1"], words.channel), 1);
+  assert.equal(words.out, "");
+  assert.equal(words.err, "No refund for BL-1.\nNext: acme order list\n");
 });
 
 test("commands include MCP-deferred tools: positionals, flags, --json and --fields", async () => {
