@@ -18,6 +18,7 @@ export {
   WHATSAPP_CAROUSELS,
   type Carousel,
   type Channel,
+  type ChannelSendContext,
   type ChannelAgent,
   type ChannelKind,
   type ChannelSummary,

@@ -1070,6 +1070,13 @@ export class Conversation {
     if ((this.resumeTurn || this.hasWork()) && !this.running) this.schedule(0);
   }
 
+  /** The id of the person's latest message on `channel` this conversation knows (its history included), if any. */
+  lastMessageId(channel: string): string | undefined {
+    let last: string | undefined;
+    for (const [id, on] of this.messageIds) if (on === channel) last = id;
+    return last;
+  }
+
   /** Whether the person's message `id` on `channel` is in the history already. */
   private inHistory(id: string, channel: string): boolean {
     const only = [...this.channels.keys()][0] ?? "chat";

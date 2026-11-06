@@ -1042,7 +1042,11 @@ export class Agent {
     return (outbound) => {
       const reply = this.requestReplies.get(viaKey(adapter.name, address));
       if (reply) return reply(outbound);
-      if (this.via.get(viaKey(adapter.name, address)) !== "playground") return adapter.send(address, outbound);
+      if (this.via.get(viaKey(adapter.name, address)) !== "playground") {
+        // The person's latest message here: a provider that finds the conversation from it can send in a process that never saw it.
+        const lastMessageId = this.conversations.get(conversationId)?.lastMessageId(adapter.name);
+        return adapter.send(address, outbound, lastMessageId ? { lastMessageId } : undefined);
+      }
       const visitor = this.playgroundVisitors.get(viaKey(adapter.name, address));
       if (visitor) return this.playgroundSink?.({ conversationId, person: { name: visitor.key ? "Signed-in user" : "New user", phone: "", ...visitor }, channel: adapter.name, outbound });
       const phone = address.startsWith("test:") ? address.slice(5) : address;

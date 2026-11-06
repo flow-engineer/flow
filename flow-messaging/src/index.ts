@@ -291,6 +291,20 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     return found;
   }
 
+  /**
+   * The conversation the person's latest message is in, for a send this process has no conversation
+   * for (a turn run again after a restart: ChannelSendContext). Undefined when Flow does not know it
+   * (past its retention) or it is no Flow message id: the send then starts one from the sender, as before.
+   */
+  async function conversationOfLatest(channel: string, to: string, latest?: string): Promise<string | undefined> {
+    if (!latest?.startsWith("msg_")) return undefined;
+    try {
+      return await conversationFor(channel, to, latest);
+    } catch {
+      return undefined;
+    }
+  }
+
   function recipient(kind: Kind, to: string): Record<string, string> {
     if (to.startsWith("ct_")) return { contact: to };
     if (kind === "telegram") return { telegram_user_id: to };
@@ -303,7 +317,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * or a new one from the channel's sender (`POST /v0/messages`, which takes a basic message or a
    * template only).
    */
-  async function send(route: Route, to: string, piece: Piece, about?: string, idempotencyKey?: string): Promise<SendReceipt> {
+  async function send(route: Route, to: string, piece: Piece, about?: string, idempotencyKey?: string, latest?: string): Promise<SendReceipt> {
     const person = key(route.name, to);
     let resolve!: () => void;
     const ready = new Promise<void>((done) => { resolve = done; });
@@ -316,7 +330,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       if (!posts.size) posting.delete(person);
     };
     try {
-      const conversation = await conversationFor(route.name, to, about);
+      const conversation = (await conversationFor(route.name, to, about)) ?? (await conversationOfLatest(route.name, to, latest));
       let sent: FlowMessage;
       if (conversation) sent = await client.post(`/v0/conversations/${idSegment("conv", conversation)}/${piece.kind.replace("_", "-")}`, piece.body, undefined, idempotencyKey);
       else {
@@ -358,9 +372,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   /** Several messages one after another, each after the last went; their receipt is the least far of theirs. */
-  async function sendAll(route: Route, to: string, pieces: Array<{ piece: Piece; about?: string; idempotencyKey?: string }>): Promise<SendReceipt> {
+  async function sendAll(route: Route, to: string, pieces: Array<{ piece: Piece; about?: string; idempotencyKey?: string; latest?: string }>): Promise<SendReceipt> {
     const receipts: SendReceipt[] = [];
-    for (const p of pieces) receipts.push(await send(route, to, p.piece, p.about, p.idempotencyKey));
+    for (const p of pieces) receipts.push(await send(route, to, p.piece, p.about, p.idempotencyKey, p.latest));
     return receipts.find((r) => r.status === "unconfirmed") ?? receipts.find((r) => r.status === "queued") ?? receipts.find((r) => r.status === "sent") ?? receipts[0]!;
   }
 
@@ -548,13 +562,13 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * photo with the card's text as caption and its buttons or link under it (a card with neither is the
    * photo alone). Each has its own Idempotency-Key, the carousel's plus what it is (`:text`, `:card:0`, ...).
    */
-  function telegramCarousel(route: Route, to: string, carousel: Carousel): Promise<SendReceipt> {
+  function telegramCarousel(route: Route, to: string, carousel: Carousel, latest?: string): Promise<SendReceipt> {
     const bare = carousel.cards.findIndex((card) => (card.buttons?.length || card.link) && !card.text);
     if (bare >= 0) return Promise.reject(new Error(`Telegram shows a card's buttons under its text, and card ${bare + 1} has none: give every card with buttons a text`));
     const keyed = (what: string) => (carousel.idempotencyKey ? `${carousel.idempotencyKey}:${what}` : undefined);
     const preview = carousel.preview === false ? { preview: false as const } : {};
     return sendAll(route, to, [
-      { piece: pieceOf("telegram", { text: carousel.text, ...(carousel.replyTo ? { replyTo: carousel.replyTo } : {}), ...preview }), about: carousel.replyTo, idempotencyKey: keyed("text") },
+      { piece: pieceOf("telegram", { text: carousel.text, ...(carousel.replyTo ? { replyTo: carousel.replyTo } : {}), ...preview }), about: carousel.replyTo, idempotencyKey: keyed("text"), latest },
       ...carousel.cards.map((card, i) => ({
         piece: pieceOf("telegram", { text: card.text ?? "", image: card.image, ...(card.link ? { link: card.link } : card.buttons?.length ? { buttons: card.buttons } : {}) }),
         idempotencyKey: keyed(`card:${i}`),
@@ -586,9 +600,10 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   function provider(route: Route) {
     return {
-      sendMessage: (to: string, message: Message) => send(route, to, pieceOf(route.kind, message), message.replyTo, message.idempotencyKey),
-      sendCarousel: (to: string, carousel: Carousel) =>
-        route.kind === "telegram" ? telegramCarousel(route, to, carousel) : send(route, to, carouselOf(carousel), carousel.replyTo, carousel.idempotencyKey),
+      // `latest`: the person's latest message, to find the conversation by in a process that never saw it (ChannelSendContext).
+      sendMessage: (to: string, message: Message, latest?: string) => send(route, to, pieceOf(route.kind, message), message.replyTo, message.idempotencyKey, latest),
+      sendCarousel: (to: string, carousel: Carousel, latest?: string) =>
+        route.kind === "telegram" ? telegramCarousel(route, to, carousel, latest) : send(route, to, carouselOf(carousel), carousel.replyTo, carousel.idempotencyKey, latest),
       react: async (to: string, messageId: string, emoji: string) => void (await send(route, to, { kind: "reaction", body: { message_id: messageId, emoji } }, messageId)),
       // An edit or unsend Flow refuses (too late, or a channel without them) rejects with its reason, for the agent.
       editMessage: (to: string, messageId: string, text: string) => change(() => client.patch(`/v0/messages/${idSegment("msg", messageId)}`, styled(route.kind, text))),
@@ -660,7 +675,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       traceChannel: route.kind,
       info,
       instructions: o.instructions,
-      send: (to, outbound) => {
+      send: (to, outbound, context) => {
+        const latest = context?.lastMessageId;
         switch (outbound.type) {
           case "message":
             return p.sendMessage(to, {
@@ -671,13 +687,13 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
               ...(outbound.image && info.images ? { image: outbound.image } : {}),
               ...(outbound.video && info.videos ? { video: outbound.video } : {}),
               ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}),
-            });
+            }, latest);
           case "carousel": {
             const { type: _type, ...carousel } = outbound;
-            if (info.carousels) return p.sendCarousel(to, carousel);
+            if (info.carousels) return p.sendCarousel(to, carousel, latest);
             return (async () => {
               const receipts: SendReceipt[] = [];
-              for (const m of carouselMessages(info, carousel)) receipts.push(await p.sendMessage(to, m));
+              for (const m of carouselMessages(info, carousel)) receipts.push(await p.sendMessage(to, m, latest));
               // The carousel got as far as its least far card; its id is its first message's.
               const least = receipts.find((r) => r.status === "unconfirmed") ?? receipts.find((r) => r.status === "queued") ?? receipts.find((r) => r.status === "sent") ?? receipts[0];
               return least && { ...least, messageId: receipts[0]!.messageId };

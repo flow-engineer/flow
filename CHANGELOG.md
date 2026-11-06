@@ -169,6 +169,15 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   conversation answers it once; a stored message counts as already answered only when it is in the
   history. Typing for a message with a provider id now starts once this process's store write has
   taken it (a voice note's typing after it is read), so only the process that has the message types.
+- **A turn run again on another process reaches the person on Telegram and iMessage with no sender
+  set.** A turn cut off by a restart (or a process that died holding it) is run again by another
+  process, whose `flow-messaging` adapter never saw the person's message, so it had no Flow
+  conversation to send into and, without `FLOW_MESSAGING_<CHANNEL>_SENDER`, failed every send with
+  `no conversation with them on telegram yet, and no sender to start one`. A channel's `send` now gets
+  a third argument, `{ lastMessageId }` (`ChannelSendContext`): the provider's id of the person's
+  latest message on that channel, from the conversation's history. The adapter finds the
+  conversation from it (`GET /v0/messages/{id}`) when it has none, and starts one from the sender as
+  before when Flow no longer knows that message.
 - **A turn owed a reply never ends in silence when the model answers in plain text twice.** After
   the one reminder that plain text never reaches them, a second step of plain text is sent as the
   reply on the channel they are owed one on (the latest), as the send tool would have sent it, and
@@ -207,6 +216,8 @@ installs a second copy, and its own imports use that one.
 Code that reads `McpToolDescriptor._meta` (a `descriptor` function's `generated._meta`) handles it
 being undefined. A script that matched `Signed out of` after a logout with nobody signed in now
 reads `Not signed in to`.
+A channel's `send(address, outbound)` may now be called with a third argument,
+`{ lastMessageId }`; channels written for two arguments keep working unchanged.
 A model that answers in plain text after the reminder now has that text sent to the person: an
 agent whose instructions use plain text for notes to itself should keep them out of the reply step.
 
