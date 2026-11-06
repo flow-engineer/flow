@@ -1,13 +1,12 @@
 // A test suite on disk: tests/scenarios/*.yaml and tests/tools/*.yaml, each file hashed by its
-// content so the cloud stores it once and a run records exactly which tests it ran. Beside them,
-// tests/tools/<tool>.fake.ts: the developer's own code that plays a tool when the cloud asks
-// (loadFakes); it runs on this machine and is never uploaded. tests/drafts/ (flow test pull,
-// testing/src/pull.ts) is never part of the suite: a draft runs once it is moved into scenarios/.
+// content so the cloud stores it once and a run records exactly which tests it ran. tests/drafts/
+// (flow test pull, testing/src/pull.ts) is never part of the suite: a draft runs once it is moved
+// into scenarios/. What 0.16.1 stopped playing (given:, origin:, expect.state, restart steps and
+// tests/tools/*.fake.ts) still parses for one release, is dropped, and is named by deprecatedLines.
 
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { extname, isAbsolute, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { isMap, isSeq, LineCounter, parseDocument, type Node } from "yaml";
 import { z } from "../../src/index.ts";
 
@@ -189,20 +188,29 @@ const openingStep = z
     nudge: businessNudge.optional(),
     /** Time passes on the test's clock. */
     wait: z.string().refine((t) => waitMs(t) !== null, 'a length of time such as 8h30m, 45m or 2d').optional(),
-    /** The agent restarts mid-conversation, on the same store: crash (it dies where it is; a new one takes over
-     * once its lease runs out) or deploy (a new one starts beside it; the old one finishes what it holds and stops).
-     * Right after a say, it lands while that message's turn runs. */
-    restart: z.enum(["crash", "deploy"], { error: "crash or deploy" }).optional(),
+    /** Deprecated in 0.16.1, never played: a step that is only a restart is dropped (deprecatedLines names it). */
+    restart: z.unknown().optional(),
     /** Move the test's clock to this time before the step. */
     at: moment.optional(),
   })
   .superRefine((step, ctx) => {
-    const kinds = [step.say !== undefined || step.attach ? "say" : null, step.event ? "event" : null, step.nudge ? "nudge" : null, step.wait !== undefined ? "wait" : null, step.restart ? "restart" : null].filter(Boolean);
-    if (kinds.length !== 1) ctx.addIssue({ code: "custom", message: kinds.length ? `one of say, event, nudge, wait or restart per step, not ${kinds.join(" and ")}` : "say something, attach a file, send an event, nudge, wait, or restart" });
+    const kinds = [step.say !== undefined || step.attach ? "say" : null, step.event ? "event" : null, step.nudge ? "nudge" : null, step.wait !== undefined ? "wait" : null].filter(Boolean);
+    if (!kinds.length && step.restart !== undefined) return;
+    if (kinds.length !== 1) ctx.addIssue({ code: "custom", message: kinds.length ? `one of say, event, nudge or wait per step, not ${kinds.join(" and ")}` : "say something, attach a file, send an event, nudge, or wait" });
     if (!step.event && (step.path || step.signature || step.answer !== undefined)) ctx.addIssue({ code: "custom", message: "path, signature and answer belong to an event step" });
     if (kinds[0] === "say" && !step.say && !step.attach) ctx.addIssue({ code: "custom", message: "say something, attach a file, or both" });
   })
-  .transform((step) => (step.event || step.nudge || step.wait !== undefined || step.restart ? step : { ...step, say: step.say ?? "" }));
+  .transform(({ restart, ...step }) => {
+    if (restart !== undefined && !(step.say !== undefined || step.attach || step.event || step.nudge || step.wait !== undefined)) return null;
+    return step.event || step.nudge || step.wait !== undefined ? step : { ...step, say: step.say ?? "" };
+  });
+
+/** The opening's steps, a deprecated restart step left out; one that was all restarts has nothing to play. */
+const opening = z
+  .array(openingStep)
+  .min(1)
+  .transform((steps) => steps.filter((step) => step !== null))
+  .refine((steps) => steps.length > 0, "only restart steps, which are no longer played: say something, send an event, nudge, or wait");
 
 /** One message of the conversation a scenario starts from: what the person said, or what the agent said. */
 const historyItem = z.union(
@@ -220,27 +228,6 @@ const shortName = (max: number, fix: string) =>
     const length = [...text].length;
     if (length > max) ctx.addIssue({ code: "custom", message: `${length} characters, at most ${max}: ${fix}` });
   });
-
-/** How a tool behaves in a scenario (`given.tools`): usual, slow, down, or flaky N% (N a whole number from 0 to 100). */
-const toolMode = z.string().refine(
-  (mode) => /^(?:usual|slow|down)$/.test(mode) || flakyPercent(mode) !== null,
-  "usual, slow, down, or flaky N% with N a whole number from 0 to 100, such as flaky 30%",
-);
-
-/** The N of `flaky N%`, or null when `mode` is not one. */
-export function flakyPercent(mode: string): number | null {
-  const m = /^flaky (\d{1,3})%$/.exec(mode);
-  return m && Number(m[1]) <= 100 ? Number(m[1]) : null;
-}
-
-/** The world as data: how each tool behaves (`tools`), flaky's dice (`seed`), and any other value for the fakes;
- * a tool file's name there (get_menu.yaml) is that tool's usual output. */
-const given = z
-  .object({
-    tools: z.record(z.string().min(1), toolMode).optional(),
-    seed: z.number().int().optional(),
-  })
-  .catchall(withClock(z.unknown()));
 
 /** The behaviours a simulated person can show (`person.behaviours`), any of them together. */
 const PERSON_BEHAVIOURS = ["impatient", "tangents", "half_messages", "pushes_rules", "walks_away"] as const;
@@ -265,18 +252,8 @@ const attackRule = z.string().superRefine((rule, ctx) => {
   else if (length > 500) ctx.addIssue({ code: "custom", message: `${length} characters, at most 500: one rule, in a sentence` });
 });
 
-/** Where a scenario came from, for the people and tools that read the suite; a run never reads it. */
-const origin = z.object({
-  /** code: written from the agent's code and prompts; chat: made by Flow from a conversation that went wrong, its people made up. */
-  from: z.enum(["code", "chat"], { error: "code or chat" }),
-  /** Who wrote it, such as a coding agent. */
-  by: z.string().min(1).optional(),
-  /** The ids of what it covers (a prompt's rule, a tool, a code path), as a coverage plan names them. */
-  covers: z.array(z.string().min(1)).optional(),
-  /** Whether it was seen to fail on the agent that went wrong (reproduces_on_bad) or to pass on the fixed one (passes_on_fixed). */
-  check: z.enum(["not_checked", "passes_on_fixed", "reproduces_on_bad"], { error: "not_checked, passes_on_fixed or reproduces_on_bad" }).optional(),
-});
-
+// Keys a scenario does not name here are dropped, not refused: so given: and origin: (and expect.state below),
+// deprecated in 0.16.1, still parse for one release and reach nothing downstream (deprecatedLines names them).
 const scenarioSchema = z.object({
   id: z.string().min(1),
   /** A short name for the scenario, such as "Milk corrected to oat"; the test itself is in `about` and the rest. */
@@ -285,8 +262,6 @@ const scenarioSchema = z.object({
   about: z.string().optional(),
   /** The area of the agent it tests, such as "Ordering": scenarios are grouped by it. */
   theme: shortName(THEME_MAX, "a theme is the area of the agent the scenario tests, in a word or two, such as Ordering.").optional(),
-  /** Where it came from: metadata, never read by a run. */
-  origin: origin.optional(),
   /** Every platform it runs on; each is a run of its own, with its own result. */
   channels: z.array(z.enum(["sms", "whatsapp", "imessage", "telegram", "web"])).min(1),
   /** The IANA time zone of the test's clock; UTC when left out. */
@@ -326,13 +301,11 @@ const scenarioSchema = z.object({
   }),
   /** The conversation so far: the run starts after these, as if they had been said (oldest first). */
   history: z.array(historyItem).min(1).max(200).optional(),
-  opening: z.array(openingStep).min(1),
+  opening,
   /** Tools whose own code runs in this scenario, in place of the cloud's simulation (state the agent keeps itself). */
   tools: z.strictObject({ real: z.array(z.string().min(1)).min(1) }).optional(),
-  /** In prose: a note for the person, the judge, and the model that plays a call no rule of `given` plays. */
+  /** In prose: a note for the person, the judge, and the model that plays the tools. */
   world: withClock(z.string()).optional(),
-  /** The world as data: each tool call is played by rule (its mode, its fake, a recorded response) before a model. */
-  given: given.optional(),
   max_turns: z.number().int().min(1).max(50).default(8),
   expect: z
     .object({
@@ -346,9 +319,6 @@ const scenarioSchema = z.object({
       sent: z.array(sentItem).optional(),
       /** None of these was sent; `{}` is anything at all. */
       not_sent: z.array(sentItem).optional(),
-      /** What the fakes' state holds when the run ends, each key one check in code: objects match in part, arrays
-       * have the same length with each expected element matched in part (any order), other values are equal. */
-      state: z.record(z.string(), z.unknown()).optional(),
     })
     .default({}),
 });
@@ -384,68 +354,81 @@ export type Scenario = z.infer<typeof scenarioSchema>;
 export type OpeningStep = Scenario["opening"][number];
 export type SentItem = z.infer<typeof sentItem>;
 
-/** The business starts something in it (an event, a nudge, time passing, a restart), or it checks what was sent: a business run. */
+/** The business starts something in it (an event, a nudge, time passing), or it checks what was sent: a business run. */
 export function isBusiness(scenario: Scenario): boolean {
-  return scenario.opening.some((s) => s.event || s.nudge || s.wait !== undefined || s.at !== undefined || s.restart) || !!scenario.expect.sent || !!scenario.expect.not_sent || !!scenario.tools;
+  return scenario.opening.some((s) => s.event || s.nudge || s.wait !== undefined || s.at !== undefined) || !!scenario.expect.sent || !!scenario.expect.not_sent || !!scenario.tools;
 }
 export type ToolFile = z.infer<typeof toolFileSchema>;
 export type ExpectedCall = z.infer<typeof expectedCall>;
 
-/** What is wrong with a scenario's `given.tools` for this agent: a tool it does not have, or down or flaky for a
- * tool whose file has no response with an error (the cloud refuses that scenario with the same reason). */
-export function givenProblems(scenario: Scenario, tools: string[], toolFiles: ToolFile[]): string[] {
-  const problems: string[] = [];
-  for (const [tool, mode] of Object.entries(scenario.given?.tools ?? {})) {
-    if (!tools.includes(tool)) {
-      problems.push(`given.tools.${tool}: the agent has no tool ${tool}`);
-      continue;
-    }
-    const fails = mode === "down" || flakyPercent(mode) !== null;
-    if (fails && !toolFiles.some((f) => f.tool === tool && f.responses.some((r) => r.error !== undefined))) {
-      problems.push(`given.tools.${tool}: ${mode} needs a response with an error in tools/${tool}.yaml`);
-    }
-  }
-  return problems;
-}
-
-/** What a fake is given for one call. */
+/** @deprecated since 0.16.1, removed in the next release: fakes are no longer run (a model plays every tool from its
+ * tool file). Kept only so a leftover tests/tools/<tool>.fake.ts still typechecks until it is deleted. */
 export interface FakeCall<I = any> {
   input: I;
-  /** The scenario's given: without tools and seed; a tool file's name there is that tool's usual output. */
   world: Record<string, unknown>;
-  /** One object per run, shared by every fake of the run: change it in place. Plain JSON. */
   state: Record<string, any>;
-  /** The test's clock at this call, ISO 8601 (UTC). */
   now: string;
-  /** This tool's calls in the run so far, this one included (1 for the first). */
   call: number;
-  /** The tool file's responses, placeholders filled (empty when it has no file). */
   responses: ToolFile["responses"];
 }
 
-/** What the tool answered, and what it changed, in plain words. `{{now ...}}` placeholders in it are filled by the cloud. */
+/** @deprecated since 0.16.1, removed in the next release: see {@link FakeCall}. */
 export type FakeAnswer = { output: unknown; changes?: string[] } | { error: string; changes?: string[] };
 
-/** A tool played by the developer's own code in tests: the default export of tests/tools/<tool>.fake.ts. */
+/** @deprecated since 0.16.1, removed in the next release: see {@link FakeCall}. */
 export type Fake<I = any> = (call: FakeCall<I>) => FakeAnswer | Promise<FakeAnswer>;
 
-/** Every tests/tools/*.fake.ts under `testsDir`, by tool (the file name before .fake.ts). A file that does not
- * import, or whose default export is not a function, throws `tests/tools/<file>: ...`. */
-export async function loadFakes(testsDir: string): Promise<Map<string, Fake>> {
-  const fakes = new Map<string, Fake>();
-  const dir = join(testsDir, "tools");
-  if (!existsSync(dir)) return fakes;
-  for (const name of readdirSync(dir).filter((n) => n.endsWith(".fake.ts")).sort()) {
-    let module: { default?: unknown };
-    try {
-      module = await import(pathToFileURL(join(dir, name)).href);
-    } catch (error) {
-      throw new Error(`tests/tools/${name}: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`);
-    }
-    if (typeof module.default !== "function") throw new Error(`tests/tools/${name}: its default export must be the fake, a function (export default placeOrder)`);
-    fakes.set(name.slice(0, -".fake.ts".length), module.default as Fake);
+/** The release that stopped playing given:, origin:, expect.state, restart steps and fakes; they go in the next one. */
+const DEPRECATED = "deprecated in 0.16.1, removed in the next release";
+
+/** `flow test --fresh`: the flag is still taken, and does nothing. */
+export const FRESH_IGNORED = "--fresh does nothing now: every run plays anew. Drop it.";
+
+/** `flow test fake`, removed in 0.16.1. */
+export const FAKE_COMMAND_REMOVED = "flow test fake was removed in 0.16.1: a model plays every tool from its tool file. Write how the tool answers as responses in tests/tools/<tool>.yaml, each with a when: saying when it happens (an error response for when it fails, a slow latency_ms for when it is slow).";
+
+/**
+ * One line per field of a scenario file that 0.16.1 stopped playing (given:, origin:, expect.state, a restart
+ * step), with where it is and what to do instead; [] when it has none, or does not parse (parseScenario says why).
+ * The fields still parse and are dropped, so a suite that has them plays as if they were gone.
+ */
+export function deprecatedLines(file: Pick<SuiteFile, "path" | "content">): string[] {
+  const lines = new LineCounter();
+  const doc = parseDocument(file.content, { lineCounter: lines });
+  if (doc.errors.length || !isMap(doc.contents)) return [];
+  // Where the field's own key is, so the line names `given:` itself, not the first line under it.
+  const at = (path: PropertyKey[]) => {
+    const holder = path.length > 1 ? nodeAt(doc.contents, path.slice(0, -1)) : doc.contents;
+    const pair = isMap(holder) ? holder.items.find((p) => (p.key as { value?: unknown } | null)?.value === path.at(-1)) : undefined;
+    const offset = (pair?.key as Node | undefined)?.range?.[0];
+    return `${file.path}:${offset === undefined ? 1 : lines.linePos(offset).line}`;
+  };
+  const raw = doc.toJS() as Record<string, unknown>;
+  const out: string[] = [];
+  if (raw.given !== undefined) out.push(`${at(["given"])}: given: is no longer played (${DEPRECATED}): describe the data in world: and how a tool fails or is slow as a response in tests/tools/<tool>.yaml with a when:; then delete given:.`);
+  if (raw.origin !== undefined) out.push(`${at(["origin"])}: origin: is no longer read (${DEPRECATED}): delete it.`);
+  if (Array.isArray(raw.opening)) {
+    raw.opening.forEach((step, i) => {
+      if (step && typeof step === "object" && "restart" in step) out.push(`${at(["opening", i, "restart"])}: opening[${i}]: restart is no longer played (${DEPRECATED}): delete the step; Flow Framework's own tests cover restarts.`);
+    });
   }
-  return fakes;
+  const expect = raw.expect as Record<string, unknown> | null | undefined;
+  if (expect && typeof expect === "object" && expect.state !== undefined) out.push(`${at(["expect", "state"])}: expect.state is no longer checked (${DEPRECATED}): check what the agent did with expect.calls (a tool and its args) or expect.outcome; then delete it.`);
+  return out;
+}
+
+/** One line per tests/tools/*.fake.ts under `testsDir` (named under `shown`, the folder as the developer sees it):
+ * fakes are no longer run. */
+export function deprecatedFakeLines(testsDir: string, shown = "tests"): string[] {
+  const dir = join(testsDir, "tools");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter((n) => n.endsWith(".fake.ts")).sort().map((name) => `${shown}/tools/${name} is no longer used (${DEPRECATED}): a model plays every tool from its tool file; delete the file.`);
+}
+
+/** Every deprecation line for the tests folder `testsDir`: its scenario files', then its fakes'. `flow test` and `flow check` print these. */
+export function deprecatedInSuite(testsDir: string, shown = "tests"): string[] {
+  const scenarios = loadSuite(testsDir).filter((f) => f.path.startsWith("scenarios/"));
+  return [...scenarios.flatMap((f) => deprecatedLines({ path: `${shown}/${f.path}`, content: f.content })), ...deprecatedFakeLines(testsDir, shown)];
 }
 
 /** Parse and check a scenario. The error has one line per problem: `file:line: field: what is wrong`. */
@@ -492,4 +475,15 @@ function offsetOf(root: unknown, path: PropertyKey[]): number | undefined {
     offset = (node as Node | null)?.range?.[0] ?? offset;
   }
   return offset;
+}
+
+/** The node at `path` (map keys and sequence indexes), or undefined when the file has none there. */
+function nodeAt(root: unknown, path: PropertyKey[]): unknown {
+  let node = root;
+  for (const key of path) {
+    if (isMap(node)) node = node.items.find((p) => (p.key as { value?: unknown } | null)?.value === key)?.value;
+    else if (isSeq(node) && typeof key === "number") node = node.items[key];
+    else return undefined;
+  }
+  return node;
 }

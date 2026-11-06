@@ -158,10 +158,9 @@ export const tools = [
 ## The tool's test file
 
 In tests no real tool runs. `tests/tools/<tool>.yaml` says how the tool behaves: every kind of
-response it gives, each with an example and how long it takes. Write one per tool. Each call is
-then played by rule from it and the scenario's `given` block, by the tool's fake
-(`tests/tools/<tool>.fake.ts`, written from `behaviour`), or, when nothing else covers the call, by
-a model from the scenario's world (the `flow-framework-tests` skill, "Tools played by rule").
+response it gives, each with an example and how long it takes. Write one per tool. A model plays
+each call from it and the scenario's `world`: it picks the response whose `when` fits, with that
+response's latency.
 
 ```yaml
 tool: place_order
@@ -184,26 +183,22 @@ responses:
 - `behaviour`: what the tool does beyond its description, in plain words (ids, ordering, limits,
   when it fails).
 - `responses`: one entry per kind of outcome, the usual one first, then slow ones and each error
-  the real system can give, the "down" one first among the errors: a scenario's `down` and
-  `flaky N%` play the first response with an error, and `slow` the slowest with an output.
-  `when` says when it happens; `latency_ms` is how long it takes; then `output` (what `run`
-  returns) or `error` (what it throws). `input` is optional, as an example of a call; a call with
-  exactly that input gets that response, with no model.
+  the real system can give. `when` says when it happens, in words a scenario's `world` can match
+  ("The point of sale is down"); `latency_ms` is how long it takes; then `output` (what `run`
+  returns) or `error` (what it throws). `input` is optional, as an example of a call.
 - Use real responses when you have them (copy them from the agent's recorded tool calls, with
   personal data removed); otherwise write realistic ones in exactly the shape `run` returns.
 - Examples show the shape, not the answer: the simulator takes ids, names and dates from the
   scenario's world, the call's input and what the agent already said. Write dates as placeholders
   for the test's clock (`{{now + 10m}}`, `{{now + 2d | date}}`; see the `flow-framework-tests` skill),
   never as written dates, which go stale.
-- Latency lives only here. A scenario picks a kind for one tool by name in `given.tools` (`slow`,
-  `down`, `flaky 30%` with a `seed`: the same calls fail on every run, random but repeatable), or
-  describes the situation in its prose `world` ("the point of sale is slow this morning") for a model
-  to play. Each mode covers only the tool it names; a tool left out (or `usual`) is played by its
-  fake, else a response whose `input` is exactly the call's, else a model.
-- A tool that changes something (books, orders, cancels), in a scenario with `given`: only a fake
-  keeps the change in `state` for `expect.state`, and a call matching a response's `input` exactly
-  records no change. You can write a fake for it (the `flow-framework-tests` skill shows one for a
-  booking), or test it in scenarios without `given`, which play as before.
+- Latency lives only here. A scenario picks a kind by describing the situation in its `world`
+  ("the point of sale is slow this morning", "it is down for the whole conversation"); the model
+  then plays the response whose `when` fits. Give each failure and each slow case its own response,
+  so a scenario can reach it.
+- A tool that changes something (books, orders, cancels): check the change with the scenario's
+  `expect.calls` (the tool and its `args`) or an `outcome` sentence (the `flow-framework-tests`
+  skill).
 
 ## Authenticated backend access
 

@@ -94,7 +94,7 @@ export async function pullCli(args: string[]): Promise<number> {
     try {
       const scenario = parseScenario({ path: row.file, content: draft.yaml });
       row.title = scenario.title ?? scenario.id;
-      row.check = scenario.origin?.check ?? null;
+      row.check = typeof draft.check === "string" ? draft.check : null;
     } catch (error) {
       row.problem = (error as Error).message;
       failed = true;

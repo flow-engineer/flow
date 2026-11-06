@@ -13,9 +13,9 @@ For `buildAgent` and playground setup, read `flow-framework-build-agent` (`build
 setup is in `flow-framework-mcp` (`mcp-skill.md`).
 
 A test is a scenario: a situation to put the agent in, played through a platform simulator by a
-model acting as the person, with the agent's tools played from `tests/tools/*.yaml` by rule, by
-your fakes, or by a model when nothing else covers a call (see "Tools played by rule" below and the
-`flow-framework-tools` skill, `tools-skill.md`). At the end, what happened is checked against `expect`.
+model acting as the person, with the agent's tools played by a model from `tests/tools/*.yaml` and
+the scenario's `world` (the `flow-framework-tools` skill, `tools-skill.md`). At the end, what
+happened is checked against `expect`.
 
 ```yaml
 id: latte-correction
@@ -94,12 +94,10 @@ expect:
   left out). The file is read on your machine and never uploaded; the person and the judge see it
   by name only.
 - `world`: everything true in this test, in plain words: stock, outages, slowness, the person's
-  history. The person, the judge and (when no rule below covers a call) the tool model read it.
-  An agent with a `profile` gets it played from here too (`get_user_profile`): say who the person
-  is ("Sam, a member since 2024, on the monthly plan").
-- `given` (optional): the same world as data, so tools are played by rule instead of by a model
-  (below). Leave it out unless the test needs the world fixed: a scenario without `given` is played
-  by a model from its prose `world`, exactly as before, and that is the safe default.
+  history. The person, the judge and the tool model read it. For a tool that is down or slow, say
+  so here and give the tool file a response for it whose `when` fits ("The point of sale is
+  down"): the tool model plays that response. An agent with a `profile` gets it played from here
+  too (`get_user_profile`): say who the person is ("Sam, a member since 2024, on the monthly plan").
 - `expect`:
   - `outcome`: what must have happened, checked against what the tools did ("exactly one
     order is placed", "no order is placed").
@@ -108,9 +106,9 @@ expect:
   - `calls`: tools that must be called at least once (whatever the call returned); `never`: tools
     that must not be called. Checked by code from the recorded tool calls, not by a model. Each
     entry is a tool name, or `{ tool, args }`: the call matches when every field in `args` equals
-    the call's input (nested objects match in part; arrays and strings must be equal).
-  - `state`: what the fakes' state must hold at the end (below), checked by code, not by a
-    model. Prefer it to an `outcome` sentence whenever the tools have fakes.
+    the call's input (nested objects match in part; arrays and strings must be equal). For what
+    a write must have done (the order is for Sam), prefer it to an `outcome` sentence: code checks
+    it the same way every run.
 - `timezone` (default UTC) and `now`: the test's clock. `now` is when each run starts,
   `YYYY-MM-DDTHH:MM[:SS]`, local to `timezone` unless it ends in `Z` or an offset (`-04:00`); left
   out, it is the real time. Placeholders are filled from it, and the simulated tools and the judge
@@ -138,134 +136,13 @@ time of day, then `| iso` (the default, with its offset), `| date` (2026-10-16),
 `person`, `opening`, `expect` and the tool files' `responses`; the cloud fills them on each run. Any other
 `{{...}}` is plain text.
 
-### Tools played by rule: `given` and fakes
-
-A model playing a tool costs money and may answer differently each run. Give the scenario a
-`given` block and each tool call is played by the first rule that fits; a model plays only what
-no rule covers, and its answer is saved, so the next run of the same scenario replays it free.
-
-Add `given` only when the test needs the world fixed: a tool down, flaky or slow on every run, or
-data a fake answers from. Without it the scenario plays exactly as before.
-
-```yaml
-world: |                     # stays, as a note for the person and the judge
-  The café is busy this morning, so the point of sale is slow, but orders go through.
-given:
-  menu: get_menu.yaml        # data: get_menu.yaml's first output, for the fakes and the model to read
-  stock: { oat: true }       # anything else: plain data for the fakes
-  tools:
-    place_order: slow        # this tool only: usual | slow | down | flaky 30%
-  seed: 7                    # flaky's dice: the same seed fails the same calls every run (default 1)
-expect:
-  state:
-    orders:
-      - name: Sam
-        items: [{ item: Latte, size: large, milk: oat }]
-```
-
-The rules, in order:
-1. `down` plays the tool file's first response with an error, on every call. `flaky N%` plays it
-   on about N% of calls, picked by `seed`: random, but the same calls fail on every run.
-2. A fake, `tests/tools/<tool>.fake.ts`, when there is one (below).
-3. A response in the tool file whose `input` is exactly this call's input: its output or error.
-4. A model, from the prose `world` and `given`, marked "played by a model" in the report.
-
-`slow` keeps the answer and takes the latency of the tool file's slowest response with an output.
-
-What `given.tools` covers:
-- A mode applies only to the tool it names; there is no mode for every tool. A tool left out is
-  `usual`, and `usual` adds no fault and nothing else: the call goes on to rules 2 to 4, so with no
-  fake and no response whose `input` is exactly the call's, a model plays it from the tool file and
-  the world, as in a scenario without `given`. Writing `usual` is the same as leaving the tool out.
-- A tool file's name in the data (`menu: get_menu.yaml`) is data only: fakes and the model read
-  that output, but `get_menu` itself is still played by the rules above.
-
-A tool that changes something (books, orders, cancels) in a scenario with `given`:
-- Only fakes keep `state`, so `expect.state` fails when the tool has no fake.
-- With no fake, a call whose input is exactly a response's `input` in the tool file plays that
-  response and records no change, so an `outcome` about the write ("exactly one table is booked")
-  can fail too.
-- So either give it a fake that keeps the write in `state` and check it with `expect.state`, or
-  leave `given` out of that scenario (or check nothing about the write). You can do either.
-
-```ts
-// tests/tools/book_table.fake.ts
-import type { Fake } from "@flow-engineer/flow/testing";
-
-const bookTable: Fake<{ name: string; party_size: number; time: string }> = ({ input, state }) => {
-  const bookings = (state.bookings ??= []) as unknown[];
-  const booking_id = `T-${100 + bookings.length}`;
-  bookings.push({ booking_id, ...input });
-  return { output: { booking_id, confirmed: true }, changes: [`table ${booking_id} booked for ${input.name}`] };
-};
-
-export default bookTable;
-```
-
-```yaml
-given: {}                    # turns the rules on; no mode needed, the fake plays book_table
-expect:
-  state:
-    bookings:                # exactly one booking, for Sam, four people
-      - { name: Sam, party_size: 4 }
-```
-
-**Fakes and `given` are optional.** A scenario without them plays, passes and costs exactly as
-before. You can add a fake to make a tool the tests call often free and repeatable: a few lines of
-plain TypeScript next to the tool file, written from its `behaviour`; it runs on the developer's
-machine, beside the agent, and is never uploaded. `npx @flow-engineer/flow test fake <tool>` writes
-a starter from the tool file (it answers as the file's responses do, and never writes over a fake
-already there); make it answer from the call and `given`. Show it to the developer to approve
-before relying on it.
-
-```ts
-// tests/tools/place_order.fake.ts
-import type { Fake } from "@flow-engineer/flow/testing";
-
-type Item = { item: string; size: string; milk?: string; quantity?: number };
-type MenuItem = { item: string; sizes: Record<string, number>; milks: string[] };
-
-const placeOrder: Fake<{ name: string; items: Item[] }> = ({ input, world, state }) => {
-  const menu = (world.menu as { menu?: MenuItem[] } | undefined)?.menu ?? [];
-  for (const it of input.items) {
-    const found = menu.find((m) => m.item === it.item);
-    if (!found || !(it.size in found.sizes) || (it.milk && !found.milks.includes(it.milk))) return { error: `Unknown item: ${it.item}` };
-  }
-  const orders = (state.orders ??= []) as unknown[];
-  const order_id = `BL-${1040 + orders.length}`;
-  orders.push({ order_id, name: input.name, items: input.items });
-  return { output: { order_id, ready_by: "{{now + 10m}}", pay_at_pickup: true }, changes: [`order ${order_id} placed for ${input.name}`] };
-};
-
-export default placeOrder;
-```
-
-- It gets `input` (the call's), `world` (`given` without `tools` and `seed`), `state` (one plain
-  object per run, shared by every fake: change it in place), `now` (the test's clock, ISO), `call`
-  (this tool's calls so far, this one included) and `responses` (the tool file's).
-- It returns `{ output }` or `{ error }`, and `changes`: what it changed, in plain words, for the
-  judge. `{{now + 10m}}` in an output is filled from the test's clock. A fake that throws is the
-  test's bug: the run is `infra` (`fake_failed`), never the agent's failure.
-- Only `import type` from Flow Framework; keep it deterministic (no `Math.random`, no real clock:
-  use `now` and `call`). It runs only in scenarios with a `given` block.
-- `expect.state` checks the end state by code: objects match in part, a list must have exactly as
-  many entries (in any order), each matching in part. "Exactly one order, a large oat latte for
-  Sam" is the `state` above, with no judge call.
-- After a session the report says how many calls a model played ("3 tool calls were played by a
-  model (place_order 2, order_status 1) ...") and, once, which of them have no fake, with the
-  `test fake` command (`toolsWithoutFake` in `--json`). You can add a fake for those tools to make
-  them free and repeatable, or add `given` to the scenarios when a fake exists but was not used; or
-  leave them to the model. Before a session with a `given` scenario, one line names the tools that
-  count as writes (no `hints.readOnly`) and have no fake. `FLOW_FRAMEWORK_FAKE_HINT=0` (in `.env`)
-  leaves both suggestions out.
-
 ### Scenarios the business starts
 
 A scenario can start with the business instead of the person: an event its backend sends, a nudge,
-time passing, or a restart of the agent. Such a run (a business run) gets an agent of its own, built by `buildAgent` with
+or time passing. Such a run (a business run) gets an agent of its own, built by `buildAgent` with
 the run's clock and the agent's own channels (pass `options.channels` and `options.testing` on to
-`createAgent`, `testing` spread as it is: `now`, `scheduleCheckMs: 0`, the run's `database` and
-`runner`), so the agent runs on
+`createAgent`, `testing` spread as it is: `now`, `scheduleCheckMs: 0`, the run's own `database`),
+so the agent runs on
 the test's clock: quiet hours, held sends, `expiresAt` and caps over days follow it.
 
 ```yaml
@@ -308,24 +185,6 @@ expect:
   not a message or template), `text` (in the message, the template's values, or the carousel's text
   and cards). Checked by code, like `calls`.
 - A business run where the agent sent nothing is not a failure by itself: `expect` decides.
-- `restart: crash` or `restart: deploy` restarts the agent mid-conversation, on the same store, to
-  catch double replies and lost turns across a crash or a deploy. Put it right after a `say` and it
-  lands while that message's turn runs (the real case: a message comes in a second before the new
-  revision is up). `crash`: the agent dies where it is (nothing more it does is sent or kept) and a
-  new one starts; it waits out the dead one's lease (15 s on the test's clock), then runs the cut-off
-  turn once. `deploy`: a new one starts beside the old one and takes every message from then on; the
-  old one finishes what it holds, a message the new one took meanwhile included, and stops. Each has
-  its own runner name (`runner-1`, `runner-2`, with createAgent's random suffix, on every event). The cloud checks that every message
-  the person sent was answered, none twice, and that no turn was lost. `buildAgent` must pass
-  `options.testing` on to `createAgent` as it is (it carries the run's `database` and `runner`), or
-  the step fails saying so.
-
-  ```yaml
-  opening:
-    - say: "when is my class?"
-    - restart: deploy              # or crash
-    - say: "and where is it?"      # reaches the new agent
-  ```
 - `history` (top level) starts a run from an earlier conversation, to test what happens late in a
   long chat (a correction about something said 40 messages ago, a history near the model's budget)
   without playing it: what each side said, oldest first, 1 to 200 items of up to 4,000 characters.
@@ -355,8 +214,9 @@ written in scenarios: the dashboard shows it for the whole run (average, p95, mi
   `outcome` or `judge` sentence: code checks it the same way every run.
 - Write `judge` items as facts a reader can check from the transcript, not taste ("asks Sam to
   confirm before placing the order", not "is helpful").
-- Cover the unhappy paths the tool files list (busy, down, unknown item) as their own scenarios;
-  `given.tools` (`slow`, `down`, `flaky 30%`) makes each run play the same path.
+- Cover the unhappy paths the tool files list (busy, down, unknown item) as their own scenarios,
+  each with a `world` that says so plainly ("the point of sale is down for the whole
+  conversation"), so the tool model plays that response on every run.
 - When a real conversation went wrong, turn it into a scenario: its world is what was true then,
   its opening is what the person sent.
 
@@ -372,6 +232,9 @@ connects out to the cloud, which plays the person and the tools and judges.
    in an agent `flow new` made).
 3. It first reads every test file as the cloud does; a mistake stops it with
    `tests/scenarios/<file>.yaml:<line>: <field>: <what is wrong>`, one line each, and nothing is sent.
+   A field 0.16.1 stopped playing (`given:`, `origin:`, `expect.state`, a `restart` step) or a leftover
+   `tests/tools/*.fake.ts` is not an error: it is ignored, and one line names it with what to do
+   instead (`flow check` prints the same lines). Do what each line says.
    Then it prints PASS or FAIL per run, with its run id, every failed check and the judge's reason,
    and a link to watch each conversation in the simulator. The cloud's dashboard, at its own
    address, shows every session over time and each scenario's history.
@@ -379,7 +242,7 @@ connects out to the cloud, which plays the person and the tools and judges.
    stderr): `outcome`, `exitCode`, `sessionId`, `agent`, `error`, `counts`, `costUsd` and per run
    `runId`, `scenario`, `channel`, `run`, `verdict`, `error` (the cloud's code when it could not play
    or judge the run, such as `judge_failed`; the run is then `errored` and its line reads `ERROR`,
-   whatever it ended as), `ended`, `turns`, `watch`, `rerun`, `label`, `replayed` and `failedChecks` (`kind`, `text` and the judge's
+   whatever it ended as), `ended`, `turns`, `watch`, `rerun`, `label` and `failedChecks` (`kind`, `text` and the judge's
    `reason`), and `invalid` (`{ path, reason }` for a scenario the cloud could not play, its error
    `scenario_invalid` and its line `INVALID`; else `null`); top-level `invalid` lists those scenarios
    once each (`scenario`, `path`, `reason`: fix the file; `unsupported: ...` means the cloud does not
@@ -400,9 +263,7 @@ connects out to the cloud, which plays the person and the tools and judges.
    (`runId`, `passed`, `watch`), never a run of its own. A flaky run counts as passed unless
    `--strict`; `counts.flaky` counts them, and `counts.failed` leaves them out unless `--strict`. Read
    a flaky run like a failure that is not certain: look at it with `flow show`, and fix the agent or
-   the test when the failed play shows a real problem. The cloud also replays the person's, the tools'
-   and the judge's stored answers for a scenario it has played unchanged (`replayed` counts them), so
-   runs vary less; `--fresh` plays every simulator anew.
+   the test when the failed play shows a real problem.
    Each run's `outcome` is `passed`, `failed`, `credit` (the workspace's test budget, `spend_cap`, or the
    agent's model refused for credit, `agent_credit`; its line reads `CREDIT`) or `infra` (the cloud
    could not play or judge it; `ERROR`). Credit and infra runs are never failures and are counted apart
@@ -452,11 +313,10 @@ Work in this loop, and never finish on a partial run:
    - the agent: it said or did the wrong thing; fix its prompt, tools or code;
    - the test: a check asks for the wrong thing, or the scenario cannot reach its goal; fix the YAML;
    - the simulator: a tool output that could not happen (a `response:` that does not fit the call is
-     a sign), a fake that answered wrongly, or a person who left the scenario; fix `tests/tools/*.yaml`,
-     the tool's `.fake.ts`, or the scenario's `world`, `given` and `person`.
+     a sign), or a person who left the scenario; fix `tests/tools/*.yaml`, or the scenario's
+     `world` and `person`.
 4. `npx @flow-engineer/flow test --synthetic --failed` until it passes with nothing flaky. With the
-   cloud's replays and second plays, `--runs 3 --only <scenario>` is rarely needed; `--fresh` plays every
-   simulator anew when you want a run with no stored answers.
+   cloud's second plays, `--runs 3 --only <scenario>` is rarely needed.
 5. The whole suite once more.
 
 ### Get a test cloud
@@ -493,8 +353,8 @@ same label the agent's traces carry; leave `--agent-version` unset unless the co
 runs, and record deploys on the owner's own servers as `build-agent-skill.md` ("Deploy it") says. Every run calls real models, so it costs a little.
 
 `tests/drafts/` holds test drafts: `npx @flow-engineer/flow test pull` writes there the scenarios Flow
-made from the hosted agent's conversations that went wrong (the business kept, the people made up,
-`origin: { from: chat, check: not_checked }`). Drafts never run or gate; `flow test` reads only
+made from the hosted agent's conversations that went wrong (the business kept, the people made up;
+it lists whether Flow checked each one). Drafts never run or gate; `flow test` reads only
 `tests/scenarios/` and `tests/tools/`. Read each draft against the agent, fix what is wrong in it, and
 move it into `tests/scenarios/` to keep it; delete the ones that do not test a real problem.
 

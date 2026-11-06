@@ -18,13 +18,11 @@ export function runPrinter(log: (line: string) => void = console.log): (run: Run
     }
     const gaveUp = verdict === "passed" && r.ended === "gave_up" ? " (passed, the person gave up)" : "";
     const retried = r.retried ? "; tried once more" : "";
-    const stored = r.replayed ? r.replayed.person + r.replayed.tools + r.replayed.judge : 0;
-    const replayed = stored ? `; replayed ${stored} stored simulator answer${stored === 1 ? "" : "s"}` : "";
     // A credit or infrastructure run: its checks say nothing about the agent, and it is never counted as failed.
     const outcome = runOutcome(r);
     const error = verdict !== "errored" ? "" : outcome === "credit" ? `; credit: ${r.error ?? "agent_credit"} (${creditReason(r)})` : `; error: ${r.error ?? r.ended} (${r.errorMessage ?? "the cloud could not play or judge this run, not the agent's fault"})`;
     const label = verdict === "errored" ? (outcome === "credit" ? "CREDIT" : "ERROR") : verdict === "passed" ? "PASS" : verdict === "flaky" ? "FLAKY" : "FAIL";
-    log(`${label}  ${r.scenario} #${r.run} (${r.channel}) ${r.runId}: ${r.turns} turn${r.turns === 1 ? "" : "s"}, ended: ${r.ended}${gaveUp}${retried}${replayed}${error}; slowest acknowledgement ${r.slowestAckMs === null ? "never" : `${r.slowestAckMs} ms`}; cost ${usd(r.agentUsage.costUsd)} agent + ${usd(r.testUsage.costUsd)} test`);
+    log(`${label}  ${r.scenario} #${r.run} (${r.channel}) ${r.runId}: ${r.turns} turn${r.turns === 1 ? "" : "s"}, ended: ${r.ended}${gaveUp}${retried}${error}; slowest acknowledgement ${r.slowestAckMs === null ? "never" : `${r.slowestAckMs} ms`}; cost ${usd(r.agentUsage.costUsd)} agent + ${usd(r.testUsage.costUsd)} test`);
     if (verdict !== "errored") for (const c of r.checks.filter((c) => !c.pass)) log(`      ✗ ${c.kind}: ${c.text}\n        ${c.reason}`);
     log(`      watch: ${r.watch}`);
     if (r.rerun) log(`      played again: ${r.rerun.passed ? "passed" : "failed"} ${r.rerun.watch}`);
