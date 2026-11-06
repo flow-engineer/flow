@@ -76,8 +76,10 @@ each, in log order, to the same handler as the webhook.
   streams opened) waits 30 s to 5 min. When Flow's error frame gives `retry_after`, the wait is at
   least that long. The backoff starts again only once a connection delivers an event or stays open
   30 s, so a stream refused right after it opens never reconnects in a tight loop. Each wait is
-  logged once (`console.warn`, with the close code). An event that fails 5 times in a row is passed
-  over, so it cannot hold up every later one; it stays in Flow's log (`GET /v0/events`).
+  logged once (`console.warn`, with the close code). An event that fails 5 times in a row while
+  the agent's store answers is passed over, so it cannot hold up every later one; it stays in Flow's
+  log (`GET /v0/events`). While the store itself does not answer, no try is counted: the stream keeps
+  its place, backs off and tries the same event again, so a store outage never loses a message.
 - **Offline messages.** With `cursorFile`, the last handled event's ID is kept on disk, so after a
   restart Flow replays everything that came while the agent was stopped, for as long as your plan
   keeps events (30 days by default). Without it, a dropped stream still resumes, but a restart
