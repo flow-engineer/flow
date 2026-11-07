@@ -217,7 +217,8 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   agent reads in its place: `describeVideoWith("google/gemini-3.8-flash")` uses the agent's own key
   (FLOW_KEY, OpenRouter or Gemini; not OpenAI or Anthropic, whose APIs take no video), or write your
   own `async ({ mime, data }) => text`. With neither, the agent is told a video came that it can't watch.
-  Anything the agent can't read reaches it named, with why, so it asks for text. The latest 3 photos,
+  Anything the agent can't read reaches it named, with why, so it asks for text. Typing shows as
+  a message with files arrives, before they are downloaded, transcribed or described: nothing to add. The latest 3 photos,
   PDFs and videos (one video at most) stay shown; their bytes are never stored.
 - Asking about a video later: the agent gets the built-in `ask_about_video` (`question`, and
   `message`, the id of the message the video came in; the latest video when left out) whenever a

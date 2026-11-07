@@ -1,7 +1,8 @@
 // One conversation: an actor that owns one person's history, across every channel they write
 // on, and runs one turn at a time.
 //
-// - Typing shows the moment a message arrives and is kept up while the agent works: sent again
+// - Typing shows the moment a message arrives (one with files, before they are downloaded,
+//   transcribed or described) and is kept up while the agent works: sent again
 //   before the platform hides it (ChannelInfo's typingLastsMs) and hidden by each message the agent
 //   sends. After a message it shows again only when new work starts (a response calls tools, or the
 //   person writes again), never because time passed: typing after an answer reads as more to come.
@@ -669,7 +670,10 @@ export class Conversation {
     this.messageIds.set(id, channel);
     // A provider's message may reach two runners at once (each reads the event stream): typing
     // waits until this runner's store write takes its id (arrive), so only the one that has it types.
-    if (options.messageId === undefined) this.startTyping(channel);
+    // A message with files types at once, before they are read: a video described or a voice note
+    // transcribed takes seconds, and they see the agent is on it. Two runners given one both type
+    // while they read it; the one whose write loses stops (arrive).
+    if (options.messageId === undefined || incoming.attachments?.length) this.startTyping(channel);
     // A file or voice note is read before message.in. Say the message arrived first, so a test
     // run is not settled as silence while the transcript is still being made.
     if (incoming.attachments?.length) this.settings.emit(this.id, "message.arrived", { messageId: id, channel });

@@ -121,6 +121,7 @@ export function multi(options: {
   fallbackTemplate?: AgentOptions["fallbackTemplate"];
   beforeSend?: AgentOptions["beforeSend"];
   wakeUps?: AgentOptions["wakeUps"];
+  describeVideo?: AgentOptions["describeVideo"];
 }) {
   const dir = options.dir ?? mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
@@ -168,6 +169,7 @@ export function multi(options: {
     fallbackTemplate: options.fallbackTemplate,
     beforeSend: options.beforeSend,
     wakeUps: options.wakeUps,
+    describeVideo: options.describeVideo,
     scheduleCheckMs: 0,
   });
   const texts = (channel?: string) =>

@@ -49,7 +49,9 @@ What follows from it:
   `flow.delivery.channel_code`; never content), or a trace of its own when another process sent it.
 - A carousel the channel sends card by card resolves once the platform accepted its last card.
 - Typing indicators, read receipts and status lines are courtesies: their failures never fail a
-  turn, and a channel whose info says `typing: false` is never sent one. Typing is kept up while the
+  turn, and a channel whose info says `typing: false` is never sent one. Typing shows as the
+  person's message arrives: for one with files (a video to describe, a voice note to transcribe),
+  before they are downloaded and read, which never wait on the typing call. It is kept up while the
   agent works (sent again before `typingLastsMs` runs out), shows again after a message only when
   new work starts (tools, or the person's next message), and never outlives the turn; refused outside the
   person's window (`outside_window`, logged at debug) it waits for the agent's next message, and any
@@ -95,8 +97,9 @@ redelivers events it is not sure arrived. The agent takes each message once:
   turn. With a database (`sqlite(file)`, `postgres(...)`) that holds across restarts and runners;
   with the default in-memory store it holds until the process stops. Two runners sent the same
   message at once (a replaced instance still reading the stream beside the new one) answer it once:
-  the runner whose store write lost its id leaves it to the stored copy and types nothing, and the
-  runner that holds the conversation answers it.
+  the runner whose store write lost its id leaves it to the stored copy and types nothing (a
+  message with files: only while it reads them, as both runners do), and the runner that holds the
+  conversation answers it.
 
 ## Outbound: when exactly once is true, and when it is not
 

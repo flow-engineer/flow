@@ -346,6 +346,27 @@ test("a video sent from a simulator reaches the agent as a video it can fetch ag
   }
 });
 
+test("the playground shows the agent typing the moment a video arrives, while it is still being described", async () => {
+  const described = gate<string>();
+  const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true } }, testPeople: [SAM], database: sqlite(), describeVideo: () => described.promise });
+  await h.agent.resume();
+  const server = await simulators().listen(h.agent, 0);
+  const where = `channel=whatsapp&person=${encodeURIComponent(SAM.phone)}`;
+  try {
+    const { seq } = (await (await fetch(`${server.url}/api/transcript?${where}`)).json()) as { seq: number };
+    const video = { kind: "video", mime: "video/mp4", data: Buffer.from(new Uint8Array(2_000)).toString("base64") };
+    const sent = await fetch(`${server.url}/api/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "whatsapp", person: SAM.phone, text: "is this covered?", attachments: [video] }) });
+    assert.equal(sent.status, 202);
+    const { events } = (await (await fetch(`${server.url}/api/poll?${where}&after=${seq}`)).json()) as { events: Array<{ type: string; on?: boolean }> };
+    assert.ok(events.some((e) => e.type === "typing" && e.on === true), "typing shows before the description is back");
+    described.open("A dented rear bumper.");
+    (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Bumper dents are covered." })));
+    await h.agent.conversation((await h.agent.testConversation(SAM.phone))!)!.whenIdle();
+  } finally {
+    await server.close();
+  }
+});
+
 test("a file sent from a simulator reaches the agent with its bytes, the message box as its caption", async () => {
   const { fake, server, post, lines } = await start();
   try {

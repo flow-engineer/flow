@@ -270,6 +270,10 @@ flow.engineer could not be reached or could not reach its projects (try again); 
 
 ## Videos people send
 
+The person sees the agent typing as soon as their video arrives (on WhatsApp, with the blue ticks,
+which Flow Messaging sends with typing), kept up while it is downloaded and described; the reply
+follows once the agent has read the description. A voice note being transcribed types the same way.
+
 A video reaches the agent one of three ways: watched by its model (`openAICompatible({ videos: true })`),
 described once (`createAgent({ describeVideo: describeVideoWith("google/gemini-3.8-flash") })`), or
 named as one it can't watch. With a describer that has `ask` (describeVideoWith's does) or a model
