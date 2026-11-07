@@ -74,6 +74,16 @@ export interface AgentOptions {
    * it asks about a video in the conversation whenever it needs to, fetched again from its channel.
    */
   describeVideo?: DescribeVideo;
+  /**
+   * A message with a video gets this reaction the moment it arrives, before the video is downloaded
+   * or watched, and the turn that answers it shows no typing: the reaction says the agent is on it.
+   * Default on, with 👀; a string is another emoji; `false` turns it off, and the video types on
+   * arrival as other messages do. Where the channel has no reactions, does not take the emoji
+   * (Telegram takes only its own reaction emoji, 👀 among them), or the reaction fails, that turn
+   * types instead. iMessage shows 👀 as a reaction on iOS 18 and later; older iPhones may show it as
+   * a line of text. Other messages, photos and voice notes included, type as before.
+   */
+  videoReaction?: boolean | string;
   tools?: Tool[];
   /** Backend credentials or clients for a verified person, available only to tool code as context.credentials. */
   credentials?: CredentialProvider;
@@ -397,6 +407,14 @@ export interface NudgeState {
 
 const NO_EXTRAS: ChannelInfo = { reactions: false, status: false };
 
+/** The emoji a video gets on arrival (createAgent's videoReaction), or undefined when it is off. */
+function videoReactionOf(option: AgentOptions["videoReaction"]): string | undefined {
+  if (option === false) return undefined;
+  if (option === undefined || option === true) return "👀";
+  if (!option.trim()) throw new Error("flow: videoReaction is an emoji, true (👀) or false");
+  return option.trim();
+}
+
 /** A channel's way to fetch a file again (Channel.file), for a conversation's link to it. */
 const fileOf = (adapter: Channel): { file?: (ref: string) => Promise<Uint8Array | null> } => (adapter.file ? { file: (ref) => adapter.file!(ref) } : {});
 const HOUR_MS = 3_600_000;
@@ -491,6 +509,7 @@ export class Agent {
       model: options.model,
       transcribe: options.transcribe,
       describeVideo: options.describeVideo,
+      videoReaction: videoReactionOf(options.videoReaction),
       tools: new Map(tools.map((t) => [t.name, t])),
       credentials: options.credentials,
       credentialProvider: ctx => this.requestCredentials.get(viaKey(ctx.channel, ctx.address ?? "")) ?? options.credentials,
