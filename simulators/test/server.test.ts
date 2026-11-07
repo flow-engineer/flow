@@ -346,7 +346,7 @@ test("a video sent from a simulator reaches the agent as a video it can fetch ag
   }
 });
 
-test("the playground shows the agent typing the moment a video arrives, while it is still being described", async () => {
+test("the playground shows the agent's 👀 on a video the moment it arrives, while it is still being described, and no typing", async () => {
   const described = gate<string>();
   const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true } }, testPeople: [SAM], database: sqlite(), describeVideo: () => described.promise });
   await h.agent.resume();
@@ -357,11 +357,16 @@ test("the playground shows the agent typing the moment a video arrives, while it
     const video = { kind: "video", mime: "video/mp4", data: Buffer.from(new Uint8Array(2_000)).toString("base64") };
     const sent = await fetch(`${server.url}/api/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "whatsapp", person: SAM.phone, text: "is this covered?", attachments: [video] }) });
     assert.equal(sent.status, 202);
-    const { events } = (await (await fetch(`${server.url}/api/poll?${where}&after=${seq}`)).json()) as { events: Array<{ type: string; on?: boolean }> };
-    assert.ok(events.some((e) => e.type === "typing" && e.on === true), "typing shows before the description is back");
+    type Event = { type: string; on?: boolean; line?: { kind: string; id?: string; messageId?: string; emoji?: string; by?: string } };
+    const { events } = (await (await fetch(`${server.url}/api/poll?${where}&after=${seq}`)).json()) as { events: Event[] };
+    const theirs = events.find((e) => e.line?.kind === "in")?.line;
+    const reaction = events.find((e) => e.line?.kind === "reaction")?.line;
+    assert.deepEqual(reaction && { messageId: reaction.messageId, emoji: reaction.emoji, by: reaction.by }, { messageId: theirs?.id, emoji: "👀", by: "agent" }, "👀 shows on the video before the description is back");
     described.open("A dented rear bumper.");
     (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Bumper dents are covered." })));
     await h.agent.conversation((await h.agent.testConversation(SAM.phone))!)!.whenIdle();
+    const after = (await (await fetch(`${server.url}/api/poll?${where}&after=${seq}`)).json()) as { events: Event[] };
+    assert.deepEqual(after.events.filter((e) => e.type === "typing" && e.on), [], "the video's turn showed no typing");
   } finally {
     await server.close();
   }

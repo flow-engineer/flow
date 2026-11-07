@@ -2,6 +2,33 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **A video gets 👀 the moment it arrives, and its turn shows no typing.** A message with a video
+  now gets the agent's reaction before the video is downloaded or watched, through the same send as
+  the `react` tool's (a `reaction` outbound, and a `reaction` event with `arrival: true`), and the
+  turn that answers it sends no typing on that channel: none on arrival, none kept up, none while
+  the agent works or writes. On WhatsApp the blue ticks then come
+  when the agent takes the video in, after it is described.
+  - **`videoReaction`:** createAgent's new option. Default on, with 👀; a string is another emoji;
+    `false` turns it off, and a video types on arrival as in 0.17.1.
+  - **Where it goes:** where the channel has reactions and takes the emoji: on Telegram only the
+    reactions Telegram lets bots use (👀 is one; an emoji with U+FE0F or a skin tone matches as Flow
+    Messaging matches it); on iMessage any, though iPhones on iOS 17 or older may show one other
+    than the six tapbacks as a line of text; on WhatsApp and the web, any. Elsewhere (SMS, or an emoji
+    Telegram does not take) that turn types as before.
+  - **A reaction that fails** is logged with a warning and never fails the turn: the turn types
+    instead. Photos, voice notes and documents type on arrival as before. If the agent reacts to
+    the same message itself later, its reaction replaces this one where the channel allows.
+
+### Migration notes
+
+- **A video no longer types while it is described; it gets 👀.** Default on, so an agent whose
+  people send videos shows 👀 on them and no typing for those turns. To move: nothing, or to keep
+  0.17.1's typing, `createAgent({ ...options, videoReaction: false })`.
+
 ## 0.17.1 (7 Nov 2026)
 
 ### Changes

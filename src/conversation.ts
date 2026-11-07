@@ -7,7 +7,9 @@
 //   sends. After a message it shows again only when new work starts (a response calls tools, or the
 //   person writes again), never because time passed: typing after an answer reads as more to come.
 //   It never outlives the turn. Refused outside the person's window for it, it waits for the agent's
-//   next message; any other failure ends it for the turn.
+//   next message; any other failure ends it for the turn. A message with a video gets a reaction
+//   instead (videoReaction, 👀) on arrival, before it is read, and its turn shows no typing on that
+//   channel; where the channel can't take the reaction, or it fails, the turn types.
 // - Double texts fold into the reply in progress. Someone who sends another message is usually
 //   correcting themselves, so a model step in flight is aborted and runs again with every message
 //   so far; one that arrives while tools run ends the wait for them (below).
@@ -53,7 +55,7 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, numbered, type ContentRefusal } from "./channels.ts";
+import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, numbered, takesReaction, type ContentRefusal } from "./channels.ts";
 import type { FlowEvents } from "./business-events/engine.ts";
 import { log, logFields, type FlowEvent, type Emit, type EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
@@ -73,6 +75,8 @@ export interface ConversationSettings {
   transcribe?: Transcribe;
   /** A video as text, for a model that can't watch it; without it (and without reads.videos) the agent is told it can't watch videos. */
   describeVideo?: DescribeVideo;
+  /** The emoji a message with a video gets on arrival, instead of typing for its turn (createAgent's videoReaction); none: it types. */
+  videoReaction?: string;
   tools: Map<string, Tool>;
   credentials?: CredentialProvider;
   credentialProvider?: (context: Readonly<Omit<ToolContext, "credentials">>) => CredentialProvider | undefined;
@@ -383,6 +387,10 @@ export class Conversation {
   private readonly typingOn = new Set<string>();
   /** Channels typing is kept up on until the turn ends (from the person's message). */
   private readonly typingKept = new Map<string, TypingKept>();
+  /** Videos reacted to on arrival (videoReaction) that no turn has taken yet, by channel: no typing shows there meanwhile. */
+  private readonly videoWaiting = new Map<string, Set<string>>();
+  /** Channels whose turn took a video reacted to on arrival: no typing shows there until the turn ends. */
+  private readonly videoTurn = new Set<string>();
   /** One challenge per channel per turn, even when the model calls several protected tools. */
   private signInPrompts = new Map<string, Promise<{ message: string; url?: string }>>();
   private authBlocked = new Set<string>();
@@ -668,6 +676,7 @@ export class Conversation {
     }
     const id = options.messageId ?? `m${++this.messageCount}`;
     this.messageIds.set(id, channel);
+    this.reactToVideo(incoming, id, channel);
     // A provider's message may reach two runners at once (each reads the event stream): typing
     // waits until this runner's store write takes its id (arrive), so only the one that has it types.
     // A message with files types at once, before they are read: a video described or a voice note
@@ -687,7 +696,10 @@ export class Conversation {
         const files = await this.readFiles(incoming.attachments ?? []);
         if (!this.closed) this.arrive(incoming, id, channel, options.messageId !== undefined, files);
       })
-      .catch((error) => log("WARNING", "flow: a message in conversation %s could not be read:", this.id, error));
+      .catch((error) => {
+        this.videoWaiting.get(channel)?.delete(id);
+        log("WARNING", "flow: a message in conversation %s could not be read:", this.id, error);
+      });
     this.preparing = ready;
     void ready.finally(() => {
       if (this.preparing !== ready) return;
@@ -715,6 +727,7 @@ export class Conversation {
         // Its id is forgotten here too, so if this runner takes the conversation next, the other
         // runner's inbox row is answered (takeOpen), not marked done as if it were in the history.
         this.pending = this.pending.filter((waiting) => waiting !== item);
+        this.videoWaiting.get(channel)?.delete(id);
         if (!this.pending.some((waiting) => waiting.id === id && waiting.channel === channel) && !this.inHistory(id, channel)) this.messageIds.delete(id);
         this.settings.emit(this.id, "message.duplicate", { messageId: id, channel });
         return;
@@ -1400,6 +1413,7 @@ export class Conversation {
       items.push(...messages);
       const theirs = messages.filter((m) => !m.answer);
       if (theirs.length) this.theirMessages = true;
+      for (const m of theirs) if (this.videoWaiting.get(m.channel)?.delete(m.id)) this.videoTurn.add(m.channel);
       for (const channel of new Set(theirs.map((m) => m.channel))) {
         if (this.channels.get(channel)?.info.readReceipts) void this.send(channel, { type: "read", messageIds: theirs.filter((m) => m.channel === channel).map((m) => m.id) });
       }
@@ -1880,10 +1894,38 @@ export class Conversation {
     if (kept.held === "window") kept.held = null;
   }
 
+  /**
+   * A message with a video gets the agent's videoReaction now, before it is read, where the channel
+   * takes that emoji; its turn then shows no typing on that channel (typing already showing is
+   * hidden). A reaction that fails is logged and gives the turn its typing back. Two runners given
+   * one message both react; the platform keeps one reaction.
+   */
+  private reactToVideo(incoming: Incoming, id: string, channel: string): void {
+    const emoji = this.settings.videoReaction;
+    const link = this.channels.get(channel);
+    if (!emoji || !link || !incoming.attachments?.some((a) => a.kind === "video") || !takesReaction(link.info, emoji)) return;
+    let waiting = this.videoWaiting.get(channel);
+    if (!waiting) this.videoWaiting.set(channel, (waiting = new Set()));
+    waiting.add(id);
+    if (this.typingOn.delete(channel)) void this.send(channel, { type: "typing", on: false });
+    void this.send(channel, { type: "reaction", emoji, messageId: id }).then((failure) => {
+      if (!failure) return void this.settings.emit(this.id, "reaction", { emoji, messageId: id, channel, arrival: true });
+      log("WARNING", "flow: the reaction to a video on %s in conversation %s failed, so its turn types instead: %s", channel, this.id, failure);
+      const untaken = this.videoWaiting.get(channel)?.delete(id) ?? false;
+      if (!untaken) this.videoTurn.delete(channel);
+      if (untaken || this.unanswered.has(channel)) this.startTyping(channel);
+    });
+  }
+
+  /** Typing does not show on `channel`: a video there was reacted to on arrival, and the turn that answers it has not ended. */
+  private videoQuiet(channel: string): boolean {
+    return Boolean(this.videoWaiting.get(channel)?.size) || this.videoTurn.has(channel);
+  }
+
   /** Their message on `channel`: typing shows there, and is kept up until the turn ends. */
   private startTyping(channel: string): void {
     const link = this.channels.get(channel);
-    if (this.closed || !link || link.info.typing === false) return;
+    if (this.closed || !link || link.info.typing === false || this.videoQuiet(channel)) return;
     let kept = this.typingKept.get(channel);
     if (!kept) this.typingKept.set(channel, (kept = { timer: null, held: null }));
     if (!kept.held && !this.typingOn.has(channel)) void this.showTyping(channel, kept);
@@ -1898,6 +1940,7 @@ export class Conversation {
   private async showTyping(channel: string, kept: TypingKept): Promise<void> {
     if (kept.timer) clearTimeout(kept.timer);
     kept.timer = null;
+    if (this.videoQuiet(channel)) return;
     this.typingOn.add(channel);
     const failure = await this.send(channel, { type: "typing", on: true });
     // The turn ended (or the conversation closed) while it went: what came of it no longer matters.
@@ -1929,6 +1972,7 @@ export class Conversation {
   private dropTyping(): void {
     for (const kept of this.typingKept.values()) if (kept.timer) clearTimeout(kept.timer);
     this.typingKept.clear();
+    this.videoTurn.clear();
   }
 
   /** The turn is over (or failed): typing is no longer kept up, and is hidden where it shows. */

@@ -447,6 +447,31 @@ export const CONTENT_LIMITS: Record<NonNullable<ChannelInfo["platform"]>, Conten
   sms: { name: "SMS", text: 1530, caption: 1024, smsSegments: 10 },
 };
 
+/**
+ * The emoji Telegram takes as a bot's reaction: the Bot API's ReactionTypeEmoji list, as Telegram
+ * writes them ("❤" without U+FE0F), as Flow Messaging checks them (another answers 422
+ * unsupported_content). Telegram may extend it; keep it in step with Flow Messaging's.
+ */
+const TELEGRAM_REACTIONS: readonly string[] = [
+  "👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", "🤩", "🤮",
+  "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯", "🤣",
+  "⚡", "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴", "😭", "🤓", "👻",
+  "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅",
+  "🤪", "🗿", "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂", "🤷",
+  "🤷‍♀", "😡",
+];
+
+/**
+ * The channel takes `emoji` as a reaction: it has reactions, and on Telegram the emoji is one of
+ * Telegram's, as written, without U+FE0F, or also without skin tones, as Flow Messaging matches it.
+ */
+export function takesReaction(info: ChannelInfo, emoji: string): boolean {
+  if (!info.reactions) return false;
+  if (info.platform !== "telegram") return true;
+  const bare = emoji.replaceAll("\uFE0F", "");
+  return [emoji, bare, bare.replace(/[\u{1F3FB}-\u{1F3FF}]/gu, "")].some((e) => TELEGRAM_REACTIONS.includes(e));
+}
+
 export interface ContentLimits {
   /** The platform's name in errors. */
   name: string;
