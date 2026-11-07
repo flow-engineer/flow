@@ -257,25 +257,26 @@ test("a typing call that fails, or never answers, neither holds up describing a 
   assert.match(format(...warn.mock.calls[0].arguments), /typing on chat in conversation v7 failed, so no more typing this turn: invalid_request$/);
 });
 
-/** WhatsApp as Flow Messaging's channel shows it: reactions, and typing that lasts 25 s (sent again every 20 s). */
-const WA: ChannelInfo = { platform: "whatsapp", reactions: true, status: false, typingLastsMs: 25_000 };
-const outLine = (o: Outbound) => (o.type === "typing" ? `typing ${o.on}` : o.type === "reaction" ? `reaction ${o.emoji} ${o.messageId}` : o.type === "message" ? `message ${o.text}` : o.type);
+/** WhatsApp as Flow Messaging's channel shows it: reactions, blue ticks, and typing that lasts 25 s (sent again every 20 s). */
+const WA: ChannelInfo = { platform: "whatsapp", reactions: true, status: false, readReceipts: true, typingLastsMs: 25_000 };
+const outLine = (o: Outbound) => (o.type === "typing" ? `typing ${o.on}` : o.type === "reaction" ? `reaction ${o.emoji} ${o.messageId}` : o.type === "read" ? `read ${o.messageIds.join(" ")}` : o.type === "message" ? `message ${o.text}` : o.type);
 
-test("a video gets 👀 the moment it arrives, before it is downloaded, described or the model is called, and its turn shows no typing at all", async (t) => {
+test("a WhatsApp video gets its blue ticks and 👀 the moment it arrives, before it is downloaded, described or the model is called, and its turn shows no typing at all", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const steps: string[] = [];
   const described = gate<string>();
   const a = agentWith({ describeVideo: () => (steps.push("describe"), described.promise) });
   const video: Attachment = { kind: "video", mime: "video/mp4", data: async () => (steps.push("download"), new Uint8Array(40)) };
   a.agent.receive("r1", { text: "is this covered?", attachments: [video] }, (o) => void steps.push(outLine(o)), { channel: WA, messageId: "wamid.R1" });
-  assert.deepEqual(steps, ["reaction 👀 wamid.R1"], "the reaction goes before anything is read");
+  assert.deepEqual(steps, ["read wamid.R1", "reaction 👀 wamid.R1"], "the read receipt, without typing, and the reaction go before anything is read");
   await settle();
   t.mock.timers.tick(30_000);
   described.open("A dented rear bumper.");
   await settle();
   t.mock.timers.tick(0);
   const first = await a.nextCall(0);
-  assert.deepEqual(steps, ["reaction 👀 wamid.R1", "download", "describe"], "no typing while it was described, kept up or not");
+  // The turn taking the message sends the read receipt again, as it does for every message.
+  assert.deepEqual(steps, ["read wamid.R1", "reaction 👀 wamid.R1", "download", "describe", "read wamid.R1"], "no typing while it was described, kept up or not");
   // A response that calls a tool is new work, which types again on other turns: not on this one.
   first.answer(respond(call("lookup_policy", {})));
   (await a.nextCall(1)).answer(respond(say("Bumper dents are covered.")));
@@ -294,20 +295,21 @@ test("only a video gets the reaction: a photo, and a video when videoReaction is
     return steps;
   };
   const on = agentWith({ reads: { images: true } });
-  assert.deepEqual(await run(on, "p1", file("image", "image/jpeg", PHOTO)), ["typing true", "message Yes.", "typing false"]);
+  assert.deepEqual(await run(on, "p1", file("image", "image/jpeg", PHOTO)), ["typing true", "read wamid.p1", "message Yes.", "typing false"]);
   const off = agentWith({ videoReaction: false, describeVideo: async () => "A dented rear bumper." });
-  assert.deepEqual(await run(off, "v1", file("video", "video/mp4", 40)), ["typing true", "message Yes.", "typing false"]);
+  assert.deepEqual(await run(off, "v1", file("video", "video/mp4", 40)), ["typing true", "read wamid.v1", "message Yes.", "typing false"]);
 });
 
 test("the reaction goes where the channel takes its emoji: 👀 on iMessage and Telegram; on Telegram an emoji outside Telegram's reactions is not sent, and that video's turn types", async () => {
-  const IMESSAGE: ChannelInfo = { platform: "imessage", reactions: true, status: false };
+  const IMESSAGE: ChannelInfo = { platform: "imessage", reactions: true, status: false, readReceipts: true };
   const TELEGRAM: ChannelInfo = { platform: "telegram", reactions: true, status: false };
   const first = async (videoReaction: string | undefined, info: ChannelInfo) => {
     const a = agentWith({ videoReaction, describeVideo: async () => "A dented rear bumper." });
     const sent: string[] = [];
     a.agent.receive("c", { text: "", attachments: [file("video", "video/mp4", 40)] }, (o) => void sent.push(outLine(o)), { channel: info, messageId: "M1" });
-    return sent[0];
+    return sent.join(", ");
   };
+  // iMessage's read receipt still goes when the turn takes the message, not on arrival.
   assert.equal(await first(undefined, IMESSAGE), "reaction 👀 M1");
   assert.equal(await first(undefined, TELEGRAM), "reaction 👀 M1");
   // Telegram's own reactions, as Flow Messaging matches them: ❤️ is its ❤, and 👍🏽 its 👍.
@@ -330,7 +332,7 @@ test("a reaction that fails is logged, and the video's turn types instead and st
   await refused.promise;
   (await a.nextCall(0)).answer(respond(say("Bumper dents are covered.")));
   await a.agent.conversation("f1")!.whenIdle();
-  assert.deepEqual(steps, ["reaction 👀 wamid.F1", "typing true", "message Bumper dents are covered.", "typing false"]);
+  assert.deepEqual(steps, ["read wamid.F1", "reaction 👀 wamid.F1", "typing true", "read wamid.F1", "message Bumper dents are covered.", "typing false"]);
   assert.deepEqual(a.events.filter((e) => e.type === "reaction"), [], "no reaction event for one that did not go");
   assert.match(format(...warn.mock.calls[0].arguments), /the reaction to a video on chat in conversation f1 failed, so its turn types instead: invalid_request$/);
 });

@@ -2,53 +2,46 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## 0.17.2 (7 Nov 2026)
+## 0.17.1 (8 Nov 2026)
 
 ### Changes
 
+- **A message with files shows the agent on it at once, not after it is read.** Since 0.17.0
+  typing for a message with the platform's id (every Flow Messaging message) started only once it
+  was stored, which for a video came after its description (3.7 s for one, up to 25 s for several at
+  once), so until then the person saw nothing. A message with files now types the moment it
+  arrives, before they are downloaded and read: a voice note being transcribed (`transcribe`), a
+  photo or PDF being downloaded, and a video being described (`describeVideo`) when `videoReaction`
+  is off (below). On WhatsApp the typing call also shows the blue ticks (Flow Messaging anchors it
+  on their latest message); on iMessage the read receipt still goes when the turn takes the message.
+  Typing is kept up while the file is read (`typingLastsMs`: every 20 s on WhatsApp), and a typing
+  call that fails or hangs never holds up reading or the reply. Default on; a channel with
+  `typing: false` (or `disable: ["typing"]`) is never sent one. When two runners are given the same
+  message with files, both type while they read it; it is still answered once, and neither is left
+  typing.
 - **A video gets 👀 the moment it arrives, and its turn shows no typing.** A message with a video
-  now gets the agent's reaction before the video is downloaded or watched, through the same send as
-  the `react` tool's (a `reaction` outbound, and a `reaction` event with `arrival: true`), and the
-  turn that answers it sends no typing on that channel: none on arrival, none kept up, none while
-  the agent works or writes. On WhatsApp the blue ticks then come
-  when the agent takes the video in, after it is described.
+  gets the agent's reaction before the video is downloaded or watched, through the same send as the
+  `react` tool's (a `reaction` outbound, and a `reaction` event with `arrival: true`), and the turn
+  that answers it sends no typing on that channel: none on arrival, none kept up, none while the
+  agent works or writes. On WhatsApp the blue ticks still show on arrival: the read receipt goes by
+  itself (no typing indicator) with the reaction. iMessage's read receipt still goes when the turn
+  takes the message.
   - **`videoReaction`:** createAgent's new option. Default on, with 👀; a string is another emoji;
-    `false` turns it off, and a video types on arrival as in 0.17.1.
+    `false` turns it off, and a video types on arrival as other files do.
   - **Where it goes:** where the channel has reactions and takes the emoji: on Telegram only the
     reactions Telegram lets bots use (👀 is one; an emoji with U+FE0F or a skin tone matches as Flow
     Messaging matches it); on iMessage any, though iPhones on iOS 17 or older may show one other
     than the six tapbacks as a line of text; on WhatsApp and the web, any. Elsewhere (SMS, or an emoji
-    Telegram does not take) that turn types as before.
+    Telegram does not take) that turn types instead.
   - **A reaction that fails** is logged with a warning and never fails the turn: the turn types
-    instead. Photos, voice notes and documents type on arrival as before. If the agent reacts to
-    the same message itself later, its reaction replaces this one where the channel allows.
+    instead. Photos, voice notes and documents type on arrival. If the agent reacts to the same
+    message itself later, its reaction replaces this one where the channel allows.
 
 ### Migration notes
 
-- **A video no longer types while it is described; it gets 👀.** Default on, so an agent whose
-  people send videos shows 👀 on them and no typing for those turns. To move: nothing, or to keep
-  0.17.1's typing, `createAgent({ ...options, videoReaction: false })`.
-
-## 0.17.1 (7 Nov 2026)
-
-### Changes
-
-- **A video shows the agent typing at once, not after it is described.** Since 0.17.0 typing for
-  a message with the platform's id (every Flow Messaging message) started only once it was stored,
-  which for a video came after its description (3.7 s for one, up to 25 s for several at once), so
-  until then the person saw nothing. A message with files now types the moment it arrives, before they are downloaded and read:
-  a video being described (`describeVideo`), a voice note being transcribed (`transcribe`), a photo
-  or PDF being downloaded. On WhatsApp the typing call also shows the blue ticks (Flow Messaging
-  anchors it on their latest message); on iMessage the read receipt still goes when the turn takes
-  the message. Typing is kept up while the description runs (`typingLastsMs`: every 20 s on
-  WhatsApp), and a typing call that fails or hangs never holds up the description or the reply.
-  Default on; a channel with `typing: false` (or `disable: ["typing"]`) is never sent one. When two
-  runners are given the same message with files, both type while they read it; it is still
-  answered once, and neither is left typing.
-
-### Migration notes
-
-None.
+- **A video gets 👀 and its turn shows no typing.** Default on, so an agent whose people send
+  videos shows 👀 on them and no typing for those turns. To move: nothing, or to have a video type
+  on arrival instead, `createAgent({ ...options, videoReaction: false })`.
 
 ## 0.17.0 (7 Nov 2026)
 

@@ -274,8 +274,8 @@ The agent reacts 👀 to a video the moment it arrives, before it is downloaded 
 turn that answers it shows no typing: the 👀 says it is on it, and the reply follows once the agent
 has seen or read the video. It is on by default; `createAgent({ videoReaction: false })` turns it off,
 and the video then types on arrival, kept up while it is described (on WhatsApp, with the blue
-ticks, which Flow Messaging sends with typing; with the reaction they come once the agent takes the
-video in). On Telegram 👀 is one of the reactions Telegram lets bots use; another emoji you pass must
+ticks, which Flow Messaging sends with typing; with the reaction the blue ticks go on arrival by
+themselves). On Telegram 👀 is one of the reactions Telegram lets bots use; another emoji you pass must
 be one too. On iMessage, iOS 18 and later show 👀 as a reaction; older iPhones may show it as a line of
 text. Where the channel has no reactions (SMS) or the reaction fails, that turn types instead.
 Photos, voice notes and documents type on arrival as other messages do.
