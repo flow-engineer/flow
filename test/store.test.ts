@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { z } from "zod";
-import { createAgent, sqlite, SMS_KEYWORDS, Store, tool, type Database, type Outbound } from "../src/index.ts";
+import { createAgent, sqlite, SMS_KEYWORDS, Store, tool, type Database, type Incoming, type Outbound } from "../src/index.ts";
 import { LEASE_MS } from "../src/conversation.ts";
 import { SMS, WHATSAPP, call, gate, last, multi, respond, scriptedModel, users } from "./helpers.ts";
 
@@ -94,10 +94,13 @@ test("while a deploy runs the old and new runner side by side, each message is a
   assert.deepEqual([...old.texts("sms"), ...next.texts("sms")], ["Thursday at 10.", "At the studio.", "Any time."]);
 });
 
-test("a message both runners are sent at once is answered once: the runner whose store write lost types nothing, and holding the conversation answers the other's copy", async () => {
+/**
+ * Two runners on one store sent one message at once, in the order seen on Cloud Run with a replaced
+ * instance still reading the stream: both check the id before either stores it; the old runner's
+ * write takes it; the new runner takes the lease and answers. Returns each runner's sends for it.
+ */
+async function bothRunnersGet(message: Incoming | string) {
   const path = file();
-  // The order seen on Cloud Run with a replaced instance still reading the stream: both check the
-  // id before either stores it; the old runner's write takes it; the new runner takes the lease.
   let racing = false;
   const checked = gate<void>();
   const stored = gate<void>();
@@ -134,28 +137,42 @@ test("a message both runners are sent at once is answered once: the runner whose
       return epoch;
     }
   }
-  const old = multi({ channels: CHANNELS, store: new OldStore(sqlite(path), "default") });
+  const describeVideo = async () => "A dented rear bumper.";
+  const old = multi({ channels: CHANNELS, store: new OldStore(sqlite(path), "default"), describeVideo });
   await old.agent.resume();
-  const sms = (messageId: string) => ({ channel: "sms", from: "+15550100100", message: "is Friday free?", messageId });
-  const a = await old.agent.message(sms("SM0"));
+  const sms = (messageId: string, text: Incoming | string) => ({ channel: "sms", from: "+15550100100", message: text, messageId });
+  const a = await old.agent.message(sms("SM0", "is Friday free?"));
   (await old.nextCall(0)).answer(respond(call("send_sms", { text: "Let me look." })));
   await old.agent.conversation(a!.conversationId)!.whenIdle();
-  const next = multi({ channels: CHANNELS, store: new NewStore(sqlite(path), "default"), dir: old.dir });
+  const next = multi({ channels: CHANNELS, store: new NewStore(sqlite(path), "default"), dir: old.dir, describeVideo });
   await next.agent.resume();
   const oldBefore = old.out.length;
 
   racing = true;
-  await Promise.all([old.agent.message(sms("SM1")), next.agent.message(sms("SM1"))]);
+  await Promise.all([old.agent.message(sms("SM1", message)), next.agent.message(sms("SM1", message))]);
   const turn = await next.nextCall(0);
-  assert.equal(users(turn.request.messages).at(-1), "[SM1] is Friday free?");
   turn.answer(respond(call("send_sms", { text: "Friday is free." })));
   await next.agent.conversation(a!.conversationId)!.whenIdle();
   await old.agent.conversation(a!.conversationId)?.whenIdle();
 
   assert.equal(old.calls.length, 1, "the old runner ran no turn for it");
   assert.deepEqual(next.texts("sms"), ["Friday is free."]);
-  assert.deepEqual(next.out.filter((o) => o.outbound.type === "typing"), [], "the runner whose write lost typed nothing");
-  assert.deepEqual(old.out.slice(oldBefore).map((o) => o.outbound), [{ type: "typing", on: true }, { type: "typing", on: false }], "the one whose write took it typed, then left it to the other");
+  return { seen: users(turn.request.messages).at(-1), old: old.out.slice(oldBefore).map((o) => o.outbound), next: next.out.map((o) => o.outbound) };
+}
+
+test("a message both runners are sent at once is answered once: the runner whose store write lost types nothing, and holding the conversation answers the other's copy", async () => {
+  const sent = await bothRunnersGet("is Friday free?");
+  assert.equal(sent.seen, "[SM1] is Friday free?");
+  assert.deepEqual(sent.next.filter((o) => o.type === "typing"), [], "the runner whose write lost typed nothing");
+  assert.deepEqual(sent.old, [{ type: "typing", on: true }, { type: "typing", on: false }], "the one whose write took it typed, then left it to the other");
+});
+
+test("a video both runners are sent at once: both type while they read it, it is answered once, and neither is left typing", async () => {
+  const video = { text: "is this covered?", attachments: [{ kind: "video" as const, mime: "video/mp4", data: async () => new Uint8Array(40) }] };
+  const sent = await bothRunnersGet(video);
+  assert.equal(sent.seen, "[SM1] [video, described: A dented rear bumper.] is this covered?");
+  assert.deepEqual(sent.old, [{ type: "typing", on: true }, { type: "typing", on: false }]);
+  assert.deepEqual(sent.next.filter((o) => o.type === "typing"), [{ type: "typing", on: true }, { type: "typing", on: false }]);
 });
 
 test("a runner that dies mid-turn leaves the turn to another once its lease runs out, and it runs there once", async () => {

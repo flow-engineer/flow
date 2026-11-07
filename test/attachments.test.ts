@@ -6,7 +6,8 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, describeVideoWith, openAICompatible, sqlite, type Attachment, type ChatMessage, type Database, type DescribeVideo, type FlowEvent, type Media, type Model, type Transcribe } from "../src/index.ts";
+import { format } from "node:util";
+import { createAgent, describeVideoWith, openAICompatible, sqlite, type Attachment, type ChannelInfo, type ChatMessage, type Database, type DescribeVideo, type FlowEvent, type Media, type Model, type Outbound, type Transcribe } from "../src/index.ts";
 import { call, gate, respond, say, scriptedModel } from "./helpers.ts";
 
 function agentWith(options: { reads?: Model["reads"]; transcribe?: Transcribe; describeVideo?: DescribeVideo; database?: Database; dir?: string } = {}) {
@@ -190,6 +191,70 @@ test("a video the model can't watch reaches it as describeVideo's text; one over
   assert.equal(t.events.find((e) => e.type === "message.in")?.description, "A cracked phone screen, turned in the light.");
   first.answer(respond(say("Screen damage is covered.")));
   await t.agent.conversation("v2")!.whenIdle();
+});
+
+/** A channel whose typing indicator lasts 1 s (sent again every 800 ms), as the platform's messages arrive: with their own ids. */
+const TYPED: ChannelInfo = { reactions: false, status: false, typingLastsMs: 1000 };
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test("a video or voice note with the platform's id types the moment it arrives, before it is downloaded and read, and typing is kept up while it is described", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const steps: string[] = [];
+  const described = gate<string>();
+  const transcribed = gate<string>();
+  const a = agentWith({ describeVideo: () => (steps.push("describe"), described.promise), transcribe: () => (steps.push("transcribe"), transcribed.promise) });
+  const deliver = (o: Outbound) => void steps.push(o.type === "typing" ? `typing ${o.on}` : o.type === "message" ? `message ${o.text}` : o.type);
+  const loaded = (kind: Attachment["kind"], mime: string): Attachment => ({ kind, mime, data: async () => (steps.push("download"), new Uint8Array(40)) });
+
+  a.agent.receive("v5", { text: "is this covered?", attachments: [loaded("video", "video/mp4")] }, deliver, { channel: TYPED, messageId: "wamid.V5" });
+  assert.deepEqual(steps, ["typing true"], "typing goes before anything is read");
+  await settle();
+  assert.deepEqual(steps, ["typing true", "download", "describe"]);
+  t.mock.timers.tick(800);
+  await settle();
+  assert.deepEqual(steps, ["typing true", "download", "describe", "typing true"], "kept up while the video is described");
+  described.open("A dented rear bumper.");
+  await settle();
+  t.mock.timers.tick(0);
+  const first = await a.nextCall(0);
+  assert.equal(lastUser(first.request.messages).content, "[wamid.V5] [video, described: A dented rear bumper.] is this covered?");
+  first.answer(respond(say("Bumper dents are covered.")));
+  await a.agent.conversation("v5")!.whenIdle();
+  assert.equal(steps.filter((s) => s === "typing true").length, 2, "typing was not sent again when the message was stored");
+  assert.ok(steps.includes("message Bumper dents are covered."));
+
+  steps.length = 0;
+  a.agent.receive("v6", { text: "", attachments: [loaded("audio", "audio/ogg")] }, deliver, { channel: TYPED, messageId: "wamid.A6" });
+  await settle();
+  assert.deepEqual(steps, ["typing true", "download", "transcribe"]);
+  transcribed.open("Book me in for Friday.");
+  await settle();
+  t.mock.timers.tick(0);
+  (await a.nextCall(1)).answer(respond(say("Friday it is.")));
+  await a.agent.conversation("v6")!.whenIdle();
+});
+
+test("a typing call that fails, or never answers, neither holds up describing a video nor stops the reply", async (t) => {
+  const warn = t.mock.method(console, "warn", () => {});
+  const refuse = gate<void>();
+  const steps: string[] = [];
+  const a = agentWith({ describeVideo: async () => (steps.push("describe"), "A dented rear bumper.") });
+  const deliver = (o: Outbound) => {
+    if (o.type === "message") steps.push(`message ${o.text}`);
+    // Typing hangs until the test refuses it.
+    if (o.type === "typing" && o.on) return refuse.promise.then(() => Promise.reject(new Error("invalid_request")));
+  };
+  a.agent.receive("v7", { text: "is this covered?", attachments: [file("video", "video/mp4", 40)] }, deliver, { channel: TYPED, messageId: "wamid.V7" });
+
+  const first = await a.nextCall(0);
+  assert.deepEqual(steps, ["describe"], "described while typing had no answer");
+  assert.equal(lastUser(first.request.messages).content, "[wamid.V7] [video, described: A dented rear bumper.] is this covered?");
+  refuse.open();
+  first.answer(respond(say("Bumper dents are covered.")));
+  await a.agent.conversation("v7")!.whenIdle();
+  assert.deepEqual(steps, ["describe", "message Bumper dents are covered."]);
+  assert.equal(warn.mock.callCount(), 1);
+  assert.match(format(...warn.mock.calls[0].arguments), /typing on chat in conversation v7 failed, so no more typing this turn: invalid_request$/);
 });
 
 test("with neither a video model nor describeVideo, the agent is told a video came that it can't watch, and it is never downloaded", async () => {

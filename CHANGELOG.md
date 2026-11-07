@@ -2,6 +2,27 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **A video shows the agent typing at once, not after it is described.** Since 0.17.0 typing for
+  a message with the platform's id (every Flow Messaging message) started only once it was stored,
+  which for a video came after its description (3.7 s for one, up to 25 s for several at once), so
+  until then the person saw nothing. A message with files now types the moment it arrives, before they are downloaded and read:
+  a video being described (`describeVideo`), a voice note being transcribed (`transcribe`), a photo
+  or PDF being downloaded. On WhatsApp the typing call also shows the blue ticks (Flow Messaging
+  anchors it on their latest message); on iMessage the read receipt still goes when the turn takes
+  the message. Typing is kept up while the description runs (`typingLastsMs`: every 20 s on
+  WhatsApp), and a typing call that fails or hangs never holds up the description or the reply.
+  Default on; a channel with `typing: false` (or `disable: ["typing"]`) is never sent one. When two
+  runners are given the same message with files, both type while they read it; it is still
+  answered once, and neither is left typing.
+
+### Migration notes
+
+Nothing to change.
+
 ## 0.17.0 (7 Nov 2026)
 
 ### Changes
