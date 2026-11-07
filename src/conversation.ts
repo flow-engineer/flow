@@ -1897,8 +1897,9 @@ export class Conversation {
   /**
    * A message with a video gets the agent's videoReaction now, before it is read, where the channel
    * takes that emoji; its turn then shows no typing on that channel (typing already showing is
-   * hidden). A reaction that fails is logged and gives the turn its typing back. Two runners given
-   * one message both react; the platform keeps one reaction.
+   * hidden). On WhatsApp, whose typing call carries the blue ticks, the read receipt goes with it
+   * instead, by itself. A reaction that fails is logged and gives the turn its typing back. Two
+   * runners given one message both react; the platform keeps one reaction.
    */
   private reactToVideo(incoming: Incoming, id: string, channel: string): void {
     const emoji = this.settings.videoReaction;
@@ -1908,6 +1909,7 @@ export class Conversation {
     if (!waiting) this.videoWaiting.set(channel, (waiting = new Set()));
     waiting.add(id);
     if (this.typingOn.delete(channel)) void this.send(channel, { type: "typing", on: false });
+    if (link.info.platform === "whatsapp" && link.info.readReceipts) void this.send(channel, { type: "read", messageIds: [id] });
     void this.send(channel, { type: "reaction", emoji, messageId: id }).then((failure) => {
       if (!failure) return void this.settings.emit(this.id, "reaction", { emoji, messageId: id, channel, arrival: true });
       log("WARNING", "flow: the reaction to a video on %s in conversation %s failed, so its turn types instead: %s", channel, this.id, failure);
