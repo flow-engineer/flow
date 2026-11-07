@@ -2,7 +2,7 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## Unreleased
+## 0.17.1 (7 Nov 2026)
 
 ### Changes
 
@@ -21,7 +21,7 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
-Nothing to change.
+None.
 
 ## 0.17.0 (7 Nov 2026)
 
