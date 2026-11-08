@@ -52,6 +52,7 @@ npm install
 npx @flow-engineer/flow link --channel telegram --json   # or whatsapp, imessage: signs in and sets up if needed (the keys, Flow's trial model key among them), then prints the phone link
 npm start                                           # after link: keep it running; the playground link it prints, and the phone link reaches it
 npx @flow-engineer/flow status --json               # any time: what the folder has and lacks
+npx @flow-engineer/flow link --channel whatsapp --own --json   # the business's own WhatsApp number: a link the owner opens to connect it in Meta's window, then the number (exit 4 if not connected within --timeout)
 printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check: talk to it locally, one message per line
 ```
 
@@ -648,6 +649,7 @@ MCP on stdio on `@modelcontextprotocol/server`, which comes with Flow Framework:
 | `list_insights` | `flow insights`: `days` 7 or 30 (default 7), `status` `open` (default), `fixed`, `muted` or `all` | `FLOW_LIVE_KEY` when set, else a `flow_live_` `FLOW_KEY` |
 | `insight_conversations` | `flow insights show <finding>`: `finding`, `days`; each conversation's `window`, the 3 messages before the flagged one and 2 after, when Flow sends it | `FLOW_LIVE_KEY` when set, else a `flow_live_` `FLOW_KEY` |
 | `list_templates` | `flow templates`: `status` `approved` (default) or `all` | `FLOW_KEY` |
+| `connect_whatsapp` | `flow link --channel whatsapp --own`: not connected, `{needs_person: true, link, next}` (a person opens the link and connects the number in Meta's window); connected, `{phone, name, state, display_name, payment_method, templates}` | `FLOW_KEY` |
 | `read_logs` | `flow logs`: `environment` (default staging), `since` (default 1h, at most 30d), `until`, `severity`, `grep`, `limit` (default 200, the newest; `truncated` says when more matched) | CI key |
 | `deploy_status` | `flow deploy status`: `environment` (default both) | CI key |
 
@@ -681,7 +683,7 @@ MCP on stdio on `@modelcontextprotocol/server`, which comes with Flow Framework:
 - Message text is as the agent API sends it: de-identified on a live key made without `--content`,
   withheld for accounts that keep it back, and contacts only as a label (`Contact 4f1c`).
 
-Expected result: `/mcp` in Claude Code lists `flow` with eight tools, and "did the booking tool fail
+Expected result: `/mcp` in Claude Code lists `flow` with nine tools, and "did the booking tool fail
 in the last conversation?" runs `list_conversations`, then `show_conversation`.
 
 ## WhatsApp templates

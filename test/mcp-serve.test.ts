@@ -46,7 +46,7 @@ test("flow mcp serve lists its tools, every one read-only, and says what it is f
   const client = await serve("http://127.0.0.1:9");
   try {
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((t) => t.name), ["list_conversations", "show_conversation", "list_issues", "list_insights", "insight_conversations", "list_templates", "read_logs", "deploy_status"]);
+    assert.deepEqual(tools.map((t) => t.name), ["list_conversations", "show_conversation", "list_issues", "list_insights", "insight_conversations", "list_templates", "connect_whatsapp", "read_logs", "deploy_status"]);
     for (const t of tools) assert.equal(t.annotations?.readOnlyHint, true, t.name);
     assert.deepEqual((tools.find((t) => t.name === "list_issues")!.inputSchema.properties as Record<string, { enum?: string[]; default?: string }>).status, { type: "string", enum: ["open", "resolved", "ignored", "all"], default: "open", description: "Which issues" });
     assert.match(client.getInstructions() ?? "", /Did a tool call fail, or was a reply delivered\?.*show_conversation/);
@@ -64,7 +64,8 @@ test("the instructions and every Flow-key tool's description say the live key's 
   const client = await serve("http://127.0.0.1:9");
   try {
     const { tools } = await client.listTools();
-    const flowKeyTools = tools.filter((t) => !/^(read_logs|deploy_status)$/.test(t.name));
+    // connect_whatsapp reads with any Flow key and says nothing of the tiers.
+    const flowKeyTools = tools.filter((t) => !/^(read_logs|deploy_status|connect_whatsapp)$/.test(t.name));
     assert.equal(flowKeyTools.length, 6);
     for (const text of [client.getInstructions() ?? "", ...flowKeyTools.map((t) => t.description!)]) {
       for (const tier of tiers) assert.ok(text.includes(tier), `${text.slice(0, 40)}: ${tier}`);
@@ -84,6 +85,31 @@ test("list_conversations reads the cloud with FLOW_KEY and returns the conversat
     assert.deepEqual(result.structuredContent, { conversations: [conversation], next_cursor: null });
     assert.match((result.content as Array<{ text: string }>)[0]!.text, /^1 conversation, 2 replies graded wrong\./);
     assert.deepEqual(cloud.seen, [{ url: "/v1/agent/conversations?environment=staging&grade=wrong&limit=20", authorization: `Bearer ${KEY}` }]);
+  } finally {
+    await client.close();
+    await cloud.close();
+  }
+});
+
+test("connect_whatsapp gives the link a person opens in Meta's window until the number is connected, then the number; a dashboard without the route says so", async () => {
+  const link = "https://flow.engineer/dashboard/projects/agt_1/connections/platform/whatsapp#own-number";
+  const answers = [
+    { status: 200, body: { connected: false, needs_person: true, link } },
+    { status: 200, body: { connected: true, needs_person: false, link, phone: "+447700900142", name: "Larkspur Bakery", state: "live", onboarding: "new", display_name: "not_reviewed", payment_method: "missing", templates: 0 } },
+    { status: 404, body: {} },
+  ];
+  const cloud = await fakeCloud(() => answers.shift()!);
+  const client = await serve(cloud.url);
+  try {
+    const waiting = await client.callTool({ name: "connect_whatsapp", arguments: {} });
+    assert.deepEqual(waiting.structuredContent, { needs_person: true, link, next: "Ask the owner to open the link; call again to see the number" });
+    const connected = await client.callTool({ name: "connect_whatsapp", arguments: {} });
+    assert.deepEqual(connected.structuredContent, { phone: "+447700900142", name: "Larkspur Bakery", state: "live", display_name: "not_reviewed", payment_method: "missing", templates: 0 });
+    assert.match((connected.content as Array<{ text: string }>)[0]!.text, /^WhatsApp: \+447700900142 · Larkspur Bakery · live\./);
+    const older = await client.callTool({ name: "connect_whatsapp", arguments: {} });
+    assert.equal(older.isError, true);
+    assert.equal((older.structuredContent as { error: { code: string } }).error.code, "not_available");
+    assert.deepEqual(cloud.seen.map((r) => [r.url, r.authorization]), Array(3).fill(["/v1/agent/whatsapp", `Bearer ${KEY}`]));
   } finally {
     await client.close();
     await cloud.close();
@@ -232,8 +258,8 @@ test("hosted, every tool reads the agent the call names (or the person's only on
   try {
     await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`)));
     const listed = (await client.listTools()).tools;
-    // The CLI's own reads stay the CLI's: a host sees list_agents and the eight.
-    assert.deepEqual(listed.map((t) => t.name), ["list_agents", "list_conversations", "show_conversation", "list_issues", "list_insights", "insight_conversations", "list_templates", "read_logs", "deploy_status"]);
+    // The CLI's own reads stay the CLI's: a host sees list_agents and the nine.
+    assert.deepEqual(listed.map((t) => t.name), ["list_agents", "list_conversations", "show_conversation", "list_issues", "list_insights", "insight_conversations", "list_templates", "connect_whatsapp", "read_logs", "deploy_status"]);
     assert.ok(listed.slice(1).every((t) => "agent" in (t.inputSchema.properties as object)), "every read takes agent");
     assert.doesNotMatch(JSON.stringify(listed), /FLOW_KEY|\.env/);
     assert.deepEqual((await client.callTool({ name: "list_agents", arguments: {} })).structuredContent, { agents: [SHOP, CAFE] });

@@ -28,9 +28,9 @@ Any other MCP host: the command npx, the arguments @flow-engineer/flow mcp serve
 agent's folder (or add --dir <folder>).
 
 Tools (all read-only): list_conversations, show_conversation, list_issues, list_insights,
-insight_conversations, list_templates, read_logs, deploy_status. They read what flow
-conversations, flow issues, flow insights, flow templates, flow logs and flow deploy status
-print, as JSON.
+insight_conversations, list_templates, connect_whatsapp, read_logs, deploy_status. They read what
+flow conversations, flow issues, flow insights, flow templates, flow link --channel whatsapp --own,
+flow logs and flow deploy status print, as JSON.
 
   --dir <folder>   The agent's folder, whose .env holds the keys (default: .)
   --cloud <url>    Flow's address (default: FLOW_FRAMEWORK_CLOUD, else https://flow.engineer/observe)
@@ -38,7 +38,8 @@ print, as JSON.
 
 Keys: each call reads them again, the environment the server started with first, then the
 folder's .env, so a key fixed in .env works on the next call without a restart.
-  FLOW_KEY                  list_conversations, show_conversation, list_issues, list_templates.
+  FLOW_KEY                  list_conversations, show_conversation, list_issues, list_templates,
+                            connect_whatsapp.
                             flow_test_... reads staging only
   FLOW_LIVE_KEY             The live Flow key, for production reads whenever it is set:
                             list_conversations and show_conversation with environment production,

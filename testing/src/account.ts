@@ -30,6 +30,8 @@ import { deployedFrom } from "./deploy.ts";
 import { flowModelURL, hasModelKey, MODEL_KEY_NAMES, NO_MODEL_KEY } from "../../src/model.ts";
 import { RUN } from "../../src/names.ts";
 import { runningAgent } from "../../src/local.ts";
+import { folderReads, OWN_WHATSAPP_NOT_YET, ownWhatsApp, ownWhatsAppPage, type OwnWhatsApp } from "./flow-tools.ts";
+import { Failed } from "./conversations.ts";
 
 export const ACCOUNT_COMMANDS = new Set(["login", "logout", "whoami", "setup", "link", "status"]);
 
@@ -74,10 +76,15 @@ export const ACCOUNT_LINES = `  flow login [--wait | --no-wait] [--timeout <s>] 
                             and runs setup first when this folder is not set up yet. --display-name
                             (here and on setup) renames the agent: package.json's displayName and
                             its prompt, agent/AGENTS.md; the phone link then says "Join <name>"
+  flow link --channel whatsapp --own [--no-wait] [--timeout <s>] [--json]
+                            The business's own WhatsApp number: prints the dashboard link a person
+                            opens to connect it in Meta's window, then waits up to --timeout
+                            (default 120) for it and prints the number (exit 4 if it isn't
+                            connected by then); --no-wait prints the link only
   flow status [--json]      What this folder has and lacks: FLOW_KEY and the model key (never their
                             values) with the trial credit left, the workspace, the
                             sign-in, each channel's sender in .env, and, signed in, which channels
-                            are open now and their free-trial counts (the account's, across all
+                            are open now, the business's own WhatsApp number when it has one, and their free-trial counts (the account's, across all
                             its agents; --json's account_trial). setup, link and status name
                             the paid plans (https://flow.engineer/dashboard/plans) once a channel's
                             trial has 80% of its people or holds new ones`;
@@ -92,7 +99,8 @@ Nothing asks for input. A code not approved in time is kept in ~/.config/flow-fr
 (mode 0600) until it expires, for ${RUN} login --wait. Signed in already, login says so; --force signs in again.
 
 Exit status: 0 done, 1 usage or not signed in, 2 network, 3 refused, denied or expired,
-4 still waiting for approval (run ${RUN} login --wait), or flow.engineer asked to wait (try again after the time it gives).`;
+4 still waiting for approval (run ${RUN} login --wait) or for the owner to connect their own WhatsApp
+number, or flow.engineer asked to wait (try again after the time it gives).`;
 
 const NEXT = { login: `${RUN} login`, wait: `${RUN} login --wait`, setup: `${RUN} setup`, link: `${RUN} link` };
 const CHANNELS = ["telegram", "whatsapp", "imessage"];
@@ -159,7 +167,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
             }
           : {}),
         ...(command === "setup" ? { replace: { type: "boolean", default: false }, rotate: { type: "string" }, now: { type: "boolean", default: false }, ci: { type: "boolean", default: false }, live: { type: "boolean", default: false }, content: { type: "boolean", default: false } } : {}),
-        ...(command === "link" ? { channel: { type: "string", default: "telegram" } } : {}),
+        ...(command === "link" ? { channel: { type: "string", default: "telegram" }, own: { type: "boolean", default: false }, "no-wait": { type: "boolean", default: false } } : {}),
         ...(command === "link" || command === "setup" ? { "display-name": { type: "string" }, workspace: { type: "string" } } : {}),
       },
     }));
@@ -177,6 +185,12 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
   const channel = String(values.channel);
   if (command === "link" && !CHANNELS.includes(channel)) {
     return usageExit(args, `flow link: --channel takes ${CHANNELS.join(", ")}.`, USAGE);
+  }
+  if (command === "link" && values.own === true && channel !== "whatsapp") {
+    return usageExit(args, `flow link: --own is the business's own WhatsApp number: give it with --channel whatsapp.`, USAGE);
+  }
+  if (command === "link" && values["no-wait"] === true && values.own !== true) {
+    return usageExit(args, `flow link: --no-wait goes with --own: it prints the link without waiting for the number.`, USAGE);
   }
   const rotate = values.rotate === undefined ? [] : String(values.rotate).split(",").map((k) => k.trim());
   const live = values.live === true;
@@ -225,6 +239,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     else if (command === "status") await status(json, out, say);
     else if (command === "setup" && live) await setupLiveKey({ content: values.content === true, rotate: rotate.length > 0, workspace }, json, out, say);
     else if (command === "setup") await setupEnv({ replace: values.replace === true, rotate, now: values.now === true, ci: values.ci === true, workspace }, json, out, say);
+    else if (values.own === true) await linkOwnWhatsApp({ noBrowser: values["no-browser"] === true, noWait: values["no-wait"] === true, timeoutSeconds, workspace }, json, out, say);
     else await link({ channel, noBrowser: values["no-browser"] === true, timeoutSeconds, renamed, workspace }, json, out, say);
     return EXIT.ok;
   } catch (error) {
@@ -232,7 +247,7 @@ export async function accountCli(command: string, args: string[]): Promise<numbe
     printWarnings(stop.warnings);
     writeAll(2, `${!stop.next ? stop.message : isCommand(stop.next) ? `${stop.message} Next: ${stop.next}` : `${stop.message}\n${stop.next}`}\n`);
     if (json) {
-      out(stop instanceof Pending ? stop.report : {
+      out(stop instanceof Pending || stop instanceof NotConnected ? stop.report : {
         ...errorReport(stop.code, stop.message, stop.next, stop.retryAfter !== undefined ? { retry_after: stop.retryAfter } : {}),
         ...(stop.warnings.length ? { warnings: stop.warnings } : {}),
       });
@@ -1250,12 +1265,7 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
   if (current && (!current.url || current.url === url)) {
     try {
       account = await whoami(url, current.token);
-      if (joinCode && existsSync(join(process.cwd(), "package.json"))) {
-        const name = agentName(process.cwd());
-        const have = [...Object.values(SETUP_ENV).filter((n) => n !== SETUP_ENV.try_url), ...MODEL_KEY_NAMES];
-        const workspace = value(WORKSPACE_ENV);
-        server = await setup(url, current.token, { name, hostname: hostname(), channels: [...CHANNELS], have, ...(workspace ? { workspace } : {}) });
-      }
+      if (joinCode && existsSync(join(process.cwd(), "package.json"))) server = await setupAsHad(url, current.token, value);
     } catch {
       // Signed out on the server, or not reachable: status says what it can from here.
     }
@@ -1281,7 +1291,8 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
   ];
   const workspace = value(WORKSPACE_ENV) || "personal";
   const plans = plansNext(Object.fromEntries(CHANNELS.map((c) => [c, channels[c]!.trial])));
-  if (json) out({ model_key: model.report, flow_key: { set: Boolean(value(FLOW_KEY)) }, workspace, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, deployed, next, plans: plans ?? null });
+  const own = await ownNumber(value);
+  if (json) out({ model_key: model.report, flow_key: { set: Boolean(value(FLOW_KEY)) }, workspace, signed_in: account ? { email: account.email, account: account.account } : false, join_code: joinCode, messaging_key: Boolean(value(SETUP_ENV.messaging_key)), channels, whatsapp_own: own, deployed, next, plans: plans ?? null });
   if (model.report.env && model.report.env !== FLOW_KEY) say(value(FLOW_KEY) ? `${FLOW_KEY} is set.` : `${FLOW_KEY}: not set yet (${RUN} setup writes it).`);
   say(model.line);
   say(`Workspace: ${workspace}`);
@@ -1291,6 +1302,11 @@ async function status(json: boolean, out: Out, say: Say): Promise<void> {
     const where = sender ? "in .env" : "not in .env";
     const now = open === null ? "" : open ? "; open now" : "; not open yet";
     say(`${CHANNEL_NAME[c]}: ${c === "telegram" ? `Flow Messaging key ${where}` : `sender ${where}`}${now}${trialNote(trial ?? undefined)}`);
+    if (c === "whatsapp" && own) {
+      // Only what needs the owner: a payment method Meta has not got, a display name it rejected.
+      const needs = [own.payment_method === "missing" ? "payment method not added" : "", own.display_name === "rejected" ? "display name rejected" : ""].filter(Boolean);
+      say(`WhatsApp: your own number ${own.phone ?? "?"}, ${stateWords(own.state)}${needs.map((n) => ` · ${n}`).join("")}`);
+    }
   }
   if (next.length) say(`Next: ${next.join(", then ")}`);
   if (plans) say(`Next: ${plans.message}`);
@@ -1319,6 +1335,126 @@ async function flowModelStatus(value: (name: string) => string | undefined): Pro
       return { report: { ...local.report, flow_credit: error.code === "trial_credit_used" ? { left_usd: 0 } : null, message }, line: message, next: OWN_KEY };
     }
     return { ...local, line: `${local.line} (credit left unknown: Flow could not be reached)` };
+  }
+}
+
+/**
+ * setup asked with every key named as had, so nothing is made and nothing written: status's call,
+ * for which channels are open and their trials, and the agent's id.
+ */
+async function setupAsHad(url: string, token: string, value: (name: string) => string | undefined): Promise<SetupAnswer> {
+  const have = [...Object.values(SETUP_ENV).filter((n) => n !== SETUP_ENV.try_url), ...MODEL_KEY_NAMES];
+  const workspace = value(WORKSPACE_ENV);
+  return await setup(url, token, { name: agentName(process.cwd()), hostname: hostname(), channels: [...CHANNELS], have, ...(workspace ? { workspace } : {}) });
+}
+
+/** The agent's own WhatsApp number for status, when it has one; anything else (no key, no route, Flow unreachable) is none. */
+async function ownNumber(value: (name: string) => string | undefined): Promise<OwnWhatsApp | null> {
+  if (!value(FLOW_KEY) && !value(LIVE_ENV)) return null;
+  try {
+    const own = await ownWhatsApp("flow status", await folderReads(process.cwd(), process.env, undefined, { note: () => {} }).flow());
+    return own.connected ? own : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A number's state as said to the owner: observe's word, its underscores as spaces. */
+const stateWords = (state: string | undefined) => (state ?? "unknown").replace(/_/g, " ");
+
+/** How often `link --own` asks whether the number is connected. */
+const OWN_POLL_MS = 3000;
+const OWN_AGAIN = `${NEXT.link} --channel whatsapp --own`;
+
+/** The number not connected yet when link --own stops waiting (or with --no-wait): exit 4, its link in the report. */
+class NotConnected extends Stop {
+  readonly report: Record<string, unknown>;
+  constructor(link: string, waited: number | null) {
+    super("not_connected", waited !== null ? `WhatsApp isn't connected yet after ${waited} s: the owner opens the link and presses Connect WhatsApp.` : "WhatsApp isn't connected yet: the owner opens the link and presses Connect WhatsApp.", OWN_AGAIN, EXIT.pending);
+    this.report = { status: "pending", connected: false, needs_person: true, link, waited_s: waited ?? 0, next: OWN_AGAIN };
+  }
+}
+
+/** A read of observe that failed, as a command's end: a network failure exits 2, a refusal 3. */
+function readStop(error: unknown): unknown {
+  if (!(error instanceof Failed)) return error;
+  return new Stop(error.code, error.message, error.next, error.code === "network" ? EXIT.network : EXIT.refused);
+}
+
+/**
+ * `link --channel whatsapp --own`: the business's own WhatsApp number, connected by a person in
+ * Meta's window (Embedded Signup) on the dashboard. With no Flow key in .env it signs in and runs
+ * setup first, as link does. Then GET /v1/agent/whatsapp: connected already, the number at once;
+ * else the link for the owner, and every few seconds again until it is connected (exit 4 at
+ * --timeout, or at once with --no-wait). Flow not offering the signup there: its reason and the
+ * manual setup page (exit 3). A dashboard without the route (404): said so, with the WhatsApp page.
+ */
+async function linkOwnWhatsApp(options: { noBrowser: boolean; noWait: boolean; timeoutSeconds: number; workspace?: string }, json: boolean, out: Out, say: Say): Promise<void> {
+  let value = dotenvValue();
+  let agent: string | undefined;
+  if ((options.workspace !== undefined && (movesWorkspace(options.workspace, value) || !value(WORKSPACE_ENV))) || (!value(FLOW_KEY) && !value(LIVE_ENV))) {
+    agentFolder(process.cwd());
+    if (!(await signedInAccount(loginUrl()))) {
+      say("Not signed in to flow.engineer yet: signing in first.");
+      await login({ noBrowser: options.noBrowser, wait: false, noWait: false, force: true, timeoutSeconds: options.timeoutSeconds, resume: { then: OWN_AGAIN } }, json, out, say);
+    }
+    say("Setting up this agent's keys in .env.");
+    agent = (await setupEnv({ replace: false, rotate: [], ci: false, workspace: options.workspace }, json, out, say, { channel: "whatsapp" })).answer.agent_id;
+    value = dotenvValue();
+  }
+  let where;
+  let own: OwnWhatsApp;
+  const ask = async () => ownWhatsApp(`${NEXT.link} --own`, where!);
+  try {
+    where = await folderReads(process.cwd(), process.env, undefined).flow();
+    own = await ask();
+  } catch (error) {
+    if (error instanceof Failed && error.status === 404 && where) {
+      agent ??= await agentId(value);
+      throw new Stop("not_available", `WhatsApp, your own number: ${OWN_WHATSAPP_NOT_YET} (${where.cloud} answered 404). Open the project's WhatsApp page on the dashboard and press Connect WhatsApp there.`, ownWhatsAppPage(where.cloud, agent), EXIT.refused);
+    }
+    throw readStop(error);
+  }
+  if (!own.connected && own.available === false) {
+    throw new Stop("not_offered", `WhatsApp, your own number: ${own.why || "Flow doesn't offer connecting it through Meta here."} Set it up by hand with your own Meta app.`, own.link ?? ownWhatsAppPage(where.cloud, agent), EXIT.refused);
+  }
+  if (!own.connected) {
+    const link = own.link ?? ownWhatsAppPage(where.cloud, agent);
+    // The link first, as login's pending line, so a coding agent can hand it over while this waits.
+    if (json) out({ status: "pending", connected: false, needs_person: true, link, next: "Ask the owner to open the link and press Connect WhatsApp" });
+    say("WhatsApp, your own number: this step needs a person, in Meta's window.");
+    say("Ask the owner to open this and press Connect WhatsApp:");
+    say(`  ${link}`);
+    if (options.noWait) throw new NotConnected(link, null);
+    say(`Waiting for the number… (--timeout ${options.timeoutSeconds}; exit 4 if it isn't connected yet)`);
+    const started = Date.now();
+    const stopAt = started + options.timeoutSeconds * 1000;
+    while (!own.connected) {
+      const left = stopAt - Date.now();
+      if (left <= 0) throw new NotConnected(link, Math.round((Date.now() - started) / 1000));
+      await delay(Math.min(OWN_POLL_MS, left));
+      try {
+        own = await ask();
+      } catch (error) {
+        // While a person is in Meta's window, a blip in reaching Flow is asked again; a refusal is not.
+        if (error instanceof Failed && (error.code === "network" || (error.status ?? 0) >= 500)) continue;
+        throw readStop(error);
+      }
+    }
+  }
+  if (json) out({ status: "connected", connected: true, phone: own.phone ?? null, name: own.name ?? null, state: own.state ?? null, onboarding: own.onboarding ?? null, display_name: own.display_name ?? null, payment_method: own.payment_method ?? null, templates: own.templates ?? 0, link: own.link ?? null });
+  say(`✓ WhatsApp: ${own.phone ?? "?"} · ${own.name ?? "?"} · ${stateWords(own.state)}`);
+}
+
+/** The agent's id (agt_...) from setup asked as status asks it, when signed in here; else none. */
+async function agentId(value: (name: string) => string | undefined): Promise<string | undefined> {
+  const current = currentToken();
+  const url = loginUrl();
+  if (!current || (current.url && current.url !== url) || !existsSync(join(process.cwd(), "package.json"))) return undefined;
+  try {
+    return (await setupAsHad(url, current.token, value)).agent_id;
+  } catch {
+    return undefined;
   }
 }
 
