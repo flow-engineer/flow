@@ -9,7 +9,8 @@
 //   It never outlives the turn. Refused outside the person's window for it, it waits for the agent's
 //   next message; any other failure ends it for the turn. A message with a video gets a reaction
 //   instead (videoReaction, 👀) on arrival, before it is read, and its turn shows no typing on that
-//   channel; where the channel can't take the reaction, or it fails, the turn types.
+//   channel for VIDEO_TYPING_AFTER_MS: a quick reply shows only the 👀, a slower one types from then
+//   on as for any message; where the channel can't take the reaction, or it fails, the turn types.
 // - Double texts fold into the reply in progress. Someone who sends another message is usually
 //   correcting themselves, so a model step in flight is aborted and runs again with every message
 //   so far; one that arrives while tools run ends the wait for them (below).
@@ -179,6 +180,8 @@ export function resetLine(note?: string): string {
   return note?.trim() ? `${RESET}\nBefore this: ${note.trim()}` : RESET;
 }
 const NOT_SHOWN = "[Chinwag] You are no longer shown the photos, videos or documents in these messages; ask them to send one again if you need it.";
+/** A message reacted to on arrival (videoReaction): the agent does not react to it with that emoji again. */
+const reactedLine = (id: string, emoji: string) => `[Chinwag] ${id} already has your ${emoji} reaction; don't react ${emoji} to it again.`;
 
 /** A server-verified auth change: an internal prompt, never a prewritten chat response. */
 export function signInNotice(channel: string, request?: string): string {
@@ -193,6 +196,8 @@ const MEDIA_SHOWN = 3;
 const VIDEOS_SHOWN = 1;
 /** Typing is sent again this far into the platform's indicator lifetime (typingLastsMs), before it hides. */
 const TYPING_AGAIN = 0.8;
+/** A video reacted to on arrival types too once this long has passed with nothing from the agent (reading one can take half a minute). */
+const VIDEO_TYPING_AFTER_MS = 5_000;
 /**
  * The largest photo, and the largest PDF, voice note or video, the agent reads (most models take 5 MB
  * images; a 10 MB video is about 13 MB as base64, within Gemini's 20 MB for a request's inline files).
@@ -387,10 +392,15 @@ export class Conversation {
   private readonly typingOn = new Set<string>();
   /** Channels typing is kept up on until the turn ends (from the person's message). */
   private readonly typingKept = new Map<string, TypingKept>();
-  /** Videos reacted to on arrival (videoReaction) that no turn has taken yet, by channel: no typing shows there meanwhile. */
+  /** Videos reacted to on arrival (videoReaction) that no turn has taken yet, by channel: no typing shows there meanwhile, until VIDEO_TYPING_AFTER_MS. */
   private readonly videoWaiting = new Map<string, Set<string>>();
-  /** Channels whose turn took a video reacted to on arrival: no typing shows there until the turn ends. */
+  /** Channels whose turn took a video reacted to on arrival: no typing shows there until the turn ends, or VIDEO_TYPING_AFTER_MS passes. */
   private readonly videoTurn = new Set<string>();
+  /** Channels with a video reacted to on arrival, until VIDEO_TYPING_AFTER_MS passes: then typing shows there after all (videoLate). */
+  private readonly videoTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly videoLate = new Set<string>();
+  /** The emoji each message was reacted to with on arrival, once the reaction went: the agent is told so when it reads the message. */
+  private readonly reactedOnArrival = new Map<string, string>();
   /** One challenge per channel per turn, even when the model calls several protected tools. */
   private signInPrompts = new Map<string, Promise<{ message: string; url?: string }>>();
   private authBlocked = new Set<string>();
@@ -698,6 +708,7 @@ export class Conversation {
       })
       .catch((error) => {
         this.videoWaiting.get(channel)?.delete(id);
+        this.reactedOnArrival.delete(id);
         log("WARNING", "flow: a message in conversation %s could not be read:", this.id, error);
       });
     this.preparing = ready;
@@ -728,6 +739,8 @@ export class Conversation {
         // runner's inbox row is answered (takeOpen), not marked done as if it were in the history.
         this.pending = this.pending.filter((waiting) => waiting !== item);
         this.videoWaiting.get(channel)?.delete(id);
+        this.reactedOnArrival.delete(id);
+        this.forgetVideoTyping(false);
         if (!this.pending.some((waiting) => waiting.id === id && waiting.channel === channel) && !this.inHistory(id, channel)) this.messageIds.delete(id);
         this.settings.emit(this.id, "message.duplicate", { messageId: id, channel });
         return;
@@ -1060,6 +1073,7 @@ export class Conversation {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.dropTyping();
+    this.reactedOnArrival.clear();
     this.pending = [];
     this.notes = [];
     this.direct = [];
@@ -1391,7 +1405,12 @@ export class Conversation {
       const read = () => {
         if (!group.length) return;
         const media = group.flatMap((m) => m.media ?? []);
-        this.history.push({ role: "user", content: group.map(line).join("\n"), ...(media.length ? { media } : {}), messages: group.map(said) });
+        const reacted = group.flatMap((m) => {
+          const emoji = this.reactedOnArrival.get(m.id);
+          this.reactedOnArrival.delete(m.id);
+          return emoji ? [reactedLine(m.id, emoji)] : [];
+        });
+        this.history.push({ role: "user", content: [...group.map(line), ...reacted].join("\n"), ...(media.length ? { media } : {}), messages: group.map(said) });
         if (media.length) this.showLatestMedia();
         group = [];
       };
@@ -1897,9 +1916,10 @@ export class Conversation {
   /**
    * A message with a video gets the agent's videoReaction now, before it is read, where the channel
    * takes that emoji; its turn then shows no typing on that channel (typing already showing is
-   * hidden). On WhatsApp, whose typing call carries the blue ticks, the read receipt goes with it
-   * instead, by itself. A reaction that fails is logged and gives the turn its typing back. Two
-   * runners given one message both react; the platform keeps one reaction.
+   * hidden) for VIDEO_TYPING_AFTER_MS, after which it types if nothing has reached them since. On
+   * WhatsApp, whose typing call carries the blue ticks, the read receipt goes with it instead, by
+   * itself. A reaction that fails is logged and gives the turn its typing back at once. Two runners
+   * given one message both react; the platform keeps one reaction.
    */
   private reactToVideo(incoming: Incoming, id: string, channel: string): void {
     const emoji = this.settings.videoReaction;
@@ -1908,20 +1928,51 @@ export class Conversation {
     let waiting = this.videoWaiting.get(channel);
     if (!waiting) this.videoWaiting.set(channel, (waiting = new Set()));
     waiting.add(id);
-    if (this.typingOn.delete(channel)) void this.send(channel, { type: "typing", on: false });
+    // A channel already typing for a video past its wait keeps typing.
+    if (!this.videoLate.has(channel)) {
+      if (this.typingOn.delete(channel)) void this.send(channel, { type: "typing", on: false });
+      if (!this.videoTimers.has(channel)) {
+        const timer = setTimeout(() => this.videoWaited(channel), VIDEO_TYPING_AFTER_MS);
+        timer.unref?.();
+        this.videoTimers.set(channel, timer);
+      }
+    }
     if (link.info.platform === "whatsapp" && link.info.readReceipts) void this.send(channel, { type: "read", messageIds: [id] });
     void this.send(channel, { type: "reaction", emoji, messageId: id }).then((failure) => {
-      if (!failure) return void this.settings.emit(this.id, "reaction", { emoji, messageId: id, channel, arrival: true });
+      if (!failure) {
+        this.reactedOnArrival.set(id, emoji);
+        return void this.settings.emit(this.id, "reaction", { emoji, messageId: id, channel, arrival: true });
+      }
       log("WARNING", "flow: the reaction to a video on %s in conversation %s failed, so its turn types instead: %s", channel, this.id, failure);
       const untaken = this.videoWaiting.get(channel)?.delete(id) ?? false;
       if (!untaken) this.videoTurn.delete(channel);
+      this.forgetVideoTyping(false);
       if (untaken || this.unanswered.has(channel)) this.startTyping(channel);
     });
   }
 
-  /** Typing does not show on `channel`: a video there was reacted to on arrival, and the turn that answers it has not ended. */
+  /** VIDEO_TYPING_AFTER_MS passed since a video on `channel` was reacted to: typing shows there from now on, if nothing has reached them since. */
+  private videoWaited(channel: string): void {
+    this.videoTimers.delete(channel);
+    if (this.closed || this.gone) return;
+    this.videoLate.add(channel);
+    if (this.videoWaiting.get(channel)?.size || this.unanswered.has(channel)) this.startTyping(channel);
+  }
+
+  /** Channels no video reacted to on arrival is waiting on any more (all, with `all`): their wait for typing is over, its timer cancelled. */
+  private forgetVideoTyping(all: boolean): void {
+    const over = (channel: string) => all || (!this.videoWaiting.get(channel)?.size && !this.videoTurn.has(channel));
+    for (const [channel, timer] of this.videoTimers) {
+      if (!over(channel)) continue;
+      clearTimeout(timer);
+      this.videoTimers.delete(channel);
+    }
+    for (const channel of this.videoLate) if (over(channel)) this.videoLate.delete(channel);
+  }
+
+  /** Typing does not show on `channel`: a video there was reacted to on arrival under VIDEO_TYPING_AFTER_MS ago, and the turn that answers it has not ended. */
   private videoQuiet(channel: string): boolean {
-    return Boolean(this.videoWaiting.get(channel)?.size) || this.videoTurn.has(channel);
+    return (Boolean(this.videoWaiting.get(channel)?.size) || this.videoTurn.has(channel)) && !this.videoLate.has(channel);
   }
 
   /** Their message on `channel`: typing shows there, and is kept up until the turn ends. */
@@ -1975,6 +2026,7 @@ export class Conversation {
     for (const kept of this.typingKept.values()) if (kept.timer) clearTimeout(kept.timer);
     this.typingKept.clear();
     this.videoTurn.clear();
+    this.forgetVideoTyping(this.closed || this.gone);
   }
 
   /** The turn is over (or failed): typing is no longer kept up, and is hidden where it shows. */

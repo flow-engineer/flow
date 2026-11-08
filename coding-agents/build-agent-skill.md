@@ -219,8 +219,8 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   own `async ({ mime, data }) => text`. With neither, the agent is told a video came that it can't watch.
   Anything the agent can't read reaches it named, with why, so it asks for text. Typing shows as
   a message with files arrives, before they are downloaded, transcribed or described: nothing to add.
-  A video gets 👀 on arrival instead, and its turn shows no typing (`videoReaction`, on by default;
-  `false` types instead). The latest 3 photos,
+  A video gets 👀 on arrival instead, and its turn types only if no reply has gone 5 s after it
+  arrived (`videoReaction`, on by default; `false` types on arrival). The latest 3 photos,
   PDFs and videos (one video at most) stay shown; their bytes are never stored.
 - Asking about a video later: the agent gets the built-in `ask_about_video` (`question`, and
   `message`, the id of the message the video came in; the latest video when left out) whenever a

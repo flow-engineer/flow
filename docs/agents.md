@@ -270,14 +270,16 @@ flow.engineer could not be reached or could not reach its projects (try again); 
 
 ## Videos people send
 
-The agent reacts 👀 to a video the moment it arrives, before it is downloaded or watched, and the
-turn that answers it shows no typing: the 👀 says it is on it, and the reply follows once the agent
-has seen or read the video. It is on by default; `createAgent({ videoReaction: false })` turns it off,
-and the video then types on arrival, kept up while it is described (on WhatsApp, with the blue
+The agent reacts 👀 to a video the moment it arrives, before it is downloaded or watched: the 👀 says
+it is on it, and the reply follows once the agent has seen or read the video. A reply within 5 s shows
+only the 👀; if nothing from the agent has reached them 5 s after the video arrived, typing shows too,
+kept up as for other messages until the reply. The agent is told the video already has its 👀, so it
+does not react 👀 again (another emoji is its choice). It is on by default;
+`createAgent({ videoReaction: false })` turns it off, and the video then types on arrival, kept up while it is described (on WhatsApp, with the blue
 ticks, which Flow Messaging sends with typing; with the reaction the blue ticks go on arrival by
 themselves). On Telegram 👀 is one of the reactions Telegram lets bots use; another emoji you pass must
 be one too. On iMessage, iOS 18 and later show 👀 as a reaction; older iPhones may show it as a line of
-text. Where the channel has no reactions (SMS) or the reaction fails, that turn types instead.
+text. Where the channel has no reactions (SMS) or the reaction fails, that turn types at once instead.
 Photos, voice notes and documents type on arrival as other messages do.
 
 A video reaches the agent one of three ways: watched by its model (`openAICompatible({ videos: true })`),

@@ -53,7 +53,8 @@ What follows from it:
   person's message arrives: for one with files (a video to describe, a voice note to transcribe),
   before they are downloaded and read, which never wait on the typing call. A message with a video
   gets the agent's `videoReaction` (👀, on by default) there instead, where the channel takes it, and
-  the turn that answers it shows no typing on that channel (on WhatsApp the read receipt goes with
+  the turn that answers it shows no typing on that channel for its first 5 s, then types as for any
+  message if nothing from the agent has reached them by then (on WhatsApp the read receipt goes with
   the reaction, by itself); a reaction that fails is logged with a
   warning, never fails the turn, and the turn types instead. It is kept up while the
   agent works (sent again before `typingLastsMs` runs out), shows again after a message only when

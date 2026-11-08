@@ -261,7 +261,7 @@ test("a typing call that fails, or never answers, neither holds up describing a 
 const WA: ChannelInfo = { platform: "whatsapp", reactions: true, status: false, readReceipts: true, typingLastsMs: 25_000 };
 const outLine = (o: Outbound) => (o.type === "typing" ? `typing ${o.on}` : o.type === "reaction" ? `reaction ${o.emoji} ${o.messageId}` : o.type === "read" ? `read ${o.messageIds.join(" ")}` : o.type === "message" ? `message ${o.text}` : o.type);
 
-test("a WhatsApp video gets its blue ticks and 👀 the moment it arrives, before it is downloaded, described or the model is called, and its turn shows no typing at all", async (t) => {
+test("a WhatsApp video gets its blue ticks and 👀 the moment it arrives, before it is downloaded, described or the model is called; with nothing from the agent 5 s on, it types from then until the reply, kept up as usual", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const steps: string[] = [];
   const described = gate<string>();
@@ -270,20 +270,37 @@ test("a WhatsApp video gets its blue ticks and 👀 the moment it arrives, befor
   a.agent.receive("r1", { text: "is this covered?", attachments: [video] }, (o) => void steps.push(outLine(o)), { channel: WA, messageId: "wamid.R1" });
   assert.deepEqual(steps, ["read wamid.R1", "reaction 👀 wamid.R1"], "the read receipt, without typing, and the reaction go before anything is read");
   await settle();
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(4_999);
+  assert.deepEqual(steps, ["read wamid.R1", "reaction 👀 wamid.R1", "download", "describe"], "no typing in the first 5 s");
+  t.mock.timers.tick(1);
+  await settle();
+  t.mock.timers.tick(20_000);
+  assert.deepEqual(steps.slice(4), ["typing true", "typing true"], "typing from 5 s, sent again 20 s later");
+  t.mock.timers.tick(5_000);
   described.open("A dented rear bumper.");
   await settle();
   t.mock.timers.tick(0);
   const first = await a.nextCall(0);
-  // The turn taking the message sends the read receipt again, as it does for every message.
-  assert.deepEqual(steps, ["read wamid.R1", "reaction 👀 wamid.R1", "download", "describe", "read wamid.R1"], "no typing while it was described, kept up or not");
-  // A response that calls a tool is new work, which types again on other turns: not on this one.
+  assert.equal(lastUser(first.request.messages).content, "[wamid.R1] [video, described: A dented rear bumper.] is this covered?\n[Chinwag] wamid.R1 already has your 👀 reaction; don't react 👀 to it again.");
   first.answer(respond(call("lookup_policy", {})));
   (await a.nextCall(1)).answer(respond(say("Bumper dents are covered.")));
   await a.agent.conversation("r1")!.whenIdle();
-  assert.deepEqual(steps.filter((s) => s.startsWith("typing")), [], "none while the agent worked or wrote either");
-  assert.ok(steps.includes("message Bumper dents are covered."));
+  t.mock.timers.tick(60_000);
+  assert.deepEqual(steps.slice(6), ["read wamid.R1", "message Bumper dents are covered.", "typing false"], "the reply hides it, and none is sent after");
   assert.deepEqual(a.events.filter((e) => e.type === "reaction").map(({ emoji, messageId, channel, arrival }) => ({ emoji, messageId, channel, arrival })), [{ emoji: "👀", messageId: "wamid.R1", channel: "chat", arrival: true }]);
+});
+
+test("a video answered within 5 s of arriving shows only the 👀: no typing, before the reply or after it", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const steps: string[] = [];
+  const a = agentWith({ describeVideo: async () => "A dented rear bumper." });
+  a.agent.receive("r2", { text: "is this covered?", attachments: [file("video", "video/mp4", 40)] }, (o) => void steps.push(outLine(o)), { channel: WA, messageId: "wamid.R2" });
+  await settle();
+  t.mock.timers.tick(3_000);
+  (await a.nextCall(0)).answer(respond(say("Bumper dents are covered.")));
+  await a.agent.conversation("r2")!.whenIdle();
+  t.mock.timers.tick(60_000);
+  assert.deepEqual(steps, ["read wamid.R2", "reaction 👀 wamid.R2", "read wamid.R2", "message Bumper dents are covered."]);
 });
 
 test("only a video gets the reaction: a photo, and a video when videoReaction is false, type on arrival as before", async () => {
@@ -330,7 +347,9 @@ test("a reaction that fails is logged, and the video's turn types instead and st
   };
   a.agent.receive("f1", { text: "is this covered?", attachments: [file("video", "video/mp4", 40)] }, deliver, { channel: WA, messageId: "wamid.F1" });
   await refused.promise;
-  (await a.nextCall(0)).answer(respond(say("Bumper dents are covered.")));
+  const first = await a.nextCall(0);
+  assert.equal(lastUser(first.request.messages).content, "[wamid.F1] [video, described: A dented rear bumper.] is this covered?", "not told it reacted");
+  first.answer(respond(say("Bumper dents are covered.")));
   await a.agent.conversation("f1")!.whenIdle();
   assert.deepEqual(steps, ["read wamid.F1", "reaction 👀 wamid.F1", "typing true", "read wamid.F1", "message Bumper dents are covered.", "typing false"]);
   assert.deepEqual(a.events.filter((e) => e.type === "reaction"), [], "no reaction event for one that did not go");

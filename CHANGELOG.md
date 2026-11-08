@@ -2,6 +2,24 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.17.2 (8 Nov 2026)
+
+### Changes
+
+- **A video whose reply is slow types after 5 s.** Since 0.17.1 a video got 👀 on arrival and its
+  turn showed no typing at all, so while a video took half a minute to read the person saw 👀 and
+  then nothing until the reply. The 👀 still goes on arrival; if nothing from the agent has reached
+  them 5 s after the video arrived, typing shows too and is kept up as for other messages (every
+  20 s on WhatsApp) until the reply, never after it. A reply within 5 s still shows only the 👀.
+  `videoReaction: false` types on arrival as before, and a reaction that fails types at once.
+- **The agent is told the video already has its 👀.** When the arrival reaction went, the message
+  reaches the model with one line saying so, so it does not react 👀 to it again; another emoji is
+  still its choice.
+
+### Migration notes
+
+None.
+
 ## 0.17.1 (8 Nov 2026)
 
 ### Changes
