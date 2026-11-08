@@ -2,6 +2,31 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **The business's own WhatsApp number, from the CLI and MCP.** Connecting it needs a person in
+  Meta's window on the dashboard, so the CLI and the MCP hand over the link and then see the number.
+  - **`flow link --channel whatsapp --own`** prints the dashboard link for the owner to open and press
+    Connect WhatsApp, then asks Flow every 3 s until the number is connected and prints
+    `✓ WhatsApp: <phone> · <name> · <state>` (at once when it is connected already). It waits up
+    to `--timeout` (default 120 s), then exits 4 with the link; `--no-wait` prints the link and
+    exits 4. Where Flow does not offer the signup, it says why and gives the manual setup page
+    (exit 3). `--own` goes only with `--channel whatsapp`. With `--json`: a `pending` line with
+    `link` first, then `connected` with the number's fields. It reads with `FLOW_KEY`, and signs in
+    and runs setup first when `.env` has no Flow key, as `link` does.
+  - **`flow status`** adds `WhatsApp: your own number <phone>, <state>` when there is one, with
+    `· payment method not added` or `· display name rejected` only when those need the owner;
+    `--json` has it as `whatsapp_own` (null when there is none).
+  - **`connect_whatsapp`** (`flow mcp serve`, and `flowReadTools()` hosted): not connected,
+    `{needs_person, link, next}`; connected, `{phone, name, state, display_name, payment_method,
+    templates}`.
+
+### Migration notes
+
+None.
+
 ## 0.17.2 (8 Nov 2026)
 
 ### Changes

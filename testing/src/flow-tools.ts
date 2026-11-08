@@ -7,7 +7,8 @@
 //     templates.ts, deploy.ts: connectReads), as any CLI built on the framework reaches its tools;
 //   - hosted (`flowReadTools({ hosted: {} })`): each call names an agent of the signed-in person
 //     (or they have one), and its key comes from the server's credentials, never the model.
-// Eight tools every host sees, the CLI's own four (pages of conversations and logs, the team's
+// Nine tools every host sees (connect_whatsapp among them: the business's own WhatsApp number,
+// which a person connects in Meta's window), the CLI's own four (pages of conversations and logs, the team's
 // feedback, an issue's test case: kept to the CLI, mcp.clients), and hosted, list_agents. A result
 // is structured content and the same data as text under a one-line summary; when the data is Flow's
 // answer as it came, the tool returns it with jsonText, so the CLI's --json prints Flow's own text,
@@ -33,6 +34,7 @@ const WHAT = [
   "Flow's own record of this agent once it is hosted: its conversations and the grades of its replies, its issues, its WhatsApp templates, its deploys and its log lines. Every tool only reads.",
   "Did a tool call fail, or was a reply delivered? list_conversations (grade: wrong finds badly graded replies), then show_conversation: each agent reply carries its tool calls (name, ms, ok, error) and its delivery (queued, sent, delivered, read, or failed with the channel's code).",
   "What is live? deploy_status. Why did it error? read_logs with severity ERROR (grep narrows it), then show_conversation for the conversation involved. Recurring problems: list_issues (graded replies, with a suggested fix) and list_insights (what real people ran into in production).",
+  "The business's own WhatsApp number: connect_whatsapp gives the link a person opens to connect it in Meta's window, then the number once it is connected.",
 ];
 
 /** What a host is told on connecting, in an agent's folder: what the server is for, and which tool answers what. */
@@ -58,6 +60,50 @@ const FLOW_KEY_NOTE = `Reads staging with FLOW_KEY (flow_test_ reads staging onl
 const INSIGHTS_KEY_NOTE = `Reads with FLOW_LIVE_KEY (flow setup --live makes it), else a flow_live_ FLOW_KEY: Insights reads production only, so a flow_test_ key is refused. The result's text_mode says whether text is raw, deidentified or withheld. The live key, by tier: ${KEY_TIERS}`;
 const CI_KEY_NOTE = "Reads with the CI key, FLOW_FRAMEWORK_CLOUD_KEY (oci_...), staging and production.";
 const HOSTED_NOTE = "The result's text_mode says whether text is raw, deidentified or withheld.";
+
+/**
+ * The agent's own WhatsApp number as observe answers GET /v1/agent/whatsapp (any of the agent's
+ * Flow keys): not connected, the dashboard page a person opens to connect it in Meta's window
+ * (Embedded Signup); connected, the number's state. `available: false`: Flow does not offer the
+ * signup there, and `link` is the page to set the number up by hand.
+ */
+export interface OwnWhatsApp {
+  connected: boolean;
+  needs_person?: boolean;
+  link?: string;
+  available?: boolean;
+  why?: string;
+  phone?: string;
+  name?: string;
+  /** connecting, pin_required, live, disconnected, restricted or not_sending. */
+  state?: string;
+  onboarding?: string;
+  /** not_reviewed, in_review, approved or rejected. */
+  display_name?: string;
+  /** missing, ok or unknown. */
+  payment_method?: string;
+  /** Approved templates. */
+  templates?: number;
+}
+
+/** Reads the agent's own WhatsApp number; a dashboard without the route answers 404 (Failed, status 404). */
+export async function ownWhatsApp(name: string, where: Access): Promise<OwnWhatsApp> {
+  const { body } = await get(name, where, "/v1/agent/whatsapp");
+  return { ...body, connected: body.connected === true } as OwnWhatsApp;
+}
+
+/**
+ * The dashboard page where a person connects the agent's own WhatsApp number, built as observe
+ * builds its link: the dashboard is the cloud's address with /observe as /dashboard. With no agent
+ * id known, the dashboard itself.
+ */
+export function ownWhatsAppPage(cloud: string, agent?: string): string {
+  const dashboard = cloud.replace(/\/+$/, "").replace(/\/observe$/, "/dashboard");
+  return agent ? `${dashboard}/projects/${encodeURIComponent(agent)}/connections/platform/whatsapp#own-number` : dashboard;
+}
+
+/** What a dashboard without the route (404) means, in the CLI's and the tool's words. */
+export const OWN_WHATSAPP_NOT_YET = "this dashboard doesn't offer connecting your own WhatsApp number from here yet";
 
 /** How the tools reach Flow on one call: the keys as found now, and the cloud. */
 export interface Reads {
@@ -238,6 +284,29 @@ const READS: Read[] = [
     summary(data, { status }) {
       const n = (data.templates as unknown[]).length;
       return `${n} ${status === "all" ? "" : "approved "}template${n === 1 ? "" : "s"}.`;
+    },
+  }),
+  read({
+    name: "connect_whatsapp",
+    title: "Connect the business's own WhatsApp number",
+    description: (hosted) => `Connects the business's own WhatsApp number to the agent. Meta's window needs a person: until it is connected this gives the link to hand the owner, who opens it and presses Connect WhatsApp; call it again to see the number (phone, name, state, display name review, payment method, approved templates).${hosted ? "" : " Reads with FLOW_KEY."}`,
+    input: z.object({}),
+    async run(_input, reads, say) {
+      const where = await reads.flow();
+      let own: OwnWhatsApp;
+      try {
+        own = await ownWhatsApp(say.name, where);
+      } catch (error) {
+        if (error instanceof Failed && error.status === 404) throw new ToolError("not_available", `${say.name}: ${OWN_WHATSAPP_NOT_YET} (${where.cloud} answered 404). The owner connects it on the project's WhatsApp page on the dashboard.`, { next: ownWhatsAppPage(where.cloud) });
+        throw error;
+      }
+      if (own.connected) return { phone: own.phone ?? null, name: own.name ?? null, state: own.state ?? null, display_name: own.display_name ?? null, payment_method: own.payment_method ?? null, templates: own.templates ?? 0 };
+      if (own.available === false) return { needs_person: true, available: false, why: own.why ?? null, link: own.link ?? null, next: "Flow doesn't offer connecting it through Meta here: the owner sets the number up by hand at the link" };
+      return { needs_person: true, link: own.link ?? ownWhatsAppPage(where.cloud), next: "Ask the owner to open the link; call again to see the number" };
+    },
+    summary(data) {
+      if (typeof data.phone === "string") return `WhatsApp: ${data.phone} · ${data.name ?? "-"} · ${data.state ?? "-"}.`;
+      return data.available === false ? `Not offered here: ${data.why ?? "connect it by hand"}.` : "Not connected yet: a person opens the link and presses Connect WhatsApp.";
     },
   }),
   read({
@@ -461,7 +530,7 @@ async function onlyAgent(access: FlowAgentAccess): Promise<FlowAgent> {
 
 /**
  * Flow's read tools and what a host is told on connecting, for mcpServer({ tools, instructions }).
- * In a folder: the eight tools `flow mcp serve` serves (and the CLI's own four, which no host sees).
+ * In a folder: the nine tools `flow mcp serve` serves (and the CLI's own four, which no host sees).
  * Hosted: every tool takes `agent`, plus list_agents; serve them with auth (sign-in required), and
  * credentials whose `credential` ("flow") is a FlowAgentAccess for the signed-in person.
  */

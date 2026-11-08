@@ -417,6 +417,7 @@ Only `chat` reads stdin; `init` asks for the name and `projects delete` for the 
 npx @flow-engineer/flow link --channel telegram --json   # or whatsapp, imessage: signs in and runs setup when needed (Flow's trial model key too), then the channel's own link (t.me, wa.me, sms:); give its say_to_person to the owner, and run its next
 npm start                                    # after link: its playground link, and the owner texts it while it runs (PORT, else 8788 or the next free port)
 npx @flow-engineer/flow status --json        # what the folder has and lacks, at any time
+npx @flow-engineer/flow link --channel whatsapp --own --json   # the business's own WhatsApp number: Meta's window needs a person, so hand the owner its link; it waits for the number (exit 4: not yet, run it again)
 printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check: one message per line, replies printed
 npx @flow-engineer/flow test --synthetic     # your own check: the tests, on the key setup wrote
 npx @flow-engineer/flow deploy --json        # when the owner wants it hosted: staging on Flow's cloud (see "Deploy it")

@@ -29,10 +29,11 @@ interface Given { status: number; body: Record<string, unknown> }
  * in turn (or from the function: null holds the request unanswered), /cli/setup with `setupStatus`
  * (a 502 carries what worked, as the real one does) and `options.setup` merged into its 200, the
  * try page (as JSON, with its direct link) as open for `options.tryOpen` (default Telegram), the model API's
- * GET /credit with `options.credit` (default 404), any signed-in route in `options.answers` by its path as given
+ * GET /credit with `options.credit` (default 404), observe's GET /v1/agent/whatsapp (the start's FLOW_FRAMEWORK_CLOUD) from
+ * `options.whatsapp` in turn (its last one again and again; default 404), any signed-in route in `options.answers` by its path as given
  * (a list answers in turn, its last one again and again), and records every request.
  */
-async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = [], setupStatus = 200, options: { setup?: Record<string, unknown>; tryOpen?: string[]; setupError?: { status: number; body: Record<string, unknown>; headers?: Record<string, string> }; credit?: { status: number; body: Record<string, unknown> }; deviceBusyOnce?: boolean; answers?: Record<string, Given | Given[]> } = {}) {
+async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => Record<string, unknown> | null) = [], setupStatus = 200, options: { setup?: Record<string, unknown>; tryOpen?: string[]; setupError?: { status: number; body: Record<string, unknown>; headers?: Record<string, string> }; credit?: { status: number; body: Record<string, unknown> }; deviceBusyOnce?: boolean; answers?: Record<string, Given | Given[]>; whatsapp?: Given[] } = {}) {
   const seen: Seen[] = [];
   const read = (req: IncomingMessage) => new Promise<string>((done) => { let b = ""; req.on("data", (c) => { b += c; }); req.on("end", () => done(b)); });
   const server = createServer(async (req, res) => {
@@ -54,6 +55,10 @@ async function flowServer(tokenAnswers: Array<Record<string, unknown>> | (() => 
       return send(404, { error: "channel_not_open", error_description: "WhatsApp is not open on the sandbox yet.", next: "npx @flow-engineer/flow link --channel telegram" });
     }
     if (req.url === "/llm/framework/v1/credit") return send(options.credit?.status ?? 404, options.credit?.body ?? {});
+    if (req.url === "/v1/agent/whatsapp") {
+      const given = (options.whatsapp?.length ?? 0) > 1 ? options.whatsapp!.shift()! : options.whatsapp?.[0];
+      return given ? send(given.status, given.body) : send(404, {});
+    }
     const bearer = req.headers.authorization?.startsWith("Bearer fcli_");
     // Too many sign-ins from this address, once: 429 slow_down with a short Retry-After.
     if (req.url === "/cli/device" && options.deviceBusyOnce && seen.filter((r) => r.path === "/cli/device").length === 1) {
@@ -105,7 +110,7 @@ function run(args: string[], options: { url: string; config: string; cwd: string
 
 /** Starts the CLI with no terminal: stdin is a pipe left open and never written. */
 function start(args: string[], options: { url: string; config: string; cwd: string; env?: Record<string, string> }) {
-  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: options.config, XDG_CONFIG_HOME: options.config, FLOW_FRAMEWORK_LOGIN_URL: options.url, ...options.env };
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: options.config, XDG_CONFIG_HOME: options.config, FLOW_FRAMEWORK_LOGIN_URL: options.url, FLOW_FRAMEWORK_CLOUD: options.url, ...options.env };
   return spawn(process.execPath, [cli, ...args], { cwd: options.cwd, env });
 }
 
@@ -937,7 +942,7 @@ test("status with FLOW_KEY the model's key asks Flow's GET /credit for what is l
   writeFileSync(join(cwd, ".env"), `FLOW_KEY=${TRIAL}\n`);
   const out = await run(["status", "--json"], { url: flow.url, config: temp(), cwd });
   assert.equal(out.code, 0, out.err);
-  assert.deepEqual(flow.seen.map((r) => [r.method, r.path, r.auth]), [["GET", "/llm/framework/v1/credit", `Bearer ${TRIAL}`]], "only the model API, with the model key; nothing else is asked signed out");
+  assert.deepEqual(flow.seen.map((r) => [r.method, r.path, r.auth]), [["GET", "/llm/framework/v1/credit", `Bearer ${TRIAL}`], ["GET", "/v1/agent/whatsapp", `Bearer ${TRIAL}`]], "only the model API and the own WhatsApp number, with the Flow key; nothing else is asked signed out");
   assert.deepEqual(out.lines[0]!.model_key, { set: true, env: "FLOW_KEY", flow_credit: { limit_usd: 2, spent_usd: 0.13, left_usd: 1.87 } });
   assert.deepEqual(out.lines[0]!.flow_key, { set: true });
   assert.match(out.err, /^Model: Flow trial credit \(\$1\.87 left\)$/m);
@@ -948,7 +953,7 @@ test("status with FLOW_KEY the model's key asks Flow's GET /credit for what is l
   const own = await run(["status"], { url: flow.url, config: temp(), cwd });
   assert.match(own.out, /^Model: OPENAI_API_KEY is set$/m);
   assert.match(own.out, /^FLOW_KEY is set\.$/m);
-  assert.equal(flow.seen.length, 1);
+  assert.equal(flow.seen.filter((r) => r.path === "/llm/framework/v1/credit").length, 1);
   writeFileSync(join(cwd, ".env"), `FLOW_KEY=${TRIAL}\n`);
 
   const spent = await flowServer([], 200, { credit: { status: 200, body: { limit_usd: 2, spent_usd: 2, left_usd: 0 } } });
@@ -1479,4 +1484,102 @@ test("a grant flow.engineer refuses (409 not_for_this_key: a live key not made b
   assert.equal(result.code, 3);
   assert.deepEqual(result.lines, [{ ok: false, error: { code: "not_for_this_key", message: "/cli/keys/grant answered 409 not_for_this_key: Only a live key made by flow setup --live takes grants.", next: "npx @flow-engineer/flow setup --live" }, next: "npx @flow-engineer/flow setup --live" }]);
   assert.match(result.err, /Only a live key made by flow setup --live takes grants\. Next: npx @flow-engineer\/flow setup --live/);
+});
+
+const OWN_KEY_ENV = `FLOW_KEY=${TRIAL}\n`;
+const PAGE = (url: string) => `${url}/projects/agt_1/connections/platform/whatsapp#own-number`;
+const NOT_CONNECTED = (link: string): Given => ({ status: 200, body: { connected: false, needs_person: true, link } });
+const CONNECTED = (link: string, more: Record<string, unknown> = {}): Given => ({ status: 200, body: { connected: true, needs_person: false, link, phone: "+447700900142", name: "Larkspur Bakery", state: "live", onboarding: "new", display_name: "not_reviewed", payment_method: "ok", templates: 0, ...more } });
+
+test("link --channel whatsapp --own prints the dashboard link for a person in Meta's window, asks again until the number is connected and prints it; connected already, it prints the number at once", async (t) => {
+  const link = "https://flow.engineer/dashboard/projects/agt_1/connections/platform/whatsapp#own-number";
+  // Answers in turn: not connected, then connected (and connected from then on).
+  const own = await flowServer([], 200, { whatsapp: [NOT_CONNECTED(link), CONNECTED(link)] });
+  t.after(own.close);
+  const cwd = agentDir();
+  writeFileSync(join(cwd, ".env"), OWN_KEY_ENV);
+
+  const waited = await run(["link", "--channel", "whatsapp", "--own"], { url: own.url, config: temp(), cwd });
+  assert.equal(waited.code, 0, waited.err);
+  assert.equal(waited.out, [
+    "WhatsApp, your own number: this step needs a person, in Meta's window.",
+    "Ask the owner to open this and press Connect WhatsApp:",
+    `  ${link}`,
+    "Waiting for the number… (--timeout 120; exit 4 if it isn't connected yet)",
+    "✓ WhatsApp: +447700900142 · Larkspur Bakery · live",
+    "",
+  ].join("\n"));
+  const asked = own.seen.filter((r) => r.path === "/v1/agent/whatsapp");
+  assert.equal(asked.length, 2);
+  for (const r of asked) assert.equal(r.auth, `Bearer ${TRIAL}`, "read with the folder's FLOW_KEY");
+  assert.equal(own.seen.length, 2, "set up already: no sign-in or setup");
+
+  const again = await run(["link", "--channel", "whatsapp", "--own", "--json"], { url: own.url, config: temp(), cwd });
+  assert.equal(again.code, 0, again.err);
+  assert.deepEqual(again.lines, [{ status: "connected", connected: true, phone: "+447700900142", name: "Larkspur Bakery", state: "live", onboarding: "new", display_name: "not_reviewed", payment_method: "ok", templates: 0, link }]);
+  assert.equal(again.err, "✓ WhatsApp: +447700900142 · Larkspur Bakery · live\n");
+  for (const secret of [TRIAL]) assert.ok(!waited.out.includes(secret) && !again.out.includes(secret) && !again.err.includes(secret));
+});
+
+test("link --own exits 4 with the link when the number is not connected by --timeout or with --no-wait; a signup Flow does not offer says why with the manual setup page, and a dashboard without the route says so with the WhatsApp page (exit 3); --own is for whatsapp only", async (t) => {
+  const flow = await flowServer([], 200, { whatsapp: [{ status: 200, body: { connected: false, needs_person: true, link: "https://flow.engineer/dashboard/projects/agt_1/connections/platform/whatsapp" } }] });
+  t.after(flow.close);
+  const cwd = agentDir();
+  writeFileSync(join(cwd, ".env"), OWN_KEY_ENV);
+  const options = { url: flow.url, config: temp(), cwd };
+  const manual = "https://flow.engineer/dashboard/projects/agt_1/connections/platform/whatsapp";
+
+  const noWait = await run(["link", "--channel", "whatsapp", "--own", "--no-wait"], options);
+  assert.equal(noWait.code, 4);
+  assert.match(noWait.out, /^Ask the owner to open this and press Connect WhatsApp:\n {2}https:\/\/flow\.engineer\/dashboard\/projects\/agt_1\/connections\/platform\/whatsapp\n$/m);
+  assert.doesNotMatch(noWait.out, /Waiting/);
+  const timedOut = await run(["link", "--channel", "whatsapp", "--own", "--timeout", "0", "--json"], options);
+  assert.equal(timedOut.code, 4);
+  assert.deepEqual(timedOut.lines.map((l) => [l.status, l.link]), [["pending", manual], ["pending", manual]]);
+  assert.equal(timedOut.lines[1]!.next, "npx @flow-engineer/flow link --channel whatsapp --own");
+  assert.match(timedOut.err, /^WhatsApp isn't connected yet after 0 s: the owner opens the link and presses Connect WhatsApp\. Next: npx @flow-engineer\/flow link --channel whatsapp --own$/m);
+
+  const off = await flowServer([], 200, { whatsapp: [{ status: 200, body: { connected: false, needs_person: true, available: false, why: "Connecting a number through Meta is not open in this region yet.", link: `${manual}/connect` } }] });
+  t.after(off.close);
+  const notOffered = await run(["link", "--channel", "whatsapp", "--own", "--json"], { ...options, url: off.url });
+  assert.equal(notOffered.code, 3);
+  assert.equal(notOffered.err, `WhatsApp, your own number: Connecting a number through Meta is not open in this region yet. Set it up by hand with your own Meta app. Next: ${manual}/connect\n`);
+  assert.deepEqual(notOffered.lines.map((l) => [l.error.code, l.next]), [["not_offered", `${manual}/connect`]]);
+
+  // No GET /v1/agent/whatsapp on this dashboard: signed in, the page is built from setup's agent id.
+  const older = await flowServer();
+  t.after(older.close);
+  const missing = await run(["link", "--channel", "whatsapp", "--own"], { ...options, url: older.url, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(missing.code, 3);
+  assert.equal(missing.err, `WhatsApp, your own number: this dashboard doesn't offer connecting your own WhatsApp number from here yet (${older.url} answered 404). Open the project's WhatsApp page on the dashboard and press Connect WhatsApp there. Next: ${PAGE(older.url)}\n`);
+  assert.equal(readFileSync(join(cwd, ".env"), "utf8"), OWN_KEY_ENV, "nothing written");
+
+  for (const args of [["link", "--channel", "telegram", "--own"], ["link", "--own"], ["link", "--channel", "whatsapp", "--no-wait"]]) {
+    const usage = await run(args, options);
+    assert.equal(usage.code, 1, args.join(" "));
+    assert.match(usage.err, /^flow link: --(own is the business's own WhatsApp number: give it with --channel whatsapp|no-wait goes with --own)/);
+  }
+});
+
+test("status names the business's own WhatsApp number with its state, and a payment method or display name only when they need the owner; none, no line", async (t) => {
+  const flow = await flowServer([], 200, { whatsapp: [CONNECTED(PAGE("https://flow.engineer/dashboard"), { payment_method: "missing", display_name: "rejected", state: "pin_required" })] });
+  t.after(flow.close);
+  const cwd = agentDir();
+  writeFileSync(join(cwd, ".env"), `OPENROUTER_API_KEY=${OWN}\n${OWN_KEY_ENV}`);
+  const human = await run(["status"], { url: flow.url, config: temp(), cwd });
+  assert.equal(human.code, 0, human.err);
+  assert.match(human.out, /^WhatsApp: sender not in \.env\nWhatsApp: your own number \+447700900142, pin required · payment method not added · display name rejected$/m);
+  const json = await run(["status", "--json"], { url: flow.url, config: temp(), cwd });
+  assert.equal(json.lines[0]!.whatsapp_own.phone, "+447700900142");
+
+  const fine = await flowServer([], 200, { whatsapp: [CONNECTED(PAGE("https://flow.engineer/dashboard"))] });
+  t.after(fine.close);
+  assert.match((await run(["status"], { url: fine.url, config: temp(), cwd })).out, /^WhatsApp: your own number \+447700900142, live$/m);
+  for (const none of [await flowServer([], 200, { whatsapp: [NOT_CONNECTED(PAGE("https://flow.engineer/dashboard"))] }), await flowServer()]) {
+    t.after(none.close);
+    const out = await run(["status", "--json"], { url: none.url, config: temp(), cwd });
+    assert.equal(out.code, 0, out.err);
+    assert.equal(out.lines[0]!.whatsapp_own, null);
+    assert.doesNotMatch((await run(["status"], { url: none.url, config: temp(), cwd })).out, /your own number/);
+  }
 });
