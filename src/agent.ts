@@ -76,8 +76,10 @@ export interface AgentOptions {
   describeVideo?: DescribeVideo;
   /**
    * A message with a video gets this reaction the moment it arrives, before the video is downloaded
-   * or watched, and the turn that answers it shows no typing: the reaction says the agent is on it.
-   * Default on, with 👀; a string is another emoji; `false` turns it off, and the video types on
+   * or watched, and the turn that answers it shows no typing at first: the reaction says the agent is
+   * on it. If nothing from the agent has reached them 5 s after it arrived, typing shows too, kept up
+   * as for other messages until the reply, so a quick reply shows only the reaction. The agent is told
+   * the message already has the reaction, so it does not add the same one. Default on, with 👀; a string is another emoji; `false` turns it off, and the video types on
    * arrival as other messages do. Where the channel has no reactions, does not take the emoji
    * (Telegram takes only its own reaction emoji, 👀 among them), or the reaction fails, that turn
    * types instead. iMessage shows 👀 as a reaction on iOS 18 and later; older iPhones may show it as
