@@ -2,17 +2,24 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## Unreleased
+## 0.18.0 (9 Nov 2026)
 
 ### Changes
 
-- **An "Onboard with AI" button for the site: `app.onboard`.** `{ prompt, label?, agents?, askLabel?, askHint? }`.
+- **An onboard button for the site ("Set up with AI"): `app.onboard`.** `{ prompt, label?, agents?, askLabel? }`.
   The site places `<div data-flow-onboard></div>` (or calls `FlowApp.onboard(element, { label?, variant? })`)
-  and the embed draws a pill in the theme's accent: it copies the setup prompt, and its menu opens it in
-  Claude, ChatGPT or Cursor or opens the app to ask. Its "Powered by flow.engineer" line is always shown.
-  The site sets its own label and variant with `FlowAppConfig.onboard` or `data-label` / `data-variant`.
+  and the embed draws a pill with the assistants' icons (`agents`: Claude, ChatGPT, Cursor). It opens a
+  popover showing the setup prompt, with "Copy prompt" and a button that opens the app to ask (`askLabel`,
+  default "Ask <title>"). Its "Powered by Flow" line is always shown. The prompt is also in the page itself
+  (`[data-flow-onboard-prompt]`, visually hidden), so agents and scrapers reading the page find it. The
+  label defaults to "Onboard with AI"; the site sets its own label and variant with `FlowAppConfig.onboard`
+  or `data-label` / `data-variant`.
+- **`FlowAppConfig.launcher: false`:** no floating launcher on that page; the panel still opens from
+  `FlowApp.open()` or the onboard button.
 - **`openAICompatible({ maxTokens })`.** The most tokens one reply may use, sent as `max_tokens`. Unset, providers
   such as OpenRouter take the model's maximum and hold credit for it on every call.
+- **`openAICompatible({ reasoning })`.** How hard a reasoning model thinks before it answers: `"minimal"`,
+  `"low"`, `"medium"` or `"high"`, sent as OpenRouter's `reasoning: { effort }`. Unset, the model's default.
 - **A CLI command's own code after its tool: `after`.** `command(tool).after((result, options, cli, output) => …)`
   (or `after` on a tool command) runs on the person's machine once the tool succeeds, with its result, the
   command's own options, the CLI's tools (`cli.call`) and whether JSON was asked for. What it returns is

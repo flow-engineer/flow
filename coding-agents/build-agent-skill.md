@@ -76,6 +76,8 @@ first of `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_AP
 default model (`MODEL` overrides it). `flowModel()` uses Flow alone; when its credit is used up a
 call fails with code `trial_credit_used` and a next step (tell the owner to add their own key). With none it stops at once and
 names them. Pass `apiKey` and `baseURL` for anywhere else (`baseURL` alone for a local server that needs no key).
+Set `maxTokens` (the most one reply may use; unset, OpenRouter holds credit for the model's maximum
+on every call) and, for a reasoning model, `reasoning` (`"minimal"`, `"low"`, `"medium"` or `"high"`).
 `flowTranscribe(audio, { language })` turns a voice note (at most 15 MB) into `{ text }` through Flow
 with FLOW_KEY, failing the same way.
 

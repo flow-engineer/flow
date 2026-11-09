@@ -423,7 +423,8 @@ test("app.onboard is served in the embed's config with its defaults, and the emb
   const embed = await (await app.get("/app/embed.js")).text();
   assert.match(embed, /onboard\(element, look/);
   assert.match(embed, /data-flow-onboard/);
-  assert.match(embed, /Powered by <b>flow\.engineer<\/b>/);
+  assert.match(embed, /utm_source=onboard[^"]*"[^>]*>Powered by <svg[^]*?<b>Flow<\/b><\/a>/);
+  assert.match(embed, /data-flow-onboard-prompt/, "the prompt is in the page for agents reading it");
 });
 
 test("places sets which of the row's places show and in what order; nothing else of the row is an option", async () => {

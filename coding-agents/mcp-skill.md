@@ -579,6 +579,13 @@ so the person's token never reaches the site's page. Its chat is its own channel
   `"claude"`, `"chatgpt"`, `"cursor"`, `"vscode"` it offers, in that order (default all, the terminal
   first and only with `cli`); their addresses are `url` and `cli.install`. Its colors follow the
   theme's background, text and muted colors while they read clearly (3:1), else the panel's defaults.
+- **An onboard button on the site's pages.** `onboard: { prompt, label?, agents?, askLabel? }` (the
+  prompt a coding agent needs to start with the product). The site places `<div data-flow-onboard></div>`
+  (or calls `FlowApp.onboard(element, { label, variant })`); the embed draws a pill with the assistants'
+  icons that opens the prompt with "Copy prompt" and a button that opens the panel to ask. The prompt is
+  also in the page (`[data-flow-onboard-prompt]`, visually hidden) for agents reading it. The site sets its
+  own label with `FlowAppConfig.onboard` or `data-label`. `FlowAppConfig.launcher: false` hides the floating
+  launcher on a page; the panel still opens from `FlowApp.open()` or the onboard button.
 - Everything else generated stays the team's: `theme.css` styles the parts above, and the panel's routes
   (`/app`, `/app/embed.js`, `/app/parts.js`, `/app/chat`, `/app/view`, `/app/link`, `/app/command`) are
   listed in `paths`.

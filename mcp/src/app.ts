@@ -215,8 +215,8 @@ export interface McpAppOptions {
   pages?: string[];
   /**
    * An "Onboard with AI" button for the site's own pages: the site places `<div data-flow-onboard></div>`
-   * (or calls `FlowApp.onboard(element)`) and the embed draws it there. Its main part copies `prompt` for
-   * any coding agent; its menu opens it in the chosen assistants and asks the app. In the theme's accent.
+   * (or calls `FlowApp.onboard(element)`) and the embed draws it there. It opens a popover with `prompt` for
+   * any coding agent, "Copy prompt" and a button that asks the app. The prompt is also in the page, for agents reading it.
    */
   onboard?: AppOnboard;
   /** The MCP URL people add to their assistant. Default: auth.resource, else this origin's MCP path. */
@@ -230,18 +230,18 @@ export interface McpAppOptions {
   };
 }
 
-/** The assistants the onboard button opens its prompt in. */
+/** The assistants the onboard button shows as made for its prompt. */
 export type OnboardAgent = "claude" | "chatgpt" | "cursor";
 const AGENTS: OnboardAgent[] = ["claude", "chatgpt", "cursor"];
 
 export interface AppOnboard {
-  /** The setup prompt it copies and opens: what a coding agent should do to start with the product. */
+  /** The setup prompt it shows and copies: what a coding agent should do to start with the product. */
   prompt: string;
   /** Default "Onboard with AI"; the site may set its own (FlowAppConfig.onboard, data-label). */
   label?: string;
-  /** Which assistants its menu opens the prompt in, in this order. Default all. */
+  /** Which assistants' icons it shows, and names when the prompt is copied. Default all. */
   agents?: OnboardAgent[];
-  /** The menu's item that opens the app. Default "Ask <title>". */
+  /** The popover's button that opens the app. Default "Ask <title>". */
   askLabel?: string;
   /** The line under it. Default "Questions before you start". */
   askHint?: string;
