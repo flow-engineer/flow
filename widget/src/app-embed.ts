@@ -40,7 +40,7 @@
   type Agent = "claude" | "chatgpt" | "cursor";
   type Onboard = { label: string; prompt: string; agents: Agent[]; askLabel: string; askHint: string };
   type LinkResult = { url: string; ok: boolean; status?: number; reason?: string };
-  type Launcher = { title: string; label: string; background?: string; color?: string; position: "right" | "left"; shape: "pill" | "circle" | "tab"; logo?: string; accent: string; accentText?: string; radius: number; font?: string; width: number; onboard?: Onboard };
+  type Launcher = { title: string; label: string; background?: string; color?: string; launcherRadius?: number; position: "right" | "left"; shape: "pill" | "circle" | "tab"; logo?: string; accent: string; accentText?: string; radius: number; font?: string; width: number; onboard?: Onboard };
   const w = window as unknown as { FlowApp?: object; FlowAppConfig?: Config };
   const script = (document.currentScript ?? document.querySelector('script[src*="/app/embed.js"]')) as HTMLScriptElement | null;
   if (w.FlowApp || !script) return;
@@ -165,7 +165,7 @@
     const logo = l.logo ? `<img alt="" src="${l.logo.replace(/"/g, "&quot;")}">` : `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.2 3.6c-.6.5-1.8.2-1.8-.7z"/></svg>`;
     shadow.innerHTML =
       `<style>:host{all:initial}` +
-      `.launcher{all:initial;box-sizing:border-box;position:fixed;z-index:2147483000;bottom:20px;${side}:20px;display:flex;align-items:center;gap:9px;padding:8px 16px 8px 8px;border-radius:999px;background:${l.background ?? l.accent};color:${l.color ?? accentText};font:600 14px/1 ${font};box-shadow:0 8px 24px -6px #0003,0 0 0 1px #0001;cursor:pointer;transition:transform .2s,opacity .2s}` +
+      `.launcher{all:initial;box-sizing:border-box;position:fixed;z-index:2147483000;bottom:20px;${side}:20px;display:flex;align-items:center;gap:9px;padding:8px 16px 8px 8px;border-radius:${l.launcherRadius ?? 999}px;background:${l.background ?? l.accent};color:${l.color ?? accentText};font:600 14px/1 ${font};box-shadow:0 8px 24px -6px #0003,0 0 0 1px #0001;cursor:pointer;transition:transform .2s,opacity .2s}` +
       `.launcher:hover{transform:translateY(-2px)}.launcher:focus-visible{outline:3px solid ${l.accent};outline-offset:3px}` +
       `.launcher img,.launcher svg{width:30px;height:30px;border-radius:50%;object-fit:cover;background:#fff2;fill:currentColor;padding:${l.logo ? 0 : 6}px;box-sizing:border-box}` +
       `.launcher.circle{padding:9px}.launcher.circle span{display:none}.launcher.circle img,.launcher.circle svg{width:38px;height:38px}` +

@@ -6,6 +6,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **The launcher's look:** `app.launcher` takes `background`, `color` and `radius` (a quiet grey, or a rounded
+  rectangle instead of a pill); default the brand accent, fully round.
 - **Several MCP servers in one deployment: `mount`.** `mount({ "/mcp": publicMcp, "/cli/mcp": cli,
   "/internal/mcp": internal, "/app": webApp({ agent, ...app }) })` serves each `mcpServer` at its path
   (one server may be at several), each path its own protected resource (`<origin><path>`), the OAuth

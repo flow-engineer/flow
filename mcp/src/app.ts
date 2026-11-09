@@ -186,6 +186,8 @@ export interface McpAppOptions {
     /** Its fill and text colors (default the brand accent and its readable text), e.g. a quiet grey. */
     background?: string;
     color?: string;
+    /** Corner radius in pixels (default fully round, a pill). */
+    radius?: number;
   };
   /** The panel's starting width in pixels, 340 to 720; people can drag it wider. Default 420. */
   width?: number;
@@ -293,6 +295,7 @@ export function appServer(options: McpAppOptions, server: { name: string; mcpPat
     accentText: theme.accentText,
     ...(options.launcher?.background ? { background: options.launcher.background } : {}),
     ...(options.launcher?.color ? { color: options.launcher.color } : {}),
+    ...(options.launcher?.radius !== undefined ? { launcherRadius: options.launcher.radius } : {}),
     radius: theme.radius ?? 14,
     font: theme.font,
     width,
