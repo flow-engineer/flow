@@ -33,9 +33,9 @@ import { unavailableRecords, type Records } from "../../src/records.ts";
 import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, SKILLS_META, type AgentFiles } from "../../src/skills.ts";
 import { serveNode } from "../../src/http.ts";
 import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
-import { FORMATTED, JSON_TEXT, jsonTextOf, render, toolContext, ToolError, type CredentialProvider, type McpClientKind, type Tool, type ToolContext } from "../../src/tools.ts";
+import { FORMATTED, JSON_TEXT, jsonTextOf, render, toolContext, ToolError, type CredentialProvider, type McpClientKind, type Tool, type ToolContext, type ToolGroup } from "../../src/tools.ts";
 import { terminalServer } from "./terminal.ts";
-import { appServer, appViewsOn, uiTools, UI_INSTRUCTIONS, type McpAppOptions } from "./app.ts";
+import { APP_PATH, appServer, appViewsOn, uiTools, UI_INSTRUCTIONS, type McpAppOptions } from "./app.ts";
 import { describe, FULL_CATALOG_META, IN_PROCESS, MCP_CLIENT_KINDS, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
 import { adaptationOf, CONTRACT_META, contractOf, contractTools, type McpClientInfo, type McpContracts } from "./contracts.ts";
 
@@ -53,10 +53,37 @@ export interface McpAuth {
   verify(token: string, request: Request): Promise<McpIdentity | null> | McpIdentity | null;
   /** The authorization server's own routes when it is served here, on the same origin (the OAuth bridge's). */
   routes?: { paths: string[]; fetch(request: Request): Promise<Response> };
+  /**
+   * Who may use this server at all, of the people `verify` signs in. With it, every request needs
+   * sign-in (even tools that need none), and a signed-in person it refuses gets 403. `only` sets it.
+   */
+  allow?: McpAccess;
+}
+
+/** Whether a signed-in person may use a server (McpAuth.allow). */
+export type McpAccess = (who: McpIdentity, request: Request) => boolean | Promise<boolean>;
+
+/** A sign-in that several servers share, and `only` keeps to some of its people for one of them. */
+export interface McpSignIn extends McpAuth {
+  /** The same sign-in, kept to the people `allow` accepts (and any this one already keeps to). */
+  only(allow: McpAccess): McpSignIn;
+}
+
+/** An McpAuth with `only` (the OAuth bridge's `auth`). */
+export function signIn(auth: McpAuth): McpSignIn {
+  return {
+    ...auth,
+    only: (allow) => {
+      const before = auth.allow;
+      return signIn({ ...auth, allow: before ? async (who, request) => (await before(who, request)) && allow(who, request) : allow });
+    },
+  };
 }
 
 export interface McpIdentity {
   key: string;
+  /** The person's verified email, when the sign-in knows it (for McpAuth.allow). */
+  email?: string;
   scopes?: string[];
   /** Request-bound backend access, such as a brand token exchange. Never exposed to the model. */
   credentials?: CredentialProvider;
@@ -71,7 +98,8 @@ export interface McpIdentity {
 export interface McpServerOptions {
   name: string;
   version: string;
-  tools: Tool[];
+  /** The tools, plain or in groups (a group's channels are the chat agent's and do not apply here). */
+  tools: (Tool | ToolGroup)[];
   /** Replace the tools' mcp.deferred flags with this list. Omitted: use the flags; []: all upfront. */
   deferred?: string[];
   /** The agent's folder, for its skills (AGENTS.md is the chat agent's and is not sent). Or `files`. */
@@ -158,8 +186,9 @@ const NO_RECORDS = unavailableRecords("give mcpServer({ records: agent.records }
 export function mcpServer(options: McpServerOptions): McpServerHandle {
   if (options.dir !== undefined && options.files !== undefined) throw new Error("@flow-engineer/flow/mcp: give dir or files, not both");
   const skills = options.dir !== undefined || options.files !== undefined ? loadSkills(options.files ?? readAgentFolder(options.dir!)) : [];
-  const feedback = options.feedback === false || options.tools.some(t => t.name === "feedback") ? undefined : feedbackTool(options.name);
-  const tools = [...options.tools, ...(skills.length ? [readSkillTool(skills)] : []), ...(feedback ? [feedback] : [])];
+  const own = options.tools.flatMap(t => "tools" in t ? t.tools : [t]);
+  const feedback = options.feedback === false || own.some(t => t.name === "feedback") ? undefined : feedbackTool(options.name);
+  const tools = [...own, ...(skills.length ? [readSkillTool(skills)] : []), ...(feedback ? [feedback] : [])];
   const problems = toolsProblems(tools);
   if (problems.length) throw new Error(`@flow-engineer/flow/mcp: these tools cannot be served as declared:\n- ${problems.join("\n- ")}`);
   // A verified token says which client is calling; without auth, only the CLI in this process
@@ -197,7 +226,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
       const hidden = new Set(shown.filter(t => deferred.has((adaptationOf(t)?.tool ?? t).name) || (!adaptationOf(t) && !source.includes(t) && t.mcp?.deferred)).map(t => t.name));
       return toolSurface(shown, describeAll(shown), hidden, options.descriptor);
     };
-    return { standalone: surface(tools), plugin: surface([...options.tools, ...(feedback ? [feedback] : [])]) };
+    return { standalone: surface(tools), plugin: surface([...own, ...(feedback ? [feedback] : [])]) };
   };
   const contractsServed = contracts ? [contracts.current, ...Object.keys(contracts.supported ?? {}).map(Number)] : [undefined];
   const kinds = [undefined, ...MCP_CLIENT_KINDS.filter(kind => kept.some(t => t.mcp!.clients!.includes(kind)))];
@@ -277,20 +306,28 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   if (terminal && [path, pluginPath, ...(options.auth?.routes?.paths ?? [])].includes(terminal.path)) throw new Error(`@flow-engineer/flow/mcp: the terminal path ${terminal.path} is already served`);
   const app = options.app ? appServer(options.app, { name: options.name, mcpPath: path, resource: options.auth?.resource, terminalPath: terminal?.path, tools: (audiences.get(`${contracts?.current}:cli`) ?? audiences.get(`${contracts?.current}:undefined`)!).standalone.full, chat: appChatOf(options, terminal), verify: options.auth && (async (token, request) => options.auth!.verify(token, request)) }) : undefined;
 
-  /** One request; `local` is the CLI in this process (IN_PROCESS): no sign-in or host checks, and the client kind "cli". */
-  async function serve(request: Request, local = false): Promise<Response> {
+  /**
+   * One request; `local` is the CLI in this process (IN_PROCESS): no sign-in or host checks, and the
+   * client kind "cli". `at` is a path `mount` serves this server at: then only its endpoint (with
+   * `${at}/plugin`) and their metadata are served here, and mount serves the rest once.
+   */
+  async function serve(request: Request, local = false, at?: string): Promise<Response> {
     const url = new URL(request.url);
     const metadataPrefix = "/.well-known/oauth-protected-resource";
-    const plugin = pluginPath !== undefined && (url.pathname === pluginPath || url.pathname === `${metadataPrefix}${pluginPath}`);
-    const servedPath = plugin ? pluginPath! : path;
-    const routes = options.auth?.routes;
-    if (routes?.paths.some((p) => url.pathname === p || url.pathname.startsWith(`${p}/`))) return routes.fetch(request);
-    if (terminal && url.pathname === terminal.path) return terminal.fetch(request);
-    if (app?.paths.some((p) => url.pathname === p || url.pathname.startsWith(`${p}/`))) return app.fetch(request);
+    const endpoint = at ?? path;
+    const pluginAt = pluginPath === undefined ? undefined : at === undefined ? pluginPath : `${at}/plugin`;
+    const plugin = pluginAt !== undefined && (url.pathname === pluginAt || url.pathname === `${metadataPrefix}${pluginAt}`);
+    const servedPath = plugin ? pluginAt! : endpoint;
+    if (at === undefined) {
+      const routes = options.auth?.routes;
+      if (routes?.paths.some((p) => url.pathname === p || url.pathname.startsWith(`${p}/`))) return routes.fetch(request);
+      if (terminal && url.pathname === terminal.path) return terminal.fetch(request);
+      if (app?.paths.some((p) => url.pathname === p || url.pathname.startsWith(`${p}/`))) return app.fetch(request);
+    }
     if (request.method === "GET" && (url.pathname === metadataPrefix || url.pathname === `${metadataPrefix}${servedPath}`)) {
       if (!options.auth) return new Response("Not found", { status: 404 });
       return Response.json({
-        resource: resourceOf(url, servedPath),
+        resource: resourceOf(url, servedPath, at),
         authorization_servers: [options.auth.issuer].flat(),
         bearer_methods_supported: ["header"],
         ...(scopes && (scopes.read || scopes.write) ? { scopes_supported: [...new Set([scopes.read, scopes.write].filter(Boolean))] } : {}),
@@ -309,9 +346,12 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     if (session && sessions.get(session)?.path !== servedPath) return new Response("Session not found", { status: 404 });
     let authInfo: AuthInfo | undefined = local ? { token: "", clientId: "", scopes: [], extra: { clientKind: "cli" } } : undefined;
     const bearer = /^Bearer\s+(.+)$/i.exec(request.headers.get("authorization") ?? "")?.[1];
+    // A server kept to some people (auth.allow) answers nobody else, whatever the tool.
+    if (options.auth?.allow && !bearer && !local) return challenge(url, servedPath, at, 401, "invalid_token", `Sign in to use ${options.name}.`, []);
     if (options.auth && bearer && !local) {
       const identity = await options.auth.verify(bearer, request);
-      if (!identity) return challenge(url, servedPath, 401, "invalid_token", "The token is not valid.", []);
+      if (!identity) return challenge(url, servedPath, at, 401, "invalid_token", "The token is not valid.", []);
+      if (options.auth.allow && !(await options.auth.allow(identity, request))) return Response.json({ error: "access_denied", error_description: `${options.name} is not available to this account.` }, { status: 403 });
       authInfo = { token: bearer, clientId: identity.client?.id ?? "", scopes: identity.scopes ?? [], extra: { key: identity.key, ...(identity.client?.kind ? { clientKind: identity.client.kind } : {}) } };
       if (identity.credentials) Object.defineProperty(authInfo.extra!, "credentials", { value: identity.credentials, enumerable: false });
     }
@@ -333,11 +373,11 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
           if (!t || signInOf(t) === "none") continue;
           const needed = scopesFor(t, scopes);
           if (!authInfo) {
-            if (signInOf(t) === "required") return challenge(url, servedPath, 401, "invalid_token", `Sign in to use ${t.name}.`, needed);
+            if (signInOf(t) === "required") return challenge(url, servedPath, at, 401, "invalid_token", `Sign in to use ${t.name}.`, needed);
             continue;
           }
           const missing = needed.filter((s) => !authInfo!.scopes.includes(s));
-          if (missing.length) return challenge(url, servedPath, 403, "insufficient_scope", `${t.name} needs ${missing.join(" ")}.`, [...new Set([...authInfo.scopes, ...needed])]);
+          if (missing.length) return challenge(url, servedPath, at, 403, "insufficient_scope", `${t.name} needs ${missing.join(" ")}.`, [...new Set([...authInfo.scopes, ...needed])]);
         }
       }
     }
@@ -361,16 +401,14 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     return response;
   }
 
-  function resourceOf(url: URL, servedPath: string): string {
+  /** The protected resource a path is: auth.resource for the endpoint, and its origin with the path for any other (the plugin's, or a path mount serves it at). */
+  function resourceOf(url: URL, servedPath: string, at: string | undefined): string {
     const resource = options.auth?.resource ?? `${url.origin}${path}`;
-    if (servedPath === path) return resource;
-    const pluginResource = new URL(resource);
-    pluginResource.pathname = servedPath;
-    return pluginResource.href;
+    return at === undefined && servedPath === path ? resource : new URL(servedPath, resource).href;
   }
 
-  function challenge(url: URL, servedPath: string, status: 401 | 403, error: string, description: string, scope: string[]): Response {
-    const metadata = `${new URL(resourceOf(url, servedPath)).origin}/.well-known/oauth-protected-resource${servedPath}`;
+  function challenge(url: URL, servedPath: string, at: string | undefined, status: 401 | 403, error: string, description: string, scope: string[]): Response {
+    const metadata = `${new URL(resourceOf(url, servedPath, at)).origin}/.well-known/oauth-protected-resource${servedPath}`;
     const header = `Bearer error="${error}", error_description="${description}", resource_metadata="${metadata}"${scope.length ? `, scope="${scope.join(" ")}"` : ""}`;
     return Response.json({ error, error_description: description }, { status, headers: { "WWW-Authenticate": header } });
   }
@@ -396,7 +434,118 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   };
   // The CLI in this process reaches the standalone endpoint here, never over the network.
   Object.defineProperty(handle, IN_PROCESS, { value: { path, fetch: (request: Request) => serve(request, true) }, enumerable: false });
+  const mountable: Mountable = {
+    name: options.name, auth: options.auth, plugin: pluginPath !== undefined, own: Boolean(options.path || (options.plugin && options.plugin.path) || options.agent || options.app),
+    appTools: (audiences.get(`${contracts?.current}:cli`) ?? audiences.get(`${contracts?.current}:undefined`)!).standalone.full,
+    serve: (request, at) => serve(request, false, at),
+  };
+  Object.defineProperty(handle, MOUNTABLE, { value: mountable, enumerable: false });
   return handle;
+}
+
+/** What mount needs of a server: serving one of its paths, and what the web app shows of it. */
+interface Mountable {
+  name: string;
+  auth?: McpAuth;
+  plugin: boolean;
+  /** It was given paths, a plugin path, terminal chat or a web app of its own, which mount serves instead. */
+  own: boolean;
+  appTools: McpToolDescriptor[];
+  serve(request: Request, at: string): Promise<Response>;
+}
+const MOUNTABLE = Symbol("flow.mcp.mountable");
+const WEB_APP = Symbol("flow.mcp.webApp");
+
+export interface WebAppOptions extends McpAppOptions {
+  /** The agent for the app's chat and terminal chat (/agent/terminal), as mcpServer's `agent`. Without it, the app has no chat. */
+  agent?: Agent | (() => Agent);
+  /** Terminal chat, as mcpServer's `terminal`. */
+  terminal?: McpServerOptions["terminal"];
+  /** The MCP server the app's panel calls and people add to their assistant. Default: the first server mounted. */
+  server?: McpServerHandle;
+}
+
+/** The web app (panel, views, onboard widget) with its chat and terminal chat, for mount at "/app". */
+export interface WebApp { readonly [WEB_APP]: WebAppOptions }
+
+export function webApp(options: WebAppOptions): WebApp {
+  return { [WEB_APP]: options };
+}
+
+/** Several MCP servers, the web app and terminal chat as one deployment: Flow's hosting takes it from the `mcp(agent, host)` factory like one server. */
+export interface McpMount {
+  fetch(request: Request): Promise<Response>;
+  node(req: IncomingMessage, res: ServerResponse): Promise<void>;
+  /** Every path served, for a host that mounts paths (Flow's hosting). */
+  paths: string[];
+  /** Every server's descriptors, once by name. */
+  descriptors: McpToolDescriptor[];
+  flushTraces(): Promise<void>;
+}
+
+/**
+ * Serve servers by path: each at its path (with `${path}/plugin` when it has a plugin endpoint), its
+ * own protected resource `<origin><path>`, and one server may be at several paths. The sign-in's
+ * routes (the OAuth bridge's, which every server shares) are served once, as are the web app at "/app"
+ * and its terminal chat.
+ */
+export function mount(routes: Record<string, McpServerHandle | WebApp>): McpMount {
+  const endpoints: { path: string; server: McpServerHandle; mountable: Mountable }[] = [];
+  let app: WebAppOptions | undefined;
+  for (const [path, value] of Object.entries(routes)) {
+    if (!path.startsWith("/") || /[?#]/.test(path) || (path !== "/" && path.endsWith("/"))) throw new Error(`@flow-engineer/flow/mcp: mount paths are absolute URL paths, not "${path}"`);
+    if (WEB_APP in value) {
+      if (path !== APP_PATH) throw new Error(`@flow-engineer/flow/mcp: the web app is served at ${APP_PATH}, not ${path}`);
+      app = value[WEB_APP];
+      continue;
+    }
+    const mountable = (value as unknown as Record<symbol, Mountable | undefined>)[MOUNTABLE];
+    if (!mountable) throw new Error(`@flow-engineer/flow/mcp: mount ${path}: give an mcpServer or webApp`);
+    if (mountable.own) throw new Error(`@flow-engineer/flow/mcp: mount ${path}: ${mountable.name} has its own path, plugin path, terminal chat or app; mount sets its paths, and the web app and terminal chat go in webApp`);
+    endpoints.push({ path, server: value, mountable });
+  }
+  if (!endpoints.length) throw new Error("@flow-engineer/flow/mcp: mount needs at least one MCP server");
+  const served = endpoints.flatMap(({ path, mountable }) => mountable.plugin ? [path, `${path}/plugin`] : [path]);
+  const duplicate = served.find((path, index) => served.indexOf(path) !== index || path === APP_PATH || path.startsWith(`${APP_PATH}/`));
+  if (duplicate) throw new Error(`@flow-engineer/flow/mcp: mount serves ${duplicate} twice`);
+  // One sign-in for all: the OAuth bridge's routes are served once, so every server must share them.
+  const signInRoutes = [...new Set(endpoints.map(({ mountable }) => mountable.auth?.routes).filter((r) => r !== undefined))];
+  if (signInRoutes.length > 1) throw new Error("@flow-engineer/flow/mcp: mounted servers share one sign-in (the same OAuth bridge's auth, kept to some people with only)");
+  const signIn = signInRoutes[0];
+
+  const appServerAt = app && (endpoints.find(({ server }) => server === app!.server) ?? (app.server ? undefined : endpoints[0]));
+  if (app && !appServerAt) throw new Error("@flow-engineer/flow/mcp: webApp's server is not mounted");
+  const auth = appServerAt?.mountable.auth;
+  const terminal = app && terminalOf({ agent: app.agent, terminal: app.terminal, auth });
+  if (terminal && served.includes(terminal.path)) throw new Error(`@flow-engineer/flow/mcp: the terminal path ${terminal.path} is already served`);
+  const web = app && appServerAt && appServer(app, {
+    name: appServerAt.mountable.name, mcpPath: appServerAt.path, terminalPath: terminal?.path, tools: appServerAt.mountable.appTools,
+    ...(auth?.resource ? { resource: new URL(appServerAt.path, auth.resource).href } : {}),
+    chat: appChatOf({ app, agent: app.agent, auth }, terminal),
+    verify: auth && (async (token, request) => auth.verify(token, request)),
+  });
+
+  const metadataPrefix = "/.well-known/oauth-protected-resource";
+  const under = (pathname: string, paths: string[]) => paths.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+  async function serve(request: Request): Promise<Response> {
+    const { pathname } = new URL(request.url);
+    if (signIn && under(pathname, signIn.paths)) return signIn.fetch(request);
+    if (terminal && pathname === terminal.path) return terminal.fetch(request);
+    if (web && under(pathname, web.paths)) return web.fetch(request);
+    const resource = pathname.startsWith(`${metadataPrefix}/`) ? pathname.slice(metadataPrefix.length) : pathname;
+    for (const { path, mountable } of endpoints) {
+      if (resource === path || (mountable.plugin && resource === `${path}/plugin`)) return mountable.serve(request, path);
+    }
+    return new Response("Not found", { status: 404 });
+  }
+  const servers = [...new Set(endpoints.map(({ server }) => server))];
+  return {
+    fetch: (request) => serve(withHost(request)),
+    node: (req, res) => serveNode(serve, req, res),
+    paths: [...new Set([...served, metadataPrefix, ...(signIn?.paths ?? []), ...(terminal ? [terminal.path] : []), ...(web?.paths ?? [])])],
+    descriptors: [...new Map(servers.flatMap((server) => server.descriptors).map((d) => [d.name, d])).values()],
+    flushTraces: async () => { await Promise.all(servers.map((server) => server.flushTraces())); },
+  };
 }
 
 /**
@@ -414,7 +563,7 @@ function withHost(request: Request): Request {
  * The web app's own chat (its channel "app"), beside terminal chat and checked the same way. On Flow's
  * hosting its answers are drawn as views, so the agent is told to keep its words short.
  */
-function appChatOf(options: McpServerOptions, terminal: ReturnType<typeof terminalOf>) {
+function appChatOf(options: Pick<McpServerOptions, "app" | "agent" | "auth">, terminal: ReturnType<typeof terminalOf>) {
   if (!options.app || !terminal || !options.agent) return undefined;
   const given = options.agent;
   const views = appViewsOn();
@@ -437,7 +586,7 @@ function appChatOf(options: McpServerOptions, terminal: ReturnType<typeof termin
 }
 
 /** The terminal route mcpServer serves, with its auth; its channel is added to the agent before the first turn. */
-function terminalOf(options: McpServerOptions) {
+function terminalOf(options: Pick<McpServerOptions, "agent" | "terminal" | "auth">) {
   const given = options.agent;
   if (!given || options.terminal === false || (!options.auth && !options.terminal)) return undefined;
   const settings = options.terminal || {};

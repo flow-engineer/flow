@@ -10,8 +10,9 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { isSpecType } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { tools as cafeTools } from "../examples/cafe/src/tools.ts";
-import { mcpServer, uiTools, type McpServerOptions } from "../mcp/src/index.ts";
-import { createAgent, flowEvents, jsonText, tool, type ToolContext } from "../src/index.ts";
+import { mcpServer, mount, uiTools, webApp, type McpServerOptions } from "../mcp/src/index.ts";
+import { signIn } from "../mcp/src/server.ts";
+import { createAgent, flowEvents, jsonText, tool, toolGroup, type ToolContext } from "../src/index.ts";
 
 const servers: Server[] = [];
 after(() => servers.forEach((s) => s.close()));
@@ -460,6 +461,69 @@ test("the web app's views join the agent as a group limited to app, unless it ha
     if (saved.url === undefined) delete process.env.FLOW_APP_SERVICE_URL; else process.env.FLOW_APP_SERVICE_URL = saved.url;
     if (saved.key === undefined) delete process.env.FLOW_KEY; else process.env.FLOW_KEY = saved.key;
   }
+});
+
+// One deployment, several servers: each path is its own server and protected resource, behind one sign-in.
+test("mount serves each server at its paths as its own protected resource, one server at two, the sign-in's routes and the web app once", async () => {
+  const signedIn: string[] = [];
+  const auth = signIn({
+    issuer: "https://cafe.example", resource: "https://cafe.example/mcp", verify: (token) => (token === "sam" ? { key: "sam" } : null),
+    routes: { paths: ["/token"], fetch: async (request) => (signedIn.push(new URL(request.url).pathname), Response.json({ ok: true })) },
+  });
+  const menu = tool({ name: "menu", description: "The menu.", input: z.object({}), signIn: "none", hints: { readOnly: true }, run: () => "latte" });
+  const orders = toolGroup({ name: "orders", tools: [tool({ name: "my_orders", description: "Their orders.", input: z.object({}), hints: { readOnly: true }, run: () => [] })] });
+  const open = mcpServer({ name: "cafe", version: "1", tools: [menu], auth, plugin: false, feedback: false });
+  const full = mcpServer({ name: "cafe-full", version: "1", tools: [menu, orders], auth, feedback: false });
+  const deployment = mount({ "/mcp": open, "/cli": full, "/staff/cli": full, "/app": webApp({ origins: [SITE] }) });
+  const http = createServer((req, res) => void deployment.node(req, res));
+  servers.push(http);
+  await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+  const origin = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+
+  const names = async (path: string) => { const c = await client(`${origin}${path}`, "sam"); const listed = (await c.listTools()).tools.map((t) => t.name); await c.close(); return listed; };
+  assert.deepEqual(await names("/mcp"), ["menu"]);
+  assert.deepEqual(await names("/cli"), ["menu", "my_orders"], "a group's tools are served like plain ones");
+  assert.deepEqual(await names("/staff/cli"), ["menu", "my_orders"]);
+  assert.deepEqual(await names("/cli/plugin"), ["menu", "my_orders"], "a server's plugin endpoint follows the path it is mounted at");
+  assert.equal((await fetch(`${origin}/mcp/plugin`, { method: "POST" })).status, 404);
+
+  for (const path of ["/cli", "/staff/cli"]) {
+    const denied = await rpc(`${origin}${path}`, call("my_orders"));
+    assert.equal(denied.status, 401);
+    const metadata = denied.headers.get("www-authenticate")!.match(/resource_metadata="([^"]+)"/)![1]!;
+    assert.equal(metadata, `https://cafe.example/.well-known/oauth-protected-resource${path}`);
+    assert.equal((await (await fetch(`${origin}/.well-known/oauth-protected-resource${path}`)).json()).resource, `https://cafe.example${path}`);
+  }
+  await fetch(`${origin}/token`, { method: "POST" });
+  assert.deepEqual(signedIn, ["/token"], "the shared sign-in's routes are served once, by mount");
+  assert.equal((await fetch(`${origin}/app/config?origin=${SITE}`)).status, 200);
+  assert.equal((await fetch(`${origin}/nowhere`)).status, 404);
+  assert.deepEqual(deployment.descriptors.map((d) => d.name), ["menu", "my_orders"]);
+  for (const path of ["/mcp", "/cli", "/staff/cli", "/cli/plugin", "/token", "/app"]) assert.ok(deployment.paths.includes(path), path);
+
+  assert.throws(() => mount({ "/a": open, "/b": mcpServer({ name: "other", version: "1", tools: [menu], auth: signIn({ ...auth, routes: { paths: ["/token"], fetch: async () => new Response() } }) }) }), /share one sign-in/);
+  assert.throws(() => mount({ "/a": mcpServer({ name: "cafe", version: "1", tools: [menu], app: { origins: [SITE] } }) }), /mount sets its paths/);
+  assert.throws(() => mount({ "/a": open, "/b": open, "/web": webApp({ origins: [SITE] }) }), /served at \/app/);
+});
+
+test("a server kept to some people with only refuses everyone else, whatever the tool; the same sign-in serves the others", async () => {
+  const people: Record<string, { key: string; email: string }> = { ana: { key: "ana", email: "ana@cafe.example" }, bo: { key: "bo", email: "bo@gmail.example" } };
+  const everyone = signIn({ issuer: "https://cafe.example", verify: (token) => people[token] ?? null });
+  const staff = everyone.only((who) => who.email!.endsWith("@cafe.example"));
+  const menu = tool({ name: "menu", description: "The menu.", input: z.object({}), signIn: "none", hints: { readOnly: true }, run: () => "latte" });
+  const deployment = mount({ "/mcp": mcpServer({ name: "cafe", version: "1", tools: [menu], auth: everyone, feedback: false }), "/staff": mcpServer({ name: "cafe-staff", version: "1", tools: [menu], auth: staff, feedback: false }) });
+  const at = (path: string, token?: string) => deployment.fetch(new Request(`https://cafe.example${path}`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(call("menu")) }));
+
+  assert.equal((await at("/mcp")).status, 200, "a tool needing no sign-in answers anyone on an open server");
+  assert.equal((await at("/mcp", "bo")).status, 200);
+  const anonymous = await at("/staff");
+  assert.equal(anonymous.status, 401, "a kept server asks everyone to sign in, even for a tool that needs none");
+  assert.match(anonymous.headers.get("www-authenticate")!, /resource_metadata="https:\/\/cafe\.example\/\.well-known\/oauth-protected-resource\/staff"/);
+  const refused = await at("/staff", "bo");
+  assert.equal(refused.status, 403, "signed in, but not someone the server is kept to");
+  assert.equal((await refused.json()).error, "access_denied");
+  assert.equal((await at("/staff", "ana")).status, 200);
+  assert.equal((await at("/staff", "nobody")).status, 401);
 });
 
 test("stdio serves the same tools and instructions to a host that runs the server as a command, anonymous, without the tools kept to the CLI", async () => {

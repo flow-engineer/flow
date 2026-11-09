@@ -22,13 +22,13 @@ import { createHash, randomBytes } from "node:crypto";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import Provider, { errors, interactionPolicy, type ClientMetadata, type Configuration, type JWKS } from "oidc-provider";
-import type { McpAuth, McpIdentity } from "../../mcp/src/server.ts";
+import { signIn, type McpIdentity, type McpSignIn } from "../../mcp/src/server.ts";
 import { oauthStore, type OAuthStorage } from "./store.ts";
 
 export interface OAuthBridgeOptions {
   /** This server's public origin, the issuer clients see (https; http on loopback in development). */
   issuer: string;
-  /** The exact MCP URLs tokens are for: the agent's /mcp, and /mcp/plugin when it serves one. */
+  /** The exact MCP URLs tokens are for: the agent's /mcp, and /mcp/plugin when it serves one; with mount, each path's. The first is the web app's. */
   resources: string[];
   /** Where clients, grants and sign-ins in progress are kept, hashed and sealed: databaseStorage(db, issuer) when self-hosted, Flow's store when hosted. Durable outside development. */
   storage: OAuthStorage;
@@ -73,8 +73,8 @@ export interface BrandTokens {
 }
 
 export interface OAuthBridge {
-  /** For mcpServer({ auth }): this issuer, each request's token checked by the brand, and the bridge's routes. */
-  auth: McpAuth;
+  /** For mcpServer({ auth }): this issuer, each request's token checked by the brand, and the bridge's routes. `auth.only(...)` keeps a server to some of the people it signs in. */
+  auth: McpSignIn;
 }
 
 const ROUTES = { authorization: "/auth", token: "/token", registration: "/reg", revocation: "/token/revocation", jwks: "/jwks" };
@@ -362,12 +362,12 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
   }
 
   return {
-    auth: {
+    auth: signIn({
       issuer,
       resource: [...resources][0]!,
       verify: (token, request) => verify(token, resourceOf(request)),
       routes: { paths: options.app ? [...PATHS, APP_SESSION_PATH] : PATHS, fetch: (request) => served(node, request) },
-    },
+    }),
   };
 }
 

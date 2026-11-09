@@ -2,6 +2,27 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **Several MCP servers in one deployment: `mount`.** `mount({ "/mcp": publicMcp, "/cli/mcp": cli,
+  "/internal/mcp": internal, "/app": webApp({ agent, ...app }) })` serves each `mcpServer` at its path
+  (one server may be at several), each path its own protected resource (`<origin><path>`), the OAuth
+  bridge's routes once for all of them, and the web app and terminal chat once. It returns `fetch`,
+  `node`, `paths`, `descriptors` and `flushTraces`, what Flow's hosting takes from the `mcp(agent, host)`
+  factory. `webApp(options)` is mcpServer's `app` with `agent`, `terminal` and `server` (the server the
+  panel calls; default the first mounted). List every path's URL in `oauthBridge`'s `resources`.
+- **`auth.only(allow)`: a server kept to some signed-in people.** The OAuth bridge's `auth` has
+  `only((who, request) => boolean)`; a server given it refuses everyone else, whatever the tool: 401
+  without a token, 403 `access_denied` signed in. `McpIdentity.email` carries the verified email for
+  it; any `McpAuth` can set `allow` itself.
+- **`mcpServer({ tools })` takes tool groups** (`toolGroup`) beside plain tools.
+
+### Migration notes
+
+None: a single `mcpServer` works unchanged.
+
 ## 0.18.1 (10 Nov 2026)
 
 ### Changes
