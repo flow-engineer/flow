@@ -842,8 +842,8 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
         });
       }
       for (const [key, field] of byFlag) if (parsed[key] !== undefined) input[field] = parsed[key];
+      const given = Object.fromEntries(options.map(([name]) => [name, parsed[name]]).filter(([, v]) => v !== undefined));
       if (settings?.input) {
-        const given = Object.fromEntries(options.map(([name]) => [name, parsed[name]]).filter(([, v]) => v !== undefined));
         try { input = await settings.input(input, given); } catch (error) { throw refuse(error); }
       }
       if (writes && parsed["dry-run"]) return void io.write(`${JSON.stringify({ dryRun: true, tool: tool.name, arguments: input }, null, parsed.json ? undefined : 2)}\n`);
@@ -866,6 +866,10 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
           throw new CliExit(EXIT.failed, `${failure.message}${failure.next ? `\nNext: ${failure.next}` : ""}${reportLine}`);
         }
         throw new CliExit(EXIT.failed, `${textOf(result.content as Block[]) || `${tool.name} failed.`}${reportLine}`);
+      }
+      if (settings?.after) {
+        const shown = await settings.after(valueOf(result), given, this.cli, { json: Boolean(parsed.json || parsed.fields) });
+        if (shown !== undefined) return void io.write(`${render(shown, { json: Boolean(parsed.json), fields: parsed.fields as string[] | undefined })}\n`);
       }
       // The tool's own text, unless the person asked for data or the CLI file chose what to show.
       if (settings?.print && !parsed.json && !parsed.fields) return void io.write(`${(await settings.print(valueOf(result))).replace(/\n*$/, "")}\n`);

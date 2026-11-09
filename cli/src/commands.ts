@@ -41,6 +41,13 @@ export interface ToolCommand {
   input?: (input: Record<string, unknown>, options: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>;
   /** Your own output for people: gets the tool's result, returns the text to print. --json and --fields still print the data. */
   print?: (result: unknown) => string | Promise<string>;
+  /**
+   * Your own code after the tool succeeds, on the person's machine (saving files, more calls): gets
+   * the tool's result, the options' values, the CLI's tools and whether JSON was asked for. What it
+   * returns is printed in place of the result, the way results are (--json and --fields apply);
+   * undefined prints the result.
+   */
+  after?: (result: unknown, options: Record<string, unknown>, cli: CliContext["cli"], output: { json: boolean }) => unknown | Promise<unknown>;
   /** Another name for the command. */
   alias?: string;
   /** One line under the command in help (default: the tool's title). */
@@ -345,6 +352,11 @@ export class CommandBuilder {
   /** Print the result your own way for people; --json and --fields still print the data. */
   print(fn: NonNullable<ToolCommand["print"]>): this {
     this.spec.print = fn;
+    return this;
+  }
+  /** Run your own code after the tool succeeds; what it returns is printed in place of the result. */
+  after(fn: NonNullable<ToolCommand["after"]>): this {
+    this.spec.after = fn;
     return this;
   }
   /** For a list: the columns of the table people see. */

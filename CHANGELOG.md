@@ -6,6 +6,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **`openAICompatible({ maxTokens })`.** The most tokens one reply may use, sent as `max_tokens`. Unset, providers
+  such as OpenRouter take the model's maximum and hold credit for it on every call.
+- **A CLI command's own code after its tool: `after`.** `command(tool).after((result, options, cli, output) => …)`
+  (or `after` on a tool command) runs on the person's machine once the tool succeeds, with its result, the
+  command's own options, the CLI's tools (`cli.call`) and whether JSON was asked for. What it returns is
+  printed in place of the result (`--json` and `--fields` apply); undefined prints the result. For work such
+  as saving files from a result's links.
 - **Tool groups: tools offered only on their channels.** `createAgent({ tools, groups: [toolGroup({ name,
   channels, tools })] })`: `tools` stays the default group, offered on every channel; a group with `channels`
   is offered only on a turn that answers a message on one of them. A tool's name is unique across them all
