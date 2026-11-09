@@ -134,9 +134,10 @@ test("a video arrives as an attachment the model can watch; one Flow says is ove
 
   await live.deliver(received(WA, "msg_1", video("file_v", 3)));
   const first = await live.nextCall(0);
-  assert.deepEqual(first.request.messages.filter((m) => m.role === "user").at(-1), {
-    role: "user",
-    content: "[whatsapp · msg_1] [video] the leak",
+  // Its first line: a line saying it has the agent's 👀 follows when that reaction went first (test/attachments.test.ts).
+  const shown = first.request.messages.filter((m) => m.role === "user").at(-1) as { content: string; media?: unknown };
+  assert.deepEqual({ line: shown.content.split("\n")[0], media: shown.media }, {
+    line: "[whatsapp · msg_1] [video] the leak",
     media: [{ kind: "video", mime: "video/mp4", data: "AQID", ref: "file_v" }],
   });
   first.answer(respond(call("send_whatsapp", { text: "I see it" })));
@@ -144,7 +145,7 @@ test("a video arrives as an attachment the model can watch; one Flow says is ove
 
   await live.deliver(received(WA, "msg_2", video("file_big", 16 * 1_048_576)));
   const second = await live.nextCall(1);
-  assert.equal(lastUser(second.request.messages), "[whatsapp · msg_2] [video: too large for you to read, over 10 MB] the leak");
+  assert.equal(lastUser(second.request.messages).split("\n")[0], "[whatsapp · msg_2] [video: too large for you to read, over 10 MB] the leak");
   assert.equal(flow.requests.some((r) => r.path === "/v0/files/file_big"), false);
   second.answer(respond(call("send_whatsapp", { text: "Could you send a shorter clip?" })));
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
