@@ -1,6 +1,8 @@
 # A spec: one situation to put the agent in, and what has to be true at the end.
 id: latte-correction
-title: Orders a latte, corrects the milk mid-thought, confirms
+title: Milk corrected to oat   # a short name, at most 45 characters
+about: Orders a large latte, corrects the milk mid-thought, then confirms.   # what it tests
+theme: Ordering                # the area of the agent it tests
 channels: [whatsapp]         # each platform it runs on, with that simulator's rules
 
 person:                      # played by a model that sees only what a person would see
@@ -14,16 +16,19 @@ opening:                     # the first messages, sent exactly like this; then 
   - say: "oat milk actually"
     after_ms: 1200
 
-world: |                     # what is true in this test; the tool simulator plays the tools from it
+world: |                     # what is true in this test, in words: for the person, the judge, and the model playing the tools
   The menu is as in tests/tools/get_menu.yaml. Oat milk is in stock. The café is busy this
-  morning, so the point of sale is slow to take orders, but they go through.
+  morning, so the point of sale is slow to take orders, but they go through (place_order.yaml's
+  busy response).
 
 max_turns: 8
 
 expect:
-  outcome:                   # judged against what the tools did (the simulator's log)
+  calls:                     # checked in code from the recorded tool calls
+    - { tool: place_order, args: { name: Sam } }
+  outcome:                   # checked against what the tools did
     - Exactly one order is placed, for one large latte with oat milk, under the name Sam.
-  judge:                     # read by the judge from the transcript, each pass or fail with a reason
+  judge:                    # read by the judge from the transcript, each pass or fail with a reason
     - The order read back to Sam uses oat milk, not whole milk.
     - The agent asks Sam to confirm before placing the order.
     - Sam is told the order number and when it will be ready.

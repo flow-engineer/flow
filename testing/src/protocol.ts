@@ -7,7 +7,7 @@
 //        Last-Event-ID: N                                    a resume: the commands after N
 //   POST /api/sessions/:id/outbound    { conversationId, outbound } → { ok, messageId? } | 409 { error }
 //        messageId: the simulator's id for the message (a1, a2, ...), which an edit or unsend outbound names
-//   POST /api/sessions/:id/tool-calls  ToolCallRequest → ToolCallResult   held open while the tool is simulated
+//   POST /api/sessions/:id/tool-calls  ToolCallRequest → ToolCallResult   held open while the tool is played
 //   POST /api/sessions/:id/events      { seq, events: FlowEvent[] }
 //
 // Every POST after the open sends Idempotency-Key. An older cloud ignores it. When Opened
@@ -21,9 +21,8 @@
 // own on the agent's side, built with a clock the commands move (its own `now`, no schedule timer),
 // and the agent's own channels, whose sends come to the cloud as an outbound with `at`, the run's
 // clock. The cloud sends `open` first, then any of `message`, `reaction`, `event`, `nudge`,
-// `advance`, `restart` (both sides said `restart`), and `close` when the run is over. `open`,
-// `event`, `nudge`, `advance` and `restart` are each answered by one StepAnswer once the agent has
-// settled: everything they set off has been sent (a deploy's answer comes once the new agent is up).
+// `advance`, and `close` when the run is over. `open`, `event`, `nudge` and `advance` are each
+// answered by one StepAnswer once the agent has settled: everything they set off has been sent.
 //
 // When Opened says resume, every command on the stream carries `id: N` (1, 2, 3, ... per session).
 // A stream that drops, or sits silent past the idle watch, is opened again with Last-Event-ID set
@@ -46,8 +45,7 @@
 //
 // When Opened says flaky, a run that fails is played once more: the failed run's `run` command carries
 // `rerun` and `label`, and the second play comes as a `run` command of its own with `rerunOf`, in any
-// order (match them by runId); it is not a run of the suite. When Opened says replay, the cloud
-// replays stored person, tool and judge answers for a scenario version it has played; `fresh` asks it not to.
+// order (match them by runId); it is not a run of the suite.
 //
 // The open goes to the cloud's front door; every later call goes to Opened.tunnel (else the same
 // address) and carries `authorization: Bearer <token>` from Opened.
@@ -101,12 +99,8 @@ export interface OpenSession {
   groups?: boolean;
   /** The client plays business runs (open, event, nudge, advance, close). */
   business?: boolean;
-  /** The client plays a business run's `restart` step (a crash or a deploy of the agent mid-conversation). */
-  restart?: boolean;
   /** The client reports flaky runs: when a run fails, the cloud plays it once more and labels it. */
   flaky?: boolean;
-  /** Play every simulator afresh: the cloud replays no stored person, tool or judge answers. */
-  fresh?: boolean;
   /** The client seeds a run's earlier conversation (`history` on a run's first message or open). */
   history?: boolean;
   /** Play only these runs, numbered as given: a re-open after session_gone. Sent only to a cloud whose Opened said reopen,
@@ -146,12 +140,8 @@ export interface Opened {
   reopen?: boolean;
   /** This cloud plays business runs; the client sent `business`. Absent on an older cloud. */
   business?: boolean;
-  /** This cloud sends `restart` steps; the client sent `restart`. Absent on an older cloud. */
-  restart?: boolean;
   /** This cloud plays a failed run once more and labels it; the client sent `flaky`. Absent on an older cloud. */
   flaky?: boolean;
-  /** This cloud replays stored simulator answers for the same scenario version (absent with `fresh`, or on an older cloud). */
-  replay?: boolean;
   /** This cloud sends a scenario's `history`; the client sent `history`. Absent on an older cloud. */
   history?: boolean;
   /** What this workspace may do, printed when the session opens. Absent on an older cloud. */
@@ -205,13 +195,6 @@ export type BusinessCommand =
   | { type: "nudge"; conversationId: string; step: number; nudge: BusinessNudge }
   /** Time passes: the clock moves to `to` (epoch ms), a minute at a time, and what came due runs at each step. */
   | { type: "advance"; conversationId: string; step: number; to: number }
-  /** The agent restarts, on the same store: `crash`, the run's agent dies where it is (nothing more it does is
-   * sent or kept, its lease stays until it runs out) and a new one starts once the clock has moved past it;
-   * `deploy`, a new one starts beside it and takes every command from now on, while the old one finishes what it
-   * holds and stops. Each has a runner name of its own. Sent only when both sides said `restart`. A cloud
-   * that plays it right after a message sends it once that message's receipt is in, not its reply, so it
-   * lands while the message's turn runs. */
-  | { type: "restart"; conversationId: string; step: number; mode: "crash" | "deploy" }
   /** The run is over: its agent is dropped. */
   | { type: "close"; conversationId: string };
 
@@ -250,9 +233,6 @@ export interface StepAnswer {
   nudge?: { status: string; reason?: string };
   /** The run's clock when the step settled, epoch ms. */
   at: number;
-  /** A restart's runners (createAgent's runner names): the one that stopped (at once on a crash; once it
-   * finished what it held on a deploy) and the one that started. */
-  restart?: { stopped: string; started: string };
   /** The step could not be played on the agent's side (the agent threw, no such route ...). */
   error?: string;
 }
@@ -286,7 +266,8 @@ export interface RunSummary {
   /** Every check passed. */
   passed: boolean;
   checks: Check[];
-  /** Why the person stopped: goal met, gave up, max turns, or the agent went quiet. */
+  /** Why the person stopped: goal met, gave up, max turns, the agent went quiet, or walked_away (a person with
+   * `behaviours: [walks_away]` left with its goal unmet: a failed run, with a failed check that says why). */
   ended: string;
   turns: number;
   messagesIn: number;
@@ -303,7 +284,8 @@ export interface RunSummary {
   /** The first try never reached the agent, so this run is the second try. */
   retried?: boolean;
   /** The cloud's code when it could not play or judge the run (judge_failed, spend_cap, simulator_failed, ...).
-   * The run then says nothing about the agent, whatever `passed` and `ended` say. */
+   * The run then says nothing about the agent, whatever `passed` and `ended` say. simulator_failed is also a
+   * run whose simulated person drifted from its goal or persona twice (the cloud plays a drifted run once more). */
   error?: string;
   /** What the run came to, from the cloud; an older cloud sends none and the client works it out (report.ts runOutcome). */
   outcome?: RunOutcome;
@@ -319,8 +301,6 @@ export interface RunSummary {
   rerun?: { runId: string; passed: boolean; watch: string };
   /** On a failed run the cloud played again: flaky when the second play passed, failing when it failed too. */
   label?: "flaky" | "failing";
-  /** How many simulator answers this run replayed from stored ones (person, tool simulator, judge). */
-  replayed?: { person: number; tools: number; judge: number };
 }
 
 export interface SessionSummary {

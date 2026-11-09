@@ -31,6 +31,11 @@ export const findSlots = tool({
 - `input` is a zod schema; Flow Framework checks the model's input against it before `run` is called and
   sends the model the error if it doesn't fit.
 - `run` returns any JSON-able value; throw to report a failure (the agent sees `Failed: <message>`).
+  For a failure the caller should act on, throw `new ToolError(code, message, { hint, next })`
+  (from `@flow-engineer/flow`): over MCP it is the result's structured content `{ ok: false, error:
+  { code, message, hint }, next }`, and a CLI command prints it with `--json` and exits 1.
+  To return an API's JSON as it came, `return jsonText(await res.text())`: the text is what a host,
+  a model and the CLI's `--json` read, byte for byte.
 - Don't make tools for talking to the person (send_<channel>, react, share_updates, edit_message, unsend_message), for reminders
   or scheduled messages, for waking the agent later (`wake_me_up`; from a tool, `context.wakeUps`),
   or for opting out of messages: Flow Framework has them.
@@ -154,9 +159,10 @@ export const tools = [
 
 ## The tool's test file
 
-In tests no real tool runs: a model plays each tool from the scenario's world. `tests/tools/<tool>.yaml`
-tells it how the tool behaves: every kind of response it gives, each with an example and how long
-it takes. Write one per tool.
+In tests no real tool runs. `tests/tools/<tool>.yaml` says how the tool behaves: every kind of
+response it gives, each with an example and how long it takes. Write one per tool. A model plays
+each call from it and the scenario's `world`: it picks the response whose `when` fits, with that
+response's latency.
 
 ```yaml
 tool: place_order
@@ -179,17 +185,22 @@ responses:
 - `behaviour`: what the tool does beyond its description, in plain words (ids, ordering, limits,
   when it fails).
 - `responses`: one entry per kind of outcome, the usual one first, then slow ones and each error
-  the real system can give. `when` says when it happens; `latency_ms` is how long it takes;
-  then `output` (what `run` returns) or `error` (what it throws). `input` is optional, as an
-  example of a call.
+  the real system can give. `when` says when it happens, in words a scenario's `world` can match
+  ("The point of sale is down"); `latency_ms` is how long it takes; then `output` (what `run`
+  returns) or `error` (what it throws). `input` is optional, as an example of a call.
 - Use real responses when you have them (copy them from the agent's recorded tool calls, with
   personal data removed); otherwise write realistic ones in exactly the shape `run` returns.
 - Examples show the shape, not the answer: the simulator takes ids, names and dates from the
   scenario's world, the call's input and what the agent already said. Write dates as placeholders
   for the test's clock (`{{now + 10m}}`, `{{now + 2d | date}}`; see the `flow-framework-tests` skill),
   never as written dates, which go stale.
-- Latency lives only here. Scenarios describe situations ("the point of sale is slow this
-  morning"); the simulator picks the matching response and latency on each call.
+- Latency lives only here. A scenario picks a kind by describing the situation in its `world`
+  ("the point of sale is slow this morning", "it is down for the whole conversation"); the model
+  then plays the response whose `when` fits. Give each failure and each slow case its own response,
+  so a scenario can reach it.
+- A tool that changes something (books, orders, cancels): check the change with the scenario's
+  `expect.calls` (the tool and its `args`) or an `outcome` sentence (the `flow-framework-tests`
+  skill).
 
 ## Authenticated backend access
 

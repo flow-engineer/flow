@@ -6,6 +6,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { gunzipSync } from "node:zlib";
 import { createAgent, customUI, sqlite, tool, z, type Agent, type AgentOptions, type Channel, type NudgeInput, type Outbound } from "../src/index.ts";
 import { NUDGE_TRIGGER } from "../src/business-events/engine.ts";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
@@ -19,13 +20,15 @@ const KEY = "trace_key_do-not-log-me";
 
 /** A traces endpoint, played: each request is kept, and `next(n)` waits for the n-th. */
 async function fakeEndpoint(status = 200) {
-  const requests: Array<{ headers: IncomingMessage["headers"]; body: any; path: string }> = [];
+  const requests: Array<{ headers: IncomingMessage["headers"]; body: any; path: string; size: number }> = [];
   const waiters: Array<() => void> = [];
   const server = createServer((req, res) => {
-    let text = "";
-    req.on("data", (chunk) => (text += chunk));
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
-      requests.push({ headers: req.headers, body: JSON.parse(text), path: req.url ?? "" });
+      const raw = Buffer.concat(chunks);
+      const text = req.headers["content-encoding"] === "gzip" ? gunzipSync(raw).toString("utf8") : raw.toString("utf8");
+      requests.push({ headers: req.headers, body: JSON.parse(text), path: req.url ?? "", size: raw.length });
       res.writeHead(status, { "content-type": "application/json" }).end("{}");
       waiters.splice(0).forEach((w) => w());
     });
@@ -286,6 +289,53 @@ test("standalone calls export one trace each with host metadata and content only
 });
 
 // The first test is SMS by hand; this one takes each channel as its adapter makes it.
+test("a batch past 64 KB goes gzipped and reads the same; a small one goes as plain JSON", async () => {
+  const endpoint = await fakeEndpoint();
+  try {
+    const h = agentFor(endpoint.url, true);
+    await h.agent.message({ channel: "sms", from: "+15550100123", message: "Hi", messageId: "SM-1" });
+    (await h.nextCall(0)).answer(respond(call("send_sms", { text: "Hello" })));
+    const small = await endpoint.next(1);
+    assert.equal(small.headers["content-encoding"], undefined);
+    const long = "Can I move my check-in? ".repeat(1500);
+    await h.agent.message({ channel: "sms", from: "+15550100123", message: long, messageId: "SM-2" });
+    (await h.nextCall(1)).answer(respond(call("send_sms", { text: long.slice(0, 1500) }), call("lookup", { day: long })));
+    (await h.nextCall(2)).answer(respond(call("send_sms", { text: "Done." })));
+    const big = await endpoint.next(2);
+    assert.equal(big.headers["content-encoding"], "gzip");
+    assert.ok(big.size < 64 * 1024, `sent ${big.size} bytes`);
+    assert.match(String(tracesOf(endpoint).at(-1)!.attrs["chinwag.user_message"]), /^Can I move my check-in\?/);
+  } finally { endpoint.close(); }
+});
+
+test("a traces endpoint that cannot be reached is logged once, saying how many turns' traces were lost and that the agent is unaffected", async (t) => {
+  const warnings: string[] = [];
+  let warned!: () => void;
+  const once = new Promise<void>((resolve) => (warned = resolve));
+  t.mock.method(console, "warn", (...args: unknown[]) => void (warnings.push(args.map(String).join(" ")), warned()));
+  const gone = await fakeEndpoint();
+  gone.close();
+  const h = agentFor(gone.url, false);
+  await playTurn(h, "+15550100123");
+  await once;
+  await playTurn(h, "+15550100123", 2);
+  await h.agent.flushTraces();
+  assert.deepEqual(h.sent, ["One sec", "Done: Thursday at 10:00.", "One sec", "Done: Thursday at 10:00."]);
+  assert.equal(warnings.length, 1, warnings.join("\n"));
+  assert.match(warnings[0], /traces could not reach the traces endpoint \(\w+\); 1 turn's traces were not sent, the agent's replies do not wait on traces; later failures of this kind are not logged/);
+});
+
+test("a channel the agent does not define (the test cloud's, through receive()) is traced as the platform its messages came with, not other", async () => {
+  const endpoint = await fakeEndpoint();
+  try {
+    const h = agentFor(endpoint.url, false);
+    h.agent.receive("run-1", "Hi", () => {}, { channel: { ...SMS, platform: "telegram" }, channelName: "telegram" });
+    (await h.nextCall(0)).answer(respond(call("send_telegram", { text: "Hello" })));
+    await endpoint.next(1);
+    assert.equal(tracesOf(endpoint)[0].attrs["chinwag.channel"], "telegram");
+  } finally { endpoint.close(); }
+});
+
 test("a trace names the platform the turn was on, the same on the root span and its send spans: Flow Messaging's own, a custom UI's web, the terminal's cli", async () => {
   const fm = flowMessaging({ apiKey: "fk_test_key" });
   const terminal = terminalServer({ agent: () => { throw new Error("not called"); }, auth: { verify: async () => null } }).channel;
@@ -378,7 +428,8 @@ test("a version Flow does not keep is never sent: the next one is, with a warnin
 
 test("with no version option, traces carry the agent's version as service.version, its status says it, and it is logged once when the agent starts", async (t) => {
   const saved = { version: process.env.FLOW_AGENT_VERSION, context: process.env.NODE_TEST_CONTEXT };
-  const warn = t.mock.method(console, "warn", () => {});
+  t.mock.method(console, "warn", () => {});
+  const info = t.mock.method(console, "info", () => {});
   process.env.FLOW_AGENT_VERSION = "build-42";
   delete process.env.NODE_TEST_CONTEXT; // the line is left out of an agent's own tests
   const endpoint = await fakeEndpoint();
@@ -394,7 +445,7 @@ test("with no version option, traces carry the agent's version as service.versio
   let request;
   try {
     assert.equal(h.agent.status().version, "build-42");
-    assert.deepEqual(warn.mock.calls.map((c) => c.arguments[0]).filter((l) => String(l).includes("agent version")), ["flow: agent version build-42 (from FLOW_AGENT_VERSION)"]);
+    assert.deepEqual(info.mock.calls.map((c) => c.arguments[0]).filter((l) => String(l).includes("agent version")), ["flow: agent version build-42 (from FLOW_AGENT_VERSION)"]);
     await playTurn(h, "+15550100123");
     request = await endpoint.next(1);
   } finally { endpoint.close(); }
@@ -443,6 +494,59 @@ test("a message sent as written is a trace of its own, also while a turn is open
     ["person", ["Let me check."], [false]],
     ["queued_message", ["The seller answered your question: yes."], [true]],
   ]);
+});
+
+test("a declared template's send span holds what the person read and the template's parts, with content on only; an undeclared one its name", async () => {
+  const sentTemplate = { name: "order_shipped", language: "en", header: { kind: "text", text: "Order {{1}}" }, body: "Hi {{1}}, your order {{2}} has shipped.", buttons: [{ type: "quick_reply", text: "Thanks" }], values: { header: "1042", body: ["Sam", "1042"] } };
+  const sends = async (content: boolean) => {
+    const endpoint = await fakeEndpoint();
+    const t = traces({ url: endpoint.url, key: KEY, content, version: "v7" }, { service: "market", kindOf: () => "whatsapp" });
+    const at = Date.now();
+    t.sink({ type: "message.out", conversationId: "c1", at, text: "order_shipped", template: true, reads: "Order 1042\nHi Sam, your order 1042 has shipped.", sentTemplate, channel: "whatsapp", direct: true, trigger: "queued_message" });
+    t.sink({ type: "message.out", conversationId: "c2", at, text: "not_declared", template: true, channel: "whatsapp", direct: true, trigger: "queued_message" });
+    await t.flush();
+    endpoint.close();
+    return tracesOf(endpoint).map((x) => Object.fromEntries(Object.entries(attrs(x.spans.find((s: any) => s.parentSpanId))).filter(([k]) => k.startsWith("flow.template.") || k === "chinwag.agent_reply")));
+  };
+  assert.deepEqual(await sends(true), [
+    {
+      "chinwag.agent_reply": "Order 1042\nHi Sam, your order 1042 has shipped.",
+      "flow.template.name": "order_shipped",
+      "flow.template.language": "en",
+      "flow.template.header_kind": "text",
+      "flow.template.header": "Order {{1}}",
+      "flow.template.body": "Hi {{1}}, your order {{2}} has shipped.",
+      "flow.template.buttons": JSON.stringify([{ type: "quick_reply", text: "Thanks" }]),
+      "flow.template.values": JSON.stringify({ header: "1042", body: ["Sam", "1042"] }),
+    },
+    { "chinwag.agent_reply": "not_declared" },
+  ]);
+  assert.deepEqual(await sends(false), [{}, {}]);
+});
+
+test("a send span names the platform's message id; a failure the channel reports later is a delivery span under it, or a trace of its own when this process did not send it, with no content", async () => {
+  const endpoint = await fakeEndpoint();
+  const t = traces({ url: endpoint.url, key: KEY, content: true, version: "v7" }, { service: "market", kindOf: () => "whatsapp" });
+  const at = Date.now();
+  t.sink({ type: "message.out", conversationId: "c1", at, text: "order_update", template: true, channel: "whatsapp", direct: true, trigger: "queued_message", messageId: "msg_1" });
+  await t.flush();
+  t.sink({ type: "message.undelivered", conversationId: "c1", at: at + 5000, text: "template order_update", reason: "permission (131042): no payment method", channel: "whatsapp", messageId: "msg_1", errorType: "permission", channelCode: "131042" });
+  t.sink({ type: "message.undelivered", conversationId: "c2", at: at + 6000, text: "Hello Sam", reason: "channel_error: failed", channel: "whatsapp", messageId: "msg_other", errorType: "channel_error" });
+  // A send that failed while it waited names no message: its failure is the send's, with no delivery span.
+  t.sink({ type: "message.undelivered", conversationId: "c1", at: at + 7000, text: "Hi", reason: "channel_error: failed" });
+  await t.flush();
+  endpoint.close();
+  const [sent, alone, ...more] = tracesOf(endpoint);
+  assert.equal(more.length, 0);
+  const send = sent!.spans.find((s: any) => s.name === "send whatsapp");
+  assert.equal(attrs(send)["flow.send.message_id"], "msg_1");
+  const delivery = sent!.spans.find((s: any) => s.name === "delivery whatsapp");
+  assert.equal(delivery.parentSpanId, send.spanId);
+  assert.deepEqual(delivery.status, { code: 2 });
+  assert.deepEqual(attrs(delivery), { "chinwag.conversation_id": "c1", "chinwag.contact_id": "c1", "chinwag.channel": "whatsapp", "flow.delivery.message_id": "msg_1", "flow.delivery.status": "failed", "flow.delivery.error_type": "permission", "flow.delivery.channel_code": "131042" });
+  assert.equal(alone!.root.name, "delivery whatsapp");
+  assert.deepEqual(alone!.attrs, { "chinwag.conversation_id": "c2", "chinwag.contact_id": "c2", "chinwag.channel": "whatsapp", "flow.delivery.message_id": "msg_other", "flow.delivery.status": "failed", "flow.delivery.error_type": "channel_error" });
+  assert.ok(!JSON.stringify(endpoint.requests.slice(1)).includes("Hello Sam"), "a delivery span holds no content");
 });
 
 test("each trace's root says what started it, with the instruction or result it began with", async () => {

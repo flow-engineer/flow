@@ -39,7 +39,7 @@ test("a WhatsApp message reaches the agent with its quote, and the reply, read r
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
-test("a link goes as a url button and a photo as media with its caption; a photo with buttons or a link is their message's image header, by URL or Flow file id", async (t) => {
+test("a link goes as a url button, a photo or a video as media with its caption; a photo with buttons or a link is their message's image header, by URL or Flow file id", async (t) => {
   const flow = await fakeFlow();
   const live = await liveAgent(flow);
   t.after(() => (flow.close(), live.close()));
@@ -52,9 +52,11 @@ test("a link goes as a url button and a photo as media with its caption; a photo
       call("send_whatsapp", { text: "The sea view room", image: { url: photo } }),
       call("send_whatsapp", { text: "Want it?", image: { url: photo }, buttons: ["Yes", "No"] }),
       call("send_whatsapp", { text: "Or this one", image: { file_id: "file_7" }, link: { label: "Book", url: "https://example.com/book" } }),
+      call("send_whatsapp", { text: "The walk-through", video: { url: "https://example.com/tour.mp4" } }),
+      call("send_whatsapp", { text: "And the garden", video: { file_id: "file_8" } }),
     ),
   );
-  await flow.request((r) => r.method === "POST" && r.body?.text === "Or this one");
+  await flow.request((r) => r.method === "POST" && r.body?.text === "And the garden");
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
   assert.deepEqual(
     flow.into("conv_wa").map((r) => [r.path.split("/").at(-1), r.body]),
@@ -63,6 +65,8 @@ test("a link goes as a url button and a photo as media with its caption; a photo
       ["basic", { media: { type: "image", url: photo }, text: "The sea view room" }],
       ["buttons", { text: "Want it?", buttons: [{ id: "Yes", label: "Yes" }, { id: "No", label: "No" }], header: { type: "image", url: photo } }],
       ["buttons", { text: "Or this one", buttons: [{ url: "https://example.com/book", label: "Book" }], header: { type: "image", file_id: "file_7" } }],
+      ["basic", { media: { type: "video", url: "https://example.com/tour.mp4" }, text: "The walk-through" }],
+      ["basic", { media: { type: "video", file_id: "file_8" }, text: "And the garden" }],
     ],
   );
 });
@@ -119,6 +123,76 @@ test("a photo arrives as an attachment whose bytes come from Flow's files API wi
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });
 
+test("a video arrives as an attachment the model can watch; one Flow says is over the limit is never fetched", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  live.model.reads = { videos: true };
+  flow.contacts.ct_maya = { address: { phone: "+15550100100" } };
+  flow.files.file_v = Buffer.from([1, 2, 3]);
+  const video = (id: string, size: number) => ({ kind: "basic", text: "the leak", media: { type: "video", url: `${flow.url}/v0/files/${id}`, file_id: id, mime_type: "video/mp4", size_bytes: size } });
+
+  await live.deliver(received(WA, "msg_1", video("file_v", 3)));
+  const first = await live.nextCall(0);
+  assert.deepEqual(first.request.messages.filter((m) => m.role === "user").at(-1), {
+    role: "user",
+    content: "[whatsapp · msg_1] [video] the leak",
+    media: [{ kind: "video", mime: "video/mp4", data: "AQID", ref: "file_v" }],
+  });
+  first.answer(respond(call("send_whatsapp", { text: "I see it" })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+
+  await live.deliver(received(WA, "msg_2", video("file_big", 16 * 1_048_576)));
+  const second = await live.nextCall(1);
+  assert.equal(lastUser(second.request.messages), "[whatsapp · msg_2] [video: too large for you to read, over 10 MB] the leak");
+  assert.equal(flow.requests.some((r) => r.path === "/v0/files/file_big"), false);
+  second.answer(respond(call("send_whatsapp", { text: "Could you send a shorter clip?" })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+});
+
+
+test("a video the model watched and no longer sees is fetched again from Flow by its file id when the agent asks about it; once Flow no longer keeps it, the agent is told", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  live.model.reads = { videos: true };
+  flow.contacts.ct_maya = { address: { phone: "+15550100100" } };
+  flow.files.file_a = Buffer.from([1, 2, 3]);
+  flow.files.file_b = Buffer.from([4, 5, 6]);
+  const video = (id: string) => ({ kind: "basic", text: "", media: { type: "video", url: `${flow.url}/v0/files/${id}`, file_id: id, mime_type: "video/mp4", size_bytes: 3 } });
+  const tools = (n: number) => live.calls[n].request.tools.map((tool) => tool.name);
+
+  await live.deliver(received(WA, "msg_1", video("file_a")));
+  const first = await live.nextCall(0);
+  assert.equal(tools(0).includes("ask_about_video"), false); // it watches this one now
+  first.answer(respond(call("send_whatsapp", { text: "Got it" })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+
+  // Only one video stays shown: the first one now needs a question to be seen again.
+  await live.deliver(received(WA, "msg_2", video("file_b")));
+  const second = await live.nextCall(1);
+  assert.ok(tools(1).includes("ask_about_video"));
+  const ask = call("ask_about_video", { message: "msg_1", question: "Where is the water coming from?" });
+  second.answer(respond(call("send_whatsapp", { text: "Checking the first one" }), ask));
+
+  // The agent's own model, which watches videos, answers with the first video fetched again and no tools.
+  const watched = await live.nextCall(2);
+  assert.deepEqual(watched.request.tools, []);
+  assert.ok(watched.request.system.endsWith("\nQuestion: Where is the water coming from?"));
+  assert.deepEqual(watched.request.messages, [{ role: "user", content: "[video]", media: [{ kind: "video", mime: "video/mp4", data: "AQID" }] }]);
+  assert.equal(flow.requests.filter((r) => r.path === "/v0/files/file_a").length, 2);
+  watched.answer({ text: "From the pipe under the sink.", toolCalls: [] });
+  const third = await live.nextCall(3);
+  assert.equal(third.request.messages.find((m) => m.role === "tool" && m.toolCallId === ask.id)?.content, '{"video":"msg_1","answer":"From the pipe under the sink."}');
+
+  delete flow.files.file_a; // past Flow's retention: 404
+  const again = call("ask_about_video", { message: "msg_1", question: "Is the pipe cracked?" });
+  third.answer(respond(again));
+  const fourth = await live.nextCall(4);
+  assert.equal(fourth.request.messages.find((m) => m.role === "tool" && m.toolCallId === again.id)?.content, "Failed: The video in msg_1 is no longer kept by whatsapp, so it can't be watched again. Ask them to send it again if you need it.");
+  fourth.answer(respond(call("send_whatsapp", { text: "It's the pipe under the sink." })));
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+});
 test("taps come as choices, with the button's id (info.buttonIds says so), and reactions to the agent's messages as reactions", async (t) => {
   const fm = flowMessaging({ apiKey: "fk_test_key" });
   assert.equal(fm.whatsapp({ sender: "snd_wa" }).info.buttonIds, true);
@@ -144,6 +218,26 @@ test("taps come as choices, with the button's id (info.buttonIds says so), and r
   assert.ok(users(second.request.messages).some((m) => m.includes('[They reacted 👍 to your message: "Booked for Tuesday"]')));
   second.answer(respond(call("send_whatsapp", { text: "Anytime" })));
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+});
+
+test("a simulated conversation, on the app's simulated sender, reaches its platform's channel and is answered in it; a real one on a sender the agent does not use is passed over", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_sim = { address: { telegram_user_id: "990001" } };
+  const on = (conversation: object, sender: string, simulated?: boolean) => {
+    const e = received(conversation as typeof TG, `msg_${sender}`, { kind: "basic", text: "Is it open today?" });
+    return { ...e, conversation: { ...e.conversation, sender, ...(simulated ? { simulated } : {}) } };
+  };
+  // Another of the app's real senders: not this agent's channel, so nothing reaches it.
+  await live.deliver(on({ id: "conv_other", channel: "telegram", contact: "ct_sim" }, "snd_other_tg"));
+  await live.deliver(on({ id: "conv_sim", channel: "telegram", contact: "ct_sim" }, "snd_simulated", true));
+  const first = await live.nextCall(0);
+  assert.equal(lastUser(first.request.messages), "[telegram · msg_snd_simulated] Is it open today?");
+  first.answer(respond(call("send_telegram", { text: "Yes, until 22:00." })));
+  assert.deepEqual((await flow.request(post("/v0/conversations/conv_sim/basic"))).body.text, "Yes, until 22:00.");
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+  assert.equal(flow.sends("/v0/conversations/conv_other/basic").length, 0);
 });
 
 test("a delivery reaches the agent only when Flow signed it, and only once", async (t) => {
@@ -229,6 +323,8 @@ test("failures reach the agent as Not delivered: a permanent refusal once, untri
   flow.queued.push({ match: post(path), status: 403, body: { error: { type: "permission", channel_code: "contact_opted_out", message: "The contact opted out.", hint, doc_url: "https://api.flow.engineer/docs/errors/permission" } } });
   const warnings: string[] = [];
   t.mock.method(console, "warn", (line: string) => void warnings.push(line));
+  const errors: string[] = [];
+  t.mock.method(console, "error", (line: string) => void errors.push(line));
 
   await live.deliver(received(SMS, "msg_1", { kind: "basic", text: "hi" }));
   (await live.nextCall(0)).answer(respond(call("send_sms", { text: "Hello" })));
@@ -246,7 +342,8 @@ test("failures reach the agent as Not delivered: a permanent refusal once, untri
   const third = await live.nextCall(2);
   assert.equal(lastUser(third.request.messages), "[Not delivered] \"Are you there?\": channel_error (carrier_filtered): A carrier filtered it. It will fail again: don't resend it.");
   assert.ok(!JSON.stringify(third.request).includes("Ask them to text the line first."), "a late failure's hint stays out of the model's text too");
-  assert.ok(warnings.some((w) => w.includes("Ask them to text the line first. (https://api.flow.engineer/docs/errors/channel_error)")), warnings.join("\n"));
+  // The developer hears of it at error level, with its hint, never its text or the person's number.
+  assert.deepEqual(errors, ["@flow-engineer/flow/flow-messaging: message msg_out1 on sms (conversation conv_sms) was not delivered (type channel_error, channel_code carrier_filtered): A carrier filtered it. Ask them to text the line first. (https://api.flow.engineer/docs/errors/channel_error)"]);
   third.answer(respond(call("send_sms", { text: "Sorry about that" })));
   await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
 });

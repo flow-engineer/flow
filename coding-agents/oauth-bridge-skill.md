@@ -195,8 +195,7 @@ code-minting step needs no change: it is bound to the same four values and redee
 
 Everything runs on localhost. Claude and ChatGPT cannot reach localhost; `flow inspect` runs the
 same OAuth they do (discovery, registration, PKCE, refresh), so it stands in for them. Below,
-`inspect` is `npx -y -p @flow-engineer/flow -p @modelcontextprotocol/client@2.3.1 flow inspect
-http://127.0.0.1:<port>/mcp` (the `flow-framework` skill says more). Run each step
+`inspect` is `npx -y @flow-engineer/flow inspect http://127.0.0.1:<port>/mcp` (the `flow-framework` skill says more). Run each step
 and compare; stop at the first that differs and fix it before going on.
 
 1. **Run the brand's app and the agent locally**, the bridge with `issuer: "http://127.0.0.1:<port>"`,
@@ -254,6 +253,12 @@ export async function mcp(agent, host) {
 
 Passing `agent` serves `<cli> chat` at `/agent/terminal` with the same sign-in as `/mcp`
 (`mcp-skill.md`, "Terminal conversations"); leave it out for MCP and CLI commands only.
+
+An MCP server alone (`src/mcp.ts` and no `src/agent.ts`: no model key, channels or chat) deploys
+the same way. The runtime calls the factory as `mcp(undefined, host)`, so `agent` is `undefined`
+and there is no `/agent/terminal`; it serves only the handle's paths and the CLI install, and
+production takes it, since its state is the bridge's, in `host.oauthStorage`. Export the tools
+beside `mcp` (`export { tools }`) so `flow check` checks them.
 
 The signing key, encryption key and cookie key go in as secrets (`npx @flow-engineer/flow deploy
 secrets`). Self-hosted, deploy with durable storage (`databaseStorage(postgres(pool), issuer)`).

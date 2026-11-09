@@ -79,7 +79,7 @@
         },
         "attachments": {
           "type": "array",
-          "description": "Photos, voice notes and documents sent with the message.",
+          "description": "Photos, voice notes, videos and documents sent with the message.",
           "items": {
             "$ref": "#/$defs/attachment"
           }
@@ -99,12 +99,13 @@
           "enum": [
             "image",
             "audio",
+            "video",
             "document"
           ]
         },
         "mime": {
           "type": "string",
-          "description": "Such as image/jpeg, audio/ogg, application/pdf."
+          "description": "Such as image/jpeg, audio/ogg, video/mp4, application/pdf."
         },
         "name": {
           "type": "string",

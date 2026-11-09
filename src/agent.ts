@@ -21,7 +21,7 @@ import { ATTACH_EVENTS, NUDGE_TRIGGER, type FlowEvents } from "./business-events
 import { checkTemplate, declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
 import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Elsewhere, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
-import { emitter, type EventSink } from "./events.ts";
+import { emitter, log, type EventSink } from "./events.ts";
 import { indexDeclared, recordsOf, type RecordCollection, type Records } from "./records.ts";
 import { addWakeUp, businessSchedule, claimDue, summary, wakeUpsOf, type WakeUp, type WakeUpInput, type WakeUpResult } from "./schedules.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
@@ -29,7 +29,7 @@ import { Store, type ConversationRow, type EventStateStore, type IdentityRow, ty
 import { clock, quietUntil, validZone } from "./time.ts";
 import { PLAY_GROUPS, STAND_IN, toolGroup, toSpec, type ChatAuth, type CredentialProvider, type Tool, type ToolGroup } from "./tools.ts";
 import { activeCall, agentVersion, setting, traces, tracesFromEnv, type QueuedBy, type Traces, type TracesOptions, type TurnTrigger } from "./traces.ts";
-import type { BeforeSend, ChannelInfo, Deliver, Incoming, Model, Outbound, SendReceipt, Template, TemplateDefinition, Transcribe } from "./types.ts";
+import type { BeforeSend, ChannelInfo, Deliver, DescribeVideo, Incoming, Model, Outbound, SendReceipt, Template, TemplateDefinition, Transcribe, UndeliveredDetail } from "./types.ts";
 
 /** What a host supplies to an agent: `createAgent({ ..., host })`. */
 export interface HostOptions {
@@ -66,6 +66,26 @@ export interface AgentOptions {
    * marked as a voice note. Without it, it is told a voice note came that it can't listen to.
    */
   transcribe?: Transcribe;
+  /**
+   * Text for a video the model can't watch (its `reads.videos` is off): what it shows and what is
+   * said. `describeVideoWith("google/gemini-3.8-flash")` is Flow Framework's own, through the agent's
+   * model key; or your own function. Without either, the agent is told a video came that it can't watch.
+   * With an `ask(video, question)` (describeVideoWith's has one), the agent also gets ask_about_video:
+   * it asks about a video in the conversation whenever it needs to, fetched again from its channel.
+   */
+  describeVideo?: DescribeVideo;
+  /**
+   * A message with a video gets this reaction the moment it arrives, before the video is downloaded
+   * or watched, and the turn that answers it shows no typing at first: the reaction says the agent is
+   * on it. If nothing from the agent has reached them 5 s after it arrived, typing shows too, kept up
+   * as for other messages until the reply, so a quick reply shows only the reaction. The agent is told
+   * the message already has the reaction, so it does not add the same one. Default on, with 👀; a string is another emoji; `false` turns it off, and the video types on
+   * arrival as other messages do. Where the channel has no reactions, does not take the emoji
+   * (Telegram takes only its own reaction emoji, 👀 among them), or the reaction fails, that turn
+   * types instead. iMessage shows 👀 as a reaction on iOS 18 and later; older iPhones may show it as
+   * a line of text. Other messages, photos and voice notes included, type as before.
+   */
+  videoReaction?: boolean | string;
   /** The agent's own tools: the default group, offered on every channel. */
   tools?: Tool[];
   /**
@@ -303,6 +323,8 @@ export interface ReceiveOptions {
   messageId?: string;
   /** The channel's name. Default "chat". */
   channelName?: string;
+  /** Fetches again a file the person sent, by its attachment's `ref` (as Channel.file): with it, the agent can ask about a video later. */
+  file?: (ref: string) => Promise<Uint8Array | null>;
 }
 
 export interface NudgeInput {
@@ -400,6 +422,17 @@ export interface NudgeState {
 }
 
 const NO_EXTRAS: ChannelInfo = { reactions: false, status: false };
+
+/** The emoji a video gets on arrival (createAgent's videoReaction), or undefined when it is off. */
+function videoReactionOf(option: AgentOptions["videoReaction"]): string | undefined {
+  if (option === false) return undefined;
+  if (option === undefined || option === true) return "👀";
+  if (!option.trim()) throw new Error("flow: videoReaction is an emoji, true (👀) or false");
+  return option.trim();
+}
+
+/** A channel's way to fetch a file again (Channel.file), for a conversation's link to it. */
+const fileOf = (adapter: Channel): { file?: (ref: string) => Promise<Uint8Array | null> } => (adapter.file ? { file: (ref) => adapter.file!(ref) } : {});
 const HOUR_MS = 3_600_000;
 /** Provider ids deleted per statement, so each one holds its locks briefly. */
 const PRUNE_BATCH = 1_000;
@@ -469,9 +502,9 @@ export class Agent {
     // One line per process, so two runs can be told apart from their logs; `flow test` prints it itself, and an agent's own tests stay quiet.
     if (version && !versionLogged && !process.env.NODE_TEST_CONTEXT && setting("RUN_KIND") !== "test") {
       versionLogged = true;
-      console.warn(`flow: agent version ${version.version} (from ${version.from})`);
+      log("INFO", `flow: agent version ${version.version} (from ${version.from})`);
     }
-    this.traces = tracing ? traces({ ...tracing, version: this.version }, { service: options.id ?? "flow", kindOf: (name) => this.channelsByName.get(name)?.traceChannel ?? this.channelsByName.get(name)?.kind, viaOf: (id, channel) => this.viaOf(id, channel) }) : null;
+    this.traces = tracing ? traces({ ...tracing, version: this.version }, { service: options.id ?? "flow", kindOf: (name, conversationId) => this.traceKind(name, conversationId), viaOf: (id, channel) => this.viaOf(id, channel) }) : null;
     const sinks = [...(options.events ?? []), ...(this.traces ? [this.traces.sink] : [])];
     this.runner = `${options.runner ?? process.env.FLOW_RUNNER ?? hostname()}:${randomUUID().slice(0, 8)}`;
     // Per-request activity never includes model context or hidden model text.
@@ -496,6 +529,8 @@ export class Agent {
     this.settings = {
       model: options.model,
       transcribe: options.transcribe,
+      describeVideo: options.describeVideo,
+      videoReaction: videoReactionOf(options.videoReaction),
       tools: new Map(tools.map((t) => [t.name, t])),
       credentials: options.credentials,
       credentialProvider: ctx => this.requestCredentials.get(viaKey(ctx.channel, ctx.address ?? "")) ?? options.credentials,
@@ -539,7 +574,7 @@ export class Agent {
       get tagChannels() { return channels.size > 1; },
       links: (id) => this.links(id),
       // What the person said on their other channels is extra context: a store that fails it leaves the turn without it.
-      elsewhere: (id) => this.elsewhere(id).catch((error) => (console.warn("flow: the person's other conversations could not be read:", error instanceof Error ? error.message : error), [])),
+      elsewhere: (id) => this.elsewhere(id).catch((error) => (log("WARNING", "flow: the person's other conversations could not be read:", error instanceof Error ? error.message : error), [])),
       settle: (target, status, reason, messageId) => this.settle(target, status, reason, messageId),
       groupTools: (channel) => this.groupTools(channel),
     };
@@ -562,7 +597,7 @@ export class Agent {
       this.served.push(served);
     }
     const every = options.scheduleCheckMs ?? 5_000;
-    if (every > 0) setInterval(() => void this.runDue().catch((error) => console.warn("flow: scheduled messages:", error)), every).unref();
+    if (every > 0) setInterval(() => void this.runDue().catch((error) => log("WARNING", "flow: scheduled messages:", error)), every).unref();
   }
 
   /**
@@ -676,7 +711,7 @@ export class Agent {
       this.via.set(lock, via);
       if (via === "playground") this.playgroundVisitors.set(lock, { key: input.key });
       this.rows.set(row.id, row);
-      this.open(row.id).link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: input.address, deliver: this.deliverer(adapter, input.address, row.id), lastMessageAt: identity.lastMessageAt });
+      this.open(row.id).link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, ...fileOf(adapter), address: input.address, deliver: this.deliverer(adapter, input.address, row.id), lastMessageAt: identity.lastMessageAt });
       return { conversationId: row.id };
     });
     this.arriving.set(lock, work.catch(() => undefined));
@@ -890,7 +925,7 @@ export class Agent {
     this.via.set(viaKey(input.channel, input.from), input.via);
     const conversation = this.open(conversationId);
     const deliver = this.deliverer(adapter, input.from, conversationId);
-    conversation.link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: input.from, deliver, lastMessageAt: null });
+    conversation.link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, ...fileOf(adapter), address: input.from, deliver, lastMessageAt: null });
     const text = typeof input.message === "string" ? input.message : input.message.text;
     const kind = keywordIn(adapter.keywords, input.message);
     const fixed = this.intercepted(conversationId, text, { keyword: kind, channel: input.channel });
@@ -912,7 +947,7 @@ export class Agent {
     try {
       return this.options.intercept?.(conversationId, text, message) ?? null;
     } catch (error) {
-      console.warn(`flow: intercept threw on a ${message.keyword.toUpperCase()} keyword; Flow Framework handled it as usual:`, error);
+      log("WARNING", `flow: intercept threw on a ${message.keyword.toUpperCase()} keyword; Flow Framework handled it as usual:`, error);
       return null;
     }
   }
@@ -1024,6 +1059,17 @@ export class Agent {
   }
 
   /** How the person on a conversation's channel last wrote, when not through its provider: "playground", whose replies the deliverer sends there. */
+  /**
+   * The platform a channel's traces name: the agent's own channel's (traceChannel, else its kind);
+   * for one it does not define (receive() from the test cloud or the simulators, with the platform's
+   * ChannelInfo), the platform its messages in this conversation came with.
+   */
+  private traceKind(name: string, conversationId?: string): string | undefined {
+    const own = this.channelsByName.get(name);
+    if (own) return own.traceChannel ?? own.kind;
+    return conversationId ? this.conversations.get(conversationId)?.channelInfo(name)?.platform : undefined;
+  }
+
   private viaOf(conversationId: string, channel?: string): Via | undefined {
     const at = this.conversations.get(conversationId)?.reachedOn(channel);
     const via = at && this.via.get(viaKey(at.channel, at.address));
@@ -1046,7 +1092,11 @@ export class Agent {
     return (outbound) => {
       const reply = this.requestReplies.get(viaKey(adapter.name, address));
       if (reply) return reply(outbound);
-      if (this.via.get(viaKey(adapter.name, address)) !== "playground") return adapter.send(address, outbound);
+      if (this.via.get(viaKey(adapter.name, address)) !== "playground") {
+        // The person's latest message here: a provider that finds the conversation from it can send in a process that never saw it.
+        const lastMessageId = this.conversations.get(conversationId)?.lastMessageId(adapter.name);
+        return adapter.send(address, outbound, lastMessageId ? { lastMessageId } : undefined);
+      }
       const visitor = this.playgroundVisitors.get(viaKey(adapter.name, address));
       if (visitor) return this.playgroundSink?.({ conversationId, person: { name: visitor.key ? "Signed-in user" : "New user", phone: "", ...visitor }, channel: adapter.name, outbound });
       const phone = address.startsWith("test:") ? address.slice(5) : address;
@@ -1076,7 +1126,7 @@ export class Agent {
     const isNew = !this.conversations.has(conversationId) && !this.rows.has(conversationId);
     const conversation = this.open(conversationId, `${name}:${conversationId}`);
     if (isNew) conversation.persist(() => this.store.addIdentity(conversationId, name, conversationId, "channel"));
-    conversation.link({ name, info: defined?.info ?? options.channel ?? NO_EXTRAS, params: defined?.params, instructions: defined?.instructions, address: conversationId, deliver, lastMessageAt: null });
+    conversation.link({ name, info: defined?.info ?? options.channel ?? NO_EXTRAS, params: defined?.params, instructions: defined?.instructions, address: conversationId, deliver, lastMessageAt: null, ...(options.file ? { file: options.file } : {}) });
     const answer = kind ? this.keyword(conversation, defined!.keywords!, kind, text, fixed, name) : null;
     const reply = answer ? answer.reply : fixed;
     if (reply === null) return conversation.receive(message, { channel: name, messageId: options.messageId });
@@ -1095,9 +1145,13 @@ export class Agent {
     this.withConversation(conversationId, (c) => c.reacted(emoji, toText));
   }
 
-  /** The channel reports that a message did not reach the person; the agent hears about it, also after a restart. */
-  undelivered(conversationId: string, text: string, reason: string): void {
-    this.withConversation(conversationId, (c) => c.undelivered(text, reason));
+  /**
+   * The channel reports that a message did not reach the person; the agent hears about it, also after
+   * a restart. `detail` (the message's platform id, the error's type and channel code) goes on the
+   * `message.undelivered` event and, with traces on, a `delivery` span.
+   */
+  undelivered(conversationId: string, text: string, reason: string, detail?: UndeliveredDetail): void {
+    this.withConversation(conversationId, (c) => c.undelivered(text, reason, detail));
   }
 
   /** Acts on a conversation now when it is in memory, else once it is loaded from the store; never on one the store does not hold. */
@@ -1110,7 +1164,7 @@ export class Agent {
       if (!row) return;
       this.rows.set(conversationId, row);
       act(this.open(conversationId));
-    })().catch((error) => console.warn("flow: conversation %s could not be loaded for a report:", conversationId, error));
+    })().catch((error) => log("WARNING", "flow: conversation %s could not be loaded for a report:", conversationId, error));
   }
 
   conversation(conversationId: string): Conversation | undefined {
@@ -1300,7 +1354,7 @@ export class Agent {
     const adapter = this.channelOf(to.channel);
     const identity = await this.conversationFor(adapter, to.channel, to.address);
     const conversation = this.open(identity.conversationId);
-    conversation.link({ name: to.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: to.address, deliver: this.deliverer(adapter, to.address, identity.conversationId), lastMessageAt: identity.lastMessageAt });
+    conversation.link({ name: to.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, ...fileOf(adapter), address: to.address, deliver: this.deliverer(adapter, to.address, identity.conversationId), lastMessageAt: identity.lastMessageAt });
     return { conversationId: identity.conversationId };
   }
 
@@ -1613,8 +1667,8 @@ export class Agent {
     await Promise.all(queued.map((q) => this.wake(q.conversationId, q.inbox)));
     await this.lookAgain();
     await this.releaseHeld(now);
-    if (this.options.onTick) await Promise.resolve().then(() => this.options.onTick!(now)).catch((error) => console.warn("flow: onTick:", error));
-    await this.pruneMessageIds(now).catch((error) => console.warn("flow: pruning message ids:", error));
+    if (this.options.onTick) await Promise.resolve().then(() => this.options.onTick!(now)).catch((error) => log("WARNING", "flow: onTick:", error));
+    await this.pruneMessageIds(now).catch((error) => log("WARNING", "flow: pruning message ids:", error));
     return queued.length;
   }
 
@@ -1675,7 +1729,7 @@ export class Agent {
         if (row) this.rows.set(id, row);
         if (!this.conversations.has(id)) this.open(id);
       })
-      .catch((error) => console.warn("flow: runner %s could not read conversation %s again:", this.runner, id, error));
+      .catch((error) => log("WARNING", "flow: runner %s could not read conversation %s again:", this.runner, id, error));
   }
 
   /**
@@ -1725,7 +1779,7 @@ export class Agent {
       const adapter = this.channelsByName.get(i.channel);
       if (!adapter) return [];
       this.via.set(viaKey(i.channel, i.address), i.via);
-      return [{ name: i.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: i.address, deliver: this.deliverer(adapter, i.address, conversationId), lastMessageAt: i.lastMessageAt }];
+      return [{ name: i.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, ...fileOf(adapter), address: i.address, deliver: this.deliverer(adapter, i.address, conversationId), lastMessageAt: i.lastMessageAt }];
     });
   }
 

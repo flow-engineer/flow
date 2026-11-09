@@ -48,11 +48,11 @@ test("a tool that cannot be served exactly over MCP is an error, by rule", async
   ]);
 });
 
-test("a tool kept to the CLI warns without a CLI file, and an unknown client kind is an error", async () => {
+test("a tool kept to the CLI warns without a CLI file that only a CLI signed in as the server's CLI client sees it, and an unknown client kind is an error", async () => {
   const reveal = `tool({ name: "api_keys_reveal", description: "Show one API key.", input: z.object({ key_id: z.string() }), mcp: { clients: ["cli"] }, run: () => "key" })`;
   const result = await check(agentFolder(`${reveal}, tool({ name: "notes", description: "Notes.", input: z.object({}), mcp: { clients: ["claude"] }, run: () => "" })`));
   assert.deepEqual(result.errors, ['tool notes: mcp.clients must list one or more of "cli"']);
-  assert.deepEqual(result.warnings, ["tool api_keys_reveal: kept to the CLI (mcp.clients), but there is no CLI file (src/cli.ts), so no client sees it"]);
+  assert.deepEqual(result.warnings, ["tool api_keys_reveal: kept to the CLI (mcp.clients): only a CLI signed in as this server's CLI client sees it, and this project has no CLI file (src/cli.ts); without another CLI that signs in so (such as `npx @flow-engineer/flow <command> --server <url>`), no client sees it"]);
   assert.deepEqual((await check(agentFolder(reveal, `{ name: "acme" }`))).warnings, []);
 });
 
@@ -79,8 +79,38 @@ test("the CLI file is checked against the tools, and a tool it does not name is 
   assert.equal(clean.code, 0);
   assert.deepEqual(clean.warnings, [
     "skill orders: names send_sms, which MCP hosts and the CLI do not have",
-    `src/cli.ts: tool get_order has no command in the CLI file; it is reachable as "get-order"`,
+    `src/cli.ts: tool get_order has no command in the CLI file; it is reachable as "get-order" if the CLI's MCP server serves it`,
   ]);
+});
+
+// The CLI's commands are what its MCP server lists, not src/agent.ts's tools: a tool src/mcp.ts
+// leaves out is not called reachable (the CLI says "No command registered" for it).
+test("with a src/mcp.ts, a tool the CLI file does not name is reachable only if that server lists it", async () => {
+  const mcpModule = pathToFileURL(join(import.meta.dirname, "../mcp/src/index.ts")).href;
+  const cli = `{ name: "acme", commands: { "order list": { tool: "list_orders" } } }`;
+  // A folder each: a module once imported stays imported.
+  const serving = (filter: string) => {
+    const dir = agentFolder(`${listOrders}, ${getOrder}`, cli);
+    writeFileSync(join(dir, "src/mcp.ts"), `import { mcpServer } from ${JSON.stringify(mcpModule)};\nimport { tools } from "./agent.ts";\nexport const mcp = mcpServer({ name: "acme", version: "1", tools: tools.filter((t) => ${filter}) });\n`);
+    return dir;
+  };
+  assert.deepEqual((await check(serving(`t.name === "list_orders"`))).warnings, [], "get_order is the chat's only");
+  assert.deepEqual((await check(serving("true"))).warnings, [`src/cli.ts: tool get_order has no command in the CLI file; it is reachable as "get-order"`]);
+});
+
+// An MCP server alone has no src/agent.ts: its tools are src/mcp.ts's, checked by the same rules.
+test("an MCP server alone (src/mcp.ts, no src/agent.ts) is checked by the tools src/mcp.ts exports", async () => {
+  const mcpModule = pathToFileURL(join(import.meta.dirname, "../mcp/src/index.ts")).href;
+  const mcpOnly = (exported: string) => {
+    const dir = agentFolder("");
+    rmSync(join(dir, "src/agent.ts"));
+    writeFileSync(join(dir, "src/mcp.ts"), `import { tool, z } from ${JSON.stringify(chinwag)};\nimport { mcpServer } from ${JSON.stringify(mcpModule)};\nconst tools = [${listOrders}];\nexport const mcp = mcpServer({ name: "acme", version: "1", tools });\n${exported}\n`);
+    return dir;
+  };
+  assert.deepEqual(await check(mcpOnly("export { tools };")), { code: 0, ok: true, errors: [], warnings: [] });
+  const none = await check(mcpOnly(""));
+  assert.equal(none.code, 1);
+  assert.deepEqual(none.errors, ["src/mcp.ts exports no tools array: with no src/agent.ts, export the tools it serves beside mcp (export { tools })"]);
 });
 
 // Existing checks cover warnings on chat-only skill tools, but not native package generation.

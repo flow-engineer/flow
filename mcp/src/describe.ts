@@ -13,7 +13,8 @@ export interface McpToolDescriptor {
   inputSchema: { type: "object"; [key: string]: unknown };
   outputSchema?: { [key: string]: unknown };
   annotations: { title: string; readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean };
-  _meta: Record<string, unknown>;
+  /** Hosts' extra keys (ChatGPT's per-tool sign-in and status lines, read_skill's skills); a `descriptor` may leave it out. */
+  _meta?: Record<string, unknown>;
 }
 
 /** The scopes an MCP server asks for: reads need `read`, writes `write` (both when given). */
@@ -24,6 +25,12 @@ export interface Scopes {
 
 /** Explicit full discovery for the CLI and MCP imports; deferral is context management, not access control. */
 export const FULL_CATALOG_META = "flow.engineer/full-tool-catalog";
+
+/**
+ * Where a handle (mcpServer's) takes the CLI's calls in the same process: { path, fetch }, served
+ * as the client kind "cli" with no sign-in. Not part of the API; the CLI layer reads it.
+ */
+export const IN_PROCESS = Symbol.for("flow.engineer/mcp-in-process");
 
 const NAME = /^[A-Za-z0-9_.-]{1,128}$/;
 /** The client kinds Tool.mcp.clients may name. */

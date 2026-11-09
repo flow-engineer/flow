@@ -188,11 +188,13 @@ flow.engineer may add `warnings` (up to 20 lines) to any setup answer. Each is p
 line on stderr; with `--json` setup's line has `warnings` (an empty list when there are none), and
 an error line has it when there were any. Pass them on to the owner.
 
-`setup` also shows the free trial: the people on each channel and those waiting for a place
-(`free trial: 3 of 25 people, 2 waiting for a place`; `trial.<channel>` `{limit, used, held}` in
-`--json`). A person past the limit is held: their messages are kept, not delivered, and reach the
+`setup` also shows the free trial: the people on each channel and those waiting for a place. The
+counts are the account's, shared by all its agents, so a brand-new agent can show people already
+(`your account's free trial, across all its agents: 3 of 25 people, 2 waiting for a place`;
+`account_trial.<channel>` `{limit, used, held}` in `--json`, and in `status --json` each channel's
+`account_trial`; `trial` is the older name of the same object, kept for a release). A person past the limit is held: their messages are kept, not delivered, and reach the
 agent once a place frees up (a contact removed) or the owner buys a paid plan. An older flow.engineer counts messages instead (`3 of 300 messages used`, no
-`held`), and on iMessage the people it may reach (`iMessage: 1 of 2 people`, `trial.imessage.contacts`).
+`held`), and on iMessage the people it may reach (`iMessage (your account's free trial, across all its agents): 1 of 2 people`, `account_trial.imessage.contacts`).
 
 ### Paid plans
 
@@ -239,6 +241,13 @@ the hint and the plans link rather than retrying. Test keys keep working meanwhi
 - The sign-in token goes only to the server that issued it, over https (http only to localhost):
   with `FLOW_FRAMEWORK_LOGIN_URL` naming another server, commands stop with `signed_in_elsewhere`.
 - CI never signs in: `npx @flow-engineer/flow setup --ci` says how to give it the test cloud key.
+- `setup`'s Flow key is a test key (`flow_test_`), which reads staging. To read production and
+  Insights, the workspace's owner runs `npx @flow-engineer/flow setup --live` once (0.16.0 on): it
+  writes `FLOW_LIVE_KEY`, de-identified unless `--content`, for 30 days, ending after 7 days
+  unused, and messaging no customer and deploying nothing live. `flow keys` lists this folder's
+  agent's live keys (`--all` every agent's on the account, `--agent <name>` one agent's), `flow keys show <kid>` one key's checklist, `flow keys revoke <kid>` ends one, and
+  `flow keys grant <name>` asks for more by tier ([Read production with a live
+  key](https://flow.engineer/docs/hosting#read-production-with-a-live-key)).
 
 ## Projects
 
@@ -258,6 +267,37 @@ Exit codes: 0 done; 1 usage, not signed in (`not_signed_in`: run `next`), no suc
 (`not_found`), `ambiguous_name`, or not confirmed (`confirm_needed`, `not_confirmed`); 2
 flow.engineer could not be reached or could not reach its projects (try again); 3 refused:
 `owner_only`, or the sign-in ended (`signed_out`: run `next`).
+
+## Videos people send
+
+The agent reacts 👀 to a video the moment it arrives, before it is downloaded or watched: the 👀 says
+it is on it, and the reply follows once the agent has seen or read the video. A reply within 5 s shows
+only the 👀; if nothing from the agent has reached them 5 s after the video arrived, typing shows too,
+kept up as for other messages until the reply. The agent is told the video already has its 👀, so it
+does not react 👀 again (another emoji is its choice). It is on by default;
+`createAgent({ videoReaction: false })` turns it off, and the video then types on arrival, kept up while it is described (on WhatsApp, with the blue
+ticks, which Flow Messaging sends with typing; with the reaction the blue ticks go on arrival by
+themselves). On Telegram 👀 is one of the reactions Telegram lets bots use; another emoji you pass must
+be one too. On iMessage, iOS 18 and later show 👀 as a reaction; older iPhones may show it as a line of
+text. Where the channel has no reactions (SMS) or the reaction fails, that turn types at once instead.
+Photos, voice notes and documents type on arrival as other messages do.
+
+A video reaches the agent one of three ways: watched by its model (`openAICompatible({ videos: true })`),
+described once (`createAgent({ describeVideo: describeVideoWith("google/gemini-3.8-flash") })`), or
+named as one it can't watch. With a describer that has `ask` (describeVideoWith's does) or a model
+that watches videos, the agent also gets `ask_about_video` for a video it can't see now, such as
+"is there a scratch near the charging port?" about a video described earlier, or one its model saw
+several turns ago (only the latest 3 photos, PDFs and videos, one of them a video, stay shown):
+
+- Input: `question`, and `message`, the id of the message the video came in (`m3`, `msg_...`); the
+  latest video when left out. Its result is `{ video, answer }`.
+- The video is fetched again from its channel by the attachment's `ref` (Flow Messaging's file id)
+  each time, up to 10 MB, and never kept. Once the channel no longer keeps it, the agent is told
+  to ask for it again.
+- 3 questions a turn and 10 a video; every failure is a `ToolError` the agent reads, and an
+  `attachment.failed` event (`kind: "video"`, `messageId`).
+- Under `flow test`, a scenario sends one with `attach: { kind: video, file: fixtures/clip.mp4 }`, and
+  `expect: { calls: [ask_about_video] }` checks the agent asked.
 
 ## Messages the business starts
 
@@ -423,18 +463,32 @@ It sends the `.env`'s values as the agent's secrets, then builds and follows it 
 npx @flow-engineer/flow deploy [--env staging|production] [--version <v>] [--no-secrets] [--json]
 npx @flow-engineer/flow deploy promote [--no-secrets] [--json]
 npx @flow-engineer/flow deploy status [--env staging|production] [--json]
-npx @flow-engineer/flow logs [--env staging|production] [--since 1h] [--follow] [--json]
-npx @flow-engineer/flow conversations [--environment staging|production] [--grade wrong|unhelpful|good] [--since 24h] [--limit n] [--json]
-npx @flow-engineer/flow conversations show <id> [--json]
+npx @flow-engineer/flow deploy restart [--env staging|production] [--json]
+npx @flow-engineer/flow logs [--env staging|production] [--since 1h] [--until <t>] [--severity WARNING] [--grep <text>] [--limit n] [--follow] [--json]
+npx @flow-engineer/flow conversations [--env staging|production] [--grade wrong|unhelpful|good] [--since 24h] [--limit n] [--contact <label>] [--json]
+npx @flow-engineer/flow conversations show <id> [--env staging|production] [--json]
 npx @flow-engineer/flow issues [--status open|resolved|ignored|all] [--json]
-npx @flow-engineer/flow deploy secret NAME [--env staging|production] < value.txt
+npx @flow-engineer/flow issues test-case <id> [--json]
+npx @flow-engineer/flow insights [--days 7|30] [--status open|fixed|muted|all] [--json]
+npx @flow-engineer/flow insights show <finding> [--days 7|30] [--json]
+npx @flow-engineer/flow deploy secret NAME [--env staging|production] [--apply] < value.txt
+npx @flow-engineer/flow deploy secret --unset NAME [--env staging|production] [--json]
 npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|production] [--json]
 ```
 
 - `deploy` first sends each non-empty value in the agent's `.env` as a secret for that
   environment, before the service starts, so the first live version has its keys: never the CI
-  key, the cloud's address or a name Flow sets itself (`FLOW_FRAMEWORK_TRACES_*`, `FLOW_STORE_*`,
-  `PORT`, ...). Later deploys send only the new or changed ones (`.flow/secrets.json` keeps a hash
+  key, the cloud's address, what `setup` and `link` write for the CLI alone
+  (`FLOW_FRAMEWORK_JOIN_CODE`, `FLOW_FRAMEWORK_TRY_URL`, `FLOW_FRAMEWORK_WORKSPACE`) or a name Flow
+  sets itself (`FLOW_FRAMEWORK_TRACES_*`, `FLOW_STORE_*`, `PORT`, ...). The
+  `FLOW_MESSAGING_<CHANNEL>_SENDER` ids are sent: the hosted agent starts conversations from them.
+  A live Flow key (`fk_live_`, `flow_live_`, `otk_live_`) is never sent to staging: it is skipped
+  with why (naming only its prefix), staging keeps the value it has, and Flow's hosting refuses it
+  too. A test key sent to production goes, with a warning. `FLOW_KEY` goes to both: the host
+  exchanges it for the environment's own runtime key.
+  An earlier deploy may have sent those three CLI names; they are harmless, and
+  `npx @flow-engineer/flow deploy secret --unset FLOW_FRAMEWORK_JOIN_CODE --env staging` removes one.
+  Later deploys send only the new or changed ones (`.flow/secrets.json` keeps a hash
   per name, never a value). It prints the names it sent, never values; `--no-secrets` sends none.
   A secret the host refuses stops the deploy before it starts, naming it.
 - `deploy` packs the folder (without `node_modules`, `.git`, `.env*` and `.flow`, at most 50 MB),
@@ -456,25 +510,179 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
   text: `trace text: on (Flow's default)` or `trace text: off (set by you)` (`deploy.trace_text`,
   `{ on, source: "flow" | "owner" }`; nothing, and `null` in `--json`, on a Flow that does not say).
   `--json` prints
-  `{ ok, environments: { staging: { deploy, pending, url, from } | null, production: ... }, next }`;
+  `{ ok, agent_framework, hosting_framework, environments: { staging: { deploy, pending, url, from } | null, production: ... }, next }`;
   `from` is `list` (the cloud's list) or `this_folder` (the last deploy from `.flow/deploys.json`, on
-  a Flow whose cloud does not list deploys to a CI key yet).
+  a Flow whose cloud does not list deploys to a CI key yet). First, the Flow Framework this folder's
+  `package.json` pins (`agent_framework` in `--json`), then, when the cloud says them (0.16.0 on), the
+  newest line Flow's hosting runs, which is hosting's and not the agent's (`hosting_framework`),
+  each deploy's `built with:` line (the framework its build used, `deploy.framework`), and `traces:` per environment, whether Flow's dashboard takes its traces: `ok`
+  (with when it last took one), `quiet` (none yet), or `REFUSED (<status> <code>)` with the reason
+  and hint (`environments.<env>.traces`).
 - Trace text is on by default in hosting. To switch it off in production, set the secret, then
   promote: `echo 0 | npx @flow-engineer/flow deploy secret FLOW_FRAMEWORK_TRACES_CONTENT --env production`,
   then `npx @flow-engineer/flow deploy promote` (`echo 1` switches it back on). Deleting that secret
   on the dashboard (the agent's secrets) goes back to Flow's default at the next deploy.
-- `logs` prints the hosted agent's log lines from `--since` (30s, 15m, 1h, 2d; default 1h), and with
-  `--follow` keeps printing new ones; `--json` is one `{ time, severity, text }` per line. On a Flow
-  whose cloud has no logs route yet it says so: `error.code` `not_available`, exit 1.
+- `logs` prints the hosted agent's log lines from `--since` (30s, 15m, 1h, 2d, up to 30d, or an RFC
+  3339 time; default 1h) to `--until` (the same forms; not with `--follow`), and with `--follow`
+  keeps printing new ones. `--severity DEFAULT|INFO|WARNING|ERROR` keeps that severity and above;
+  a `DEFAULT` line that is plainly an uncaught error (`Error:`, `DOMException`, a stack: how
+  runtimes before 0.16 wrote Flow's own errors) counts as `ERROR`.
+  `--grep <text>` keeps lines containing it (case-insensitive, at most 200 characters). The cloud
+  filters; the CLI filters again, so an older cloud's answer is right too. When the lines start later
+  than `--since` asked, stderr says `Logs start at <time>: this Flow keeps <N> back`. Every page
+  up to `--until` (else now) is read before printing; past `--limit` lines (default 10000, at most
+  100000) the newest are kept and stderr says where they start and the `--since`/`--until` for the
+  older ones. `--json` is one
+  `{ time, severity, text }` per line. On a Flow whose cloud has no logs route yet it says so:
+  `error.code` `not_available`, exit 1. Flow's own
+  lines carry their real severity, and a failed tool call is one `WARNING` or `ERROR` line
+  ([Framework log lines](https://flow.engineer/docs/traces#framework-log-lines)), so
+  `npx @flow-engineer/flow logs --since 1h --json | jq -c 'select(.severity == "ERROR" or .severity == "WARNING")'`
+  lists only the problems.
+- `conversations` lists the hosted agent's conversations, newest first (id, last message, channel,
+  contact, messages, and how many replies were graded wrong and unhelpful), over as many pages as
+  `--limit` needs (default 20, at most 1000). `--since` is 30m, 24h, 7d or an RFC 3339 time.
+  `--contact "Contact 4f1c"` (or `4f1c`) keeps one contact's conversations, read over as many pages
+  as it takes. `--env` and `--environment` are one flag.
+  `conversations show <id>` prints one, one line per message, and under each graded agent reply its
+  label, rule, reason and quoted words. When the cloud sends them, each agent reply also shows its
+  tool calls (`tool <name> <ms> ms ok`, or `FAILED: <code>: <message>`, then its `input:` and
+  `output:` when Flow keeps them, masked and cut at 2 KB, `(cut by Flow)`) and its delivery
+  (`queued`, `sent`, `delivered`, `read`, or `FAILED <channel code> (<type>)`); a message whose
+  text was not sent to Flow says why (metadata-only traces, `FLOW_FRAMEWORK_TRACES_CONTENT` off, or
+  a photo, video or voice note with no caption). `--json` passes `tools` and `delivery` through. `issues` lists the problems the grades add up to, each with
+  a suggested fix (`--status open` by default), then the team's feedback of the last 30 days
+  (Framework 0.14.4 on): `check out of date <scenario> (<channel>), check <n>: <check>` (update that
+  scenario check) and `grade marked wrong conversation <id>, reply <id>, rules <ids>` (do not change
+  the agent for it), each with its `note:` and `todo:`; `--json` stays the issues only. They read with the agent's `FLOW_KEY` (`.env`, or
+  `--dotenv`; never printed) at `--cloud`, else `FLOW_FRAMEWORK_CLOUD`, else flow.engineer. Without
+  `--environment`, a live key reads production and a test key staging. Contacts show only as a label
+  (`Contact 4f1c`), never an address. Text Flow keeps back prints as `(text withheld)` or
+  `(deleted by retention)`, and messages the agent's own code sent show as `your code`. `--json` is
+  the server's JSON (pages merged into one). Exit codes: 0 printed, 1 no key, refused or not
+  reachable, 2 a wrong flag (0.16.0 on; 1 before), with the server's message and hint, and
+  on a refused key which key the command reads, which one it found (prefix and last 4) and where. To fix bad replies: `conversations --grade wrong`, then
+  `conversations show <id>`; fix the instructions, skill or tool the rule points at, add a scenario
+  that plays that conversation, run `flow test`, and deploy. The list's KIND is `test` for `flow
+  chat`, the playground and `flow test` (never graded, never in Insights; `show` says so), else
+  `production`. `issues test-case <id>` prints the test case Flow proposes for an issue (rule, the
+  reply it comes from, `includes`, `must_not`, `expect`, `rubrics`), to write a scenario from; it
+  writes no file (0.16.0 on).
+- `insights` lists Flow Insights' findings (where people gave up, asked again or got annoyed in
+  closed production conversations on a live key, by topic), ranked as the dashboard ranks them: id,
+  status, conversations with the window before's (`4 (was 9)`), topic and what happened;
+  low-confidence tags are named under the table. `--days 7|30`, `--status open|fixed|muted|all`
+  (default open). `collecting` (under 20 closed sessions) shows counts only. `insights show
+  <finding>` lists its conversations, each with why it was flagged, the person's words when allowed
+  and `flow conversations show <id>`. Before Insights is open to the workspace both print `Insights
+  is not open to this workspace yet` and exit 1 (0.16.0 on). They read with
+  `FLOW_LIVE_KEY` when it is set (`flow setup --live`), else a `flow_live_` `FLOW_KEY`: with only a
+  test key (`flow_test_`) both say so, naming `flow setup --live`, and exit 1. The loop: `insights`, `insights
+  show`, `conversations show`, fix, a scenario, `flow test`, deploy, and `insights` again after the
+  window.
 - `secret NAME` (one value from stdin) and `secrets --from-env` (every value in a file, now) are for
-  changing a secret by hand; `deploy` already sends the `.env`. `--json` prints
+  changing a secret by hand; `deploy` already sends the `.env`. In a terminal `secret` asks for the
+  value without echoing it (one line); a value of several lines is piped in. `--json` prints
   `{ ok, environment, saved, skipped, refused, next }`. Before the agent's first deploy the host has
   no agent to keep them for: they are refused, exit 1, and `next` is `deploy`. A secret takes effect
-  on the next deploy.
+  on the next deploy or promote, unless `--apply` restarts the live version with it now.
+- `restart` (and `secret --apply`) restarts an environment's live version with its secrets as they
+  are now, no new build, and follows it to live like `promote`; with nothing live it says so and
+  exits 0. `secret --unset NAME` takes a secret away (it applies at the next deploy or restart). A
+  Flow whose cloud cannot do either yet says so (`not_available`, exit 1).
 - Exit codes: 0 live or saved, 1 refused, failed or not reachable, 2 a usage problem (no CI key, a
   missing file, a bad name). On an error, `--json` prints `{ ok: false, error: { code, message }, next }`.
 
 Run each answer's `next`. Promote, or deploy to production, only when the owner says so.
+
+### For coding agents: JSON, waits and keys
+
+- **`--json` is one JSON document on stdout**, a failure's too: `{ "ok": false, "error": { "code",
+  "message", "hint"? }, "next" }`, exit 1 (2 for a wrong flag), from `conversations`, `issues`,
+  `templates`, `show`, `deploy` and its subcommands (0.16.0 on). Progress and notes go to
+  stderr, so read stdout alone; do not merge it with `2>&1`. Two commands are JSON Lines instead:
+  `logs --json` (one line per log line) and `login`, `link` and `setup` (one complete document a
+  line; the last line is the answer).
+- **Rate limits.** Flow's cloud reads 60 times a minute per key. A `429` is waited out for its
+  `Retry-After` (at most 30 s, said on stderr) and sent again, up to 3 times; a GET is tried once
+  more after a network error or a 5xx. `login` keeps polling through `slow_down`.
+- **Which key.** `conversations`, `issues` and `templates` read with `FLOW_KEY`: `flow setup` makes a
+  `flow_test_` key, which reads staging. Production reads (`conversations --env production`,
+  `insights`, and `conversations show` of a production conversation) use `FLOW_LIVE_KEY` when it is
+  set, else `FLOW_KEY`: the workspace's owner makes it with `flow setup --live`, for 30 days and
+  de-identified text by default ([the key table and its limits](https://flow.engineer/docs/hosting#read-production-with-a-live-key)).
+  It messages no customer and deploys nothing live: ask for more with `flow keys grant <name>`, by
+  tier. Fine by default (de-identified reads, Insights, tests, traces, the model): granted at once.
+  Only when the user asked: raw message text (`keys grant content`). Only with the user's explicit
+  yes: messaging customers and deploying live (`keys grant send|deploy`); the owner confirms once in
+  the browser ([granting more](https://flow.engineer/docs/hosting#grant-a-live-key-more)).
+  Every read prints a `Text:` line and `--json` carries `text_mode`. `test`, `show`, `deploy`, `logs` and `cli
+  publish|rollback|status` use the CI key `FLOW_FRAMEWORK_CLOUD_KEY` (`oci_...`), from the agent's
+  Developers page on the dashboard or `flow setup`. A refused key's error names the key wanted, the
+  one found (prefix and last 4, never the value) and whether it came from the environment or `.env`.
+- **Cells.** The US cloud is `https://flow.engineer/observe` (the default; `/dashboard` is the same);
+  the India cell's is `https://flow.engineer/dashboard/in`: set `FLOW_FRAMEWORK_CLOUD` (or `--cloud`)
+  to it for an agent there. A network failure names the address tried and the error (`ENOTFOUND`,
+  `ECONNREFUSED`, ...).
+
+Run each answer's `next`. Promote, or deploy to production, only when the owner says so.
+
+## Flow's MCP server for your coding agent
+
+`flow mcp serve` gives a coding agent the same reads as typed MCP tools, so it calls a tool
+instead of running a command and parsing `--json` (0.16.0 on). Add it from the agent's folder:
+
+```sh
+claude mcp add flow -- npx @flow-engineer/flow mcp serve
+```
+
+Any other MCP host: the command `npx`, the arguments `@flow-engineer/flow mcp serve`, started in the
+agent's folder (or add `--dir <folder>`; `--cloud <url>` as for the other commands). It speaks
+MCP on stdio on `@modelcontextprotocol/server`, which comes with Flow Framework: nothing more to install.
+
+| Tool | Reads | Key |
+| --- | --- | --- |
+| `list_conversations` | `flow conversations`: `environment`, `since`, `grade`, `contact`, `limit` (default 20, at most 200) | `FLOW_KEY`; production: `FLOW_LIVE_KEY` when set |
+| `show_conversation` | `flow conversations show <id>`: `id`, `environment`; each reply's tool calls (name, ms, ok, error) and delivery (queued, sent, delivered, read, failed with the channel's code) | `FLOW_KEY`, then `FLOW_LIVE_KEY` when `FLOW_KEY` does not find it; production: `FLOW_LIVE_KEY` first |
+| `list_issues` | `flow issues`: `status` (default `open`) | `FLOW_KEY` |
+| `list_insights` | `flow insights`: `days` 7 or 30 (default 7), `status` `open` (default), `fixed`, `muted` or `all` | `FLOW_LIVE_KEY` when set, else a `flow_live_` `FLOW_KEY` |
+| `insight_conversations` | `flow insights show <finding>`: `finding`, `days`; each conversation's `window`, the 3 messages before the flagged one and 2 after, when Flow sends it | `FLOW_LIVE_KEY` when set, else a `flow_live_` `FLOW_KEY` |
+| `list_templates` | `flow templates`: `status` `approved` (default) or `all` | `FLOW_KEY` |
+| `read_logs` | `flow logs`: `environment` (default staging), `since` (default 1h, at most 30d), `until`, `severity`, `grep`, `limit` (default 200, the newest; `truncated` says when more matched) | CI key |
+| `deploy_status` | `flow deploy status`: `environment` (default both) | CI key |
+
+- Every tool only reads (`readOnlyHint: true`). Nothing here deploys, changes a secret or sends a message.
+- The same tools are `flowReadTools()` (`@flow-engineer/flow/testing`), for your own
+  `mcpServer({ tools })`; `flowReadTools({ hosted: {} })` adds an `agent` input and `list_agents`, and
+  takes each call's key from the signed-in person's credentials, never from the model (0.16.1 on).
+- The read commands (`conversations`, `issues`, `insights`, `templates`, `logs`, `deploy status`)
+  read over a hosted Flow MCP with `--server <url>` (or `FLOW_MCP_SERVER`) and `--agent`, as the
+  person signed in with `flow mcp login --server <url>` (`FLOW_MCP_TOKEN` in CI); their output is
+  the same (0.16.1 on).
+- `FLOW_KEY`: a `flow_test_` key, the one `flow setup` writes, reads staging only. Production, and
+  Insights (closed production conversations only), read with `FLOW_LIVE_KEY` when it is set: the
+  workspace's owner makes it with `npx @flow-engineer/flow setup --live`
+  ([its limits](https://flow.engineer/docs/hosting#read-production-with-a-live-key)). The tool descriptions repeat its three
+  tiers in the CLI's words, so a coding agent asks for a `flow keys grant` only as its tier allows.
+  Each result carries `text_mode`
+  (`raw`, `deidentified` or `withheld`). The CI
+  key, `FLOW_FRAMEWORK_CLOUD_KEY` (`oci_...`), reads logs and deploys in both environments.
+- The keys are read again on every call, from the environment the server started with, then the
+  folder's `.env`: a key fixed in `.env` works on the next call, without restarting the server.
+  No tool returns a key; errors name one by its prefix and last 4 only.
+- A result is `structuredContent` (what the command's `--json` prints) and the same JSON as text
+  under a one-line summary, such as `1 conversation, 1 reply graded wrong. Read one: show_conversation.`
+- A failure is a tool error (`isError: true`) whose `structuredContent` is `--json`'s failure
+  document, `{ ok: false, error: { code, message, hint? }, next }`: a refused key says which key the
+  tool reads, what it found and how to get the right one (a live key refused for something it was
+  not granted: Flow's hint naming the `keys grant`, and the three tiers); `no_flow_key` and `no_ci_key` have `next`
+  `npx @flow-engineer/flow setup`, and `no_live_key` (a production read with neither key)
+  `npx @flow-engineer/flow setup --live`.
+- Message text is as the agent API sends it: de-identified on a live key made without `--content`,
+  withheld for accounts that keep it back, and contacts only as a label (`Contact 4f1c`).
+
+Expected result: `/mcp` in Claude Code lists `flow` with eight tools, and "did the booking tool fail
+in the last conversation?" runs `list_conversations`, then `show_conversation`.
 
 ## WhatsApp templates
 

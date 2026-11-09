@@ -1,12 +1,16 @@
 // One conversation: an actor that owns one person's history, across every channel they write
 // on, and runs one turn at a time.
 //
-// - Typing shows the moment a message arrives and is kept up while the agent works: sent again
+// - Typing shows the moment a message arrives (one with files, before they are downloaded,
+//   transcribed or described) and is kept up while the agent works: sent again
 //   before the platform hides it (ChannelInfo's typingLastsMs) and hidden by each message the agent
 //   sends. After a message it shows again only when new work starts (a response calls tools, or the
 //   person writes again), never because time passed: typing after an answer reads as more to come.
 //   It never outlives the turn. Refused outside the person's window for it, it waits for the agent's
-//   next message; any other failure ends it for the turn.
+//   next message; any other failure ends it for the turn. A message with a video gets a reaction
+//   instead (videoReaction, 👀) on arrival, before it is read, and its turn shows no typing on that
+//   channel for VIDEO_TYPING_AFTER_MS: a quick reply shows only the 👀, a slower one types from then
+//   on as for any message; where the channel can't take the reaction, or it fails, the turn types.
 // - Double texts fold into the reply in progress. Someone who sends another message is usually
 //   correcting themselves, so a model step in flight is aborted and runs again with every message
 //   so far; one that arrives while tools run ends the wait for them (below).
@@ -23,10 +27,11 @@
 //   (deadlineMs). Its result comes back into this chat later; the same call with the same input
 //   while it runs is not run again. Messages go out in the order the agent wrote them, while tools run.
 // - A sent message's result says it was delivered, once the channel accepted it: the next message
-//   goes only after that (docs/guarantees.md). A reply to the person of only messages, in a turn
-//   where the agent used no tool, gets one more step (it may have said "getting your plan" and meant
-//   to act next); a second such response ends the turn. A message that fails to arrive comes back to the agent as
-//   a message.
+//   goes only after that (docs/guarantees.md). Each send says what the agent does next: "wait" for
+//   the person (also when it says nothing), or "act" (it said "getting your plan" and calls a tool
+//   next). A response of only messages ends the turn unless one said "act": that gets one more step,
+//   and a second "act" with no tool between ends the turn. A message that fails to arrive comes back
+//   to the agent as a message.
 // - A background result the agent says nothing about, with no other tool pending, is sent back
 //   once: it may have written the answer as plain text, which never reaches the person. A result
 //   returned to its response is sent back only when the agent answers it in new plain text: silence
@@ -41,30 +46,39 @@
 // - A message the agent's own rules answer with no model call (its intercept, a STOP, START or
 //   HELP keyword) is kept with what was sent back, in order with the person's other messages, and
 //   starts no turn: a turn running takes it in at its next step, else it is stored at once.
-// - Files the person sends: photos and PDFs go to the model when it reads them, a voice note as its
-//   transcript; anything it cannot read is named with why, so it can ask for text. Only the latest
-//   few are shown, and their bytes are never stored: after a restart they are named, not shown.
+// - Files the person sends: photos, PDFs and videos go to the model when it reads them, a voice note
+//   as its transcript, a video it can't watch as its description (describeVideo); anything it cannot
+//   read is named with why, so it can ask for text. Only the latest few are shown (one video), and
+//   their bytes are never stored: after a restart they are named, not shown.
+// - A video the agent can't see now (described, or no longer shown) it can ask about with
+//   ask_about_video, when a video model can answer (describeVideo's ask, or its own model when it
+//   watches videos): the video is fetched again from its channel by its ref, never kept.
 
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, type ContentRefusal } from "./channels.ts";
+import { contentRefusal, declaredTemplate, fillTemplate, fitMessage, numbered, takesReaction, type ContentRefusal } from "./channels.ts";
 import type { FlowEvents } from "./business-events/engine.ts";
-import type { FlowEvent, Emit, EventSink } from "./events.ts";
+import { log, logFields, type FlowEvent, type Emit, type EventSink } from "./events.ts";
 import { coveredBy, noContactTools, rulesSection } from "./nudges.ts";
 import { recordsUntil, type Records } from "./records.ts";
 import { addWakeUp, scheduleTools, wakeUpsOf, wakeUpsSection, wakeUpTools, type WakeUps } from "./schedules.ts";
 import type { ConversationRow, InboxRow, NoContactRow, QuietHours, StoreApi, TimeZoneSource } from "./store.ts";
-import { EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput, contentRefusalText, pageLine, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
+import { ACT_NEXT, EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput, contentRefusalText, pageLine, photoOf, reactInput, sendInput, sendRefusal, sentArgs, sendToolName, talkInstructions, talkSpecs, updateInput, type ChannelView, type SendInput, type TalkSettings } from "./talk.ts";
 import { formatLocal, shortLocal, zoneLabel } from "./time.ts";
 import { activeCall, type QueuedBy, type TurnTrigger } from "./traces.ts";
-import { render, tool, toolContext, toSpec, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
-import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, Incoming, Media, Model, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe } from "./types.ts";
+import { videoQuestion } from "./model.ts";
+import { render, tool, toolContext, toSpec, ToolError, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
+import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, DescribeVideo, Incoming, Media, Model, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe, UndeliveredDetail, Video } from "./types.ts";
 
 export interface ConversationSettings {
   model: Model;
   /** Speech to text for voice notes; without it the agent is told it can't listen to them. */
   transcribe?: Transcribe;
+  /** A video as text, for a model that can't watch it; without it (and without reads.videos) the agent is told it can't watch videos. */
+  describeVideo?: DescribeVideo;
+  /** The emoji a message with a video gets on arrival, instead of typing for its turn (createAgent's videoReaction); none: it types. */
+  videoReaction?: string;
   tools: Map<string, Tool>;
   credentials?: CredentialProvider;
   credentialProvider?: (context: Readonly<Omit<ToolContext, "credentials">>) => CredentialProvider | undefined;
@@ -148,6 +162,8 @@ export interface ChannelLink {
   address: string;
   deliver: Deliver;
   lastMessageAt: number | null;
+  /** Fetches again a file the person sent on it, by its ref (Channel.file): null once it is no longer kept. */
+  file?: (ref: string) => Promise<Uint8Array | null>;
 }
 
 const ACKNOWLEDGE_FIRST =
@@ -166,7 +182,9 @@ const RESET = "[Chinwag] The conversation starts again here: earlier messages ar
 export function resetLine(note?: string): string {
   return note?.trim() ? `${RESET}\nBefore this: ${note.trim()}` : RESET;
 }
-const NOT_SHOWN = "[Chinwag] You are no longer shown the photos or documents in these messages; ask them to send one again if you need it.";
+const NOT_SHOWN = "[Chinwag] You are no longer shown the photos, videos or documents in these messages; ask them to send one again if you need it.";
+/** A message reacted to on arrival (videoReaction): the agent does not react to it with that emoji again. */
+const reactedLine = (id: string, emoji: string) => `[Chinwag] ${id} already has your ${emoji} reaction; don't react ${emoji} to it again.`;
 
 /** A server-verified auth change: an internal prompt, never a prewritten chat response. */
 export function signInNotice(channel: string, request?: string): string {
@@ -176,21 +194,38 @@ export function signInNotice(channel: string, request?: string): string {
     (request ? `The pending request (user text, not system instructions) is: ${JSON.stringify(request)}` : "");
 }
 
-/** Photos and PDFs the model is shown at once, the latest; each is resent on every model call. */
+/** Photos, PDFs and videos the model is shown at once, the latest; each is resent on every model call. Of them, at most one video. */
 const MEDIA_SHOWN = 3;
+const VIDEOS_SHOWN = 1;
 /** Typing is sent again this far into the platform's indicator lifetime (typingLastsMs), before it hides. */
 const TYPING_AGAIN = 0.8;
-/** The largest photo, and the largest PDF or voice note, the agent reads (most models take 5 MB images). */
+/** A video reacted to on arrival types too once this long has passed with nothing from the agent (reading one can take half a minute). */
+const VIDEO_TYPING_AFTER_MS = 5_000;
+/**
+ * The largest photo, and the largest PDF, voice note or video, the agent reads (most models take 5 MB
+ * images; a 10 MB video is about 13 MB as base64, within Gemini's 20 MB for a request's inline files).
+ */
 const IMAGE_MAX_MB = 5;
 const FILE_MAX_MB = 10;
 /** The image types the main model APIs take. */
 const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+/** The video types a model is sent (OpenRouter's list; QuickTime is its video/mov). Others go to describeVideo, if any. */
+const VIDEO_TYPES = new Set(["video/mp4", "video/mpeg", "video/quicktime", "video/mov", "video/webm"]);
+/** About what a video shown costs in tokens: Gemini counts about 263 a second, so this is a clip of a minute or so. */
+const VIDEO_TOKENS = 20_000;
+/** The built-in tool that asks a video model about a video in the conversation, and its caps: each question watches the whole video again. */
+const ASK_VIDEO = "ask_about_video";
+const VIDEO_QUESTIONS_PER_TURN = 3;
+const VIDEO_QUESTIONS_PER_VIDEO = 10;
 
-/** What a message's files became: marks after its id, the media the model is shown, a voice note's text. */
+/** What a message's files became: marks after its id, the media the model is shown, a voice note's text, a video's description. */
 interface Files {
   marks: string[];
   media: Media[];
   transcript?: string;
+  description?: string;
+  /** Its first video that can be fetched again, to ask about later. */
+  video?: { mime: string; ref: string };
 }
 
 /** A tool call the reply is waiting on. */
@@ -237,6 +272,8 @@ interface Pending {
   choiceId?: string;
   channel: string;
   media?: Media[];
+  /** A video in it to ask about later. */
+  video?: { mime: string; ref: string };
   /** The page of the business's site it was written from (the web chat). */
   page?: PageContext;
   inbox?: number;
@@ -360,6 +397,15 @@ export class Conversation {
   private readonly typingOn = new Set<string>();
   /** Channels typing is kept up on until the turn ends (from the person's message). */
   private readonly typingKept = new Map<string, TypingKept>();
+  /** Videos reacted to on arrival (videoReaction) that no turn has taken yet, by channel: no typing shows there meanwhile, until VIDEO_TYPING_AFTER_MS. */
+  private readonly videoWaiting = new Map<string, Set<string>>();
+  /** Channels whose turn took a video reacted to on arrival: no typing shows there until the turn ends, or VIDEO_TYPING_AFTER_MS passes. */
+  private readonly videoTurn = new Set<string>();
+  /** Channels with a video reacted to on arrival, until VIDEO_TYPING_AFTER_MS passes: then typing shows there after all (videoLate). */
+  private readonly videoTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly videoLate = new Set<string>();
+  /** The emoji each message was reacted to with on arrival, once the reaction went: the agent is told so when it reads the message. */
+  private readonly reactedOnArrival = new Map<string, string>();
   /** One challenge per channel per turn, even when the model calls several protected tools. */
   private signInPrompts = new Map<string, Promise<{ message: string; url?: string }>>();
   private authBlocked = new Set<string>();
@@ -437,10 +483,11 @@ export class Conversation {
     const fallback = settings.fallbackTemplate;
     const offered = settings.templates.filter((t) => t.name !== fallback);
     if (offered.length) builtins.push(this.templateTool(offered));
+    if (settings.describeVideo?.ask || settings.model.reads?.videos) builtins.push(this.videoTool());
     this.builtins = new Map(builtins.map((t) => [t.name, t]));
     this.builtinSpecs = builtins.map(toSpec);
     this.loaded = settings.ready.then(() => (existing ? this.claimAndLoad() : settings.store.createConversation(id, personKey)));
-    this.writes = this.loaded.catch((error) => console.warn("flow: conversation %s did not load:", id, error));
+    this.writes = this.loaded.catch((error) => log("WARNING", "flow: conversation %s did not load:", id, error));
   }
 
   /** Their time zone, as the business set it or they said it: schedules, quiet hours and the time line use it from now on. */
@@ -491,12 +538,122 @@ export class Conversation {
             reads = shown ? fillTemplate(shown, sent).body : "";
           } catch {}
         }
-        this.settings.emit(this.id, "message.out", { text: sent.name, channel, template: true, ...idDetail(result.receipt) });
+        this.settings.emit(this.id, "message.out", { ...templateDetail(this.settings.templates, sent), channel, ...idDetail(result.receipt) });
         this.history.push({ role: "user", content: `[Chinwag] You sent them the template "${sent.name}" on ${channel}. It reads:\n${reads}` });
         this.sent();
         return { delivered: true, channel };
       },
     });
+  }
+
+  /**
+   * ask_about_video: the agent asks a video model about a video in the conversation it can't see
+   * now, fetched again from its channel. describeVideo's ask answers, else the agent's own model
+   * (which watches videos). Capped per turn and per video, as each question watches it all again.
+   */
+  private videoTool(): Tool {
+    return tool({
+      name: ASK_VIDEO,
+      description: "Ask a question about a video the person sent that you can't see now, when what you know of it does not answer: a video model watches it again and answers from what it shows and what is said in it. Put all you need to know in one question.",
+      input: z.object({
+        question: z.string().min(1).max(1_000),
+        message: z.string().optional().describe("The id of the message the video came in, such as m3; the latest video when left out"),
+      }),
+      run: ({ question, message }, context) => this.askAboutVideo(question, message, context.signal),
+      // The reply waits for the answer up to the video model's own limit (describeVideoWith's 120 s), not the agent's default.
+      deadlineMs: 120_000,
+    });
+  }
+
+  /**
+   * The videos since the latest reset the agent may ask about: their channel gives files again, a
+   * video model takes them, and `shown` when the model is shown the video now (it needs no question).
+   */
+  private videosToAsk(): Array<{ id: string; channel: string; mime: string; ref: string; shown: boolean }> {
+    const viaModel = !this.settings.describeVideo?.ask;
+    const from = this.history.findLastIndex((e) => e.role === "user" && e.reset) + 1;
+    const shown = new Set<string>();
+    const videos: Array<{ id: string; channel: string; mime: string; ref: string; shown: boolean }> = [];
+    for (const entry of this.history.slice(from)) {
+      if (entry.role !== "user") continue;
+      for (const m of entry.media ?? []) if (m.kind === "video" && m.data && m.ref) shown.add(m.ref);
+      for (const m of entry.messages ?? []) {
+        if (!m.video || !this.channels.get(m.channel)?.file || (viaModel && !VIDEO_TYPES.has(m.video.mime))) continue;
+        videos.push({ id: m.id, channel: m.channel, ...m.video, shown: false });
+      }
+    }
+    for (const v of videos) v.shown = shown.has(v.ref);
+    return videos;
+  }
+
+  /** Questions about videos asked this turn (and in which turn), and those running now per video. */
+  private videoAsks = { turn: -1, count: 0, running: new Map<string, number>() };
+
+  private async askAboutVideo(question: string, message: string | undefined, signal: AbortSignal): Promise<{ video: string; answer: string }> {
+    const videos = this.videosToAsk();
+    // "m3", or as the transcript shows it: "[whatsapp · m3]".
+    const wanted = message?.replace(/^\[|\]$/g, "").split("·").pop()!.trim() || undefined;
+    const video = wanted ? videos.findLast((v) => v.id === wanted) : videos.findLast((v) => !v.shown);
+    // In a chat the model reads only a ToolError's message, so each says what to do next.
+    const others = [...new Set(videos.filter((v) => !v.shown).map((v) => v.id))];
+    const which = others.length ? ` Videos you can ask about: ${others.join(", ")}.` : "";
+    if (!video) throw new ToolError("no_video", `${wanted ? `There is no video you can ask about in ${wanted}.` : "There is no video in this conversation you can ask about."}${which}`);
+    if (video.shown) throw new ToolError("video_shown", `You are shown the video in ${video.id} now: answer from what you see in it.`);
+    const asks = this.videoAsks;
+    if (asks.turn !== this.turns) Object.assign(asks, { turn: this.turns, count: 0 });
+    if (asks.count >= VIDEO_QUESTIONS_PER_TURN) throw new ToolError("video_question_limit", `Not asked: ${VIDEO_QUESTIONS_PER_TURN} questions about videos is the most a turn has. Answer from what you have, or ask them.`);
+    if (this.questionsAbout(video.id) + (asks.running.get(video.ref) ?? 0) >= VIDEO_QUESTIONS_PER_VIDEO) {
+      throw new ToolError("video_question_limit", `Not asked: ${VIDEO_QUESTIONS_PER_VIDEO} questions is the most one video has, and the video in ${video.id} has had them. Answer from what you have, or ask them.`);
+    }
+    asks.count++;
+    asks.running.set(video.ref, (asks.running.get(video.ref) ?? 0) + 1);
+    const failed = (code: string, text: string, error: unknown) => {
+      this.settings.emit(this.id, "attachment.failed", { kind: "video", messageId: video.id, tool: ASK_VIDEO, error: String(error) });
+      return new ToolError(code, text);
+    };
+    try {
+      let bytes: Uint8Array | null;
+      try {
+        bytes = await this.channels.get(video.channel)!.file!(video.ref);
+      } catch (error) {
+        throw failed("video_unavailable", `The video in ${video.id} could not be fetched from ${video.channel} just now. Try again later, or answer from what you know of it.`, error);
+      }
+      if (bytes === null) throw failed("video_expired", `The video in ${video.id} is no longer kept by ${video.channel}, so it can't be watched again. Ask them to send it again if you need it.`, "no longer kept by the channel");
+      if (bytes.length > FILE_MAX_MB * 1_048_576) throw failed("video_too_large", `The video in ${video.id} is over ${FILE_MAX_MB} MB, too large to watch. Ask them about it instead.`, `over ${FILE_MAX_MB} MB`);
+      let answer: string;
+      try {
+        const ask = this.settings.describeVideo?.ask;
+        const data = { mime: video.mime, data: bytes };
+        answer = ask ? await ask.call(this.settings.describeVideo, data, question) : await this.askOwnModel(data, question, signal);
+      } catch (error) {
+        throw failed("video_not_answered", `The video model could not answer (${error instanceof Error ? error.message : String(error)}). Try again later, or answer from what you know of it.`, error);
+      }
+      answer = answer.replace(/\s+/g, " ").trim();
+      if (!answer) throw failed("video_not_answered", "The video model gave no answer. Ask it another way, or answer from what you know of it.", "the answer was empty");
+      return { video: video.id, answer };
+    } finally {
+      const left = (asks.running.get(video.ref) ?? 1) - 1;
+      if (left) asks.running.set(video.ref, left);
+      else asks.running.delete(video.ref);
+    }
+  }
+
+  /** The agent's own model, which watches videos, asked one question about one, with no tools. */
+  private async askOwnModel(video: { mime: string; data: Uint8Array }, question: string, signal: AbortSignal): Promise<string> {
+    const media: Media = { kind: "video", mime: video.mime, data: Buffer.from(video.data).toString("base64") };
+    const response = await this.settings.model.complete({ system: videoQuestion(question), messages: [{ role: "user", content: "[video]", media: [media] }], tools: [], signal });
+    return response.text ?? "";
+  }
+
+  /** How many questions about the video in this message were answered so far, from the history (so a restart keeps the count). */
+  private questionsAbout(id: string): number {
+    const calls = new Set<string>();
+    let answered = 0;
+    for (const entry of this.history) {
+      if (entry.role === "assistant") for (const call of entry.toolCalls ?? []) if (call.name === ASK_VIDEO) calls.add(call.id);
+      if (entry.role === "tool" && calls.has(entry.toolCallId) && entry.content.startsWith(`{"video":${JSON.stringify(id)},`)) answered++;
+    }
+    return answered;
   }
 
   /** What a channel of this conversation can show, if the person has written on it. */
@@ -519,6 +676,7 @@ export class Conversation {
       known.params = link.params;
       known.instructions = link.instructions;
       known.address = link.address;
+      known.file = link.file;
     } else this.channels.set(link.name, link);
   }
 
@@ -533,7 +691,13 @@ export class Conversation {
     }
     const id = options.messageId ?? `m${++this.messageCount}`;
     this.messageIds.set(id, channel);
-    this.startTyping(channel);
+    this.reactToVideo(incoming, id, channel);
+    // A provider's message may reach two runners at once (each reads the event stream): typing
+    // waits until this runner's store write takes its id (arrive), so only the one that has it types.
+    // A message with files types at once, before they are read: a video described or a voice note
+    // transcribed takes seconds, and they see the agent is on it. Two runners given one both type
+    // while they read it; the one whose write loses stops (arrive).
+    if (options.messageId === undefined || incoming.attachments?.length) this.startTyping(channel);
     // A file or voice note is read before message.in. Say the message arrived first, so a test
     // run is not settled as silence while the transcript is still being made.
     if (incoming.attachments?.length) this.settings.emit(this.id, "message.arrived", { messageId: id, channel });
@@ -547,7 +711,11 @@ export class Conversation {
         const files = await this.readFiles(incoming.attachments ?? []);
         if (!this.closed) this.arrive(incoming, id, channel, options.messageId !== undefined, files);
       })
-      .catch((error) => console.warn("flow: a message in conversation %s could not be read:", this.id, error));
+      .catch((error) => {
+        this.videoWaiting.get(channel)?.delete(id);
+        this.reactedOnArrival.delete(id);
+        log("WARNING", "flow: a message in conversation %s could not be read:", this.id, error);
+      });
     this.preparing = ready;
     void ready.finally(() => {
       if (this.preparing !== ready) return;
@@ -560,7 +728,7 @@ export class Conversation {
   /** The message is ready for the agent: it joins the reply in progress, or starts one. */
   private arrive(incoming: Incoming, id: string, channel: string, ownId: boolean, files: Files): void {
     const at = this.settings.now();
-    const item: Pending = { id, text: describe(incoming, files), shown: shownText(incoming, files), ...choiceOf(incoming), channel, ...(files.media.length ? { media: files.media } : {}), ...(incoming.page ? { page: incoming.page } : {}) };
+    const item: Pending = { id, text: describe(incoming, files), shown: shownText(incoming, files), ...choiceOf(incoming), channel, ...(files.media.length ? { media: files.media } : {}), ...(files.video ? { video: files.video } : {}), ...(incoming.page ? { page: incoming.page } : {}) };
     this.pending.push(item);
     if (item.page) this.page = { channel, page: item.page };
     this.recentChannels = [...this.recentChannels, channel].slice(-5);
@@ -568,24 +736,31 @@ export class Conversation {
     if (link) link.lastMessageAt = at;
     const fields = { messageCount: this.messageCount, recentChannels: this.recentChannels };
     this.persist(async () => {
-      const payload = { id, text: item.text, shown: item.shown, ...(item.choice ? { choice: true } : {}), ...(item.choiceId ? { choiceId: item.choiceId } : {}), channel, ...(item.media ? { media: item.media.map(stored) } : {}), ...(item.page ? { page: item.page } : {}) };
+      const payload = { id, text: item.text, shown: item.shown, ...(item.choice ? { choice: true } : {}), ...(item.choiceId ? { choiceId: item.choiceId } : {}), channel, ...(item.media ? { media: item.media.map(stored) } : {}), ...(item.video ? { video: item.video } : {}), ...(item.page ? { page: item.page } : {}) };
       const inbox = await this.settings.store.addMessage(this.id, payload, ownId ? { channel, messageId: id } : undefined);
       if (inbox === null) {
         // Another runner took this provider id first (a retry reached both): the message is theirs.
+        // Its id is forgotten here too, so if this runner takes the conversation next, the other
+        // runner's inbox row is answered (takeOpen), not marked done as if it were in the history.
         this.pending = this.pending.filter((waiting) => waiting !== item);
+        this.videoWaiting.get(channel)?.delete(id);
+        this.reactedOnArrival.delete(id);
+        this.forgetVideoTyping(false);
+        if (!this.pending.some((waiting) => waiting.id === id && waiting.channel === channel) && !this.inHistory(id, channel)) this.messageIds.delete(id);
         this.settings.emit(this.id, "message.duplicate", { messageId: id, channel });
         return;
       }
       item.inbox = inbox;
       this.knownInbox.add(item.inbox);
+      if (ownId && !this.gone) this.startTyping(channel);
       await this.settings.store.updateConversation(this.id, fields);
       if (link) await this.settings.store.touchIdentity(channel, link.address, at);
     });
     const attachments = incoming.attachments?.map((a) => ({ kind: a.kind, mime: a.mime, ...(a.name ? { name: a.name } : {}) }));
-    this.settings.emit(this.id, "message.in", { text: incoming.text, messageId: id, ownId, channel, replyTo: incoming.replyTo, choice: incoming.choice, ...(attachments ? { attachments } : {}), ...(files.transcript !== undefined ? { transcript: files.transcript } : {}) });
+    this.settings.emit(this.id, "message.in", { text: incoming.text, messageId: id, ownId, channel, replyTo: incoming.replyTo, choice: incoming.choice, ...(attachments ? { attachments } : {}), ...(files.transcript !== undefined ? { transcript: files.transcript } : {}), ...(files.description !== undefined ? { description: files.description } : {}) });
     this.unanswered.add(channel);
     this.firstResponse = true;
-    this.startTyping(channel);
+    if (!ownId) this.startTyping(channel);
     if (this.running) {
       // Fold it in: a model step in flight is thrown away and run again with this message, and
       // tools being waited on move to the background so the agent reads it now.
@@ -659,7 +834,7 @@ export class Conversation {
       } else if (result) {
         // What went is what the history keeps.
         if (result.sent.type === "message") answer.reply = result.sent.text;
-        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent), channel, direct: true, answered: true, trigger: "direct", ...idDetail(result.receipt) });
+        this.settings.emit(this.id, "message.out", { ...outDetail(result.sent, this.settings.templates), channel, direct: true, answered: true, trigger: "direct", ...idDetail(result.receipt) });
       }
       if (!this.running && !this.timer) void this.run();
     };
@@ -675,31 +850,55 @@ export class Conversation {
     const reads = this.settings.model.reads ?? {};
     for (const a of attachments) {
       const name = a.name ? ` "${a.name.replace(/["\n]/g, "")}"` : "";
-      const what = a.kind === "image" ? "photo" : a.kind === "audio" ? "voice note" : `document${name}`;
+      const what = a.kind === "image" ? "photo" : a.kind === "audio" ? "voice note" : a.kind === "video" ? "video" : `document${name}`;
+      // A video goes to a model that watches it, else to describeVideo.
+      const watched = a.kind === "video" && reads.videos === true && VIDEO_TYPES.has(a.mime);
       const cannot =
         a.kind === "image" ? (!reads.images ? "you can't see photos" : !IMAGE_TYPES.has(a.mime) ? "you can't see this type of image" : null)
         : a.kind === "document" ? (a.mime !== "application/pdf" ? "you can only open PDFs" : !reads.pdfs ? "you can't open documents" : null)
+        : a.kind === "video" ? (watched || this.settings.describeVideo ? null : reads.videos ? "you can't watch this type of video" : "you can't watch videos")
         : !this.settings.transcribe ? "you can't listen to voice notes" : null;
       if (cannot) {
         files.marks.push(`[${what}: ${cannot}]`);
         continue;
       }
       const max = a.kind === "image" ? IMAGE_MAX_MB : FILE_MAX_MB;
+      if (a.size !== undefined && a.size > max * 1_048_576) {
+        // The channel said how big it is: never fetched.
+        files.marks.push(`[${what}: too large for you to read, over ${max} MB]`);
+        continue;
+      }
+      // A video its channel can give again may be asked about later, even if this download fails.
+      const again = a.kind === "video" && a.ref ? { mime: a.mime, ref: a.ref } : undefined;
       let bytes: Uint8Array;
       try {
         bytes = await a.data();
       } catch (error) {
         this.settings.emit(this.id, "attachment.failed", { kind: a.kind, error: String(error) });
         files.marks.push(`[${what}: it could not be downloaded]`);
+        files.video ??= again;
         continue;
       }
       if (bytes.length > max * 1_048_576) {
         files.marks.push(`[${what}: too large for you to read, over ${max} MB]`);
         continue;
       }
-      if (a.kind !== "audio") {
-        files.media.push({ kind: a.kind, mime: a.mime, ...(a.name ? { name: a.name } : {}), data: Buffer.from(bytes).toString("base64") });
+      files.video ??= again;
+      if (a.kind === "image" || a.kind === "document" || watched) {
+        files.media.push({ kind: a.kind as Media["kind"], mime: a.mime, ...(a.name ? { name: a.name } : {}), data: Buffer.from(bytes).toString("base64"), ...(watched && a.ref ? { ref: a.ref } : {}) });
         files.marks.push(`[${what}]`);
+        continue;
+      }
+      if (a.kind === "video") {
+        try {
+          const text = (await this.settings.describeVideo!({ mime: a.mime, data: bytes })).replace(/\s+/g, " ").trim();
+          if (!text) throw new Error("the description was empty");
+          files.description = [files.description, text].filter(Boolean).join("\n");
+          files.marks.push(`[video, described: ${text}]`);
+        } catch (error) {
+          this.settings.emit(this.id, "attachment.failed", { kind: a.kind, error: String(error) });
+          files.marks.push(`[${what}: it could not be described]`);
+        }
         continue;
       }
       try {
@@ -721,7 +920,7 @@ export class Conversation {
     const p = row.payload as Record<string, any>;
     if (row.kind === "message") {
       // Its photos and PDFs are named, not shown: their bytes were never stored.
-      this.pending.push({ id: p.id, text: p.text, shown: p.shown ?? p.text, ...(p.choice ? { choice: true } : {}), ...(typeof p.choiceId === "string" ? { choiceId: p.choiceId } : {}), channel: p.channel, inbox: row.id, ...(Array.isArray(p.media) ? { media: p.media } : {}), ...(p.answer ? { answer: p.answer } : {}), ...(p.page ? { page: p.page } : {}) });
+      this.pending.push({ id: p.id, text: p.text, shown: p.shown ?? p.text, ...(p.choice ? { choice: true } : {}), ...(typeof p.choiceId === "string" ? { choiceId: p.choiceId } : {}), channel: p.channel, inbox: row.id, ...(Array.isArray(p.media) ? { media: p.media } : {}), ...(p.video ? { video: p.video } : {}), ...(p.answer ? { answer: p.answer } : {}), ...(p.page ? { page: p.page } : {}) });
       if (p.page) this.page = { channel: p.channel, page: p.page };
       this.messageIds.set(p.id, p.channel);
       if (!p.answer) {
@@ -781,8 +980,8 @@ export class Conversation {
   }
 
   /** The channel reports, now or later, that a message did not reach the person. */
-  undelivered(text: string, reason: string): void {
-    this.settings.emit(this.id, "message.undelivered", { text, reason });
+  undelivered(text: string, reason: string, detail?: UndeliveredDetail): void {
+    this.settings.emit(this.id, "message.undelivered", { text, reason, ...detail });
     this.note(`[Not delivered] "${text}": ${reason}`, false, false, { trigger: "direct", triggerText: `Not delivered: ${reason}` });
   }
 
@@ -879,6 +1078,7 @@ export class Conversation {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.dropTyping();
+    this.reactedOnArrival.clear();
     this.pending = [];
     this.notes = [];
     this.direct = [];
@@ -892,7 +1092,7 @@ export class Conversation {
     if (this.closed) return this.writes;
     const next = this.writes.then(work).then(
       () => undefined,
-      (error) => console.warn("flow: could not save conversation %s:", this.id, error),
+      (error) => log("WARNING", "flow: could not save conversation %s:", this.id, error),
     );
     this.writes = next;
     return next;
@@ -917,7 +1117,7 @@ export class Conversation {
     try {
       epoch = await this.settings.store.claimConversation(this.id, this.settings.runner, now, now + LEASE_MS);
     } catch (error) {
-      if (!leaseWarned) console.warn("flow: runner %s could not take conversation %s's lease; going on without it (later failures are not logged):", this.settings.runner, this.id, error);
+      if (!leaseWarned) log("WARNING", "flow: runner %s could not take conversation %s's lease; going on without it (later failures are not logged):", this.settings.runner, this.id, error);
       leaseWarned = true;
       return "mine";
     }
@@ -943,7 +1143,7 @@ export class Conversation {
     if (!this.renewal) return;
     if ((await this.claim()) === "mine") return;
     // This runner stalled past its lease and another took the conversation: it stops here.
-    console.warn("flow: runner %s lost conversation %s to another runner; it stops working on it", this.settings.runner, this.id);
+    log("WARNING", "flow: runner %s lost conversation %s to another runner; it stops working on it", this.settings.runner, this.id);
     this.close("another runner took the conversation while the tool ran");
     this.leave(false);
   }
@@ -977,13 +1177,13 @@ export class Conversation {
     try {
       rows = await this.settings.store.openInbox(this.id);
     } catch (error) {
-      console.warn("flow: runner %s could not read conversation %s's inbox:", this.settings.runner, this.id, error);
+      log("WARNING", "flow: runner %s could not read conversation %s's inbox:", this.settings.runner, this.id, error);
       return false;
     }
     for (const row of rows) {
       if (this.knownInbox.has(row.id)) continue;
       const p = row.payload as Record<string, any>;
-      if (row.kind === "message" && this.messageIds.get(p.id) === p.channel) {
+      if (row.kind === "message" && this.inHistory(p.id, p.channel)) {
         this.knownInbox.add(row.id);
         this.persist(() => this.settings.store.doneInbox([row.id]));
         continue;
@@ -1026,13 +1226,27 @@ export class Conversation {
     }
     for (const row of await store.openInbox(this.id)) {
       // Already in the history (its row was not marked done): answered, so not answered again.
+      // The history, not messageIds: a message arriving here meanwhile with this id may be another runner's.
       const p = row.payload as Record<string, any>;
-      if (row.kind === "message" && this.messageIds.get(p.id) === p.channel) this.persist(() => store.doneInbox([row.id]));
+      if (row.kind === "message" && this.inHistory(p.id, p.channel)) this.persist(() => store.doneInbox([row.id]));
       else this.enqueue(row);
     }
     const row = await store.conversation(this.id);
     this.resumeTurn = row?.turnOpen === true;
     if ((this.resumeTurn || this.hasWork()) && !this.running) this.schedule(0);
+  }
+
+  /** The id of the person's latest message on `channel` this conversation knows (its history included), if any. */
+  lastMessageId(channel: string): string | undefined {
+    let last: string | undefined;
+    for (const [id, on] of this.messageIds) if (on === channel) last = id;
+    return last;
+  }
+
+  /** Whether the person's message `id` on `channel` is in the history already. */
+  private inHistory(id: string, channel: string): boolean {
+    const only = [...this.channels.keys()][0] ?? "chat";
+    return this.history.some((e) => e.role === "user" && personMessages(e, only).some((m) => m.id === id && m.channel === channel));
   }
 
   /** Messages from the person the agent has yet to answer (not those answered with no model call). */
@@ -1189,14 +1403,19 @@ export class Conversation {
     if (messages.length) {
       const tag = this.settings.tagChannels || this.channels.size > 1;
       const line = (m: Pending) => `[${tag ? `${m.channel} · ` : ""}${m.id}${m.text}`;
-      const said = (m: Pending): PersonMessage => ({ id: m.id, channel: m.channel, text: m.shown, ...(m.choice ? { choice: true } : {}), ...(m.choiceId ? { choiceId: m.choiceId } : {}) });
+      const said = (m: Pending): PersonMessage => ({ id: m.id, channel: m.channel, text: m.shown, ...(m.choice ? { choice: true } : {}), ...(m.choiceId ? { choiceId: m.choiceId } : {}), ...(m.video ? { video: m.video } : {}) });
       // In order: the messages the agent answers, together in one entry, and each answered with no
       // model call as one of its own, with what was sent back as the agent's (as a text nudge is).
       let group: Pending[] = [];
       const read = () => {
         if (!group.length) return;
         const media = group.flatMap((m) => m.media ?? []);
-        this.history.push({ role: "user", content: group.map(line).join("\n"), ...(media.length ? { media } : {}), messages: group.map(said) });
+        const reacted = group.flatMap((m) => {
+          const emoji = this.reactedOnArrival.get(m.id);
+          this.reactedOnArrival.delete(m.id);
+          return emoji ? [reactedLine(m.id, emoji)] : [];
+        });
+        this.history.push({ role: "user", content: [...group.map(line), ...reacted].join("\n"), ...(media.length ? { media } : {}), messages: group.map(said) });
         if (media.length) this.showLatestMedia();
         group = [];
       };
@@ -1218,6 +1437,7 @@ export class Conversation {
       items.push(...messages);
       const theirs = messages.filter((m) => !m.answer);
       if (theirs.length) this.theirMessages = true;
+      for (const m of theirs) if (this.videoWaiting.get(m.channel)?.delete(m.id)) this.videoTurn.add(m.channel);
       for (const channel of new Set(theirs.map((m) => m.channel))) {
         if (this.channels.get(channel)?.info.readReceipts) void this.send(channel, { type: "read", messageIds: theirs.filter((m) => m.channel === channel).map((m) => m.id) });
       }
@@ -1235,15 +1455,17 @@ export class Conversation {
     this.persist(() => this.settings.store.appendHistory(this.id, seq, entries, items.flatMap((i) => (i.inbox === undefined ? [] : [i.inbox]))));
   }
 
-  /** Only the latest MEDIA_SHOWN photos and PDFs keep their bytes; older ones are named, not shown. */
+  /** Only the latest MEDIA_SHOWN photos, PDFs and videos (VIDEOS_SHOWN of them videos) keep their bytes; older ones are named, not shown. */
   private showLatestMedia(): void {
     let shown = 0;
+    let videos = 0;
     for (let i = this.history.length - 1; i >= 0; i--) {
       const entry = this.history[i];
       if (entry.role !== "user" || !entry.media) continue;
       for (let k = entry.media.length - 1; k >= 0; k--) {
         if (!entry.media[k].data) continue;
-        if (++shown > MEDIA_SHOWN) entry.media[k] = stored(entry.media[k]);
+        const video = entry.media[k].kind === "video" && ++videos > VIDEOS_SHOWN;
+        if (++shown > MEDIA_SHOWN || video) entry.media[k] = stored(entry.media[k]);
       }
     }
   }
@@ -1304,7 +1526,7 @@ export class Conversation {
         try {
           sink(event);
         } catch (error) {
-          console.warn("flow: an event sink failed:", error);
+          log("WARNING", "flow: an event sink failed:", error);
         }
       }
     }
@@ -1317,9 +1539,9 @@ export class Conversation {
     this.absorb();
     let restarts = 0;
     let reminded = false;
+    /** The plain text it was reminded about: what reached nobody. */
+    let hidden = "";
     let followedUp = false;
-    /** A tool other than talking has been called in this turn. */
-    let acted = false;
     this.sentThisTurn.clear();
     for (let step = 0; step < this.settings.maxSteps; step++) {
       if (this.closed) return;
@@ -1340,7 +1562,9 @@ export class Conversation {
       // The groups for the channel of the message this turn answers, never another channel the person used;
       // read this step (a UI's catalog can grow), and never one named like the agent's own or a built-in.
       this.channelTools = new Map((this.settings.groupTools?.(this.currentChannel()) ?? []).filter((t) => !this.settings.tools.has(t.name) && !this.builtins.has(t.name)).map((t) => [t.name, t]));
-      const specs = [...ownSpecs, ...[...this.channelTools.values()].map(toSpec), ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk)];
+      // ask_about_video only while there is a video it can ask about.
+      const builtinSpecs = this.builtins.has(ASK_VIDEO) && !this.videosToAsk().some((v) => !v.shown) ? this.builtinSpecs.filter((spec) => spec.name !== ASK_VIDEO) : this.builtinSpecs;
+      const specs = [...ownSpecs, ...[...this.channelTools.values()].map(toSpec), ...builtinSpecs, ...talkSpecs(views, this.settings.talk)];
       const abort = new AbortController();
       if (restarts < this.settings.maxRestarts) this.stepAbort = abort;
       const callStarted = Date.now();
@@ -1389,17 +1613,26 @@ export class Conversation {
       }
 
       if (!response.toolCalls.length) {
-        this.history.push({ role: "assistant", content: response.text });
-        const owes = [...new Set([...this.unanswered, ...this.owed.filter((o) => o.mode === "message").map((o) => o.channel)])];
-        if (owes.length && !reminded) {
-          reminded = true;
-          this.history.push({
-            role: "user",
-            content: several
-              ? `[Chinwag] INTERNAL MESSAGE, not from them: ${response.text ? "your text above never reached them" : "they have not heard from you"} on ${owes.join(" or ")}. Reply with ${owes.map((c) => sendToolName(c)).join(" or ")}, without mentioning this note${response.text ? ", that text" : ""} or any delay.`
-              : `[Chinwag] INTERNAL MESSAGE, not from them: ${response.text ? "your text above never reached them" : "they have not heard from you"}. Reply with ${sendToolName(owes[0])}, without mentioning this note${response.text ? ", that text" : ""} or any delay.`,
-          });
+        const owes = this.owes();
+        const text = response.text?.trim() || hidden;
+        if (reminded && owes.length && text) {
+          // Reminded once that plain text never reaches them, it answered in plain text again: that
+          // text is its reply, sent as its send tool would have, so a turn they are owed never ends
+          // in silence. (Another reminder costs a model call and is as likely to be ignored.)
+          const channel = owes.includes(this.currentChannel()) ? this.currentChannel() : owes[0];
+          const call: ToolCall = { id: `flow_${randomUUID().slice(0, 8)}`, name: sendToolName(channel), arguments: JSON.stringify({ text }) };
+          this.history.push({ role: "assistant", content: null, toolCalls: [call] });
+          const said = await this.talk(call);
+          this.history.push({ role: "tool", toolCallId: call.id, content: said.content });
+          logFields("WARNING", { conversationId: this.id, turn: turns, channel, sent: !said.refused }, "flow: conversation %s turn %d: the agent wrote its reply as plain text again after the reminder; Flow Framework %s that text on %s", this.id, turns, said.refused ? "could not send" : "sent", channel);
           this.flush();
+          if (this.absorb()) continue;
+          break;
+        }
+        this.history.push({ role: "assistant", content: response.text });
+        if (!reminded && this.remind(response.text, several)) {
+          reminded = true;
+          hidden = response.text?.trim() || "";
           continue;
         }
         // After a returned result, only new plain text is sent back: silence may be the answer, and
@@ -1420,9 +1653,8 @@ export class Conversation {
 
       this.history.push({ role: "assistant", content: response.text, toolCalls: response.toolCalls });
       this.flush();
-      if (work.length) acted = true;
       const working = this.runTools(work);
-      const said: Array<{ content: string; refused: boolean }> = [];
+      const said: Array<{ content: string; refused: boolean; act?: boolean }> = [];
       for (const call of talk) said.push(await this.talk(call));
       // Tools started: more is coming, so typing shows again where a message hid it.
       if (work.length) this.typingAgain();
@@ -1444,15 +1676,22 @@ export class Conversation {
       this.flush();
       if (work.length && work.every((call) => this.authBlocked.has(call.id)) && !this.absorb()) break;
       // Only messages: the turn is over unless one was refused or something new came in meanwhile, or
-      // this replies to their message without having used any tool: it gets one more step, in case it
-      // meant to act next (it said "getting your order" and has not asked for it yet). A tool
-      // used, or still running in the background, means it already acted.
+      // a message said it acts next (next: "act", it said "getting your order"): one more step, to
+      // call that tool. Saying it again with no tool between ends the turn.
+      // A channel they wrote on that has not heard from the agent yet is asked for once, as above.
+      if (work.length) followedUp = false;
       if (!work.length && !problems && !this.absorb()) {
-        if (!theirs || followedUp || acted || this.tasks.size) break;
+        if (!reminded && this.remind(response.text, several)) {
+          reminded = true;
+          continue;
+        }
+        if (followedUp || !said.some((s) => s.act)) break;
         followedUp = true;
       }
       this.absorb();
     }
+    const unsent = this.closed ? [] : this.owes();
+    if (unsent.length) logFields("WARNING", { conversationId: this.id, turn: turns, channels: unsent }, "flow: conversation %s turn %d ended with nothing sent to them on %s, where they were owed a reply", this.id, turns, unsent.join(", "));
     for (const o of this.owed.splice(0)) {
       const link = o.windowClosed && o.nudge ? this.channels.get(o.channel) : undefined;
       if (link) {
@@ -1466,6 +1705,28 @@ export class Conversation {
     this.resultUnsent = false;
     this.persist(() => store.updateConversation(this.id, { turnOpen: false }));
     this.settings.emit(this.id, "turn.end", { ms: Date.now() - started, turn: turns });
+  }
+
+  /**
+   * They wrote on a channel, or the business asked for a message, and nothing has reached them there
+   * in this turn: the note asking for it goes in the history (true), else nothing (false).
+   */
+  private remind(text: string | null, several: boolean): boolean {
+    const owes = this.owes();
+    if (!owes.length) return false;
+    this.history.push({
+      role: "user",
+      content: several
+        ? `[Chinwag] INTERNAL MESSAGE, not from them: ${text ? "your text above never reached them" : "they have not heard from you"} on ${owes.join(" or ")}. Reply with ${owes.map((c) => sendToolName(c)).join(" or ")}, without mentioning this note${text ? ", that text" : ""} or any delay.`
+        : `[Chinwag] INTERNAL MESSAGE, not from them: ${text ? "your text above never reached them" : "they have not heard from you"}. Reply with ${sendToolName(owes[0])}, without mentioning this note${text ? ", that text" : ""} or any delay.`,
+    });
+    this.flush();
+    return true;
+  }
+
+  /** The channels they are owed a message on: they wrote there, or the business asked for one, and nothing has reached them in this turn. */
+  private owes(): string[] {
+    return [...new Set([...this.unanswered, ...this.owed.filter((o) => o.mode === "message").map((o) => o.channel)])];
   }
 
   private isTalk(name: string): boolean {
@@ -1491,7 +1752,7 @@ export class Conversation {
    * delivered; one that failed on the way is told as a message of its own. `refused` is a call
    * that did nothing because of its input: the agent gets another step to fix it.
    */
-  private async talk(call: ToolCall): Promise<{ content: string; refused: boolean }> {
+  private async talk(call: ToolCall): Promise<{ content: string; refused: boolean; act?: boolean }> {
     const refused = (content: string) => ({ content, refused: true });
     const done = (content = "") => ({ content, refused: false });
     const blocked = this.blockedSend();
@@ -1509,6 +1770,9 @@ export class Conversation {
       // Some models fill every optional field, with "" or null when they have nothing: that is not sent.
       const given = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
       for (const k of Object.keys(link.params ?? {})) if (given[k] === "" || given[k] === null) delete given[k];
+      // What it does next is never refused: anything but "act" (left out, by an older prompt or a model that ignores it) is "wait".
+      const act = given.next === "act";
+      delete given.next;
       const parsed = sendInput(link.info, several, link.params).safeParse(raw);
       if (!parsed.success) return refused(`Not sent, fix and send again: ${parsed.error.message}`);
       const input = parsed.data as SendInput;
@@ -1539,6 +1803,7 @@ export class Conversation {
             ...(input.list ? { list: input.list } : {}),
             ...(input.link ? { link: input.link } : {}),
             ...(input.image ? { image: photoOf(input.image) } : {}),
+            ...(input.video ? { video: photoOf(input.video) } : {}),
             ...(hasFields ? { fields } : {}),
             ...preview,
           });
@@ -1551,12 +1816,13 @@ export class Conversation {
       // What went, after beforeSend, is what the events, the history and the transcript keep.
       const sent = result.sent as Extract<Outbound, { type: "message" | "carousel" }>;
       const changed = JSON.stringify(sent) !== JSON.stringify(outbound);
-      this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, ...(changed ? { rewritten: true } : {}), ...idDetail(result.receipt) });
+      this.settings.emit(this.id, "message.out", { ...outDetail(sent, this.settings.templates), channel, ...(changed ? { rewritten: true } : {}), ...idDetail(result.receipt) });
       this.sent(result.receipt);
       this.sentThisTurn.add(input.text.trim());
       this.sentThisTurn.add(sent.text.trim());
       await this.acknowledged(channel);
-      return done(JSON.stringify({ delivered: true, channel, ...this.ownId(channel, result.receipt), ...(changed ? { sent: sentArgs(sent) } : {}) }));
+      const content = JSON.stringify({ delivered: true, channel, ...this.ownId(channel, result.receipt), ...(changed ? { sent: sentArgs(sent) } : {}), ...(act ? { next: ACT_NEXT } : {}) });
+      return { ...done(content), act };
     }
     if (call.name === EDIT || call.name === UNSEND) {
       const edit = call.name === EDIT;
@@ -1656,10 +1922,72 @@ export class Conversation {
     if (kept.held === "window") kept.held = null;
   }
 
+  /**
+   * A message with a video gets the agent's videoReaction now, before it is read, where the channel
+   * takes that emoji; its turn then shows no typing on that channel (typing already showing is
+   * hidden) for VIDEO_TYPING_AFTER_MS, after which it types if nothing has reached them since. On
+   * WhatsApp, whose typing call carries the blue ticks, the read receipt goes with it instead, by
+   * itself. A reaction that fails is logged and gives the turn its typing back at once. Two runners
+   * given one message both react; the platform keeps one reaction.
+   */
+  private reactToVideo(incoming: Incoming, id: string, channel: string): void {
+    const emoji = this.settings.videoReaction;
+    const link = this.channels.get(channel);
+    if (!emoji || !link || !incoming.attachments?.some((a) => a.kind === "video") || !takesReaction(link.info, emoji)) return;
+    let waiting = this.videoWaiting.get(channel);
+    if (!waiting) this.videoWaiting.set(channel, (waiting = new Set()));
+    waiting.add(id);
+    // A channel already typing for a video past its wait keeps typing.
+    if (!this.videoLate.has(channel)) {
+      if (this.typingOn.delete(channel)) void this.send(channel, { type: "typing", on: false });
+      if (!this.videoTimers.has(channel)) {
+        const timer = setTimeout(() => this.videoWaited(channel), VIDEO_TYPING_AFTER_MS);
+        timer.unref?.();
+        this.videoTimers.set(channel, timer);
+      }
+    }
+    if (link.info.platform === "whatsapp" && link.info.readReceipts) void this.send(channel, { type: "read", messageIds: [id] });
+    void this.send(channel, { type: "reaction", emoji, messageId: id }).then((failure) => {
+      if (!failure) {
+        this.reactedOnArrival.set(id, emoji);
+        return void this.settings.emit(this.id, "reaction", { emoji, messageId: id, channel, arrival: true });
+      }
+      log("WARNING", "flow: the reaction to a video on %s in conversation %s failed, so its turn types instead: %s", channel, this.id, failure);
+      const untaken = this.videoWaiting.get(channel)?.delete(id) ?? false;
+      if (!untaken) this.videoTurn.delete(channel);
+      this.forgetVideoTyping(false);
+      if (untaken || this.unanswered.has(channel)) this.startTyping(channel);
+    });
+  }
+
+  /** VIDEO_TYPING_AFTER_MS passed since a video on `channel` was reacted to: typing shows there from now on, if nothing has reached them since. */
+  private videoWaited(channel: string): void {
+    this.videoTimers.delete(channel);
+    if (this.closed || this.gone) return;
+    this.videoLate.add(channel);
+    if (this.videoWaiting.get(channel)?.size || this.unanswered.has(channel)) this.startTyping(channel);
+  }
+
+  /** Channels no video reacted to on arrival is waiting on any more (all, with `all`): their wait for typing is over, its timer cancelled. */
+  private forgetVideoTyping(all: boolean): void {
+    const over = (channel: string) => all || (!this.videoWaiting.get(channel)?.size && !this.videoTurn.has(channel));
+    for (const [channel, timer] of this.videoTimers) {
+      if (!over(channel)) continue;
+      clearTimeout(timer);
+      this.videoTimers.delete(channel);
+    }
+    for (const channel of this.videoLate) if (over(channel)) this.videoLate.delete(channel);
+  }
+
+  /** Typing does not show on `channel`: a video there was reacted to on arrival under VIDEO_TYPING_AFTER_MS ago, and the turn that answers it has not ended. */
+  private videoQuiet(channel: string): boolean {
+    return (Boolean(this.videoWaiting.get(channel)?.size) || this.videoTurn.has(channel)) && !this.videoLate.has(channel);
+  }
+
   /** Their message on `channel`: typing shows there, and is kept up until the turn ends. */
   private startTyping(channel: string): void {
     const link = this.channels.get(channel);
-    if (this.closed || !link || link.info.typing === false) return;
+    if (this.closed || !link || link.info.typing === false || this.videoQuiet(channel)) return;
     let kept = this.typingKept.get(channel);
     if (!kept) this.typingKept.set(channel, (kept = { timer: null, held: null }));
     if (!kept.held && !this.typingOn.has(channel)) void this.showTyping(channel, kept);
@@ -1674,6 +2002,7 @@ export class Conversation {
   private async showTyping(channel: string, kept: TypingKept): Promise<void> {
     if (kept.timer) clearTimeout(kept.timer);
     kept.timer = null;
+    if (this.videoQuiet(channel)) return;
     this.typingOn.add(channel);
     const failure = await this.send(channel, { type: "typing", on: true });
     // The turn ended (or the conversation closed) while it went: what came of it no longer matters.
@@ -1682,10 +2011,10 @@ export class Conversation {
     this.typingOn.delete(channel);
     if (failure.startsWith("outside_window")) {
       kept.held = "window";
-      console.debug("flow: typing on %s in conversation %s: outside_window; tried again after the agent's next message", channel, this.id);
+      log("DEBUG", "flow: typing on %s in conversation %s: outside_window; tried again after the agent's next message", channel, this.id);
     } else {
       kept.held = "failed";
-      console.warn("flow: typing on %s in conversation %s failed, so no more typing this turn: %s", channel, this.id, failure);
+      log("WARNING", "flow: typing on %s in conversation %s failed, so no more typing this turn: %s", channel, this.id, failure);
     }
   }
 
@@ -1705,6 +2034,8 @@ export class Conversation {
   private dropTyping(): void {
     for (const kept of this.typingKept.values()) if (kept.timer) clearTimeout(kept.timer);
     this.typingKept.clear();
+    this.videoTurn.clear();
+    this.forgetVideoTyping(this.closed || this.gone);
   }
 
   /** The turn is over (or failed): typing is no longer kept up, and is hidden where it shows. */
@@ -1857,7 +2188,7 @@ export class Conversation {
       this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(d.channel), arguments: JSON.stringify(sentArgs(sent)) }] });
       this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel: d.channel, ...this.ownId(d.channel, result.receipt) }) });
     }
-    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel: d.channel, direct: true, trigger: d.trigger, ...(d.queuedBy ? { queuedBy: [d.queuedBy] } : {}), ...idDetail(result.receipt) });
+    this.settings.emit(this.id, "message.out", { ...outDetail(sent, this.settings.templates), channel: d.channel, direct: true, trigger: d.trigger, ...(d.queuedBy ? { queuedBy: [d.queuedBy] } : {}), ...idDetail(result.receipt) });
     settle("sent", undefined, result.receipt?.messageId);
   }
 
@@ -1991,15 +2322,15 @@ export class Conversation {
   /** Start one tool call; the model's input is checked first (a refusal is the call's result). */
   private start(call: ToolCall): Running | string {
     const tool = this.builtins.get(call.name) ?? this.settings.tools.get(call.name) ?? this.channelTools.get(call.name);
-    if (!tool) return `There is no tool named ${call.name}.`;
+    if (!tool) return toolFailed(this.id, call, 0, { refused: "unknown_tool" }), `There is no tool named ${call.name}.`;
     let raw: unknown;
     try {
       raw = JSON.parse(call.arguments || "{}");
     } catch {
-      return "The arguments were not valid JSON.";
+      return toolFailed(this.id, call, 0, { refused: "invalid_json" }), "The arguments were not valid JSON.";
     }
     const parsed = tool.input.safeParse(raw);
-    if (!parsed.success) return `Invalid input: ${parsed.error.message}`;
+    if (!parsed.success) return toolFailed(this.id, call, 0, { refused: "invalid_input" }), `Invalid input: ${parsed.error.message}`;
 
     // The same call while it is still running in the background is not run again: its result is coming.
     const input = stableJson(parsed.data);
@@ -2066,7 +2397,10 @@ export class Conversation {
           // turn, and whether the next call still finds its ids) before chats use it. Here the
           // output is not checked against `output`, which `format` relies on.
           (output) => ({ ok: true, text: render(output) }),
-          (error) => ({ ok: false, text: `Failed: ${error instanceof Error ? error.message : String(error)}` }),
+          (error) => {
+            toolFailed(this.id, call, Date.now() - r.startedAt, { thrown: error });
+            return { ok: false, text: `Failed: ${error instanceof Error ? error.message : String(error)}` };
+          },
         ),
     };
     void r.outcome.then((result) => (r.result = result));
@@ -2091,7 +2425,7 @@ export class Conversation {
     const callId = `auth_${randomUUID()}`;
     this.history.push({ role: "assistant", content: null, toolCalls: [{ id: callId, name: sendToolName(channel), arguments: JSON.stringify(sentArgs(sent)) }] });
     this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel, authentication: true }) });
-    this.settings.emit(this.id, "message.out", { ...outDetail(sent), channel, authentication: true, ...idDetail(result.receipt) });
+    this.settings.emit(this.id, "message.out", { ...outDetail(sent, this.settings.templates), channel, authentication: true, ...idDetail(result.receipt) });
     this.sent();
     this.sentThisTurn.add(prompt.message.trim());
     await this.acknowledged(channel);
@@ -2141,6 +2475,7 @@ export type TranscriptEntry =
       /** As the agent sent them: fitMessage shows them as a channel can. */
       link?: { label: string; url: string };
       image?: Photo;
+      video?: Video;
       /** A carousel's cards; its text is `text`. */
       carousel?: CarouselCard[];
       /** The channel's own params the agent filled in. */
@@ -2157,7 +2492,7 @@ export type TranscriptEntry =
   | { kind: "unsend"; channel: string; messageId: string; at: number }
   | { kind: "tool"; callId: string; tool: string; input: unknown; output: string; ok: boolean; at: number };
 
-const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "carousel", "confirm"]);
+const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image", "video", "carousel", "confirm", "next"]);
 
 /**
  * The history as the person saw it: their messages (with their ids and channels), what the agent
@@ -2210,6 +2545,7 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
           ...(args.list ? { list: args.list as never } : {}),
           ...(args.link ? { link: args.link as never } : {}),
           ...(args.image ? { image: photoOf(args.image as never) } : {}),
+          ...(args.video ? { video: photoOf(args.video as never) } : {}),
           ...(Array.isArray(args.carousel) ? { carousel: cardsOf(args.carousel as never) } : {}),
           ...(Object.keys(fields).length ? { fields } : {}),
           ...(typeof delivered.message_id === "string" ? { messageId: delivered.message_id } : {}),
@@ -2287,14 +2623,14 @@ function tokens(text: string | null | undefined): number {
   return Math.ceil((text?.length ?? 0) / 3);
 }
 
-/** About how many tokens a history entry takes, a photo or PDF shown counted as 1,500. */
+/** About how many tokens a history entry takes, a photo or PDF shown counted as 1,500, a video as VIDEO_TOKENS. */
 function size(entry: ChatMessage): number {
   if (entry.role === "assistant") return tokens(entry.content) + tokens(JSON.stringify(entry.toolCalls ?? []));
   if (entry.role === "tool") return tokens(entry.content);
-  return tokens(entry.content) + (entry.media?.filter((m) => m.data).length ?? 0) * 1_500;
+  return tokens(entry.content) + (entry.media ?? []).reduce((sum, m) => sum + (!m.data ? 0 : m.kind === "video" ? VIDEO_TOKENS : 1_500), 0);
 }
 
-/** A photo or PDF as it is stored: named, without its bytes. */
+/** A photo, PDF or video as it is stored: named, without its bytes. */
 function stored(media: Media): Media {
   const { data: _bytes, ...rest } = media;
   return rest;
@@ -2321,16 +2657,46 @@ function clipOutput(text: string): string {
   return `${text.slice(0, end)}\n[cut: ${text.length - end} more characters not shown]`;
 }
 
-/** A sent message or carousel as its `message.out` event tells it. */
 /** The platform's id for a sent message, on its message.out event, when the channel gave one. */
 function idDetail(receipt?: SendReceipt): { messageId?: string } {
   return receipt?.messageId ? { messageId: receipt.messageId } : {};
 }
 
-function outDetail(sent: OutboundMessage): Record<string, unknown> {
-  if (sent.type === "template") return { text: sent.name, template: true };
+/** A sent message, carousel or template as its `message.out` event tells it. */
+function outDetail(sent: OutboundMessage, templates: TemplateDefinition[]): Record<string, unknown> {
+  if (sent.type === "template") return templateDetail(templates, sent);
   if (sent.type === "carousel") return { text: sent.text, carousel: sent.cards, replyTo: sent.replyTo };
-  return { text: sent.text, buttons: sent.buttons, list: sent.list, link: sent.link, image: sent.image, replyTo: sent.replyTo, ...(sent.fields ? { fields: sent.fields } : {}), ...(sent.authentication ? { authentication: true } : {}) };
+  return { text: sent.text, buttons: sent.buttons, list: sent.list, link: sent.link, image: sent.image, video: sent.video, replyTo: sent.replyTo, ...(sent.fields ? { fields: sent.fields } : {}), ...(sent.authentication ? { authentication: true } : {}) };
+}
+
+/**
+ * A sent template as its `message.out` event tells it: `text` is its name. A declared one also says what
+ * the person read (`reads`: its text header's line, then its body, filled in) and `sentTemplate`, its
+ * declared parts (placeholders kept) with the values this send filled in, so a traces endpoint can show
+ * it as they saw it. An undeclared one is only its name: its words are not known here.
+ */
+function templateDetail(templates: TemplateDefinition[], sent: Template): Record<string, unknown> {
+  const detail = { text: sent.name, template: true };
+  const declared = declaredTemplate(templates, sent);
+  if (!declared) return detail;
+  let filled: ReturnType<typeof fillTemplate>;
+  try {
+    filled = fillTemplate(declared, sent);
+  } catch {
+    return detail;
+  }
+  const shape = declared.header;
+  const header = filled.header?.kind === "text" ? filled.header.text : undefined;
+  const values = { ...(shape?.kind === "text" && sent.header?.kind === "text" ? { header: sent.header.text } : {}), body: sent.body ?? numbered(sent.variables) };
+  const sentTemplate = {
+    name: declared.name,
+    language: declared.language,
+    ...(shape ? { header: shape.kind === "text" ? { kind: "text", text: shape.text } : { kind: shape.kind } } : {}),
+    body: declared.body,
+    buttons: (declared.buttons ?? []).map((b) => ({ type: b.type, text: b.text })),
+    values,
+  };
+  return { ...detail, reads: header ? `${header}\n${filled.body}` : filled.body, sentTemplate };
 }
 
 function errorText(error: unknown): string {
@@ -2338,6 +2704,25 @@ function errorText(error: unknown): string {
 }
 
 /** A model.error event's details: the error, and the code and HTTP status it carries (Flow's typed errors, a provider's APIError). */
+/** JavaScript's own errors for code that is wrong (as against a failure the tool ran into): an ERROR, not a WARNING. */
+const BUG_ERRORS = new Set(["TypeError", "ReferenceError", "SyntaxError", "RangeError", "EvalError", "URIError"]);
+
+/**
+ * One log line for a tool call that failed, in every environment: the model's call refused before
+ * it ran (`kind` says why), or the tool threw (its error's name, code and status). Ids, kinds and ms
+ * only: never the call's input or output, nor the error's message, which may quote either.
+ */
+function toolFailed(conversationId: string, call: ToolCall, ms: number, failure: { refused: "unknown_tool" | "invalid_json" | "invalid_input" } | { thrown: unknown }): void {
+  const thrown = "thrown" in failure ? failure.thrown : undefined;
+  const kind = "refused" in failure ? failure.refused : thrown instanceof Error ? thrown.name : typeof thrown;
+  const { code: own, cause, status: rawStatus } = (thrown ?? {}) as { code?: unknown; cause?: { code?: unknown }; status?: unknown };
+  const idLike = (v: unknown) => (typeof v === "string" && /^[\w.:-]{1,64}$/.test(v)) || typeof v === "number" ? v : undefined;
+  const code = idLike(own) ?? idLike(cause?.code);
+  const status = typeof rawStatus === "number" ? rawStatus : undefined;
+  const what = "refused" in failure ? `was refused (${kind})` : `failed after ${ms} ms (${[kind, code, status].filter((v) => v !== undefined).join(", ")})`;
+  logFields("thrown" in failure && BUG_ERRORS.has(kind) ? "ERROR" : "WARNING", { tool: call.name, kind, ...(code !== undefined ? { code } : {}), ...(status !== undefined ? { status } : {}), conversation: conversationId, callId: call.id, ms }, `flow: tool ${call.name} ${what} in conversation ${conversationId}`);
+}
+
 function modelError(error: unknown): { error: string; code?: string; status?: number } {
   const { code, status } = (error ?? {}) as { code?: unknown; status?: unknown };
   return { error: String(error), ...(typeof code === "string" && code ? { code } : {}), ...(typeof status === "number" ? { status } : {}) };

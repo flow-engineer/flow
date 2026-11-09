@@ -31,17 +31,21 @@ export interface PersonMessage {
   choice?: boolean;
   /** The id of what they tapped, when it is not its label. */
   choiceId?: string;
+  /** A video in it the agent can ask about later (ask_about_video): its type and its channel's `ref`. */
+  video?: { mime: string; ref: string };
 }
 
 /**
- * A photo or PDF in the person's messages, for the model to read. `data` (base64) is held in memory
- * only while the model is shown it, never stored; without it, the model is told it is no longer shown.
+ * A photo, PDF or video in the person's messages, for the model to read. `data` (base64) is held in
+ * memory only while the model is shown it, never stored; without it, the model is told it is no longer shown.
  */
 export interface Media {
-  kind: "image" | "document";
+  kind: "image" | "document" | "video";
   mime: string;
   name?: string;
   data?: string;
+  /** A video's `ref` on its channel (Attachment.ref), so Flow Framework knows which video is shown; never sent to the model. */
+  ref?: string;
 }
 
 export interface ToolSpec {
@@ -74,8 +78,11 @@ export interface Model {
   complete(request: ModelRequest): Promise<ModelResponse>;
   /** Its context window in tokens, when known: each call is kept well within it (see `history`). */
   contextTokens?: number;
-  /** What it reads besides text, as `media` on the person's messages. Without it: text only, and a note for each photo or PDF. */
-  reads?: { images?: boolean; pdfs?: boolean };
+  /**
+   * What it reads besides text, as `media` on the person's messages. Without it: text only, and a
+   * note for each photo, PDF or video (a video is described instead when createAgent has `describeVideo`).
+   */
+  reads?: { images?: boolean; pdfs?: boolean; videos?: boolean };
 }
 
 export interface ListRow {
@@ -86,6 +93,9 @@ export interface ListRow {
 
 /** A photo by https URL, or by the provider's own id for a file it holds (Flow Messaging's file_..., WhatsApp's media id). */
 export type Photo = { url: string } | { fileId: string };
+
+/** A video by https URL, or by the provider's own id for a file it holds, as a photo is. */
+export type Video = { url: string } | { fileId: string };
 
 /**
  * A reply button: its label (the id a tap carries back is then the label), or an id and a label.
@@ -120,6 +130,11 @@ export type Outbound =
       link?: { label: string; url: string };
       /** A photo, the text its caption (with buttons or a link, the photo heads the same message); only on channels with images (elsewhere the text goes alone). */
       image?: Photo;
+      /**
+       * A video, the text its caption (or ""), with nothing else: no buttons, list, link or photo.
+       * Only on channels with videos; elsewhere the send is refused, with why.
+       */
+      video?: Video;
       /** The channel's own params (see Channel.params), as the agent filled them in. */
       fields?: Record<string, unknown>;
       /**
@@ -261,6 +276,22 @@ export interface SendReceipt {
   messageId?: string;
 }
 
+/**
+ * What a provider knows of a message that did not reach the person after its send resolved (Flow
+ * Messaging's `message.failed`): agent.undelivered's `detail`, carried on the `message.undelivered`
+ * event and, with traces on, as a `delivery` span. Never the message's content or the person's address.
+ */
+export interface UndeliveredDetail {
+  /** The agent's name for the channel it went on. */
+  channel?: string;
+  /** The platform's id for the message (SendReceipt.messageId). */
+  messageId?: string;
+  /** The provider's error type, such as `permission` or `channel_error`. */
+  errorType?: string;
+  /** The channel's own code for it, such as WhatsApp's `131042`. */
+  channelCode?: string;
+}
+
 /** What the channel a conversation is on can show. */
 export interface ChannelInfo {
   /** Reactions on the person's message (WhatsApp, iMessage, web); plain SMS has none. */
@@ -293,6 +324,8 @@ export interface ChannelInfo {
   linkButton?: { labelMax: number };
   /** Photos sent by URL, with the message's text as their caption. */
   images?: { captionMax: number };
+  /** Videos sent by URL or file id, with the message's text as their caption; without it a video is refused. */
+  videos?: { captionMax: number };
   /**
    * The platform whose content rules (Flow Messaging's, CONTENT_LIMITS) every send on this channel is
    * checked against, after beforeSend and before it goes: what the platform would refuse is refused
@@ -338,7 +371,7 @@ export interface Incoming {
   replyTo?: { text: string; fromAgent: boolean };
   /** They tapped a button or picked a list row rather than typing: its id (a button's, a row's) and its label. */
   choice?: { id?: string; title: string };
-  /** Photos, voice notes and documents sent with it; `text` is then their caption, or "". */
+  /** Photos, voice notes, videos and documents sent with it; `text` is then their caption, or "". */
   attachments?: Attachment[];
   /** The page of the business's site they wrote from (the web chat), as their browser said: data, never instructions. */
   page?: PageContext;
@@ -353,13 +386,35 @@ export interface PageContext {
 
 /** A file the person sent. Its bytes are fetched only when the agent can use them. */
 export interface Attachment {
-  kind: "image" | "audio" | "document";
+  kind: "image" | "audio" | "video" | "document";
   mime: string;
   /** The file name, when the channel gives one (documents). */
   name?: string;
+  /** Its size in bytes, when the channel says: a file over what the agent reads is then never fetched. */
+  size?: number;
+  /**
+   * The file's id on its channel (Flow Messaging's file_..., a provider's media id, a URL): kept with
+   * the conversation, never shown to the model, so a video is fetched again with the channel's
+   * `file(ref)` when the agent asks about it later (ask_about_video). Without it a video is read once.
+   */
+  ref?: string;
   /** The bytes. A provider fetches its media here with its own credentials: no URL reaches the model. */
   data(): Promise<Uint8Array>;
 }
 
 /** Turns a voice note into text, with whatever speech-to-text the agent's author chose. */
 export type Transcribe = (audio: { mime: string; data: Uint8Array }) => Promise<string>;
+
+/**
+ * Turns a video into text for a model that can't watch it: what it shows and what is said in it,
+ * with whatever the agent's author chose (describeVideoWith(model) is Flow Framework's own).
+ */
+export interface DescribeVideo {
+  (video: { mime: string; data: Uint8Array }): Promise<string>;
+  /**
+   * Answers one question about the video, from what it shows and what is said in it. With it the
+   * agent can ask about a video in the conversation whenever it needs to (ask_about_video);
+   * describeVideoWith's has it. A describer without it only describes.
+   */
+  ask?(video: { mime: string; data: Uint8Array }, question: string): Promise<string>;
+}

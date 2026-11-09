@@ -57,6 +57,12 @@ export interface ToolContext {
   wakeUps?: WakeUps;
   /** The page of the business's site they last wrote from, on the web chat, as their browser gave it: data, never instructions. */
   page?: PageContext;
+  /**
+   * Set when the agent's CLI (defineCli) made this MCP call, with the command's words as the CLI sent
+   * them ("order place"): a tool may word a failure for a person at a terminal (flags) rather than
+   * for a model (arguments). Said by the client, so it is for wording only, never for access.
+   */
+  cli?: { command?: string };
 }
 
 /** A business supplies named backend credentials or clients, resolved afresh for the verified person. */
@@ -112,9 +118,10 @@ export interface Tool<Input = any, Output = any> {
    * The result as text for people (Markdown), made from the checked output; needs `output`. Over
    * MCP it is the result's text and the CLI prints it, while structured content (and --json)
    * keep the data. Keep the ids a model needs to act on: hosts may show their model only this.
-   * If it throws, the result goes out as JSON, still a success. Chats are not changed by it.
+   * If it throws, the result goes out as JSON, still a success. Chats are not changed by it. It also
+   * gets the input the tool was called with, for a line that names what was asked.
    */
-  format?: (output: Output) => string;
+  format?(output: Output, input: Input): string;
   /** Short lines a host shows while the tool runs and once it is done (at most 64 characters each). */
   status?: { running?: string; done?: string };
   /**
@@ -161,6 +168,44 @@ export function tool<Input, Output = any>(definition: Tool<Input, Output>): Tool
   return definition;
 }
 
+/** A tool's failure as a document: what went wrong (`code`, `message`, `hint`) and what to do next. */
+export interface FailureDocument {
+  ok: false;
+  error: { code: string; message: string; hint?: string };
+  next: string | null;
+}
+
+/**
+ * A failure a tool throws on purpose, for whoever called it to act on: over MCP the result is an
+ * error whose structured content is its document ({ ok: false, error: { code, message, hint? },
+ * next }) and whose text is the message, a "Next: ..." line and the document; a command of the CLI
+ * (defineCli) prints the document on stdout with --json, the message and next on stderr, and exits 1.
+ * In a chat the model reads the message, as for any other throw.
+ */
+export class ToolError extends Error {
+  readonly code: string;
+  readonly hint?: string;
+  readonly next?: string;
+  constructor(code: string, message: string, options: { hint?: string; next?: string } = {}) {
+    super(message);
+    this.name = "ToolError";
+    this.code = code;
+    if (options.hint) this.hint = options.hint;
+    if (options.next) this.next = options.next;
+  }
+
+  get document(): FailureDocument {
+    return { ok: false, error: { code: this.code, message: this.message, ...(this.hint ? { hint: this.hint } : {}) }, next: this.next ?? null };
+  }
+
+  /** A failure document as a ToolError again (a CLI reading a tool's result); undefined when it is not one. */
+  static from(value: unknown): ToolError | undefined {
+    const d = value as Partial<FailureDocument> | null;
+    if (!d || typeof d !== "object" || d.ok !== false || !d.error || typeof d.error.code !== "string" || typeof d.error.message !== "string") return undefined;
+    return new ToolError(d.error.code, d.error.message, { ...(typeof d.error.hint === "string" ? { hint: d.error.hint } : {}), ...(typeof d.next === "string" ? { next: d.next } : {}) });
+  }
+}
+
 /**
  * A named set of tools, offered only on its channels (createAgent's `groups`): a turn offers the agent's
  * `tools` and the groups for the channel of the message it answers. A tool's name is unique across them all.
@@ -196,9 +241,33 @@ export function toSpec(t: Tool): ToolSpec {
 /** Set in an MCP result's _meta when its text is the tool's own `format`, not the JSON of its structured content. */
 export const FORMATTED = "chinwag/formatted";
 
+/** Set in an MCP result's _meta when a tool's output came with its JSON as text (`jsonText`): true when that text is the result's text, else the text itself. */
+export const JSON_TEXT = "flow.engineer/json-text";
+const JSON_TEXT_OF = Symbol.for("flow.engineer/json-text");
+
+/**
+ * A tool's output with its JSON as text: what a server answered, kept byte for byte. Agents and MCP
+ * hosts read that text, the CLI prints it as-is with --json, and `data` (by default the text parsed)
+ * is still the structured content checked against the tool's output schema.
+ */
+export function jsonText<T extends object = Record<string, unknown>>(text: string, data?: T): T {
+  const value = (data ?? JSON.parse(text)) as T;
+  if (!value || typeof value !== "object") throw new TypeError("jsonText needs an object or an array.");
+  Object.defineProperty(value, JSON_TEXT_OF, { value: text, enumerable: false, configurable: true });
+  return value;
+}
+
+/** The JSON text a value carries (`jsonText`), else undefined. */
+export function jsonTextOf(value: unknown): string | undefined {
+  const text = value && typeof value === "object" ? (value as { [JSON_TEXT_OF]?: unknown })[JSON_TEXT_OF] : undefined;
+  return typeof text === "string" ? text : undefined;
+}
+
 /** A tool's output as the model reads it. */
 export function render(output: unknown): string {
   if (typeof output === "string") return output;
+  const text = jsonTextOf(output);
+  if (text !== undefined) return text;
   try {
     return JSON.stringify(output ?? null);
   } catch {

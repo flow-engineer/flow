@@ -110,12 +110,12 @@ test("a message hides typing; while the tools it went with run, typing shows aga
   assert.deepEqual(afterReaction(), [false, true, true, false]);
 });
 
-test("after a reply with no tools, typing stays hidden through a slow last model step", async (t) => {
+test("after a reply of only messages that says it acts next, typing stays hidden through a slow last model step", async (t) => {
   const h = typingHarness(t, () => {}, [], "manual");
   h.send("t6", "what time do you open?");
   await h.tick(0);
-  (await h.nextCall(0)).answer(respond(say("We open at 9.")));
-  // The step Flow Framework adds after a reply that used no tool: slower than the 800 ms interval.
+  (await h.nextCall(0)).answer(respond(call("send_chat", { text: "Let me check.", next: "act" })));
+  // The step Flow Framework adds after a message that said "act": slower than the 800 ms interval.
   const last = await h.nextCall(1);
   await h.tick(5_000);
   assert.deepEqual(h.typed(), [true, false], "hidden by the answer, and not shown again");
@@ -189,6 +189,27 @@ test("typing stops when the turn fails", async (t) => {
   await h.tick(60_000);
   assert.deepEqual(h.typed(), [true, false]);
   assert.ok(h.sent().length === 1, "they are told something went wrong");
+});
+
+test("plain text again after the reminder is sent as the reply, as its send tool would have, and logged with ids only", async (t) => {
+  const warn = t.mock.method(console, "warn", () => {});
+  const h = harness();
+  h.send("c11", "is Friday free?");
+  (await h.nextCall(0)).answer({ text: "Friday is free.", toolCalls: [] });
+  (await h.nextCall(1)).answer({ text: "Yes, Friday at 10 is free.", toolCalls: [] });
+  await h.agent.conversation("c11")!.whenIdle();
+  assert.deepEqual(h.sent(), ["Yes, Friday at 10 is free."]);
+  assert.equal(h.calls.length, 2, "no third model call");
+  assert.ok(h.events.some((e) => e.type === "message.out"));
+  const lines = warn.mock.calls.map((c) => format(...c.arguments));
+  assert.deepEqual(lines, ["flow: conversation c11 turn 1: the agent wrote its reply as plain text again after the reminder; Flow Framework sent that text on chat"]);
+
+  // The next turn sees it as sent, like any message of the agent's.
+  h.send("c11", "great");
+  const next = await h.nextCall(2);
+  assert.match(JSON.stringify(next.request.messages), /send_chat.*Yes, Friday at 10 is free\./);
+  next.answer(respond(say("See you then.")));
+  await h.agent.conversation("c11")!.whenIdle();
 });
 
 test("plain text from the model is never shown, and the agent is reminded to reply", async () => {

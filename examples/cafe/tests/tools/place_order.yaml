@@ -1,8 +1,6 @@
-# Everything place_order can do, for the tool simulator. During a test no real tool runs: a model
-# plays the tool. On each call it reads the scenario's world and picks the response (and how long
-# the call takes) that fits, from the kinds below. Scenarios never set responses or latencies;
-# they describe the situation ("the point of sale is slow this morning") and the simulator plays
-# it, possibly differently on each call, as a real system would.
+# Everything place_order can do, for the tests. During a test no real tool runs: a model plays
+# each call from these responses, picking the one whose when: fits the call and the scenario's
+# world (a world that says the point of sale is down gets the error below), with its latency.
 #
 #   behaviour    what the tool does, in plain words, beyond its description
 #   responses    the kinds of response it gives, each with an example and how long it takes

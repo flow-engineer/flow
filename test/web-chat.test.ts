@@ -180,12 +180,12 @@ test("an anonymous visitor stays themselves with their credential; a signed-in o
 });
 
 test("only the listed sites may use the chat, and a wildcard covers their subdomains", async () => {
-  const web = await webAgent({ origins: ["https://*.vingo.example"] });
+  const web = await webAgent({ origins: ["https://*.acme.example"] });
   assert.equal((await web.http("/session", { method: "POST", body: "{}", origin: "https://evil.example" })).status, 403);
-  const preflight = await web.http("/messages", { method: "OPTIONS", origin: "https://www.vingo.example" });
+  const preflight = await web.http("/messages", { method: "OPTIONS", origin: "https://www.acme.example" });
   assert.equal(preflight.status, 204);
-  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://www.vingo.example");
-  assert.equal((await web.http("/session", { method: "POST", body: "{}", origin: "https://vingo.example" })).status, 403);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://www.acme.example");
+  assert.equal((await web.http("/session", { method: "POST", body: "{}", origin: "https://acme.example" })).status, 403);
   assert.throws(() => webChat({ origins: ["http://shop.example"], sessionKey: SESSION_KEY }), /not a site/);
 });
 

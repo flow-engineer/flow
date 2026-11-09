@@ -30,6 +30,13 @@
 // `chinwag.channel` is the platform (whatsapp, sms, telegram, imessage, web, cli, voice, other),
 // the same on the root span and on every send span of the trace.
 //
+// A WhatsApp template's send span, with content on, holds what the person read when the template
+// is declared (createAgent's templates): `chinwag.agent_reply` is its text header's line and its
+// body with the send's values filled in, and `flow.template.*` its parts: `name`, `language`,
+// `header_kind` and `header` (a text header's words), `body` (placeholders kept), `buttons` (JSON:
+// each button's type and text) and `values` (JSON: `header` and `body`, the values in send order),
+// so an endpoint can draw it as the template it was. An undeclared template's reply is its name.
+//
 // The resource's `service.version` is the agent's version (agentVersion below), with no setting:
 // the same label `flow test` keeps with its session and `flow deploy` with the deploy, so a reply
 // can be matched to the code that wrote it.
@@ -41,13 +48,22 @@
 // that code queued while it ran in a turn (recordNudge from a tool, say, for another person) names
 // where: a span link to that span (`flow.link.kind` "queued_by") and, for ingest paths that drop
 // links, `flow.origin.*` on the root span.
+//
+// A send span carries the platform's id for the message it sent, `flow.send.message_id` (Flow
+// Messaging's `msg_...`, SendReceipt.messageId), content on or off. When the channel fails a
+// message after its send resolved (agent.undelivered with the message's id: Flow Messaging's late
+// `message.failed`), a `delivery <channel>` span follows: in the send's trace under its send span
+// when this process sent it, else a trace of its own. It holds `flow.delivery.message_id`,
+// `flow.delivery.status` ("failed"), `flow.delivery.error_type`, `flow.delivery.channel_code` (when
+// the channel gave one) and `chinwag.channel`, never the message's content, and its status is error.
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { EventSink, FlowEvent } from "./events.ts";
+import { gzipSync } from "node:zlib";
+import { log, type EventSink, type FlowEvent } from "./events.ts";
 import { setting } from "./names.ts";
 
 export interface TracesOptions {
@@ -66,8 +82,12 @@ const MAX_QUEUED = 512;
 /** Turns per request. */
 const BATCH = 64;
 const TIMEOUT_MS = 10_000;
+/** A request body past this many bytes goes gzipped (OTLP/HTTP's Content-Encoding: gzip): a batch with content is mostly text. */
+const GZIP_OVER = 64 * 1024;
 /** The cap per content attribute. */
 const MAX_TEXT = 32 * 1024;
+/** Send spans remembered by the platform's message id, for a delivery failure heard later; past this the oldest goes. */
+const MAX_SENDS = 4096;
 
 /** Where traces go when a key is set and no address is, and the test cloud `flow test` uses when none is named. */
 export const OBSERVE_URL = "https://flow.engineer/observe";
@@ -168,13 +188,14 @@ export interface Traces {
 let warnedMetadataOnly = false;
 
 /**
- * What traces ask the agent: a channel's platform, and how the person on a channel of a
- * conversation reaches the agent when not through the channel's provider ("playground"; by
- * default on the channel of their latest message).
+ * What traces ask the agent: a channel's platform (for a channel the agent does not define, such
+ * as the test cloud's, the platform the conversation's messages came with), and how the person on a
+ * channel of a conversation reaches the agent when not through the channel's provider
+ * ("playground"; by default on the channel of their latest message).
  */
 export interface TracedAgent {
   service: string;
-  kindOf(channel: string): string | undefined;
+  kindOf(channel: string, conversationId?: string): string | undefined;
   viaOf?(conversationId: string, channel?: string): string | undefined;
 }
 
@@ -190,7 +211,7 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
   const content = options.content === true;
   if (!content && !warnedMetadataOnly) {
     warnedMetadataOnly = true;
-    console.warn("flow: traces are metadata only. Set FLOW_FRAMEWORK_TRACES_CONTENT=1 to send what was written.");
+    log("WARNING", "flow: traces are metadata only. Set FLOW_FRAMEWORK_TRACES_CONTENT=1 to send what was written.");
   }
   const open = new Map<string, Turn>();
   const calls = new Map<string, { at: number; input?: unknown }>();
@@ -198,6 +219,8 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
   const detached = new Map<string, { traceId: string; spanId: string }>();
   /** Messages and background results that came while no turn was open: they join the next one. */
   const waiting = new Map<string, { inbound: Inbound[]; spans: Array<(turn: Turn) => Span> }>();
+  /** Send spans by the platform's message id: where a failure the channel reports later goes. */
+  const sends = new Map<string, { traceId: string; spanId: string }>();
   const queue: Span[][] = [];
   const warned = new Set<string>();
   let sending: Promise<void> | null = null;
@@ -210,10 +233,10 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
   function warnOnce(kind: string, message: string) {
     if (warned.has(kind)) return;
     warned.add(kind);
-    console.warn(`flow: ${message}; later failures of this kind are not logged`);
+    log("WARNING", `flow: ${message}; later failures of this kind are not logged`);
   }
 
-  const kindOf = (channel: string | undefined) => (channel ? CHANNEL_KIND[agent.kindOf(channel) ?? ""] ?? "other" : undefined);
+  const kindOf = (channel: string | undefined, conversationId?: string) => (channel ? CHANNEL_KIND[agent.kindOf(channel, conversationId) ?? ""] ?? "other" : undefined);
 
   function waitingFor(id: string) {
     let w = waiting.get(id);
@@ -244,7 +267,7 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
 
   function record(conversationId: string, turn: Turn, failed: boolean, at: number) {
     const attributes = [attr("gen_ai.operation.name", "invoke_agent"), attr("gen_ai.agent.name", agent.service), ...ids(conversationId)];
-    const channel = kindOf(turn.inbound.at(-1)?.channel ?? turn.replyChannel);
+    const channel = kindOf(turn.inbound.at(-1)?.channel ?? turn.replyChannel, conversationId);
     if (channel) attributes.push(attr("chinwag.channel", channel));
     const session = testRun ? setting("TEST_SESSION") : undefined;
     if (session) attributes.push(attr("chinwag.test.session", session));
@@ -273,18 +296,42 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
   function alone(conversationId: string, e: FlowEvent) {
     const channel = String(e.channel);
     const turn: Turn = { traceId: hex(16), rootId: hex(8), start: e.at, inbound: [], spans: [], tools: new Map(), replyChannel: channel, ...started(e) };
-    turn.spans.push(reply(turn, e.at, channel, e.text, e.direct === true));
+    turn.spans.push(reply(turn, e, e.direct === true));
     record(conversationId, turn, false, e.at);
   }
 
-  function reply(turn: Turn, at: number, channel: string, text: unknown, asWritten = false): Span {
+  /** A message.out's send span. A declared template's is what the person read, and its parts (templateAttributes). */
+  function reply(turn: Turn, e: FlowEvent, asWritten = false): Span {
+    const channel = String(e.channel);
     turn.replyChannel ??= channel;
     // The platform, as on the root span; the span's name has the channel's own name.
-    const kind = kindOf(channel);
+    const kind = kindOf(channel, e.conversationId);
     const attributes = kind ? [attr("chinwag.channel", kind)] : [];
     if (asWritten) attributes.push(attr("flow.message.as_written", true));
+    const text = typeof e.reads === "string" ? e.reads : e.text;
     if (content && typeof text === "string") attributes.push(attr("chinwag.agent_reply", clip(text)));
-    return child(turn, `send ${channel}`, at, at, attributes);
+    if (content && e.sentTemplate) attributes.push(...templateAttributes(e.sentTemplate as SentTemplate));
+    const messageId = typeof e.messageId === "string" && e.messageId ? e.messageId : undefined;
+    if (messageId) attributes.push(attr("flow.send.message_id", messageId));
+    const made = child(turn, `send ${channel}`, e.at, e.at, attributes);
+    if (messageId) {
+      sends.set(messageId, { traceId: made.traceId, spanId: made.spanId });
+      if (sends.size > MAX_SENDS) sends.delete(sends.keys().next().value!);
+    }
+    return made;
+  }
+
+  /** A message the channel failed after its send resolved: under its send span when this process sent it, else a trace of its own. */
+  function delivery(conversationId: string, e: FlowEvent, messageId: string) {
+    const channel = typeof e.channel === "string" ? e.channel : undefined;
+    const send = sends.get(messageId);
+    const attributes = ids(conversationId);
+    const kind = kindOf(channel, conversationId);
+    if (kind) attributes.push(attr("chinwag.channel", kind));
+    attributes.push(attr("flow.delivery.message_id", messageId), attr("flow.delivery.status", "failed"));
+    if (typeof e.errorType === "string" && e.errorType) attributes.push(attr("flow.delivery.error_type", e.errorType));
+    if (typeof e.channelCode === "string" && e.channelCode) attributes.push(attr("flow.delivery.channel_code", e.channelCode));
+    enqueue([span(send?.traceId ?? hex(16), channel ? `delivery ${channel}` : "delivery", e.at, e.at, attributes, send?.spanId, true)]);
   }
 
   function enqueue(spans: Span[]) {
@@ -298,18 +345,23 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
 
   function drain(): Promise<void> {
     sending ??= (async () => {
-      while (queue.length) await post(queue.splice(0, BATCH).flat());
+      while (queue.length) {
+        const turns = queue.splice(0, BATCH);
+        await post(turns.flat(), turns.length);
+      }
     })().finally(() => (sending = null));
     return sending;
   }
 
-  async function post(spans: Span[]) {
-    const body = JSON.stringify({ resourceSpans: [{ resource: { attributes: resource }, scopeSpans: [{ scope: { name: "chinwag" }, spans }] }] });
+  async function post(spans: Span[], turns: number) {
+    const json = JSON.stringify({ resourceSpans: [{ resource: { attributes: resource }, scopeSpans: [{ scope: { name: "chinwag" }, spans }] }] });
+    // A big batch (content on, long tool results) went out slower than the timeout on a slow uplink; gzipped it is a few times smaller.
+    const gzip = Buffer.byteLength(json) > GZIP_OVER;
     try {
       const response = await fetch(endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${options.key}` },
-        body,
+        headers: { "content-type": "application/json", ...(gzip ? { "content-encoding": "gzip" } : {}), authorization: `Bearer ${options.key}` },
+        body: gzip ? gzipSync(json) : json,
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
       const answer = await response.text();
@@ -318,7 +370,11 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
       if (rejected > 0) warnOnce("partial", `the traces endpoint rejected ${rejected} span(s) of a trace`);
     } catch (error) {
       const name = error instanceof Error ? error.name : "error";
-      warnOnce(`network ${name}`, `traces could not reach the traces endpoint (${name})`);
+      // Said once, with what it cost: those turns' traces are gone, and nothing else is.
+      const why = name === "TimeoutError" ? `${name}: no answer in ${TIMEOUT_MS / 1000} s` : name;
+      const lost = `${turns} ${turns === 1 ? "turn's traces were" : "turns' traces were"} not sent`;
+      const unaffected = testRun ? "the test's results do not depend on them (only those conversations are missing from flow conversations and the dashboard)" : "the agent's replies do not wait on traces";
+      warnOnce(`network ${name}`, `traces could not reach the traces endpoint (${why}); ${lost}, ${unaffected}`);
     }
   }
 
@@ -370,10 +426,14 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
         return finish(id, false, e.at);
       case "model.error":
         return finish(id, true, e.at);
+      case "message.undelivered":
+        // Only a failure that names the message (heard after its send resolved) has a send to belong to.
+        if (typeof e.messageId === "string" && e.messageId) delivery(id, e, e.messageId);
+        return;
       case "message.out":
         // Sent as written (no model call: a nudge's text, a rule's answer): never part of a turn open meanwhile.
         if (!turn || e.answered || e.direct) return alone(id, e);
-        turn.spans.push(reply(turn, e.at, String(e.channel), e.text));
+        turn.spans.push(reply(turn, e));
         return;
       case "model.call": {
         if (!turn) return;
@@ -461,6 +521,28 @@ function ids(conversationId: string): Attr[] {
   return [attr("chinwag.conversation_id", conversationId), attr("chinwag.contact_id", conversationId)];
 }
 
+/** A declared template's parts, as a template send's message.out carries them (`sentTemplate`, conversation.ts). */
+interface SentTemplate {
+  name: string;
+  language?: string;
+  header?: { kind: string; text?: string };
+  body: string;
+  buttons?: Array<{ type: string; text: string }>;
+  values?: { header?: string; body?: string[] };
+}
+
+/** A template send's `flow.template.*` attributes (content only), from its declared parts and the values it filled in. */
+function templateAttributes(t: SentTemplate): Attr[] {
+  const out = [attr("flow.template.name", t.name)];
+  if (t.language) out.push(attr("flow.template.language", t.language));
+  if (t.header) out.push(attr("flow.template.header_kind", t.header.kind));
+  if (t.header?.text) out.push(attr("flow.template.header", clip(t.header.text)));
+  out.push(attr("flow.template.body", clip(t.body)));
+  if (t.buttons?.length) out.push(attr("flow.template.buttons", clip(JSON.stringify(t.buttons))));
+  out.push(attr("flow.template.values", clip(JSON.stringify(t.values ?? {}))));
+  return out;
+}
+
 function span(traceId: string, name: string, start: number, end: number, attributes: Attr[], parentSpanId?: string, failed = false): Span {
   return {
     traceId,
@@ -526,7 +608,7 @@ export function agentVersion(options: { given?: string; dir?: string; env?: Node
     if (validVersion(version)) return { version, from };
     if (CI_COMMITS.includes(from) || warnedVersions.has(from)) continue;
     warnedVersions.add(from);
-    console.warn(`flow: the version ${from === "given" ? "given" : `in ${from}`} is not sent: a version is 1 to 100 letters, digits and . _ : / + -`);
+    log("WARNING", `flow: the version ${from === "given" ? "given" : `in ${from}`} is not sent: a version is 1 to 100 letters, digits and . _ : / + -`);
   }
   if (options.dir) return gitVersion(options.dir) ?? packageVersion(options.dir);
   ownFolder ??= { version: gitVersion(process.cwd()) ?? packageVersion(process.cwd()) };

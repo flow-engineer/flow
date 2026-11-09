@@ -239,6 +239,11 @@ From `const fm = flowMessaging({ apiKey?, webhookSecret?, baseUrl? })`
 | `instructions` | Your guidance for the agent on this channel |
 | `disable` | `fm.whatsapp()` only: as `whatsapp()`'s `disable` |
 
+A file the person sends comes with its Flow file id as `ref`, and each channel's `file(ref)` fetches
+it again (null once Flow no longer keeps it), so the agent can ask about a video later
+(`ask_about_video`). A channel of your own can do the same: put `ref` on the attachments it hands
+in and give the channel a `file(ref)`; `agent.receive` takes one as `options.file`.
+
 `fm.channels({ except? })` gives Telegram, plus WhatsApp and iMessage when their sender is set. What
 each channel can send, and how it maps to Flow Messaging, is in
 [flow-messaging/README.md](../flow-messaging/README.md#what-it-maps); their limits are the exported
@@ -251,12 +256,13 @@ offers are ever set.
 
 | Field | What it is |
 |---|---|
-| `text` | The text, or a photo's caption |
+| `text` | The text, or a photo's or video's caption |
 | `replyTo` | The id of the person's message it quotes |
 | `buttons` | Reply buttons: a label, or `{ id, label }` |
 | `list` | `{ button, rows: [{ id, title, description? }] }`: a list the person picks one row from |
 | `link` | `{ label, url }`: one button that opens a page. Never with buttons or a list |
 | `image` | `{ url }` or `{ fileId }`: a photo, the text its caption. Never with a list |
+| `video` | `{ url }` or `{ fileId }`: a video, the text its caption. Alone: never with buttons, a list, a link or an image. Only to a provider with `features: { videos: true }` |
 | `preview` | `false`: send with link previews off (a message the business started) |
 | `idempotencyKey` | Set on a send the business starts (a nudge, a scheduled text), the same in every process: a provider that takes one sends it once |
 
@@ -274,10 +280,11 @@ What a channel can show; Flow Framework offers the agent only what is set, and f
 | `lists` | `{ maxRows, titleMax, buttonMax }` |
 | `linkButton` | `{ labelMax }`: one button that opens a page |
 | `images` | `{ captionMax }`: photos, the text as caption |
+| `videos` | `{ captionMax }`: videos, the text as caption; without it a video is refused |
 | `carousels` | `{ maxCards, textMax, cardTextMax, buttons, labelMax }` |
 | `platform` | `whatsapp`, `telegram`, `imessage` or `sms`: whose content rules (`CONTENT_LIMITS`) every send is checked against |
 | `replyWindowHours` | The business may write first only this long after the person's last message |
 | `typing` | `false`: no typing indicator is ever sent |
-| `typingLastsMs` | How long the platform shows one typing indicator (`WHATSAPP` 25 s; Flow Messaging's Telegram 5 s and iMessage 15 s). From the person's message until the turn ends, typing is sent again at 80% of it (20 s, 4 s, 12 s); each message the agent sends hides it, and it shows again only when new work starts (a response that calls tools, or the person's next message), never just because time passed. Absent: it is sent once and shows until it is turned off or a message goes |
+| `typingLastsMs` | How long the platform shows one typing indicator (`WHATSAPP` 25 s; Flow Messaging's Telegram 5 s and iMessage 15 s). From the person's message until the turn ends, typing is sent again at 80% of it (20 s, 4 s, 12 s), also while a voice note they sent is transcribed or a video described (unless the video got the agent's `videoReaction`: that turn shows none); each message the agent sends hides it, and it shows again only when new work starts (a response that calls tools, or the person's next message), never just because time passed. Absent: it is sent once and shows until it is turned off or a message goes |
 | `reactions`, `status`, `readReceipts` | Set from the provider's methods |
 | `edits`, `unsends` | The agent can change or take back a message it sent (`edit_message`, `unsend_message`, by the id its send's result gave). Telegram and iMessage on Flow Messaging have both; a custom UI sets them from `editMessage` and `unsendMessage`; WhatsApp and SMS have neither. The platform decides how late either may come, and nothing is sent in place of one it refuses: the refusal goes back to the agent as its tool result. Flow Messaging refuses a late or unsupported one when it is made (`422 unsupported_content` with `edit_window_closed`, `unsend_window_closed`, `first_message_not_editable` or `not_on_sms`, its message stating the limit) |

@@ -1,7 +1,8 @@
-// covers: cli/src/chat-ui.ts cli/src/colors.ts cli/src/welcome.ts cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/skills.ts src/agent.ts src/channels.ts
+// covers: cli/src/chat-ui.ts cli/src/colors.ts cli/src/welcome.ts cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/skills.ts src/agent.ts src/channels.ts testing/src/sign-in-page.ts testing/src/flow-tools.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createServer, type RequestListener, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,13 +15,14 @@ import { CURSOR_MARKER, TUI, visibleWidth, type Terminal } from "@mariozechner/p
 import { after, test } from "node:test";
 import { z } from "zod";
 import { buildCommand } from "@stricli/core";
-import { cliProblems, command, commandTable, defineCli, runCli, skillFile, type CliConfig, type CliIO } from "../cli/src/index.ts";
+import { cliProblems, command, commandTable, connectCli, defineCli, runCli, skillFile, type CliConfig, type CliIO } from "../cli/src/index.ts";
 import { isSignedIn, signOut, storedProvider } from "../cli/src/auth.ts";
 import { palette } from "../cli/src/colors.ts";
 import { commandLine, feedbackUsage } from "../cli/src/commands.ts";
 import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
 import { scriptedModel, respond, call } from "./helpers.ts";
-import { createAgent, tool } from "../src/index.ts";
+import { createAgent, jsonText, jsonTextOf, tool, ToolError } from "../src/index.ts";
+import { FLOW_MCP_CLI } from "../testing/src/flow-tools.ts";
 
 // These tests drive chat as a person would; a coding agent running them must not switch chat to plain.
 for (const name of ["CLAUDECODE", "CURSOR_AGENT", "CODEX_CI", "AI_AGENT"]) delete process.env[name];
@@ -102,6 +104,78 @@ test("the CLI tells agents how to send feedback: in its help, its skill and a fa
   assert.equal(await runCli(cli, ["feedback", "--about", "product", "--message", "Let me refund part of an order", "--json"], sent.channel), 0, sent.err);
   assert.deepEqual(events.find(e => e.type === "tool.end" && e.tool === "feedback")?.feedback, { about: "product", message: "Let me refund part of an order" });
   assert.equal(feedbackUsage(cli, [{ name: "list_orders", inputSchema: {} }]), undefined, "a server without it is told nothing");
+});
+
+test("a ToolError is a failure document: MCP's structured content and text, the CLI's --json on stdout, its message and next on stderr, exit 1", async () => {
+  const refusing = tool({ name: "get_refund", description: "A refund.", input: z.object({ order_id: z.string() }), signIn: "none", hints: { readOnly: true },
+    run: () => { throw new ToolError("not_found", "No refund for BL-1.", { hint: "Refunds show a day after.", next: "acme order list" }); } });
+  const server = await serve({ tools: [refusing], feedback: false });
+  const document = { ok: false, error: { code: "not_found", message: "No refund for BL-1.", hint: "Refunds show a day after." }, next: "acme order list" };
+  const { Client, StreamableHTTPClientTransport } = await import("@modelcontextprotocol/client");
+  const client = new Client({ name: "test", version: "1" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(server)));
+  const result = await client.callTool({ name: "get_refund", arguments: { order_id: "BL-1" } });
+  await client.close();
+  assert.equal(result.isError, true);
+  assert.deepEqual(result.structuredContent, document);
+  assert.equal((result.content as Array<{ text: string }>)[0]!.text, `No refund for BL-1.\nNext: acme order list\n${JSON.stringify(document)}`);
+  const json = io();
+  assert.equal(await runCli(acme(server), ["get-refund", "--order-id", "BL-1", "--json"], json.channel), 1);
+  assert.deepEqual(JSON.parse(json.out), document);
+  assert.equal(json.err, "No refund for BL-1.\nNext: acme order list\n");
+  const words = io();
+  assert.equal(await runCli(acme(server), ["get-refund", "--order-id", "BL-1"], words.channel), 1);
+  assert.equal(words.out, "");
+  assert.equal(words.err, "No refund for BL-1.\nNext: acme order list\n");
+});
+
+test("over a handle in this process the CLI needs no network or sign-in, sees the tools kept to the CLI, and says its command to the tool; --server and connectCli switch to a URL", async () => {
+  const commands: Array<string | undefined> = [];
+  const reveal = tool({ name: "reveal_code", description: "A code.", input: z.object({}), signIn: "none", hints: { readOnly: true }, mcp: { clients: ["cli"] },
+    run: (_i, context) => (commands.push(context.cli?.command), { code: "7" }) });
+  const handle = mcpServer({ name: "acme", version: "1", tools: [listOrders, reveal], feedback: false });
+  assert.deepEqual(handle.descriptors.map((d) => d.name), ["list_orders"], "no host sees reveal_code");
+  const cli = defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-local-")), server: handle });
+  const listed = io();
+  assert.equal(await runCli(cli, ["reveal-code", "--json"], listed.channel), 0, listed.err);
+  assert.deepEqual(JSON.parse(listed.out), { code: "7" });
+  assert.deepEqual(commands, ["reveal-code"]);
+  const help = io();
+  assert.equal(await runCli(cli, ["--help"], help.channel), 0);
+  assert.match(help.out, /Server: this process/);
+  const connection = await connectCli(cli, { env: {} });
+  assert.deepEqual(await connection.call("list_orders", { status: "making" }, { command: "orders mine" }), { orders: [orders[1]] });
+  await connection.close();
+  // A URL named by --server (or ACME_SERVER) wins over the handle.
+  const remote = await serve({ tools: [listOrders] });
+  const named = io();
+  assert.equal(await runCli(cli, ["list-orders", "--server", remote, "--json"], named.channel), 0, named.err);
+  assert.equal(JSON.parse(named.out).orders.length, 2);
+  const byEnv = await connectCli(cli, { env: { ACME_SERVER: "http://127.0.0.1:9/mcp" } }).catch((error: Error & { code?: number }) => error);
+  assert.equal((byEnv as { code?: number }).code, 5);
+});
+
+test("a tool's JSON text (jsonText) is what --json prints, byte for byte, over a handle or a URL; --fields and connectCli read its data", async () => {
+  const raw = '{\n  "order_id": "BL-1",\n  "note": "2 \\u003c 3"\n}';
+  const answer = tool({ name: "get_answer", description: "An order as the shop's API said it.", input: z.object({}), output: z.object({ order_id: z.string(), note: z.string() }), signIn: "none", hints: { readOnly: true }, run: () => jsonText(raw), format: (o) => `Order ${o.order_id}` });
+  const handle = mcpServer({ name: "acme", version: "1", tools: [answer], feedback: false });
+  for (const server of [handle, await serve({ tools: [answer], feedback: false })]) {
+    const cli = defineCli({ name: "acme", directory: mkdtempSync(join(testDirectory, "cli-json-text-")), server });
+    const json = io();
+    assert.equal(await runCli(cli, ["get-answer", "--json"], json.channel), 0, json.err);
+    assert.equal(json.out, `${raw}\n`);
+    const fields = io();
+    assert.equal(await runCli(cli, ["get-answer", "--json", "--fields", "note"], fields.channel), 0, fields.err);
+    assert.equal(fields.out, '{"note":"2 < 3"}\n');
+    const said = io();
+    assert.equal(await runCli(cli, ["get-answer"], said.channel), 0, said.err);
+    assert.equal(said.out, "Order BL-1\n");
+    const connection = await connectCli(cli, { env: {} });
+    const value = await connection.call("get_answer", {}, { command: "get-answer" });
+    assert.deepEqual(value, { order_id: "BL-1", note: "2 < 3" });
+    assert.equal(jsonTextOf(value), raw);
+    await connection.close();
+  }
 });
 
 test("commands include MCP-deferred tools: positionals, flags, --json and --fields", async () => {
@@ -945,6 +1019,24 @@ test("a failed code exchange shows the failure page; a team's own page gets only
   assert.match(await (await answered())[1]!.text(), /Sign-in didn't finish[\s\S]*acme login/);
 });
 
+test("flow mcp login ends on Flow's own page, whose CSP lets only its own style and script run", async () => {
+  const sha = (text: string) => `'sha256-${createHash("sha256").update(text).digest("base64")}'`;
+  for (const [status, words] of [[200, /Head back to your terminal[\s\S]*Flow is ready\.[\s\S]*window\.close\(\)/], [400, /Sign-in didn't finish[\s\S]*Run <code>flow mcp login<\/code>/]] as const) {
+    const { server, openUrl, answered } = await signInServers(() => status);
+    const cli: CliConfig = { ...FLOW_MCP_CLI, server, directory: mkdtempSync(join(testDirectory, "flow-mcp-page-")), openUrl };
+    assert.equal(await runCli(defineCli(cli), ["mcp", "login"], io().channel) === 0, status === 200);
+    const page = (await answered())[0]!;
+    assert.equal(page.headers.get("cache-control"), "no-store");
+    const html = await page.text();
+    assert.match(html, words);
+    if (status === 400) assert.doesNotMatch(html, /window\.close/, "a failed sign-in's tab stays open");
+    const csp = html.match(/http-equiv="Content-Security-Policy" content="([^"]+)"/)![1]!;
+    const style = html.match(/<style>([\s\S]*?)<\/style>/)![1]!, script = html.match(/<script>([\s\S]*?)<\/script>/)![1]!;
+    assert.equal(csp, `default-src 'none'; style-src ${sha(style)} https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src ${sha(script)}; base-uri 'none'; form-action 'none'`);
+    assert.match(script, /^history\.replaceState\(null, "", location\.pathname\);/, "the code leaves the address bar");
+  }
+});
+
 test("flow check refuses a brand color or logo a browser cannot use", () => {
   const problems = (brand: object) => cliProblems(defineCli({ name: "acme", brand }), []).errors;
   assert.deepEqual(problems({ accent: "#645bff", logo: "https://acme.test/logo.svg" }), []);
@@ -968,7 +1060,7 @@ test("the sign-in commands are where signIn puts them, beside the team's own, an
   assert.match(skillFile(cli, []), /Sign in once with `acme auth login`/);
   const out = io();
   assert.equal(await runCli(cli, ["auth", "logout"], out.channel), 0, "the sign-in commands never wait for sign-in");
-  assert.match(out.err, /^Signed out of /);
+  assert.match(out.err, /^Not signed in to /);
 
   const login = buildCommand({ docs: { brief: "Mine" }, parameters: {}, func() {} });
   assert.throws(() => defineCli({ name: "acme", commands: { login: { command: login } } }), /command "login": it is the CLI's login command \(signIn\.login\)/);
@@ -977,10 +1069,30 @@ test("the sign-in commands are where signIn puts them, beside the team's own, an
   assert.deepEqual(cliProblems({ name: "acme", signIn: { login: "Sign In", logout: "login" } }, []).errors, ['signIn.login must be words of lowercase letters, digits and -, such as "login" or "auth login"']);
 });
 
+test("logout says Signed out only when someone was signed in on this computer, else Not signed in", async () => {
+  const cli = defineCli({ name: "acme", server: "http://127.0.0.1:9/mcp", directory: mkdtempSync(join(testDirectory, "flow-cli-logout-")) });
+  const nobody = io();
+  assert.equal(await runCli(cli, ["logout"], nobody.channel), 0);
+  assert.equal(nobody.err, "Not signed in to http://127.0.0.1:9/mcp.\n");
+  await storedProvider(cli, cli.server as string).saveTokens({ access_token: "kept", token_type: "Bearer" });
+  const someone = io();
+  assert.equal(await runCli(cli, ["logout"], someone.channel), 0);
+  assert.equal(someone.err, "Signed out of http://127.0.0.1:9/mcp.\n");
+  assert.equal(isSignedIn(cli, cli.server as string), false);
+});
+
+test("login to a server out of reach says so as every command does, exit 5, never a crash", async () => {
+  const cli = defineCli({ name: "acme", server: "http://127.0.0.1:9/mcp", directory: mkdtempSync(join(testDirectory, "flow-cli-login-down-")) });
+  const down = io();
+  assert.equal(await runCli(cli, ["login"], down.channel), 5);
+  assert.match(down.err, /^Could not reach http:\/\/127\.0\.0\.1:9\/mcp: /);
+  assert.doesNotMatch(down.err, /Command failed|TypeError/);
+});
+
 test("the old auth words keep working for a release, hidden from help, saying what replaces them", async () => {
   const directory = mkdtempSync(join(testDirectory, "flow-cli-old-auth-"));
   const cli = defineCli({ name: "acme", server: "http://127.0.0.1:9/mcp", directory });
-  await storedProvider(cli, cli.server!).saveTokens({ access_token: "kept", token_type: "Bearer" });
+  await storedProvider(cli, cli.server as string).saveTokens({ access_token: "kept", token_type: "Bearer" });
   const status = io();
   assert.equal(await runCli(cli, ["auth", "status", "--json"], status.channel), 0);
   assert.deepEqual(JSON.parse(status.out), { server: cli.server, signedIn: true, source: "login", renew: false });
@@ -1027,6 +1139,54 @@ test("beforeLogout runs with the stored token before the sign-in is forgotten; f
   assert.equal(await runCli(cli(true), ["logout"], failed.channel), 0);
   assert.equal(failed.err, `Could not end the Acme session.\nSigned out of ${server} on this computer only.\n`);
   assert.equal(isSignedIn(cli(true), server), false);
+});
+
+test("logout ends the sign-in on the server too: the refresh token, then the access token, at the advertised revocation endpoint; refused, it signs out here only", async () => {
+  const seen: Array<Record<string, string>> = [];
+  let answer = 200;
+  const revoker = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => { seen.push({ path: req.url ?? "", ...Object.fromEntries(new URLSearchParams(body)) }); res.writeHead(answer).end(); });
+  });
+  await new Promise<void>((done) => revoker.listen(0, "127.0.0.1", done));
+  const origin = `http://127.0.0.1:${(revoker.address() as { port: number }).port}`;
+  try {
+    const server = "http://127.0.0.1:9/mcp";
+    const cli = defineCli({ name: "acme", server, directory: mkdtempSync(join(testDirectory, "flow-cli-logout-revoke-")) });
+    const signedIn = async (access: string, revocation: boolean) => {
+      const provider = storedProvider(cli, server);
+      await provider.saveDiscoveryState!({ authorizationServerUrl: origin, authorizationServerMetadata: { issuer: origin, authorization_endpoint: `${origin}/auth`, token_endpoint: `${origin}/token`, response_types_supported: ["code"], ...(revocation ? { revocation_endpoint: `${origin}/token/revocation` } : {}) } });
+      await provider.saveClientInformation!({ client_id: `${origin}/.well-known/oauth-client/cli` });
+      await provider.saveTokens({ access_token: access, refresh_token: `r-${access}`, token_type: "Bearer" });
+    };
+
+    await signedIn("a-1", true);
+    const out = io();
+    assert.equal(await runCli(cli, ["logout"], out.channel), 0);
+    assert.equal(out.err, `Signed out of ${server}.\n`);
+    const client_id = `${origin}/.well-known/oauth-client/cli`;
+    assert.deepEqual(seen, [
+      { path: "/token/revocation", token: "r-a-1", token_type_hint: "refresh_token", client_id },
+      { path: "/token/revocation", token: "a-1", token_type_hint: "access_token", client_id },
+    ]);
+    assert.equal(isSignedIn(cli, server), false);
+
+    seen.length = 0;
+    answer = 503;
+    await signedIn("a-2", true);
+    const refused = io();
+    assert.equal(await runCli(cli, ["logout"], refused.channel), 0);
+    assert.equal(refused.err, `${origin} did not end the sign-in (HTTP 503).\nSigned out of ${server} on this computer only.\n`);
+    assert.equal(isSignedIn(cli, server), false, "forgotten here even when the server refused");
+
+    seen.length = 0;
+    await signedIn("a-3", false);
+    assert.equal(await runCli(cli, ["logout"], io().channel), 0);
+    assert.deepEqual(seen, [], "nothing is sent where the server advertises no revocation endpoint");
+  } finally {
+    revoker.close();
+  }
 });
 
 // Updating is the only command that runs a program on the person's computer; flow check holds its option.
@@ -1403,10 +1563,13 @@ test("human chat distinguishes input, waiting and agent replies", async (t) => {
   const old = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), "chinwag-chat-presentation-"));
   t.after(() => { if (old === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = old; });
-  // styleText colours by process.stdout and the environment, not the io the CLI is given; FORCE_COLOR=0 keeps this plain in any terminal.
-  const oldColor = process.env.FORCE_COLOR;
-  process.env.FORCE_COLOR = "0";
-  t.after(() => { if (oldColor === undefined) delete process.env.FORCE_COLOR; else process.env.FORCE_COLOR = oldColor; });
+  // styleText colours by process.stdout and the environment, not the io the CLI is given, and node --test
+  // sets FORCE_COLOR=1 for its test files when its own output is a terminal, which marked-terminal's
+  // chalk has already read: NO_COLOR, with FORCE_COLOR gone, keeps this plain in any terminal.
+  const oldColor = { FORCE_COLOR: process.env.FORCE_COLOR, NO_COLOR: process.env.NO_COLOR };
+  delete process.env.FORCE_COLOR;
+  process.env.NO_COLOR = "1";
+  t.after(() => { for (const [name, value] of Object.entries(oldColor)) if (value === undefined) delete process.env[name]; else process.env[name] = value; });
   let received!: () => void, release!: () => void;
   const requested = new Promise<void>(resolve => { received = resolve; });
   const response = new Promise<void>(resolve => { release = resolve; });

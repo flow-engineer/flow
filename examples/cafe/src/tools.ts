@@ -1,5 +1,10 @@
 // The agent's tools, over a tiny in-memory café. Placing an order is slow on purpose (a real point-of-sale
 // takes seconds), so it shows a tool moving to the background.
+//
+// The café has no accounts: anyone may read the menu, order for pickup under a name and ask after an
+// order, as at the counter. So every tool says `signIn: "none"`, public on purpose, and its MCP server
+// (src/mcp.ts) needs no sign-in. A tool that reads or changes a person's account must not: leave
+// signIn out (it is then "required") and set up sign-in (the flow-framework-auth skill).
 
 import { tool, z } from "../../../src/index.ts";
 
@@ -50,6 +55,7 @@ export const tools = [
     }),
     output: z.object({ order_id: z.string(), ready_by: z.string(), pay_at_pickup: z.boolean() }),
     status: { running: "Placing your order…", done: "Order placed" },
+    signIn: "none",
     hints: { destructive: false, openWorld: false },
     run: async ({ items }) => {
       await wait(5_000);
@@ -64,6 +70,7 @@ export const tools = [
     description: "Where an order is: received, being made, or ready.",
     input: z.object({ order_id: z.string() }),
     output: z.object({ found: z.boolean(), status: z.enum(["being made", "ready"]).optional(), ready_by: z.string().optional() }),
+    signIn: "none",
     hints: { readOnly: true, openWorld: false },
     run: async ({ order_id }) => {
       await wait(200);

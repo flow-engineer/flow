@@ -11,7 +11,7 @@ import { isSpecType } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { tools as cafeTools } from "../examples/cafe/src/tools.ts";
 import { mcpServer, uiTools, type McpServerOptions } from "../mcp/src/index.ts";
-import { createAgent, flowEvents, tool, type ToolContext } from "../src/index.ts";
+import { createAgent, flowEvents, jsonText, tool, type ToolContext } from "../src/index.ts";
 
 const servers: Server[] = [];
 after(() => servers.forEach((s) => s.close()));
@@ -52,7 +52,7 @@ test("the café's tools are served as spec-valid MCP tools, every annotation sen
   assert.deepEqual(place.annotations, { title: "Place an order", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
   assert.equal(place.inputSchema.type, "object");
   assert.equal(place.outputSchema?.type, "object");
-  assert.deepEqual(place._meta, { securitySchemes: [{ type: "oauth2", scopes: [] }], "openai/toolInvocation/invoking": "Placing your order…", "openai/toolInvocation/invoked": "Order placed" });
+  assert.deepEqual(place._meta, { securitySchemes: [{ type: "noauth" }], "openai/toolInvocation/invoking": "Placing your order…", "openai/toolInvocation/invoked": "Order placed" });
   const status = listed.tools.find((t) => t.name === "order_status")!;
   assert.equal(status.title, "Order status", "derived from the name when the tool gives none");
   assert.deepEqual(status.annotations, { title: "Order status", readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false });
@@ -272,6 +272,28 @@ test("a tool's format is the result's text beside its structured content; a form
   await c.close();
 });
 
+test("a client calling handle.fetch with its own fetch needs no Host header: its URL's host is used, and a Host naming another host is still refused", async () => {
+  const handle = mcpServer({ name: "cafe", version: "1", tools: cafeTools, feedback: false });
+  const c = new Client({ name: "plain", version: "1" });
+  await c.connect(new StreamableHTTPClientTransport(new URL("http://127.0.0.1/mcp"), { fetch: (url, init) => handle.fetch(new Request(url, init)) }));
+  assert.ok((await c.listTools()).tools.length > 0);
+  await c.close();
+  const rebound = await handle.fetch(new Request("http://127.0.0.1/mcp", { method: "POST", headers: { host: "evil.example", "content-type": "application/json", accept: "application/json, text/event-stream" }, body: "{}" }));
+  assert.equal(rebound.status, 403);
+});
+
+test("a tool's output given with its JSON text (jsonText) is sent as that text, byte for byte, beside the structured content; formatted, only a CLI gets the text", async () => {
+  const raw = '{\n  "id": "BL-1",\n  "note": "2 \\u003c 3"\n}\n';
+  const answer = tool({ name: "answer", description: "An order as the shop's API said it.", input: z.object({}), output: z.object({ id: z.string(), note: z.string() }), signIn: "none", run: () => jsonText(raw) });
+  const formatted = tool({ ...answer, name: "formatted", format: (o) => `Order ${o.id}` });
+  const c = await client(await serve({ name: "cafe", version: "1", tools: [answer, formatted], feedback: false }));
+  assert.deepEqual(await c.callTool({ name: "answer", arguments: {} }), { content: [{ type: "text", text: raw }], structuredContent: { id: "BL-1", note: "2 < 3" }, _meta: { "flow.engineer/json-text": true } });
+  // A host reads the tool's own text; the JSON text rides along only for a CLI, which prints it with --json.
+  assert.deepEqual(await c.callTool({ name: "formatted", arguments: {} }), { content: [{ type: "text", text: "Order BL-1" }], structuredContent: { id: "BL-1", note: "2 < 3" }, _meta: { "chinwag/formatted": true } });
+  assert.deepEqual((await c.callTool({ name: "formatted", arguments: {}, _meta: { "chinwag/surface": "cli", "chinwag/command": "formatted" } }))._meta, { "chinwag/formatted": true, "flow.engineer/json-text": raw });
+  await c.close();
+});
+
 test("a served tool's context.records is the records given to mcpServer; without them its call says how to give them", async () => {
   const agent = createAgent({ files: { "AGENTS.md": "Test." }, model: { complete: () => Promise.reject(new Error("no model")) }, records: { notes: { people: ["about"] } }, scheduleCheckMs: 0 });
   const note = tool({ name: "note", description: "Keeps a note.", input: z.object({ text: z.string() }), signIn: "none", run: async ({ text }, context) => (await context.records.put("notes", "n1", { about: context.person, text }), { kept: true }) });
@@ -423,5 +445,29 @@ test("the web app's views join the agent as a group limited to app, unless it ha
   } finally {
     if (saved.url === undefined) delete process.env.FLOW_APP_SERVICE_URL; else process.env.FLOW_APP_SERVICE_URL = saved.url;
     if (saved.key === undefined) delete process.env.FLOW_KEY; else process.env.FLOW_KEY = saved.key;
+  }
+});
+
+test("stdio serves the same tools and instructions to a host that runs the server as a command, anonymous, without the tools kept to the CLI", async () => {
+  const { StdioClientTransport } = await import("@modelcontextprotocol/client/stdio");
+  const server = new URL("../mcp/src/index.ts", import.meta.url).href;
+  const tools = new URL("../src/index.ts", import.meta.url).href;
+  const script = `
+    import { mcpServer } from ${JSON.stringify(server)};
+    import { tool } from ${JSON.stringify(tools)};
+    import { z } from "zod";
+    const echo = tool({ name: "echo", description: "Says it back.", input: z.object({ text: z.string() }), hints: { readOnly: true }, run: ({ text }, context) => ({ text, person: context.person }) });
+    const kept = tool({ name: "kept", description: "Only the CLI.", input: z.object({}), hints: { readOnly: true }, mcp: { clients: ["cli"] }, run: () => "no" });
+    await mcpServer({ name: "acme", version: "1", tools: [echo, kept], feedback: false, traces: false, instructions: "Acme's tools." }).stdio();
+  `;
+  const c = new Client({ name: "test", version: "1" });
+  await c.connect(new StdioClientTransport({ command: process.execPath, args: ["--input-type=module", "-e", script], cwd: new URL("..", import.meta.url).pathname, stderr: "ignore" }));
+  try {
+    assert.deepEqual((await c.listTools()).tools.map((t) => t.name), ["echo"]);
+    assert.equal(c.getInstructions(), "Acme's tools.");
+    const result = await c.callTool({ name: "echo", arguments: { text: "hi" } });
+    assert.deepEqual(JSON.parse((result.content as Array<{ text: string }>)[0]!.text), { text: "hi", person: "mcp:anonymous" });
+  } finally {
+    await c.close();
   }
 });

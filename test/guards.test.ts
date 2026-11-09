@@ -58,7 +58,7 @@ test("what was sent reaches beforeSend from the stored history, so a once-per-ch
   await restarted.agent.resume();
   await restarted.message("sms", "+15550100100", "where is my order?");
   const turn = await restarted.nextCall(0);
-  turn.answer(respond(call("send_sms", { text: "I'm an AI assistant. It ships today." })));
+  turn.answer(respond(call("send_sms", { text: "I'm an AI assistant. It ships today.", next: "act" })));
   await restarted.agent.conversation(a!.conversationId)!.whenIdle();
   assert.deepEqual(restarted.texts(), ["It ships today."]);
   assert.deepEqual(JSON.parse(last(restarted.followUps[0].messages).content).sent, { text: "It ships today." }, "the agent is told what went");

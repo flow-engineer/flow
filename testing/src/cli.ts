@@ -4,7 +4,7 @@
 // agent in this folder from the terminal (testing/src/chat.ts), and `flow records export` prints
 // its records (testing/src/records.ts). `flow test`, or `flow` with flags, runs an agent's tests in the cloud,
 // from the agent's folder:
-//   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--strict] [--min-pass 98] [--fresh] [--json]
+//   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--strict] [--min-pass 98] [--json]
 // A hosted cloud (any --cloud off this machine, the default included) needs the
 // agent's CI key in FLOW_FRAMEWORK_CLOUD_KEY and --synthetic, the attestation that the test files hold no real
 // customer or member data. --agent-version (else the agent's version, as its traces carry it:
@@ -20,12 +20,18 @@
 // scenarios that did not pass. --json prints one report (testing/src/report.ts) on stdout at every exit,
 // and `flow show <run>` prints one run's record from the cloud (testing/src/show.ts).
 // `flow login`, `logout`, `whoami`, `setup` and `link` sign in to flow.engineer and get the agent's
-// keys and its phone link (testing/src/account.ts); `flow projects list | delete` lists and deletes
+// keys and its phone link, and `flow setup --live` the agent's live Flow key; `flow keys` lists,
+// shows, grants to and revokes the account's keys (testing/src/account.ts); `flow projects list | delete` lists and deletes
 // that account's projects (testing/src/projects.ts). `flow deploy` puts the agent on Flow's hosting
 // (testing/src/deploy.ts). `flow conversations` and `flow issues` read the hosted agent's
-// conversations and the grades of its replies (testing/src/conversations.ts); `flow templates` the
+// conversations and the grades of its replies, and `flow insights` Flow Insights' findings
+// (testing/src/conversations.ts); `flow templates` the
 // project's approved WhatsApp templates (testing/src/templates.ts), which `flow test` compares with
-// the declared ones.
+// the declared ones. `flow mcp serve` serves those reads, and logs and deploy status, as read-only MCP
+// tools on stdio for the coding agent in the agent's folder (testing/src/mcp-serve.ts, on the tools
+// in testing/src/flow-tools.ts); with --server those commands read over a hosted Flow MCP, signed
+// in with `flow mcp login`. `flow test pull` writes the test drafts Flow made from the hosted agent's
+// conversations into tests/drafts/, which flow test never reads (testing/src/pull.ts).
 
 import { mkdirSync, existsSync, readFileSync, renameSync, writeFileSync, writeSync } from "node:fs";
 import { request as httpRequest } from "node:http";
@@ -41,12 +47,14 @@ import type { SessionLimits } from "./protocol.ts";
 import { runPrinter } from "./print-run.ts";
 import { checkEndpointCli } from "./check-endpoint.ts";
 import { CHECK_LINE as TOOLS_CHECK_LINE, checkCli, mcpUpdateCli } from "./check.ts";
-import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli } from "./account.ts";
+import { ACCOUNT_COMMANDS, ACCOUNT_LINES, accountCli, keysCli } from "./account.ts";
 import { PROJECTS_LINE, projectsCli } from "./projects.ts";
 import { CHAT_LINE, chatCli } from "./chat.ts";
 import { RECORDS_LINE, recordsCli } from "./records.ts";
-import { CONVERSATIONS_LINES, conversationsCli, issuesCli } from "./conversations.ts";
+import { CONVERSATIONS_LINES, conversationsCli, Failed, failed, INSIGHTS_LINES, insightsCli, issuesCli } from "./conversations.ts";
 import { TEMPLATES_LINE, templatesCli, templateWarnings } from "./templates.ts";
+import { KEYS_HELP } from "./cloud-call.ts";
+import { PULL_LINE, pullCli } from "./pull.ts";
 import type { TemplateDefinition } from "../../src/types.ts";
 import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
 import { httpAgent } from "./http-agent.ts";
@@ -54,7 +62,7 @@ import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
 import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
-import { loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
+import { deprecatedInSuite, FAKE_COMMAND_REMOVED, FRESH_IGNORED, loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
 import type { RunOutcome, RunSummary } from "./protocol.ts";
 
 const NEW_LINE = `  flow new <name> [--display-name <name>]
@@ -69,12 +77,21 @@ const NEW_LINE = `  flow new <name> [--display-name <name>]
                             the folder's name)`;
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
-                            the tests are in tests/scenarios and tests/tools)`;
+                            the tests are in tests/scenarios and tests/tools)
+${PULL_LINE}`;
 const CHECK_LINE = `  flow check-endpoint <url> [--token-env NAME] [--json]
                             Check an agent's HTTP endpoint against the contract, for --agent-url
                             (flow check-endpoint --help)`;
 const MCP_LINE = `  flow mcp update        Write the tools of the MCP servers the agent uses (mcpTools) to
-                            mcp.lock.json, from the agent's folder; commit it after the tests`;
+                            mcp.lock.json, from the agent's folder; commit it after the tests
+  flow mcp serve [--dir <folder>] [--cloud <url>]
+                            This agent's conversations, issues, templates, logs and deploys as
+                            read-only MCP tools for your coding agent (flow mcp serve --help):
+                            claude mcp add flow -- npx @flow-engineer/flow mcp serve
+  flow mcp login --server <url>
+                            Sign in to a hosted Flow MCP, so flow conversations, issues, insights,
+                            templates, logs and deploy status read over it with --server <url>
+                            (or FLOW_MCP_SERVER), as you; flow mcp logout forgets it`;
 const CLI_LINE = `  flow cli --server <url> <command>
                             Any MCP server's tools as commands (flow cli --server <url> --help)`;
 const INSPECT_LINE = `  flow inspect <url> <command>
@@ -92,8 +109,6 @@ const TEST_OPTIONS = `Options for test:
                            as failed, also in the pass rate
   --min-pass <percent>     The pass rate the session needs, 0 to 100 with at most one decimal
                            (default: FLOW_TEST_MIN_PASS, else 98); 100 fails on any failed run
-  --fresh                  Play every simulator anew: the cloud replays no stored person, tool or
-                           judge answers
   --synthetic              Attest the test files hold no real customer data (a hosted cloud needs it)
   --json                   Print one JSON report on stdout when it ends, whatever the exit; every
                            other line goes to stderr
@@ -104,7 +119,7 @@ const TEST_OPTIONS = `Options for test:
                            commit, or package.json's version)
   --ref <ref>              Kept with the session (default: the CI's branch, else the folder's git
                            branch), with the repository's default branch when git knows it
-  --environment <name>     staging or production, kept with the session
+  --env <name>             staging or production, kept with the session; --environment works too
   --agent-url <url>        Test an agent you already have, on any framework, through its HTTP
                            endpoint (it may be http://localhost): each message is a POST to it from
                            this machine, and no src/agent.ts is loaded
@@ -122,9 +137,7 @@ A suite with more runs than that plays them in turn, so its time grows with the 
 
 Flaky runs: the cloud plays a run that failed once more. When the second play passes, the run is
 flaky ("FLAKY" on its line, and its own section in the summary with both watch links); when it fails
-too, the run failed. A flaky run counts as passed unless --strict. The cloud also replays
-the person's, the tools' and the judge's stored answers for a scenario it has played unchanged, so
-runs vary less and --runs 3 is rarely needed; --fresh plays everything anew.
+too, the run failed. A flaky run counts as passed unless --strict.
 
 Outcomes: each run passed, failed, stopped for credit (the workspace's daily test budget, or the
 agent's model refused for credit: CREDIT on its line) or hit an infrastructure error (the cloud
@@ -161,18 +174,21 @@ with the judge's reasons (and, for a scenario the cloud could not play, its file
 
 Environment (also read from the agent folder's .env, or --dotenv; variables already set win;
 the CHINWAG_ names from before the rename still work):
-  FLOW_FRAMEWORK_CLOUD     The test cloud, when --cloud is not given
+  FLOW_FRAMEWORK_CLOUD     The test cloud, when --cloud is not given: https://flow.engineer/observe
+                           (US) or https://flow.engineer/dashboard/in (an agent in the India cell)
   FLOW_TEST_MIN_PASS       The pass rate the session needs, when --min-pass is not given
   FLOW_FRAMEWORK_CLOUD_KEY The agent's CI key, for a hosted cloud (oci_...: flow setup
-                           writes it, or make one at https://flow.engineer/observe, your agent, Developers)
+                           writes it, or make one at https://flow.engineer/dashboard, your agent, Developers)
   FLOW_FRAMEWORK_AGENT_TOKEN
                            With --agent-url: sent to it as authorization: Bearer <token>
   OPENROUTER_API_KEY       The agent's model key, or OPENAI_API_KEY, ANTHROPIC_API_KEY or
                            GEMINI_API_KEY: the first with a value is used, else FLOW_KEY
-                           (the agent's Flow key, on its trial credit; flow setup writes it)`;
+                           (the agent's Flow key, on its trial credit; flow setup writes it)
+
+${KEYS_HELP}`;
 const TEST_USAGE = `Usage:\n${TEST_LINE}\n\n${TEST_OPTIONS}`;
 const USAGE = `Usage:\n${NEW_LINE}\n${CHAT_LINE}\n${RECORDS_LINE}\n${TEST_LINE}\n${SHOW_LINE}\n${CHECK_LINE}\n${TOOLS_CHECK_LINE}\n${MCP_LINE}\n${CLI_LINE}\n${CLI_RELEASE_LINE}\n${INSPECT_LINE}
-${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${PROJECTS_LINE}\n${DEPLOY_LINE}\n${CONVERSATIONS_LINES}\n${TEMPLATES_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
+${PLUGIN_LINE}\n${ACCOUNT_LINES}\n${PROJECTS_LINE}\n${DEPLOY_LINE}\n${CONVERSATIONS_LINES}\n${INSIGHTS_LINES}\n${TEMPLATES_LINE}\n  flow --version         Show the version\n\n${TEST_OPTIONS}`;
 
 /** What to do after new or init, from step 2; a model key comes first when none is set here. */
 function nextSteps(): string {
@@ -188,44 +204,60 @@ function nextSteps(): string {
 
 checkNode(process.versions.node);
 
-if (process.argv[2] === "plugin") process.exit(pluginCli(process.argv.slice(3)));
+if (process.argv[2] === "plugin") await exitFlushed(pluginCli(process.argv.slice(3)));
 
 if (process.argv[2] === "check-endpoint") {
   // Its token may be in the agent folder's .env; no value is ever printed.
   loadEnv(undefined);
-  process.exit(await checkEndpointCli(process.argv.slice(3)));
+  await exitFlushed(await checkEndpointCli(process.argv.slice(3)));
 }
-if (process.argv[2] === "show") process.exit(await showCli(process.argv.slice(3)));
-if (process.argv[2] === "check") process.exit(await checkCli(process.argv.slice(3)));
+if (process.argv[2] === "show") await exitFlushed(await showCli(process.argv.slice(3)));
+if (process.argv[2] === "check") await exitFlushed(await checkCli(process.argv.slice(3)));
 if (process.argv[2] === "mcp") {
+  if (process.argv[3] === "--help" || process.argv[3] === "-h") {
+    console.log(`Usage:\n${MCP_LINE}`);
+    process.exit(0);
+  }
+  if (process.argv[3] === "serve") {
+    // Loaded only here, so the other commands never load the MCP SDK (a dependency of Flow Framework).
+    const { mcpServeCli } = await import("./mcp-serve.ts");
+    process.exit(await mcpServeCli(process.argv.slice(4)));
+  }
+  if (process.argv[3] === "login" || process.argv[3] === "logout") {
+    // Loaded only here, so the other commands never load the MCP client SDK or Stricli.
+    const [{ defineCli, runCli }, { FLOW_MCP_CLI }] = await Promise.all([import("../../cli/src/index.ts"), import("./flow-tools.ts")]);
+    await exitFlushed(await runCli(defineCli(FLOW_MCP_CLI), ["mcp", ...process.argv.slice(3)]));
+  }
   if (process.argv[3] !== "update") {
-    console.error(MCP_LINE.trim());
+    console.error(`Usage:\n${MCP_LINE}`);
     process.exit(1);
   }
-  // Loaded here first, so a missing optional peer is one line; mcpUpdateCli's own import of it is then cached.
-  await withPeers("mcp update", () => import("../../mcp/src/client.ts"));
   process.exit(await mcpUpdateCli());
 }
-if (process.argv[2] === "cli" && ["pack", "publish", "rollback", "status"].includes(process.argv[3] ?? "")) process.exit(await cliReleaseCli(process.argv.slice(3)));
+if (process.argv[2] === "cli" && ["pack", "publish", "rollback", "status"].includes(process.argv[3] ?? "")) await exitFlushed(await cliReleaseCli(process.argv.slice(3)));
 if (process.argv[2] === "cli") {
-  // Loaded only here: @flow-engineer/flow/cli needs @modelcontextprotocol/client and @stricli/core, optional peers.
-  const { defineCli, runCli } = await withPeers("cli", () => import("../../cli/src/index.ts"));
-  process.exit(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
+  // Loaded only here, so the other commands never load the MCP client SDK or Stricli.
+  const { defineCli, runCli } = await import("../../cli/src/index.ts");
+  await exitFlushed(await runCli(defineCli({ name: "flow" }), process.argv.slice(3)));
 }
 if (process.argv[2] === "inspect") {
-  // Loaded only here: it needs @modelcontextprotocol/client, an optional peer.
-  const { inspectCli } = await withPeers("inspect", () => import("./inspect.ts"));
-  process.exit(await inspectCli(process.argv.slice(3)));
+  // Loaded only here, so the other commands never load the MCP client SDK.
+  const { inspectCli } = await import("./inspect.ts");
+  await exitFlushed(await inspectCli(process.argv.slice(3)));
 }
-if (process.argv[2] === "deploy") process.exit(await deployCli(process.argv.slice(3)));
-if (process.argv[2] === "logs") process.exit(await logsCli(process.argv.slice(3)));
-if (process.argv[2] === "chat") process.exit(await chatCli(process.argv.slice(3)));
-if (process.argv[2] === "records") process.exit(await recordsCli(process.argv.slice(3)));
-if (process.argv[2] === "projects") process.exit(await projectsCli(process.argv.slice(3)));
-if (process.argv[2] === "conversations") process.exit(await conversationsCli(process.argv.slice(3)));
-if (process.argv[2] === "issues") process.exit(await issuesCli(process.argv.slice(3)));
-if (process.argv[2] === "templates") process.exit(await templatesCli(process.argv.slice(3)));
-if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) process.exit(await accountCli(process.argv[2]!, process.argv.slice(3)));
+if (process.argv[2] === "deploy") await exitFlushed(await deployCli(process.argv.slice(3)));
+if (process.argv[2] === "logs") await exitFlushed(await logsCli(process.argv.slice(3)));
+if (process.argv[2] === "chat") await exitFlushed(await chatCli(process.argv.slice(3)));
+if (process.argv[2] === "records") await exitFlushed(await recordsCli(process.argv.slice(3)));
+if (process.argv[2] === "keys") await exitFlushed(await keysCli(process.argv.slice(3)));
+if (process.argv[2] === "projects") await exitFlushed(await projectsCli(process.argv.slice(3)));
+if (process.argv[2] === "conversations") await exitFlushed(await conversationsCli(process.argv.slice(3)));
+if (process.argv[2] === "issues") await exitFlushed(await issuesCli(process.argv.slice(3)));
+if (process.argv[2] === "insights") await exitFlushed(await insightsCli(process.argv.slice(3)));
+if (process.argv[2] === "templates") await exitFlushed(await templatesCli(process.argv.slice(3)));
+if (process.argv[2] === "test" && process.argv[3] === "pull") await exitFlushed(await pullCli(process.argv.slice(4)));
+if (process.argv[2] === "test" && process.argv[3] === "fake") await exitFlushed(failed(process.argv.includes("--json"), new Failed(FAKE_COMMAND_REMOVED, "removed")));
+if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) await exitFlushed(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
 const TEST_FLAGS = {
   cloud: { type: "string" },
@@ -238,7 +270,7 @@ const TEST_FLAGS = {
   strict: { type: "boolean", default: false },
   /** The pass rate the session needs, in percent; else FLOW_TEST_MIN_PASS, else 98. */
   "min-pass": { type: "string" },
-  /** The cloud replays no stored simulator answers. */
+  /** Deprecated in 0.16.1: still taken, does nothing, and says so (FRESH_IGNORED). */
   fresh: { type: "boolean", default: false },
   synthetic: { type: "boolean", default: false },
   json: { type: "boolean", default: false },
@@ -247,6 +279,8 @@ const TEST_FLAGS = {
   "agent-version": { type: "string" },
   ref: { type: "string" },
   environment: { type: "string" },
+  /** --environment's other spelling, as the other cloud commands take it. */
+  env: { type: "string" },
   "agent-url": { type: "string" },
   channel: { type: "string" },
   "agent-timeout": { type: "string", default: "60" },
@@ -256,14 +290,19 @@ const TEST_FLAGS = {
 
 const { values, positionals } = parseCommandLine();
 const [command, ...rest] = positionals;
+if (values.env !== undefined && values.environment !== undefined && values.env !== values.environment) {
+  console.error(`flow: --env and --environment name different environments (${values.env}, ${values.environment}): give one.\n\n${TEST_USAGE}`);
+  await exitFlushed(1);
+}
+values.environment ??= values.env;
 
 if (values.version) {
   console.log(JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).version);
-  process.exit(0);
+  await exitFlushed(0);
 }
 if (values.help || process.argv.length <= 2) {
   console.log(command === "new" || command === "init" ? NEW_USAGE : command === "test" ? TEST_USAGE : USAGE);
-  process.exit(0);
+  await exitFlushed(0);
 }
 
 /** --display-name, else asked for in a terminal (Enter takes the folder's name in words), else that default. */
@@ -288,35 +327,35 @@ const nameFlag = (values as { name?: string }).name;
 
 if (command === "new") {
   const name = rest.length === 1 ? rest[0]! : "";
-  let dir: string;
+  let dir!: string; // set below, or exitFlushed(1) has ended the process (TypeScript cannot tell an awaited never)
   try {
     if (!name) throw new Error("Usage: flow new <name> [--display-name <name>]");
     dir = newStandalone(name, { displayName: await askDisplayName(displayNameFlag, name) });
   } catch (error) {
     console.error((error as Error).message);
-    process.exit(1);
+    await exitFlushed(1);
   }
   console.log(`Made ./${name}/ from the café example. ${namedLine(dir)} Next:
   1. cd ${name} && npm install
 ${nextSteps()}`);
-  process.exit(0);
+  await exitFlushed(0);
 }
 
 if (command === "init") {
-  let name: string;
+  let name!: string; // set below, or exitFlushed(1) has ended the process
   try {
     if (rest.length) throw new Error("Usage: flow init [--name <name>] [--display-name <name>] (it makes the agent in the current folder; flow new <name> makes a folder for it)");
     if (nameFlag !== undefined) checkName(nameFlag);
     name = initHere(process.cwd(), { name: nameFlag, displayName: await askDisplayName(displayNameFlag, nameFlag ?? folderName(process.cwd())) });
   } catch (error) {
     console.error((error as Error).message);
-    process.exit(1);
+    await exitFlushed(1);
   }
   loadEnv(undefined); // a .env already here may hold a model key
   console.log(`Made ${name}, started from the café example, in this folder. ${namedLine(process.cwd())} Next:
   1. npm install
 ${nextSteps()}`);
-  process.exit(0);
+  await exitFlushed(0);
 }
 
 /** Every human line of `flow test`: stdout, or stderr with --json, where stdout is the report. */
@@ -396,15 +435,21 @@ if (agentUrl) {
   }
   // Flow Framework runs the agent here, so its traces are marked as a test's (src/traces.ts).
   process.env.FLOW_FRAMEWORK_RUN_KIND = "test";
-  const module = await import(pathToFileURL(join(dir, "src/agent.ts")).href);
+  let module: Record<string, unknown>;
+  try {
+    module = await import(pathToFileURL(join(dir, "src/agent.ts")).href);
+  } catch (error) {
+    // Said as the run's failure (with --json, in its report), not a stack on stderr and nothing on stdout.
+    invalid(`src/agent.ts could not be loaded: ${(error as Error).message.split("\n")[0]}`);
+  }
   if (typeof module.buildAgent !== "function" || !Array.isArray(module.tools)) {
     invalid("src/agent.ts must export buildAgent({ model, events, tools }) and tools, or pass --agent-url to test an agent by its HTTP endpoint.");
   }
   // A business run's agent also gets its channels and clock (testing/src/business.ts); buildAgent passes them on to createAgent.
   agent = {
-    tools: module.tools,
+    tools: module.tools as ConnectOptions["tools"],
     build: ({ tools, events, channels, testing }) => {
-      const built = module.buildAgent({ tools, events, ...(channels ? { channels, testing } : {}) });
+      const built = (module.buildAgent as (options: Record<string, unknown>) => ReturnType<ConnectOptions["build"]> & { templates?: () => TemplateDefinition[] })({ tools, events, ...(channels ? { channels, testing } : {}) });
       if (!declaredTemplates.length && typeof built?.templates === "function") declaredTemplates = built.templates();
       return built;
     },
@@ -439,6 +484,9 @@ const suite = loadSuite(join(dir, "tests"));
 picked = values.failed ? failedLastTime(suite) : values.only ? new Set(values.only.split(",").map((s) => s.trim())) : undefined;
 const chosen = only(suite, picked);
 checkSuite(chosen);
+// What 0.16.1 stopped playing still parses and is dropped; each is named once, as flow check names it.
+for (const line of deprecatedInSuite(join(dir, "tests"))) console.warn(line);
+if (values.fresh) console.warn(FRESH_IGNORED);
 files = forUrl(chosen);
 if (agentUrl) await checkAgentReachable(agentUrl);
 perScenario = runs;
@@ -467,7 +515,6 @@ try {
     files,
     testsDir: join(dir, "tests"),
     runs: perScenario,
-    fresh: values.fresh,
     openHeaders,
     log: say,
     verbose: values.verbose,
@@ -498,6 +545,7 @@ for (const r of summary.runs) printRun(r);
 const played = summary.runs.filter((r) => !r.rerunOf);
 const passed = played.filter((r) => runVerdict(r) === "passed").length;
 const failedRuns = played.filter((r) => runVerdict(r) === "failed").length;
+const flakyRuns = played.filter((r) => runVerdict(r) === "flaky").length;
 const credit = played.filter((r) => runOutcome(r) === "credit");
 const infra = played.filter((r) => runOutcome(r) === "infra" && !r.invalid).length;
 // Cost counts every play, second plays included: the cloud spent it.
@@ -507,17 +555,22 @@ const noModel = played.filter((r) => r.agentModels.length === 0 && r.agentUsage.
 const modelCalls = noModel ? `${noModel} ${noModel === 1 ? "run never called" : "runs never called"} the agent's model.` : "Every run called the agent's model.";
 const checkFails = played.filter((r) => runVerdict(r) === "failed" && r.checks.some((c) => !c.pass)).length;
 // Credit and infrastructure runs say nothing about the agent: each has its own count, never with the failures.
+// Every run is in one count: passed, flaky (failed, then passed when played again), failed, credit or infrastructure.
+const flakyLine = flakyRuns ? ` ${flakyRuns} flaky.` : "";
 const failedLine = failedRuns ? ` ${failedRuns} failed${checkFails && checkFails < failedRuns ? ` (${checkFails} on a check)` : ""}.` : "";
 const creditLine = credit.length ? ` ${credit.length} stopped for credit (not the agent's fault, not counted as failed).` : "";
 const infraLine = infra ? ` ${infra} hit an infrastructure error (the cloud could not play or judge ${infra === 1 ? "it" : "them"}; not counted as failed).` : "";
 const tokens = (n: number) => n.toLocaleString("en-US");
-say(`\n${passed} of ${played.length} runs passed.${failedLine}${creditLine}${infraLine} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
+say(`\n${passed} of ${played.length} runs passed.${flakyLine}${failedLine}${creditLine}${infraLine} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
 const rate = passRate(mergedRuns(summary.runs), values.strict);
 if (rate.tenths !== null) say(rateSummary(rate));
 if (credit.length) say(`Credit: ${creditReason(credit[0]!)}`);
+// Each channel counted as the pass rate is: flaky runs as passed (as failed with --strict), credit and infrastructure runs apart.
 for (const channel of [...new Set(played.map((r) => r.channel))]) {
-  const runs = played.filter((r) => r.channel === channel);
-  say(`  ${channel}: ${runs.filter((r) => runVerdict(r) === "passed").length} of ${runs.length} passed`);
+  const runs = mergedRuns(summary.runs).filter((m) => m.channel === channel);
+  const r = passRate(runs, values.strict);
+  const apart = runs.filter((m) => m.verdict !== "passed" && m.verdict !== "failed" && m.verdict !== "flaky").length;
+  say(`  ${channel}: ${r.passed} of ${r.counted} counted runs passed${r.flaky ? ` (${r.flaky} flaky)` : ""}${apart ? `; ${apart} not counted` : ""}`);
 }
 // With --runs above 1 (or a run played again), each scenario's pass rate: credit and infrastructure runs are not counted.
 const rates = scenarioRates(mergedRuns(summary.runs).map((m) => ({ ...m, scenario: m.id })));
@@ -540,7 +593,10 @@ if (sendPath.length) {
   for (const p of sendPath) say(`  ${p.conversationId}: ${p.delivered} reached the cloud through the agent's channels, ${p.announced} the agent says it sent (message.out)`);
 }
 // Warned, never failed: a declared template that is not the approved one fails only when it is sent.
-for (const line of await templateWarnings(declaredTemplates, cloud, process.env.FLOW_KEY?.trim() || ciKey)) say(line);
+const templateKey = process.env.FLOW_KEY?.trim()
+  ? { kind: "flow_key" as const, name: "FLOW_KEY", where: "the environment or .env", value: process.env.FLOW_KEY.trim() }
+  : ciKey ? { kind: "ci_key" as const, name: "FLOW_FRAMEWORK_CLOUD_KEY", where: "the environment or .env", value: ciKey } : undefined;
+for (const line of await templateWarnings(declaredTemplates, cloud, templateKey)) say(line);
 sessionId = summary.sessionId || sessionId;
 dashboard = summary.dashboard || dashboard;
 saveSession("finished", summary.runs, dashboard, say);
@@ -694,7 +750,6 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       invalid: m.summary?.invalid ?? null,
       rerun: m.summary?.rerun ?? null,
       label: m.summary?.label ?? null,
-      replayed: m.summary?.replayed ?? null,
     })) : [];
     const count = (verdict: Verdict) => runs.filter((r) => r.verdict === verdict).length;
     const rate = passRate(runs, values.strict);
@@ -730,18 +785,11 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
   process.exit(exitCode);
 }
 
-/** A command's module, or exits 1 with one line when an optional peer it needs is not installed where
- * flow runs from (npx's cache, say, rather than the agent's folder). */
-async function withPeers<T>(command: string, load: () => Promise<T>): Promise<T> {
-  try {
-    return await load();
-  } catch (error) {
-    const missing = /Cannot find package '([^']+)'/.exec((error as Error).message)?.[1];
-    const peers = JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).peerDependencies as Record<string, string>;
-    if ((error as NodeJS.ErrnoException).code !== "ERR_MODULE_NOT_FOUND" || !missing || !(missing in peers)) throw error;
-    console.error(`flow ${command} needs ${missing}: run it from your agent's folder (npx @flow-engineer/flow ${command}), or npm install ${missing}.`);
-    process.exit(1);
-  }
+/** Exits once stdout and stderr have taken everything written: a pipe is written asynchronously on
+ * macOS, and process.exit would cut off a long --json answer, leaving a reader an empty or broken document. */
+async function exitFlushed(code: number): Promise<never> {
+  await Promise.all([process.stdout, process.stderr].map((stream) => new Promise<void>((done) => stream.write("", () => done()))));
+  process.exit(code);
 }
 
 /** Nothing was sent: prints what is wrong and exits 1 (with --json, after the report). */

@@ -16,12 +16,13 @@ import { createInterface } from "node:readline/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider, type Tool as McpTool } from "@modelcontextprotocol/client";
 import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
-import { configDir, isSignedIn, signedInAsOtherClient, signIn, signOut, storedAccessToken, storedProvider } from "./auth.ts";
+import { configDir, isSignedIn, revokeStored, signedInAsOtherClient, signIn, signOut, storedAccessToken, storedProvider } from "./auth.ts";
 import { colorsAt, painter, severity, type Paint } from "./colors.ts";
 import { chooseAtTerminal, person, signInQuestion, tips, waitsForSignIn, welcomeScreen } from "./welcome.ts";
 import { SKILLS_META } from "../../src/skills.ts";
-import { FORMATTED } from "../../src/tools.ts";
-import { FULL_CATALOG_META } from "../../mcp/src/describe.ts";
+import { FORMATTED, JSON_TEXT, jsonText, jsonTextOf, ToolError } from "../../src/tools.ts";
+import { FULL_CATALOG_META, IN_PROCESS } from "../../mcp/src/describe.ts";
+import type { McpServerHandle } from "../../mcp/src/server.ts";
 import {
   BUILT_IN,
   commandEntries,
@@ -35,6 +36,7 @@ import {
   isCustom,
   oldAuth,
   OWN_FLAGS,
+  serverEnvOf,
   signInCommand,
   signInWords,
   skillFile,
@@ -108,8 +110,8 @@ export function processIO(): CliIO {
   };
 }
 
-/** A failure the CLI reports with its own exit code. */
-class CliExit extends Error {
+/** A failure the CLI reports with its own exit code (EXIT): from runCli's commands, and connectCli's calls. */
+export class CliExit extends Error {
   readonly code: number;
   constructor(code: number, message: string) {
     super(message);
@@ -143,12 +145,22 @@ function callMeta(config: CliConfig, command: string): Record<string, string> {
   return { "chinwag/surface": "cli", "chinwag/command": command, "chinwag/client-version": config.version ?? "1", "chinwag/idempotency-key": randomUUID() };
 }
 
-function envName(config: CliConfig, suffix: string): string {
-  return `${config.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_${suffix}`;
+function noServer(config: CliConfig): string {
+  return `No server: pass --server <url> or set ${serverEnvOf(config)}.`;
 }
 
-function noServer(config: CliConfig): string {
-  return `No server: pass --server <url> or set ${envName(config, "SERVER")}.`;
+/** How a handle in this process is named where a server's URL would be (help, the welcome). */
+const THIS_PROCESS = "this process";
+
+/**
+ * The server a run uses: --server, else the CLI file's URL, else <NAME>_SERVER, else the CLI file's
+ * handle in this process (`local`); `server` is what messages name.
+ */
+function serverOf(config: CliConfig, given: string | undefined, env: Record<string, string | undefined>): { server?: string; named?: string; local?: McpServerHandle } {
+  const named = given ?? (typeof config.server === "string" ? config.server : undefined) ?? env[serverEnvOf(config)];
+  if (named !== undefined) return { server: named, named };
+  if (config.server && typeof config.server === "object") return { server: THIS_PROCESS, local: config.server };
+  return {};
 }
 
 /** Run the CLI once; resolves with its exit code. */
@@ -167,6 +179,47 @@ export async function runCli(config: CliConfig, argv: string[], io: CliIO = proc
   return code;
 }
 
+/** The CLI's connection to its server, for code of your own (connectCli). */
+export interface CliConnection {
+  /**
+   * Call one of the server's tools as a command of this CLI does (its sign-in, and `command` as the
+   * command's words): resolves with the result's data, rejects with the tool's ToolError when it
+   * failed with a document, else a CliExit (its `code` one of EXIT: 1 failed, 2 refused arguments,
+   * 3 sign-in needed, 5 not reached).
+   */
+  call(tool: string, input: Record<string, unknown>, options?: { command?: string }): Promise<unknown>;
+  close(): Promise<void>;
+}
+
+/**
+ * One level down from runCli: the CLI's server (as runCli picks it: --server's value in `server`,
+ * the CLI file's URL, <NAME>_SERVER, or its handle in this process), its sign-in (a stored one, or
+ * `token`, else <NAME>_TOKEN), for commands that parse their own arguments. Nothing is asked: a
+ * call that needs sign-in rejects with exit code 3, naming the sign-in command.
+ */
+export async function connectCli(config: CliConfig, options: { server?: string; token?: string; env?: Record<string, string | undefined>; signal?: AbortSignal } = {}): Promise<CliConnection> {
+  const env = options.env ?? process.env;
+  const { server, local } = serverOf(config, options.server, env);
+  if (!server) throw new CliExit(EXIT.unreachable, noServer(config));
+  const token = options.token ?? env[tokenEnvOf(config)];
+  let client: Client;
+  try { client = await connect(config, server, token, options.signal, local); }
+  catch (error) { throw error instanceof CliExit ? error : explain(config, server, error); }
+  return {
+    async call(tool, input, settings = {}) {
+      let result;
+      try {
+        result = await client.callTool({ name: tool, arguments: input, _meta: callMeta(config, settings.command ?? "custom") });
+      } catch (error) {
+        if (error instanceof ProtocolError && error.code === ProtocolErrorCode.InvalidParams) throw new CliExit(EXIT.usage, short(error.message.replace(/^MCP error -?\d+:\s*/, "")));
+        throw explain(config, server, error);
+      }
+      return valueOf(result);
+    },
+    close: () => client.close(),
+  };
+}
+
 async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<number> {
   const env = io.env ?? process.env;
   const paint = painter(colorsAt(config, io));
@@ -179,9 +232,9 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
   }
   // A group with a default subcommand, alone, shows its help rather than running the default.
   if (rest.length && config.defaultCommands?.[rest.join(" ")] !== undefined) rest.push("--help");
-  const server = given ?? config.server ?? env[envName(config, "SERVER")];
+  const { server, named, local } = serverOf(config, given, env);
   const token = givenToken ?? env[tokenEnvOf(config)];
-  const signedIn = token ? "env" as const : server && isSignedIn(config, server) ? "login" as const : null;
+  const signedIn = local ? "local" as const : token ? "env" as const : server && isSignedIn(config, server) ? "login" as const : null;
   const bare = rest.length === 0;
   const welcome = bare && config.welcome !== false && person(io);
   // A bare run without a person is a request for the help, which needs no sign-in.
@@ -195,7 +248,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     if (config.welcome !== false) (bare ? io.write : io.writeError)(welcomeScreen(config, { server, signedIn, tokenEnv: tokenEnvOf(config) }, io, true));
     const chosen = io.choose ? await io.choose(signInQuestion(config), ["Sign in", "Exit"], (text) => painter(colorsAt(config, io))(["bold", "accent"], text)) : (await io.confirm(`${signInQuestion(config)} Sign in now?`) ? 0 : undefined);
     if (chosen !== 0) { io.writeError(`Not signed in. Run \`${login}\` when you are ready.\n`); return EXIT.signIn; }
-    try { await signIn(config, server, io.signal, (text) => io.writeError(text)); }
+    try { await signInHere(config, server, io); }
     catch (error) { const problem = error instanceof CliExit ? error : explain(config, server, error); io.writeError(`${paint(severity(problem.code), problem.message)}\n`); return problem.code; }
     forgetChat(config, server);
     io.writeError(`Signed in to ${server}.\n`);
@@ -206,10 +259,10 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     io.write(welcomeScreen(config, { server, signedIn, tokenEnv: tokenEnvOf(config) }, io));
     return EXIT.ok;
   }
-  if (rest[0] === "chat" && !config.commands?.[rest[0]]) return runTerminal(config, server, token, rest, io);
+  if (rest[0] === "chat" && !config.commands?.[rest[0]]) return runTerminal(config, named, token, rest, io);
   const table = commandTable(config, []);
-  const local = findCommand(table, withDefaults(config, table, rest));
-  const custom = Boolean(local?.command.config && isCustom(local.command.config));
+  const found = findCommand(table, withDefaults(config, table, rest));
+  const custom = Boolean(found?.command.config && isCustom(found.command.config));
   const prefix = rest.filter(w => w !== "--help" && w !== "-h").join(" ");
   const children = commandEntries(config).filter(([words]) => words.startsWith(`${prefix} `));
   const localOnly = custom || (rest[0] === "update" && updatesItself(config)) || Boolean(prefix && children.length && children.every(([, command]) => isCustom(command)));
@@ -225,7 +278,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
   const getClient = async (): Promise<Client> => {
     if (!server) throw new CliExit(EXIT.unreachable, noServer(config));
     if (client) return client;
-    connecting ??= connect(config, server, token, io.signal).then(connected => client = connected).catch(error => {
+    connecting ??= connect(config, server, token, io.signal, local).then(connected => client = connected).catch(error => {
       connecting = undefined;
       throw explain(config, server, error);
     });
@@ -240,13 +293,13 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     tools = current;
     cached = undefined;
     // Connecting can refresh OAuth tokens; do not reuse another credential's cache entry.
-    file = await discoveryFile(config, server!, token);
+    file = local ? undefined : await discoveryFile(config, server!, token);
     writeDiscovery(file, { format: 2, at: started, server: serverVersion(connected), tools });
     return before !== JSON.stringify(tools);
   };
   if (server && !signingIn(config, rest) && (!localOnly || refresh)) {
     try {
-      file = await discoveryFile(config, server, token);
+      file = local ? undefined : await discoveryFile(config, server, token);
       cached = refresh ? undefined : readDiscovery(file);
       if (cached) tools = cached.tools;
       else await discover();
@@ -301,7 +354,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
       } };
       const refused = (error: unknown) => badArguments(config, wordsKnown(rest.filter(w => !w.startsWith("-")), config, tools), error, field => field);
       const exitOf = (error: unknown) => error instanceof CliReparse ? EXIT.usage : error instanceof CliExit ? error.code : needsSignIn(error) ? EXIT.signIn : refused(error) ? EXIT.usage : EXIT.failed;
-      const app = buildApplication(routes(config, server, tools, async tool => {
+      const app = buildApplication(routes(config, server, named, tools, async tool => {
         try { await prepare(tool); }
         catch (error) { if (error instanceof CliReparse) reparse = true; throw error; }
       }, call, output, async () => { await discover(); return tools; }), {
@@ -312,6 +365,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
           return paint("error", text_en.exceptionWhileParsingArguments.call(this, exc, ansiColor));
         }, exceptionWhileRunningCommand(exc, ansiColor) {
           if (exc instanceof CliReparse) return "";
+          if (exc instanceof ToolError) return paint("error", `${exc.message}${exc.next ? `\nNext: ${exc.next}` : ""}`);
           return paint(severity(exitOf(exc)), exc instanceof CliExit ? exc.message : refused(exc)?.message ?? text_en.exceptionWhileRunningCommand.call(this, exc, ansiColor));
         } } },
         determineExitCode: exitOf,
@@ -337,7 +391,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
       if (problem) io.writeError(`\n${paint(severity(problem.code), problem.message)}\n`);
       if (code < 0) {
         const words = rest.filter(w => !w.startsWith("-"));
-        if (code === ExitCode.UnknownCommand && server && !token && await signedInAsOtherClient(config, server)) io.writeError(`${RENEW(config)}\n`);
+        if (code === ExitCode.UnknownCommand && named && !token && await signedInAsOtherClient(config, named)) io.writeError(`${RENEW(config)}\n`);
         io.writeError(`Run \`${[config.name, ...wordsKnown(words, config, tools)].join(" ")} --help\` to see how to use it.\n`);
         return EXIT.usage;
       }
@@ -366,14 +420,20 @@ function wordsKnown(words: string[], config: CliConfig, tools: ToolInfo[]): stri
   return known;
 }
 
-async function connect(config: CliConfig, server: string, token: string | undefined, signal?: AbortSignal): Promise<Client> {
-  const provider: AuthProvider | OAuthClientProvider | undefined = token ? { token: async () => token } : isSignedIn(config, server) ? storedProvider(config, server, undefined, signal) : undefined;
+async function connect(config: CliConfig, server: string, token: string | undefined, signal?: AbortSignal, local?: McpServerHandle): Promise<Client> {
   const client = new Client({ name: `${config.name}-cli`, version: config.version ?? "1" });
   const abort = () => { void client.close(); };
   signal?.addEventListener("abort", abort, { once: true });
   try {
     signal?.throwIfAborted();
-    await withoutRefreshWarning(() => client.connect(new StreamableHTTPClientTransport(new URL(server), provider ? { authProvider: provider } : {}), { signal }));
+    // A handle in this process is called through its own entry, never the network, with no sign-in.
+    const entry = local && (local as unknown as Record<symbol, { path: string; fetch(request: Request): Promise<Response> } | undefined>)[IN_PROCESS];
+    if (local && !entry) throw new Error(`${config.name}: server is not an mcpServer handle (give a URL, or mcpServer(...)'s handle)`);
+    const provider: AuthProvider | OAuthClientProvider | undefined = entry ? undefined : token ? { token: async () => token } : isSignedIn(config, server) ? storedProvider(config, server, undefined, signal) : undefined;
+    const transport = entry
+      ? new StreamableHTTPClientTransport(new URL(`http://in-process.invalid${entry.path}`), { fetch: (url, init) => entry.fetch(new Request(url, init)) })
+      : new StreamableHTTPClientTransport(new URL(server), provider ? { authProvider: provider } : {});
+    await withoutRefreshWarning(() => client.connect(transport, { signal }));
     signal?.throwIfAborted();
   } catch (error) { await client.close(); throw error; }
   finally { signal?.removeEventListener("abort", abort); }
@@ -526,6 +586,15 @@ if (refreshWorker) {
   } catch {} finally { await client?.close(); clearTimeout(timeout); release(); }
 }
 
+/** Signs in to `server`; a server out of reach is said as any command says it (explain: exit 5), never as a crash. */
+async function signInHere(config: CliConfig, server: string, io: CliIO): Promise<void> {
+  try {
+    await signIn(config, server, io.signal, (text) => io.writeError(text));
+  } catch (error) {
+    throw error instanceof CliExit ? error : explain(config, server, error);
+  }
+}
+
 /** Why the server could not be used, as one line and an exit code. */
 function explain(config: CliConfig, server: string, error: unknown): CliExit {
   if (needsSignIn(error)) return new CliExit(EXIT.signIn, `Sign in first: ${signInCommand(config)} (or set ${tokenEnvOf(config)}).`);
@@ -577,7 +646,7 @@ type Target = StricliCommand<CliContext> | RouteMap<CliContext>;
 type ToolCall = (tool: string, input: Record<string, unknown>, command: string) => ReturnType<Client["callTool"]>;
 
 /** The command tree: groups from the commands' words, then the CLI's own commands. */
-function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[], prepare: (tool: ToolInfo) => Promise<void>, call: ToolCall, io: CliIO, refresh: () => Promise<ToolInfo[]>): RouteMap<CliContext> {
+function routes(config: CliConfig, server: string | undefined, named: string | undefined, tools: ToolInfo[], prepare: (tool: ToolInfo) => Promise<void>, call: ToolCall, io: CliIO, refresh: () => Promise<ToolInfo[]>): RouteMap<CliContext> {
   interface Node {
     command?: StricliCommand<CliContext>;
     children: Map<string, Node>;
@@ -598,7 +667,7 @@ function routes(config: CliConfig, server: string | undefined, tools: ToolInfo[]
   };
   const table = commandTable(config, tools);
   for (const c of table) place(c.words, { command: c.config && isCustom(c.config) ? c.config.command : toolCommand(config, c, prepare, call, io, feedback) });
-  const signing = signInRoutes(config, server, io);
+  const signing = signInRoutes(config, named, io);
   for (const [key, words] of Object.entries(signInWords(config)) as Array<["login" | "logout", string]>) {
     const at = place(words.split(" "), {});
     if (at.command || at.children.size) throw new Error(`${config.name}: "${words}" is the CLI's ${key} command (signIn.${key}); name yours something else, or move ${key} with signIn.${key}.`);
@@ -789,7 +858,14 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
       if (result.isError) {
         // Agents read stderr: a failure says where to report it, unless it is feedback's own.
         const report = tool.name === "feedback" ? undefined : feedback;
-        throw new CliExit(EXIT.failed, `${textOf(result.content as Block[]) || `${tool.name} failed.`}${report ? `\nIf this looks wrong, tell the team: ${report.replace("tooling|product", "tooling")}` : ""}`);
+        const reportLine = report ? `\nIf this looks wrong, tell the team: ${report.replace("tooling|product", "tooling")}` : "";
+        // A failure document (ToolError): --json prints it as the command's one output; stderr says it in words.
+        const failure = ToolError.from(result.structuredContent);
+        if (failure) {
+          if (parsed.json) io.write(`${JSON.stringify(failure.document)}\n`);
+          throw new CliExit(EXIT.failed, `${failure.message}${failure.next ? `\nNext: ${failure.next}` : ""}${reportLine}`);
+        }
+        throw new CliExit(EXIT.failed, `${textOf(result.content as Block[]) || `${tool.name} failed.`}${reportLine}`);
       }
       // The tool's own text, unless the person asked for data or the CLI file chose what to show.
       if (settings?.print && !parsed.json && !parsed.fields) return void io.write(`${(await settings.print(valueOf(result))).replace(/\n*$/, "")}\n`);
@@ -1048,20 +1124,28 @@ function signInRoutes(config: CliConfig, server: string | undefined, io: CliIO) 
     return server;
   };
   const login = async () => {
-    await signIn(config, need(), io.signal, (text) => io.writeError(text));
+    await signInHere(config, need(), io);
     forgetChat(config, need());
     io.writeError(`Signed in to ${need()}.\n`);
   };
   const logout = async () => {
     const s = need();
     let warned = false;
-    if (config.signIn?.beforeLogout && isSignedIn(config, s)) {
+    const signedIn = isSignedIn(config, s);
+    const warn = (error: unknown) => { warned = true; io.writeError(`${painter(colorsAt(config, io))("warning", error instanceof Error ? error.message : String(error))}\n`); };
+    if (config.signIn?.beforeLogout && signedIn) {
       try { await config.signIn.beforeLogout({ server: s, token: await storedAccessToken(config, s, false, io.signal) }); }
-      catch (error) { warned = true; io.writeError(`${painter(colorsAt(config, io))("warning", error instanceof Error ? error.message : String(error))}\n`); }
+      catch (error) { warn(error); }
+    }
+    // The server's own session ends too, where its authorization server takes revocations (the OAuth bridge does).
+    if (signedIn) {
+      try { await revokeStored(config, s, io.signal); }
+      catch (error) { warn(error); }
     }
     signOut(config, s);
     forgetChat(config, s);
-    io.writeError(`Signed out of ${s}${warned ? " on this computer only" : ""}.\n`);
+    // With nobody signed in here it says so (a token in the environment is not a sign-in to forget).
+    io.writeError(signedIn ? `Signed out of ${s}${warned ? " on this computer only" : ""}.\n` : `Not signed in to ${s}.\n`);
   };
   const status = async (flags: { json?: boolean }) => {
     const s = need();
@@ -1094,9 +1178,16 @@ function textOf(content: Block[]): string {
 }
 
 function valueOf(result: { content?: unknown; structuredContent?: unknown; isError?: unknown }): unknown {
-  if (result.isError) throw new CliExit(EXIT.failed, textOf(result.content as Block[]) || "The tool failed.");
-  if (result.structuredContent !== undefined) return result.structuredContent;
+  // A failure document comes back as the ToolError it was, for a command of the team's own to act on.
+  if (result.isError) throw ToolError.from(result.structuredContent) ?? new CliExit(EXIT.failed, textOf(result.content as Block[]) || "The tool failed.");
   const text = textOf((result.content ?? []) as Block[]);
+  // The JSON as the tool gave it (jsonText): --json prints it byte for byte.
+  const given = (result as { _meta?: Record<string, unknown> })._meta?.[JSON_TEXT];
+  const raw = given === true ? text : typeof given === "string" ? given : undefined;
+  if (result.structuredContent !== undefined) return raw !== undefined && result.structuredContent && typeof result.structuredContent === "object" ? jsonText(raw, result.structuredContent) : result.structuredContent;
+  if (raw !== undefined) {
+    try { return jsonText(raw); } catch {}
+  }
   try {
     return JSON.parse(text);
   } catch {
@@ -1124,7 +1215,7 @@ function pick(value: unknown, fields: string[]): unknown {
 
 function render(value: unknown, options: { json?: boolean; fields?: string[]; columns?: string[]; view?: string[] }): string {
   const shown = options.fields ? pick(value, options.fields) : value;
-  if (options.json) return JSON.stringify(shown);
+  if (options.json) return jsonTextOf(shown) ?? JSON.stringify(shown);
   return human(shown, options.fields ?? options.columns, options.fields ?? options.view);
 }
 

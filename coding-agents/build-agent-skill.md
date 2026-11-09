@@ -26,7 +26,7 @@ Read the relevant section:
 
 Build the agent in one function that the playground and the tests both call, so they never
 drift apart. Tests pass their own model, events and simulated tools; a test the business starts
-also passes `channels` and `testing` (the run's clock, store and runner name), which go on to `createAgent` as they are
+also passes `channels` and `testing` (the run's clock and store), which go on to `createAgent` as they are
 (the `flow-framework-tests` skill):
 
 ```ts
@@ -144,7 +144,11 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   The provider gets it as `image: { url }` or `image: { fileId }`; elsewhere the text goes alone.
   WhatsApp's rules hold everywhere: a link never with buttons or a list, an image never with a
   list. A provider without them says so (`features: { links: false, images: false }`) and never
-  gets them; the URLs and file ids come from your tools' results, like app_link's.
+  gets them; the URLs and file ids come from your tools' results, like app_link's. Channels with
+  `videos` (Flow Messaging's WhatsApp, Telegram and iMessage) also offer a `video`, the same shape,
+  the text its caption and nothing else with it (no buttons, list, link or image). A hand-written
+  WhatsApp provider gets videos only when it says `features: { videos: true }`. A video sent where
+  the channel has no videos (SMS, the web chat), or with buttons, is refused and the agent told why.
 - Carousels (WhatsApp's media carousel): a WhatsApp provider with `sendCarousel(to, { text, cards })`,
   or a customUI whose `info` has `carousels`, offers the agent a `carousel` of 2 to 10 cards, each
   `{ image, text?, buttons? | link? }` with the same kind and number of buttons on every card
@@ -220,14 +224,34 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   running are reported as interrupted (never rerun).
 - `agent.receive(conversationId, message, deliver)` still works for one channel at a time (the
   test cloud uses it).
-- Photos, voice notes and documents: hand them in on the message, `message: { text: caption, attachments: [{ kind: "image" | "audio" | "document", mime, name?, data: () => provider.download(id) }] }`.
+- Photos, voice notes, videos and documents: hand them in on the message, `message: { text: caption, attachments: [{ kind: "image" | "audio" | "video" | "document", mime, name?, size?, ref?, data: () => provider.download(id) }] }`.
   `data` is a loader your provider fetches with its own credentials; never put a media URL where
-  the model sees it. Photos (JPEG, PNG, WebP, GIF, up to 5 MB) and PDFs (up to 10 MB) go to the
+  the model sees it. `size` (bytes, when the platform says) keeps a file over the limit from being
+  fetched at all. Photos (JPEG, PNG, WebP, GIF, up to 5 MB) and PDFs (up to 10 MB) go to the
   model when it reads them (`openAICompatible({ images, pdfs })`: images default on, PDFs on with
   OpenRouter; set `images: false` for a text-only model). Voice notes need
   `createAgent({ transcribe: async ({ mime, data }) => text })` with the speech-to-text the owner
-  picks; Flow Framework has none. Anything the agent can't read reaches it named, with why, so it asks
-  for text. The latest 3 photos and PDFs stay shown; their bytes are never stored.
+  picks; Flow Framework has none. Videos (up to 10 MB) go to a model that watches them:
+  `openAICompatible({ model: "google/gemini-3.8-flash", videos: true })` on FLOW_KEY or an OpenRouter
+  key (MP4, MPEG, MOV, WebM). Otherwise `createAgent({ describeVideo })` turns each into text the
+  agent reads in its place: `describeVideoWith("google/gemini-3.8-flash")` uses the agent's own key
+  (FLOW_KEY, OpenRouter or Gemini; not OpenAI or Anthropic, whose APIs take no video), or write your
+  own `async ({ mime, data }) => text`. With neither, the agent is told a video came that it can't watch.
+  Anything the agent can't read reaches it named, with why, so it asks for text. Typing shows as
+  a message with files arrives, before they are downloaded, transcribed or described: nothing to add.
+  A video gets 👀 on arrival instead, and its turn types only if no reply has gone 5 s after it
+  arrived (`videoReaction`, on by default; `false` types on arrival). The latest 3 photos,
+  PDFs and videos (one video at most) stay shown; their bytes are never stored.
+- Asking about a video later: the agent gets the built-in `ask_about_video` (`question`, and
+  `message`, the id of the message the video came in; the latest video when left out) whenever a
+  video in the conversation is one it can't see now (described, or no longer shown) and a video
+  model can answer: `describeVideoWith(...)`'s `ask`, or the agent's own model when it watches
+  videos. A custom describer answers too when it has `ask`:
+  `Object.assign(async ({ mime, data }) => text, { ask: async ({ mime, data }, question) => text })`.
+  The video is fetched again from its channel each time (never kept), by the attachment's `ref`
+  with the channel's `file(ref)`: Flow Messaging's channels have both. Without them it is not offered.
+  3 questions a turn, 10 a video; a video the channel no longer keeps, or any other failure, is a
+  `ToolError` the agent reads ("ask them to send it again"). Don't write your own video tool.
 
 Built in, so don't build them as tools: what the business knows about the person (`profile`, as
 `get_user_profile`), scheduled messages (`schedule_message`, `list_scheduled`,
@@ -483,6 +507,9 @@ npx @flow-engineer/flow logs --since 15m                        # the hosted age
 npx @flow-engineer/flow conversations --grade wrong --since 7d  # its conversations with a reply graded wrong
 npx @flow-engineer/flow conversations show <id>                 # one of them: each reply's grade, rule, reason and quote
 npx @flow-engineer/flow issues                                  # the problems the grades add up to, with a suggested fix
+npx @flow-engineer/flow issues test-case <id>                   # the test case Flow proposes for one: rule, reply, checks
+npx @flow-engineer/flow insights                                # Flow Insights: where people gave up or got annoyed, by topic
+npx @flow-engineer/flow insights show <finding>                 # one finding's conversations, each with why it was flagged
 npx @flow-engineer/flow templates --declare                     # the approved WhatsApp templates, to paste into createAgent
 printf '%s' "$VALUE" | npx @flow-engineer/flow deploy secret NAME --env production   # one secret by hand, from stdin
 ```
@@ -509,6 +536,25 @@ the reason and the words it was graded on. Fix the instructions, skill or tool t
 at, add a scenario that plays that conversation, run `flow test`, and deploy. `flow issues` groups
 the same grades into problems with a suggested fix. They read with `FLOW_KEY` from `.env`.
 After `flow issues`, act on its team feedback: "check out of date" means update that scenario check; "grade marked wrong" means do not change the agent for it.
+`flow issues test-case <id>` prints the checks Flow proposes for an issue (its rule, the reply it
+comes from, the words to include or avoid): write a scenario from them and `flow test --only` it.
+
+Flow Insights reads what the people did, not single replies: in the hosted agent's closed
+production conversations (quiet 24 h, on a live key; test keys, `flow chat`, the playground and
+`flow test` are never graded) it finds where they gave up, asked again or got annoyed, by topic.
+It reads with the agent's live Flow key, `FLOW_LIVE_KEY` (else a `flow_live_` `FLOW_KEY`); with only
+the test key `flow setup` writes it says so: ask the workspace's owner to run
+`npx @flow-engineer/flow setup --live` rather than changing anything. Text then reads de-identified
+(the `Text:` line, `text_mode` in `--json`). To work a finding through:
+
+1. `flow insights` lists the open findings, ranked, each with its count and the window before's
+   ("4 (was 9)"); `--days 30` for a longer window.
+2. `flow insights show <finding>` lists its conversations, each with why it was flagged and the
+   person's words.
+3. `flow conversations show <id>` reads one, to tell whether the issue is real and what caused it.
+4. Fix the instructions, skill or tool behind it, and add a scenario that plays the conversation.
+5. `flow test`, then `flow deploy` (production only when the owner says so).
+6. Once a window has passed, `flow insights` again: the finding's count should drop.
 
 On the owner's own servers: one instance, kept warm, CPU always on, a durable `database`
 (`postgres(pool)`), `await agent.resume()` at start, the secrets from the platform's secret store

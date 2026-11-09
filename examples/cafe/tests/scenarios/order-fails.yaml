@@ -1,5 +1,7 @@
 id: order-fails
-title: The point of sale is down when the order is placed
+title: Point of sale down
+about: The point of sale is down when the order is placed.
+theme: Ordering
 channels: [sms]
 
 person:
@@ -11,7 +13,7 @@ person:
 opening:
   - say: "Hi, could I order a small cold brew for pickup please? Name's Jo."
 
-world: |
+world: |                     # every place_order call gets place_order.yaml's response for when the point of sale is down
   The menu is as in tests/tools/get_menu.yaml. The café's point of sale is down this morning and
   stays down for the whole conversation.
 

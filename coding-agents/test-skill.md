@@ -6,19 +6,22 @@ description: Write or change tests for a Flow Framework agent (tests/scenarios/*
 # Writing tests for a Flow Framework agent
 
 Read the `flow-framework` skill (`skill.md`) first if you haven't. Turn the situations in
-`context/examples/` (the `flow-framework-context` skill) into scenarios, and run `npx flow check`
+`context/examples/` (the `flow-framework-context` skill) into scenarios, and run `npx @flow-engineer/flow check`
 before the tests when the agent serves MCP or a CLI.
 
 For `buildAgent` and playground setup, read `flow-framework-build-agent` (`build-agent-skill.md`). MCP and CLI
 setup is in `flow-framework-mcp` (`mcp-skill.md`).
 
 A test is a scenario: a situation to put the agent in, played through a platform simulator by a
-model acting as the person, with the agent's tools played by a model from `tests/tools/*.yaml`
-(see the `flow-framework-tools` skill, `tools-skill.md`). At the end, what happened is checked against `expect`.
+model acting as the person, with the agent's tools played by a model from `tests/tools/*.yaml` and
+the scenario's `world` (the `flow-framework-tools` skill, `tools-skill.md`). At the end, what
+happened is checked against `expect`.
 
 ```yaml
 id: latte-correction
-title: Orders a latte, corrects the milk mid-thought, confirms
+title: Milk corrected to oat
+about: Orders a large latte, corrects the milk mid-thought, then confirms.
+theme: Ordering
 channels: [whatsapp, sms]   # runs once on each, with a result for each; a custom UI by its name (app); web is the first custom UI
 
 person:
@@ -49,22 +52,53 @@ expect:
 
 ## The parts
 
+- `title`: a short name for the scenario, at most 45 characters, shown on one line in lists and
+  reports. **A title is a name, not the test**: the situation, the steps and what must happen go in
+  `about` (a sentence or two, shown under the title), `opening`, `world` and `expect`. A longer
+  title fails the check before anything is sent, naming the file, the title's length and the fix.
+
+  | Bad (the whole test) | Good (a name) |
+  |---|---|
+  | Orders a latte, corrects the milk mid-thought, then confirms the order | Milk corrected to oat |
+  | Asks for a table for four at 8pm when the restaurant is fully booked | Table when fully booked |
+  | Says the order never arrived, gets a refund offered only after the order is looked up | Missing order refund |
+  | Writes in Spanish, asks for opening hours, the answer comes back in Spanish | Spanish opening hours |
+  | Replies "2" to a numbered list of three sizes, and gets the medium | Size picked by number |
+
+- `theme`: the area of the agent the scenario tests, in a word or two (at most 30 characters):
+  Ordering, Bookings, Refunds, Menu questions. Group scenarios by theme: 3 to 10 themes per agent,
+  each scenario in one, the same spelling every time. Flow's dashboard groups scenarios by it.
+
 - `channels`: one or more of sms, whatsapp, imessage, telegram and web; each is a run of its own.
   The run uses that simulator's real rules (SMS has no buttons or reactions; WhatsApp has both).
 - `person`: who the model playing the person is (`persona`), what they want (`goal`), and facts
-  they only give if asked (`knows`). It sees only what a person would see.
+  they only give if asked (`knows`). It sees only what a person would see. Three optional fields
+  make it harder to serve; add one only when the scenario tests that:
+  - `reveal: one_at_a_time`: one fact of `knows` per message, only the one asked for. Use it to test
+    that the agent asks for each detail it needs and does not assume the rest.
+  - `behaviours`: any of `impatient` (short, wants it fast: tests brevity), `tangents` (drifts off
+    and back: tests getting back to the task), `half_messages` (a thought split over two messages:
+    tests waiting for the rest), `pushes_rules` (argues a no, up to twice: tests a policy holds
+    politely), `walks_away` (may leave when the agent is slow, repetitive or unhelpful; the run
+    then ends `walked_away` and fails: tests the agent gets there before people give up).
+  - `attack: { rule, tactics }`: tries over several turns to make the agent break one `rule` (a
+    sentence, such as `Never gives a discount or a free item.`); `tactics`, in the order it
+    escalates, from `ask`, `reason`, `authority`, `pressure`, `reframe`, `inject` (all six when left
+    out). One scenario per rule that matters (prices, refunds, what it must not reveal); the run is
+    judged on that rule in every reply. Never with `walks_away` (refused).
 - `opening`: the first messages, sent exactly as written; `after_ms` sends one that long after
   the previous one (a double text). Then the person plays on until `goal` is met or `max_turns`
   (default 8). A run that uses every turn never passes.
   A step may send a file: `- { say: "here is my receipt", attach: { kind: image, file: fixtures/receipt.jpg } }`
-  (`kind`: image, audio or document; `file` a path in `tests/`; `say` is its caption and may be
-  left out). The file is read on your machine and never uploaded; the person and the judge see it
+  (`kind`: image, audio, video or document; `file` a path in `tests/`; `say` is its caption and may be
+  left out). A video is `.mp4`, `.mov`, `.webm` or `.mpeg`; to check the agent looked at it again,
+  `expect: { calls: [ask_about_video] }`. The file is read on your machine and never uploaded; the person and the judge see it
   by name only.
-- `world`: everything true in this test, in plain words. It is the only place the situation is
-  set: stock, outages, slowness, the person's history. The tool simulator plays every tool from
-  it, choosing among the responses in `tests/tools/*.yaml`. Never write tool responses or
-  latencies in a scenario. An agent with a `profile` gets it played from here too
-  (`get_user_profile`): say who the person is ("Sam, a member since 2024, on the monthly plan").
+- `world`: everything true in this test, in plain words: stock, outages, slowness, the person's
+  history. The person, the judge and the tool model read it. For a tool that is down or slow, say
+  so here and give the tool file a response for it whose `when` fits ("The point of sale is
+  down"): the tool model plays that response. An agent with a `profile` gets it played from here
+  too (`get_user_profile`): say who the person is ("Sam, a member since 2024, on the monthly plan").
 - `expect`:
   - `outcome`: what must have happened, checked against what the tools did ("exactly one
     order is placed", "no order is placed").
@@ -73,7 +107,9 @@ expect:
   - `calls`: tools that must be called at least once (whatever the call returned); `never`: tools
     that must not be called. Checked by code from the recorded tool calls, not by a model. Each
     entry is a tool name, or `{ tool, args }`: the call matches when every field in `args` equals
-    the call's input (nested objects match in part; arrays and strings must be equal). A tool group's
+    the call's input (nested objects match in part; arrays and strings must be equal). For what
+    a write must have done (the order is for Sam), prefer it to an `outcome` sentence: code checks
+    it the same way every run. A tool group's
     tools (the web app's `ui_*` views) are played and checked like the agent's own, on the channels of
     their group. On a channel that shows tool calls (`showsTools`), the person and the judge see each
     call (its name and input) in the transcript, so the person can answer a card as they would.
@@ -107,10 +143,10 @@ time of day, then `| iso` (the default, with its offset), `| date` (2026-10-16),
 ### Scenarios the business starts
 
 A scenario can start with the business instead of the person: an event its backend sends, a nudge,
-time passing, or a restart of the agent. Such a run (a business run) gets an agent of its own, built by `buildAgent` with
+or time passing. Such a run (a business run) gets an agent of its own, built by `buildAgent` with
 the run's clock and the agent's own channels (pass `options.channels` and `options.testing` on to
-`createAgent`, `testing` spread as it is: `now`, `scheduleCheckMs: 0`, the run's `database` and
-`runner`), so the agent runs on
+`createAgent`, `testing` spread as it is: `now`, `scheduleCheckMs: 0`, the run's own `database`),
+so the agent runs on
 the test's clock: quiet hours, held sends, `expiresAt` and caps over days follow it.
 
 ```yaml
@@ -153,24 +189,6 @@ expect:
   not a message or template), `text` (in the message, the template's values, or the carousel's text
   and cards). Checked by code, like `calls`.
 - A business run where the agent sent nothing is not a failure by itself: `expect` decides.
-- `restart: crash` or `restart: deploy` restarts the agent mid-conversation, on the same store, to
-  catch double replies and lost turns across a crash or a deploy. Put it right after a `say` and it
-  lands while that message's turn runs (the real case: a message comes in a second before the new
-  revision is up). `crash`: the agent dies where it is (nothing more it does is sent or kept) and a
-  new one starts; it waits out the dead one's lease (15 s on the test's clock), then runs the cut-off
-  turn once. `deploy`: a new one starts beside the old one and takes every message from then on; the
-  old one finishes what it holds, a message the new one took meanwhile included, and stops. Each has
-  its own runner name (`runner-1`, `runner-2`, with createAgent's random suffix, on every event). The cloud checks that every message
-  the person sent was answered, none twice, and that no turn was lost. `buildAgent` must pass
-  `options.testing` on to `createAgent` as it is (it carries the run's `database` and `runner`), or
-  the step fails saying so.
-
-  ```yaml
-  opening:
-    - say: "when is my class?"
-    - restart: deploy              # or crash
-    - say: "and where is it?"      # reaches the new agent
-  ```
 - `history` (top level) starts a run from an earlier conversation, to test what happens late in a
   long chat (a correction about something said 40 messages ago, a history near the model's budget)
   without playing it: what each side said, oldest first, 1 to 200 items of up to 4,000 characters.
@@ -200,7 +218,9 @@ written in scenarios: the dashboard shows it for the whole run (average, p95, mi
   `outcome` or `judge` sentence: code checks it the same way every run.
 - Write `judge` items as facts a reader can check from the transcript, not taste ("asks Sam to
   confirm before placing the order", not "is helpful").
-- Cover the unhappy paths the tool files list (busy, down, unknown item) as their own scenarios.
+- Cover the unhappy paths the tool files list (busy, down, unknown item) as their own scenarios,
+  each with a `world` that says so plainly ("the point of sale is down for the whole
+  conversation"), so the tool model plays that response on every run.
 - When a real conversation went wrong, turn it into a scenario: its world is what was true then,
   its opening is what the person sent.
 
@@ -216,6 +236,9 @@ connects out to the cloud, which plays the person and the tools and judges.
    in an agent `flow new` made).
 3. It first reads every test file as the cloud does; a mistake stops it with
    `tests/scenarios/<file>.yaml:<line>: <field>: <what is wrong>`, one line each, and nothing is sent.
+   A field 0.16.1 stopped playing (`given:`, `origin:`, `expect.state`, a `restart` step) or a leftover
+   `tests/tools/*.fake.ts` is not an error: it is ignored, and one line names it with what to do
+   instead (`flow check` prints the same lines). Do what each line says.
    Then it prints PASS or FAIL per run, with its run id, every failed check and the judge's reason,
    and a link to watch each conversation in the simulator. The cloud's dashboard, at its own
    address, shows every session over time and each scenario's history.
@@ -223,7 +246,7 @@ connects out to the cloud, which plays the person and the tools and judges.
    stderr): `outcome`, `exitCode`, `sessionId`, `agent`, `error`, `counts`, `costUsd` and per run
    `runId`, `scenario`, `channel`, `run`, `verdict`, `error` (the cloud's code when it could not play
    or judge the run, such as `judge_failed`; the run is then `errored` and its line reads `ERROR`,
-   whatever it ended as), `ended`, `turns`, `watch`, `rerun`, `label`, `replayed` and `failedChecks` (`kind`, `text` and the judge's
+   whatever it ended as), `ended`, `turns`, `watch`, `rerun`, `label` and `failedChecks` (`kind`, `text` and the judge's
    `reason`), and `invalid` (`{ path, reason }` for a scenario the cloud could not play, its error
    `scenario_invalid` and its line `INVALID`; else `null`); top-level `invalid` lists those scenarios
    once each (`scenario`, `path`, `reason`: fix the file; `unsupported: ...` means the cloud does not
@@ -244,9 +267,7 @@ connects out to the cloud, which plays the person and the tools and judges.
    (`runId`, `passed`, `watch`), never a run of its own. A flaky run counts as passed unless
    `--strict`; `counts.flaky` counts them, and `counts.failed` leaves them out unless `--strict`. Read
    a flaky run like a failure that is not certain: look at it with `flow show`, and fix the agent or
-   the test when the failed play shows a real problem. The cloud also replays the person's, the tools'
-   and the judge's stored answers for a scenario it has played unchanged (`replayed` counts them), so
-   runs vary less; `--fresh` plays every simulator anew.
+   the test when the failed play shows a real problem.
    Each run's `outcome` is `passed`, `failed`, `credit` (the workspace's test budget, `spend_cap`, or the
    agent's model refused for credit, `agent_credit`; its line reads `CREDIT`) or `infra` (the cloud
    could not play or judge it; `ERROR`). Credit and infra runs are never failures and are counted apart
@@ -296,10 +317,10 @@ Work in this loop, and never finish on a partial run:
    - the agent: it said or did the wrong thing; fix its prompt, tools or code;
    - the test: a check asks for the wrong thing, or the scenario cannot reach its goal; fix the YAML;
    - the simulator: a tool output that could not happen (a `response:` that does not fit the call is
-     a sign), or a person who left the scenario; fix `tests/tools/*.yaml` or the scenario's `world` and `person`.
+     a sign), or a person who left the scenario; fix `tests/tools/*.yaml`, or the scenario's
+     `world` and `person`.
 4. `npx @flow-engineer/flow test --synthetic --failed` until it passes with nothing flaky. With the
-   cloud's replays and second plays, `--runs 3 --only <scenario>` is rarely needed; `--fresh` plays every
-   simulator anew when you want a run with no stored answers.
+   cloud's second plays, `--runs 3 --only <scenario>` is rarely needed.
 5. The whole suite once more.
 
 ### Get a test cloud
@@ -312,7 +333,7 @@ The owner does these; never ask for the key in chat or print it:
 4. Put it in the agent's `.env` as `FLOW_FRAMEWORK_CLOUD_KEY` (never on the command line).
 5. `npx @flow-engineer/flow test --cloud https://flow.engineer/observe --synthetic` from the agent's folder (`--cloud` is that address by default).
 
-Your agent runs on your machine with your own model key. The cloud's person simulator, tool simulator and judge are free within the workspace's limits: runs at once per session, sessions at once and a daily test budget. They depend on the workspace; `flow test` prints them on one line when a session opens (`--json` reports them as `limits`); test data only (`--synthetic`), and records are deleted after 30 days. `--synthetic` is the promise that the test files hold no real customer or member data;
+Your agent runs on your machine with your own model key. When it reaches Flow's model gateway (FLOW_KEY), each model and transcription call carries the session's id, and on a Pro workspace Flow counts those calls as free test spend whatever the key's mode (test or live), once the test cloud confirms the session; an unconfirmed session is charged normally. An `--agent-url` agent makes its calls in its own process, without the id, so they are charged as usual. The cloud's person simulator, tool simulator and judge are free within the workspace's limits: runs at once per session, sessions at once and a daily test budget. They depend on the workspace; `flow test` prints them on one line when a session opens (`--json` reports them as `limits`); test data only (`--synthetic`), and records are deleted after 30 days. `--synthetic` is the promise that the test files hold no real customer or member data;
 the CLI refuses a hosted cloud without it and the key. `--environment staging` or `production` is
 kept with the session.
 
@@ -334,6 +355,12 @@ Only the files in your `tests/` folder run; the cloud keeps each file by its has
 runs only while the tests are the same. The session's version is the commit the CI checked out, the
 same label the agent's traces carry; leave `--agent-version` unset unless the commit is not what
 runs, and record deploys on the owner's own servers as `build-agent-skill.md` ("Deploy it") says. Every run calls real models, so it costs a little.
+
+`tests/drafts/` holds test drafts: `npx @flow-engineer/flow test pull` writes there the scenarios Flow
+made from the hosted agent's conversations that went wrong (the business kept, the people made up;
+it lists whether Flow checked each one). Drafts never run or gate; `flow test` reads only
+`tests/scenarios/` and `tests/tools/`. Read each draft against the agent, fix what is wrong in it, and
+move it into `tests/scenarios/` to keep it; delete the ones that do not test a real problem.
 
 ## An agent on another framework, in any language
 

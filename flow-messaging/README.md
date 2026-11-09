@@ -76,8 +76,10 @@ each, in log order, to the same handler as the webhook.
   streams opened) waits 30 s to 5 min. When Flow's error frame gives `retry_after`, the wait is at
   least that long. The backoff starts again only once a connection delivers an event or stays open
   30 s, so a stream refused right after it opens never reconnects in a tight loop. Each wait is
-  logged once (`console.warn`, with the close code). An event that fails 5 times in a row is passed
-  over, so it cannot hold up every later one; it stays in Flow's log (`GET /v0/events`).
+  logged once (`console.warn`, with the close code). An event that fails 5 times in a row while
+  the agent's store answers is passed over, so it cannot hold up every later one; it stays in Flow's
+  log (`GET /v0/events`). While the store itself does not answer, no try is counted: the stream keeps
+  its place, backs off and tries the same event again, so a store outage never loses a message.
 - **Offline messages.** With `cursorFile`, the last handled event's ID is kept on disk, so after a
   restart Flow replays everything that came while the agent was stopped, for as long as your plan
   keeps events (30 days by default). Without it, a dropped stream still resumes, but a restart
@@ -150,6 +152,10 @@ adapter picks the kind each channel takes:
 - A photo (by URL, or a Flow file ID from `POST /v0/files`): a `basic` message with the photo as
   its `media` and the text as its caption; with buttons or a link, the image header of that same
   message (on Telegram, one photo with its keyboard).
+- A video (by URL, or a Flow file ID), on WhatsApp, Telegram and iMessage: a `basic` message with
+  the video as its `media` and the text as its caption. It goes alone: with buttons, a list, a link
+  or a photo it is refused, as it is on SMS. Flow checks each channel's own size and format limits
+  and refuses a video past them (`unsupported_content`), which the agent is told.
 - A carousel: on WhatsApp a `carousel`, 2 to 10 cards side by side, each a photo, up to 160
   characters and 1 or 2 reply buttons or one link, the same on every card. Telegram has none, so the
   adapter sends the carousel's text, then one message per card in order: its photo with the card's
@@ -190,11 +196,18 @@ older API gets the older shape (`content.type`); both read the same.
   or row's id and its label. A quick reply's payload is its ID.
 - Quotes, read from Flow.
 - Reactions to the agent's messages.
-- Late failures (`message.failed`), told to the agent as "Not delivered" (an edit's or unsend's as `edit of msg_...`, `unsend of msg_...`).
-- Photos, voice notes, audio and documents, as attachments. Their bytes are fetched from
-  `GET /v0/files/{id}` only when the agent can use them. A voice note Flow already transcribed
-  arrives as its transcript.
-- A video, a file Flow did not keep, a location or a contact card arrives as a note in the text.
+- Late failures (`message.failed`), told to the agent as "Not delivered" (an edit's or unsend's as
+  `edit of msg_...`, `unsend of msg_...`, a template's as `template <name>`), also for someone this
+  process has not heard from (a nudge or template to someone new, or after a restart). Each is logged
+  once at error level: `message <msg_...> on <channel> (conversation <conv_...>) was not delivered
+  (type <type>, channel_code <code>): <Flow's message, hint and doc_url>`, never the message's content
+  or the person's address. With traces on it is a `delivery` span (see docs/guarantees.md).
+- Photos, voice notes, audio, videos and documents, as attachments. Their bytes are fetched from
+  `GET /v0/files/{id}` only when the agent can use them, and never when Flow's `size_bytes` is over
+  the agent's limit. A voice note Flow already transcribed arrives as its transcript. A video goes to
+  a model that watches videos (`openAICompatible({ videos: true })`), else to `createAgent({ describeVideo })`,
+  else it is named.
+- A file Flow did not keep, a location or a contact card arrives as a note in the text.
 
 ## What it does for you
 

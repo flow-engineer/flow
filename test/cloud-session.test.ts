@@ -1,4 +1,4 @@
-// covers: testing/src/client.ts testing/src/protocol.ts testing/src/cli.ts
+// covers: testing/src/client.ts testing/src/protocol.ts testing/src/cli.ts testing/src/suite.ts
 // The CLI against a hosted cloud: the open carries the CI key and the synthetic attestation, and the
 // session is played at the tunnel the open answers, which never sees the key; the agent's posts reach
 // the cloud while the stream is open, also over HTTPS with HTTP/2 as a hosted cloud speaks it, and a
@@ -16,6 +16,7 @@ import { test } from "node:test";
 import { getCACertificates, setDefaultCACertificates } from "node:tls";
 import { z } from "zod";
 import { cloudHeaders, gitBranch, gitDefaultBranch, runInCloud, tunnelBase } from "../testing/src/client.ts";
+import { parseScenario } from "../testing/src/suite.ts";
 import type { Agent, Incoming } from "../src/index.ts";
 import { unavailableRecords } from "../src/records.ts";
 
@@ -110,11 +111,14 @@ test("the key goes to the front door only; the files and the stream go to the tu
   }
 });
 
-test("a file a scenario attaches is read from the tests folder on this machine, and from nowhere else", async () => {
+test("a file a scenario attaches (a video too) is read from the tests folder on this machine, again by its path when the agent asks, and from nowhere else", async () => {
   const testsDir = mkdtempSync(join(tmpdir(), "flow-tests-"));
   mkdirSync(join(testsDir, "fixtures"));
   writeFileSync(join(testsDir, "fixtures", "receipt.png"), new Uint8Array([1, 2, 3]));
-  const incoming = { conversationId: "c", messageId: "m1", channel: { reactions: false, status: false }, incoming: { text: "my receipt", attachments: [{ kind: "image", file: "fixtures/receipt.png" }, { kind: "document", file: "../../etc/passwd" }] } };
+  writeFileSync(join(testsDir, "fixtures", "controller.mp4"), new Uint8Array([4, 5]));
+  const step = parseScenario({ path: "scenarios/v.yaml", content: "id: v\nchannels: [whatsapp]\nperson: { persona: p, goal: g }\nopening:\n  - { say: the grip, attach: { kind: video, file: fixtures/controller.mp4 } }\n" }).opening[0];
+  assert.deepEqual(step.attach, { kind: "video", file: "fixtures/controller.mp4" });
+  const incoming = { conversationId: "c", messageId: "m1", channel: { reactions: false, status: false }, incoming: { text: "my receipt", attachments: [{ kind: "image", file: "fixtures/receipt.png" }, { kind: "document", file: "../../etc/passwd" }, { kind: "video", file: "fixtures/controller.mp4" }] } };
   const server = createServer((req, res) => {
     req.resume();
     if (!req.url!.endsWith("/stream")) return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ sessionId: "s", token: "t", missing: [], dashboard: "d" }));
@@ -123,12 +127,13 @@ test("a file a scenario attaches is read from the tests folder on this machine, 
   });
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   const got: Incoming[] = [];
+  let file: ((ref: string) => Promise<Uint8Array | null>) | undefined;
   try {
     await runInCloud({
       cloud: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
       name: "cafe",
       tools: [],
-      build: () => ({ channels: () => [], receive: (_id: string, message: Incoming) => (got.push(message), "m1") }) as unknown as Agent,
+      build: () => ({ channels: () => [], receive: (_id: string, message: Incoming, _deliver: unknown, options: { file?: typeof file }) => (got.push(message), (file = options.file), "m1") }) as unknown as Agent,
       files: [],
       testsDir,
       log: () => {},
@@ -136,10 +141,14 @@ test("a file a scenario attaches is read from the tests folder on this machine, 
   } finally {
     server.close();
   }
-  const [photo, outside] = got[0].attachments!;
+  const [photo, outside, video] = got[0].attachments!;
   assert.deepEqual({ kind: photo.kind, mime: photo.mime, name: photo.name }, { kind: "image", mime: "image/png", name: "receipt.png" });
   assert.deepEqual(await photo.data(), new Uint8Array([1, 2, 3]));
   await assert.rejects(outside.data(), /not a file in the tests folder/);
+  assert.deepEqual({ kind: video.kind, mime: video.mime, ref: video.ref }, { kind: "video", mime: "video/mp4", ref: "fixtures/controller.mp4" });
+  assert.deepEqual(await file!(video.ref!), new Uint8Array([4, 5]));
+  assert.equal(await file!("fixtures/gone.mp4"), null);
+  await assert.rejects(file!("../../etc/passwd"), /not a file in the tests folder/);
 });
 
 test("a late session_closed drops the leftover events instead of failing the run", async () => {

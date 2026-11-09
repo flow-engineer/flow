@@ -32,13 +32,31 @@ the platform accepted the call (Flow Messaging's `200`) and rejects when it refu
 What follows from it:
 
 - A send tool's result tells the agent `delivered` only once the platform accepted the message.
+- Each send says what the agent does next: `next: "wait"` for the person's reply, or `"act"` when it
+  calls a tool next in the same turn (it said "getting your order"). A response of only messages
+  ends the turn unless one of them said `"act"`; that one gets one more step, and its result says so.
+  A second `"act"` with no tool call between ends the turn. A send that leaves `next` out (or gives
+  anything else) waits. So a message is never followed by a step the model did not ask for, which it
+  could fill by sending the same message again.
 - `message.out` is emitted, and the message kept in the history and the transcript, only then.
 - A rejected send comes back to the agent as a "Not delivered" note with the reason, once
   (`message.undelivered`). A failure Flow reports after the send resolved (a late
-  `message.failed`) comes back the same way.
+  `message.failed`) comes back the same way, also to someone the process has not heard from, is
+  logged at error level, and its `message.undelivered` carries `channel`, `messageId` (the
+  platform's id), `errorType` and `channelCode`. With traces on, its send span carries
+  `flow.send.message_id` and the failure is a `delivery <channel>` span under it (error status,
+  `flow.delivery.message_id`, `flow.delivery.status` `failed`, `flow.delivery.error_type`,
+  `flow.delivery.channel_code`; never content), or a trace of its own when another process sent it.
 - A carousel the channel sends card by card resolves once the platform accepted its last card.
 - Typing indicators, read receipts and status lines are courtesies: their failures never fail a
-  turn, and a channel whose info says `typing: false` is never sent one. Typing is kept up while the
+  turn, and a channel whose info says `typing: false` is never sent one. Typing shows as the
+  person's message arrives: for one with files (a video to describe, a voice note to transcribe),
+  before they are downloaded and read, which never wait on the typing call. A message with a video
+  gets the agent's `videoReaction` (👀, on by default) there instead, where the channel takes it, and
+  the turn that answers it shows no typing on that channel for its first 5 s, then types as for any
+  message if nothing from the agent has reached them by then (on WhatsApp the read receipt goes with
+  the reaction, by itself); a reaction that fails is logged with a
+  warning, never fails the turn, and the turn types instead. It is kept up while the
   agent works (sent again before `typingLastsMs` runs out), shows again after a message only when
   new work starts (tools, or the person's next message), and never outlives the turn; refused outside the
   person's window (`outside_window`, logged at debug) it waits for the agent's next message, and any
@@ -82,7 +100,11 @@ redelivers events it is not sure arrived. The agent takes each message once:
   so Flow delivers it again.
 - A message whose id the conversation has already taken is a `message.duplicate` and starts no
   turn. With a database (`sqlite(file)`, `postgres(...)`) that holds across restarts and runners;
-  with the default in-memory store it holds until the process stops.
+  with the default in-memory store it holds until the process stops. Two runners sent the same
+  message at once (a replaced instance still reading the stream beside the new one) answer it once:
+  the runner whose store write lost its id leaves it to the stored copy and types nothing (a
+  message with files: only while it reads them, as both runners do), and the runner that holds the
+  conversation answers it.
 
 ## Outbound: when exactly once is true, and when it is not
 

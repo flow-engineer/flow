@@ -1,4 +1,4 @@
-// covers: testing/src/cli.ts testing/src/suite.ts testing/src/client.ts testing/src/report.ts testing/src/show.ts testing/src/print-run.ts testing/src/protocol.ts src/traces.ts
+// covers: testing/src/cli.ts testing/src/suite.ts testing/src/client.ts testing/src/report.ts testing/src/show.ts testing/src/print-run.ts testing/src/protocol.ts src/traces.ts testing/src/check.ts
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -43,7 +43,7 @@ function agentDir(more: Record<string, string> = {}): string {
 function cloud(hold: boolean, frames: unknown[] = [run], sessionId = "s", answer: Record<string, unknown> = {}) {
   let release: (() => void) | undefined;
   const opened = new Promise<void>((done) => { release = done; });
-  const opens: Array<{ files: Array<{ path: string }>; runs: number; flaky?: boolean; fresh?: boolean; agentVersion?: string }> = [];
+  const opens: Array<{ files: Array<{ path: string }>; runs: number; flaky?: boolean; agentVersion?: string }> = [];
   const server = createServer((req, res) => {
     if (req.url === "/api/sessions") {
       let body = "";
@@ -167,6 +167,42 @@ test("the command line: --version, each command's own --help, and a plain line f
   assert.ok(!existsSync(join(dir, "x")));
 });
 
+test("what 0.16.1 stopped playing still parses and is sent without it: flow test and flow check name each file and field with what to do instead, --fresh warns, and flow test fake says it was removed", { timeout: 20_000 }, async () => {
+  const closed = "http://127.0.0.1:9";
+  const old = [
+    "id: old", "channels: [sms]", "origin: { from: chat, check: not_checked }", "person:", "  persona: a", "  goal: b",
+    "opening:", "  - say: hi", "  - restart: crash", "given:", "  tools: { place_order: down }", "expect:", "  state: { orders: [] }", "",
+  ].join("\n");
+  const dir = agentDir({ old });
+  mkdirSync(join(dir, "tests", "tools"));
+  writeFileSync(join(dir, "tests", "tools", "place_order.fake.ts"), "export default () => ({ output: {} });\n");
+  const soon = "deprecated in 0.16.1, removed in the next release";
+  const lines = [
+    `tests/scenarios/old.yaml:10: given: is no longer played (${soon}): describe the data in world: and how a tool fails or is slow as a response in tests/tools/<tool>.yaml with a when:; then delete given:.`,
+    `tests/scenarios/old.yaml:3: origin: is no longer read (${soon}): delete it.`,
+    `tests/scenarios/old.yaml:9: opening[1]: restart is no longer played (${soon}): delete the step; Flow Framework's own tests cover restarts.`,
+    `tests/scenarios/old.yaml:13: expect.state is no longer checked (${soon}): check what the agent did with expect.calls (a tool and its args) or expect.outcome; then delete it.`,
+    `tests/tools/place_order.fake.ts is no longer used (${soon}): a model plays every tool from its tool file; delete the file.`,
+  ];
+  // Never an error: the lines come first, then the session is tried (and this closed cloud does not answer).
+  const tested = await cliOutput(["test", "--cloud", closed, "--fresh"], dir);
+  assert.equal(tested.code, 2, tested.out);
+  assert.ok(tested.out.startsWith(`${[...lines, "--fresh does nothing now: every run plays anew. Drop it."].join("\n")}\n`), tested.out);
+  // The scenario reaches the cloud's side without them.
+  const parsed = parseScenario({ path: "scenarios/old.yaml", content: old });
+  assert.deepEqual([Object.keys(parsed).sort(), parsed.opening, parsed.expect], [["channels", "expect", "id", "max_turns", "opening", "person"], [{ say: "hi" }], {}]);
+  const checked = await cliStreams(["check", "--json"], dir);
+  assert.equal(checked.code, 0, checked.out);
+  assert.deepEqual(JSON.parse(checked.stdout).warnings, lines);
+  const fake = await cliStreams(["test", "fake", "place_order"], dir);
+  assert.equal(fake.code, 1);
+  assert.match(fake.stderr, /^flow test fake was removed in 0\.16\.1: a model plays every tool from its tool file\. Write how the tool answers as responses in tests\/tools\/<tool>\.yaml, each with a when:/);
+  // An opening that was only restarts has nothing left to play.
+  assert.throws(() => parseScenario({ path: "scenarios/r.yaml", content: "id: r\nchannels: [sms]\nperson:\n  persona: a\n  goal: b\nopening:\n  - restart: deploy\n" }), {
+    message: "scenarios/r.yaml:7: opening: only restart steps, which are no longer played: say something, send an event, nudge, or wait",
+  });
+});
+
 test("what is wrong on this machine is said before the cloud is called, an address that does not answer is named, and the default cloud asks for its key", { timeout: 15_000 }, async () => {
   const closed = "http://127.0.0.1:9";
   const empty = mkdtempSync(join(tmpdir(), "flow-cli-"));
@@ -174,10 +210,10 @@ test("what is wrong on this machine is said before the cloud is called, an addre
   assert.equal(noAgent.code, 1);
   assert.match(noAgent.out, /^No src\/agent\.ts in .+ Run flow test from your agent's folder/);
   const dir = agentDir();
-  writeFileSync(join(dir, "tests", "scenarios", "bad.yaml"), "id: bad\nchannels: [sms, fax]\nperson:\n  persona: a\nopening:\n  - say: hi\n");
+  writeFileSync(join(dir, "tests", "scenarios", "bad.yaml"), "id: bad\nchannels: [sms, Fax]\nperson:\n  persona: a\nopening:\n  - say: hi\n");
   assert.deepEqual(await cliOutput(["test", "--cloud", closed], dir), {
     code: 1,
-    out: `${join("tests", "scenarios", "bad.yaml")}:2: channels[1]: Invalid option: expected one of "sms"|"whatsapp"|"imessage"|"telegram"|"web"\n${join("tests", "scenarios", "bad.yaml")}:3: person.goal: missing\n\nNothing was sent: fix the test files above.\n`,
+    out: `${join("tests", "scenarios", "bad.yaml")}:2: channels[1]: a platform (sms, whatsapp, imessage, telegram, web) or a custom UI's name\n${join("tests", "scenarios", "bad.yaml")}:3: person.goal: missing\n\nNothing was sent: fix the test files above.\n`,
   });
   const good = agentDir();
   assert.match((await cliOutput(["test", "--cloud", closed, "--agent-url", "http://127.0.0.1:9/flow"], good)).out, /^Could not reach your agent at http:\/\/127\.0\.0\.1:9\/flow: ECONNREFUSED\. Start it first/m);
@@ -187,13 +223,6 @@ test("what is wrong on this machine is said before the cloud is called, an addre
   assert.match(named.out, /^Could not reach http:\/\/127\.0\.0\.1:9: ECONNREFUSED\.$/m);
   // No cloud named: the hosted one, which needs a key before anything is sent.
   assert.match((await cliOutput(["test"], good)).out, /^A hosted cloud needs the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY\. Run npx @flow-engineer\/flow login, then npx @flow-engineer\/flow setup, to get one into \.env\.$/m);
-});
-
-test("a command whose optional peer is not installed where flow runs (npx's cache) says so in one line and exits 1", { timeout: 15_000 }, async () => {
-  // Resolved from a folder with no node_modules, as from npx's cache: Node's own error, not a made-up one.
-  const hook = `import { registerHooks } from "node:module"; registerHooks({ resolve: (s, c, next) => next(s, s === "@modelcontextprotocol/client" ? { ...c, parentURL: "file:///nowhere/x.js" } : c) });`;
-  const result = await cliOutput(["inspect", "http://127.0.0.1:1/mcp", "tools"], agentDir(), ["--import", `data:text/javascript,${encodeURIComponent(hook)}`]);
-  assert.deepEqual(result, { code: 1, out: "flow inspect needs @modelcontextprotocol/client: run it from your agent's folder (npx @flow-engineer/flow inspect), or npm install @modelcontextprotocol/client.\n" });
 });
 
 test("Ctrl-C prints the same partial report, keeps what finished, and exits 130", { timeout: 15_000 }, async () => {
@@ -295,8 +324,8 @@ test("with --json, every exit prints one report on stdout and every other line o
     minPass: 98,
     costUsd: { agent: 0.5, test: 0.5 },
     runs: [
-      { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", outcome: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }], invalid: null, rerun: null, label: null, replayed: null },
-      { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", outcome: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [], invalid: null, rerun: null, label: null, replayed: null },
+      { runId: "trn_2", scenario: "b", channel: "sms", run: 1, verdict: "failed", outcome: "failed", error: null, ended: "goal", turns: 6, watch: "http://watch/r1", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }], invalid: null, rerun: null, label: null },
+      { runId: "trn_1", scenario: "hello", channel: "sms", run: 1, verdict: "passed", outcome: "passed", error: null, ended: "goal", turns: 1, watch: "http://watch/r1", failedChecks: [], invalid: null, rerun: null, label: null },
     ],
     invalid: [],
     sessionInvalid: null,
@@ -402,35 +431,38 @@ test("a run the cloud names an error for is errored, whatever it ended as: ERROR
   } finally { mixed.close(); }
 });
 
-test("a run that failed and passed when the cloud played it again is flaky: its own section, its second play never counted, exit 0 unless --strict; the open asks for flaky runs, and --fresh for no replays", { timeout: 20_000 }, async () => {
+test("a run that failed and passed when the cloud played it again is flaky: on the summary line, counted as passed on its channel as in the pass rate, its own section, its second play never counted, exit 0 unless --strict; the open asks for flaky runs", { timeout: 20_000 }, async () => {
   const dir = agentDir({ b: scenarioYaml("bee", "sms") });
   // The second play has its original's scenario, channel and number; the cloud may send it first.
   const second = runOf({ runId: "trn_3", passed: true, rerunOf: "trn_1", watch: "http://watch/trn_3" });
-  const first = runOf({ runId: "trn_1", watch: "http://watch/trn_1", rerun: { runId: "trn_3", passed: true, watch: "http://watch/trn_3" }, label: "flaky", replayed: { person: 2, tools: 1, judge: 0 } });
+  const first = runOf({ runId: "trn_1", watch: "http://watch/trn_1", rerun: { runId: "trn_3", passed: true, watch: "http://watch/trn_3" }, label: "flaky" });
   const bee = runOf({ runId: "trn_2", scenario: "bee", passed: true });
   const runs = [second, first, bee];
   const frames = [...runs.map((run) => ({ type: "run", run })), { type: "finished", summary: { sessionId: "s1", suiteHash: "h", testModel: "m", runs, dashboard: "http://dash/s1" } }];
-  const local = await cloud(false, frames, "s1", { flaky: true, replay: true });
+  const local = await cloud(false, frames, "s1", { flaky: true });
   try {
     const result = await cliStreams(["test", "--cloud", local.url, "--json"], dir);
     assert.equal(result.code, 0, result.out);
-    assert.match(result.stderr, /^FLAKY {2}hello #1 \(sms\) trn_1: .*replayed 3 stored simulator answers/m);
+    assert.match(result.stderr, /^FLAKY {2}hello #1 \(sms\) trn_1: /m);
     assert.match(result.stderr, /^ {6}played again: passed http:\/\/watch\/trn_3$/m);
     assert.doesNotMatch(result.stderr, /trn_3:/);
-    assert.match(result.stderr, /^1 of 2 runs passed\./m);
+    // Every count agrees with the pass rate: the flaky run is named on the first line and counted as passed on its channel's.
+    assert.match(result.stderr, /^1 of 2 runs passed\. 1 flaky\. /m);
+    assert.match(result.stderr, /^Pass rate 100% · Excellent: 2 of 2 counted runs passed \(1 flaky counted as passed\)\./m);
+    assert.match(result.stderr, /^ {2}sms: 2 of 2 counted runs passed \(1 flaky\)$/m);
     assert.match(result.stderr, /^1 flaky \(failed once, passed when played again\):\n {2}hello #1 \(sms\): http:\/\/watch\/trn_1 then http:\/\/watch\/trn_3$/m);
     const report = JSON.parse(result.stdout);
     assert.deepEqual([report.outcome, report.strict, report.counts], ["passed", false, { runs: 2, passed: 1, failed: 0, flaky: 1, errored: 0, notPlayed: 0, credit: 0, infra: 0 }]);
     assert.deepEqual(report.runs.map((r: { runId: string; verdict: string; label: string | null; rerun: { runId: string } | null }) => `${r.runId} ${r.verdict} ${r.label} ${r.rerun?.runId ?? null}`), ["trn_2 passed null null", "trn_1 flaky flaky trn_3"]);
-    assert.deepEqual(report.runs[1].replayed, { person: 2, tools: 1, judge: 0 });
     assert.deepEqual(lastSession(dir).runs.map((r: { runId: string; verdict: string }) => `${r.runId} ${r.verdict}`), ["trn_2 passed", "trn_1 flaky"]);
 
-    const strict = await cliStreams(["test", "--cloud", local.url, "--json", "--strict", "--fresh"], dir);
+    const strict = await cliStreams(["test", "--cloud", local.url, "--json", "--strict"], dir);
     assert.equal(strict.code, 1, strict.out);
+    assert.match(strict.stderr, /^ {2}sms: 1 of 2 counted runs passed \(1 flaky\)$/m);
     const strictReport = JSON.parse(strict.stdout);
     assert.deepEqual([strictReport.outcome, strictReport.strict, strictReport.counts.failed, strictReport.counts.flaky], ["failed", true, 1, 1]);
-    // Every open asks for flaky runs; only --fresh asks the cloud to replay nothing.
-    assert.deepEqual(local.opens.map((o) => [o.flaky, o.fresh]), [[true, undefined], [true, true]]);
+    // Every open asks for flaky runs.
+    assert.deepEqual(local.opens.map((o) => o.flaky), [true, true]);
   } finally { local.close(); }
 });
 
@@ -694,11 +726,16 @@ test("test files: old ones parse as before, the clock, calls and never parse, an
   // A custom UI by its name (the web app's app), beside a platform; not a name that could be no channel's.
   assert.deepEqual(parseScenario({ path: "scenarios/x.yaml", content: old.replace("[sms]", "[app, web]") }).channels, ["app", "web"]);
   assert.throws(() => parseScenario({ path: "scenarios/x.yaml", content: old.replace("[sms]", "[My App]") }), /channels\[0\]/);
+  // A title is a short name, counted in characters, not bytes; the test's detail goes in about.
+  // A theme groups scenarios by the area they test: a word or two, at most 30 characters.
+  const named = parseScenario(scenario(`title: Café order, milk to oat ${"é".repeat(21)}\nabout: Orders a latte, corrects the milk mid-thought, confirms.\ntheme: Ordering\n`));
+  assert.deepEqual([[...named.title!].length, named.about, named.theme], [45, "Orders a latte, corrects the milk mid-thought, confirms.", "Ordering"]);
   // The café example, as shipped, is valid.
   for (const file of loadSuite(fileURLToPath(new URL("../examples/cafe/tests", import.meta.url)))) (file.path.startsWith("scenarios/") ? parseScenario : parseToolFile)(file);
-
   const placeholder = (text: string) => `unknown placeholder ${text}: write it like {{now + 3d}}, {{now - 2h | time}} or {{now + 1w @ 10:00 | date}}`;
   const mistakes: Array<[string, string]> = [
+    ["title: Orders a latte, corrects the milk mid-thought, confirms", "scenarios/x.yaml:9: title: 55 characters, at most 45: a title is a name, not the test. Move the detail to about:"],
+    ["theme: Ordering, milk changes and confirmations", "scenarios/x.yaml:9: theme: 40 characters, at most 30: a theme is the area of the agent the scenario tests, in a word or two, such as Ordering."],
     ["timezone: Mars/Base", "scenarios/x.yaml:9: timezone: not a time zone: use an IANA name such as America/New_York or UTC"],
     ["now: 2026-02-30T09:00", "scenarios/x.yaml:9: now: not a date and time: write YYYY-MM-DDTHH:MM, with :SS, Z or an offset such as -04:00 if needed"],
     ["now: 2026-10-16 09:00", "scenarios/x.yaml:9: now: not a date and time: write YYYY-MM-DDTHH:MM, with :SS, Z or an offset such as -04:00 if needed"],
@@ -713,6 +750,34 @@ test("test files: old ones parse as before, the clock, calls and never parse, an
   assert.throws(() => parseToolFile({ path: "tools/t.yaml", content: `${tool}    input:\n      days: ['{{now + 1d | year}}']\n` }), {
     message: `tools/t.yaml:7: responses[0].input.days[0]: ${placeholder("{{now + 1d | year}}")}`,
   });
+});
+
+test("the person's reveal, behaviours and attack parse as written; a wrong value, a name twice, and an attacker who walks away are named at their line", () => {
+  // Without them a scenario parses as before: the old scenario in the test above.
+  const scenario = (person: string) => ({ path: "scenarios/p.yaml", content: `id: p\nchannels: [sms]\nperson:\n  persona: a\n  goal: b\n${person}opening:\n  - say: hi\n` });
+  assert.deepEqual(parseScenario(scenario("  reveal: one_at_a_time\n  behaviours: [impatient, tangents, half_messages, pushes_rules, walks_away]\n")).person, {
+    persona: "a", goal: "b", reveal: "one_at_a_time", behaviours: ["impatient", "tangents", "half_messages", "pushes_rules", "walks_away"],
+  });
+  assert.deepEqual(parseScenario(scenario("  behaviours: [pushes_rules]\n  attack:\n    rule: Never gives a discount or a free item.\n    tactics: [inject, ask]\n")).person, {
+    persona: "a", goal: "b", behaviours: ["pushes_rules"], attack: { rule: "Never gives a discount or a free item.", tactics: ["inject", "ask"] },
+  });
+  assert.deepEqual(parseScenario(scenario("  attack: { rule: Never gives a discount. }\n")).person.attack, { rule: "Never gives a discount." });
+
+  const mistakes: Array<[string, string]> = [
+    ["  reveal: slowly", "scenarios/p.yaml:6: person.reveal: as_asked or one_at_a_time"],
+    ["  behaviours:\n    - impatient\n    - rude", "scenarios/p.yaml:8: person.behaviours[1]: one of impatient, tangents, half_messages, pushes_rules, walks_away"],
+    ["  behaviours:\n    - impatient\n    - impatient", "scenarios/p.yaml:8: person.behaviours[1]: impatient is listed twice: list each behaviour once"],
+    ["  behaviours: []", "scenarios/p.yaml:6: person.behaviours: at least one behaviour, or leave it out"],
+    ["  attack: no discounts", "scenarios/p.yaml:6: person.attack: { rule: <the rule the agent must keep>, tactics: [<tactic>, ...] }"],
+    ["  attack:\n    tactics: [ask]", "scenarios/p.yaml:6: person.attack.rule: missing"],
+    ["  attack:\n    rule: ' '", "scenarios/p.yaml:7: person.attack.rule: the rule the agent must keep, in a sentence, such as: Never gives a discount or a free item."],
+    [`  attack:\n    rule: ${"é".repeat(501)}`, "scenarios/p.yaml:7: person.attack.rule: 501 characters, at most 500: one rule, in a sentence"],
+    ["  attack:\n    rule: r\n    tactics: [ask, bribe]", "scenarios/p.yaml:8: person.attack.tactics[1]: one of ask, reason, authority, pressure, reframe, inject"],
+    ["  attack:\n    rule: r\n    tactics: []", "scenarios/p.yaml:8: person.attack.tactics: at least one tactic, or leave it out"],
+    ["  attack:\n    rule: r\n    goal: x", "scenarios/p.yaml:7: person.attack: Unrecognized key: \"goal\""],
+    ["  behaviours:\n    - tangents\n    - walks_away\n  attack: { rule: r }", "scenarios/p.yaml:8: person.behaviours[1]: an attacker does not walk away: leave walks_away out"],
+  ];
+  for (const [person, error] of mistakes) assert.throws(() => parseScenario(scenario(`${person}\n`)), { message: error }, person);
 });
 
 test("the summary reads the same on every machine: token counts in one format, and whether every run called the agent's model", { timeout: 15_000 }, async () => {
@@ -740,9 +805,9 @@ test("--dotenv is read in place of the folder's .env, and variables already set 
   assert.deepEqual(await cliOutput(["test", "--dotenv", "none.env"], dir), { code: 1, out: "--dotenv none.env: no such file.\n" });
 });
 
-/** A run's record as the cloud keeps it: a judge check failed, one tool call between the messages, the agent's message edited and then unsent. */
+/** A run's record as the cloud keeps it: a scenario with its title, about and theme, a judge check failed, one tool call between the messages, the agent's message edited and then unsent. */
 const record = {
-  runId: "trn_2", sessionId: "s1", agent: "agt_1", scenario: { id: "bee", path: "scenarios/b.yaml", hash: "h" }, run: 1, channel: "whatsapp",
+  runId: "trn_2", sessionId: "s1", agent: "agt_1", scenario: { id: "bee", path: "scenarios/b.yaml", hash: "h", title: "Latte order", about: "Orders a large latte; must be asked to confirm.", theme: "Ordering" }, run: 1, channel: "whatsapp",
   startedAt: 1_000, finishedAt: 9_000,
   transcript: [
     { kind: "in", id: "m1", text: "a large latte please", at: 1_000 },
@@ -791,7 +856,8 @@ test("flow show prints a run's record from the cloud with the CI key: checks wit
     assert.match(shown.stderr, /also did not pass: flow show trn_3/);
     assert.deepEqual(asked, [{ path: "/v1/agents/agt_1/tests/runs/trn_2", authorization: "Bearer oci_test" }]);
     assert.equal(shown.stdout, [
-      "FAIL  scenarios/b.yaml",
+      "FAIL  scenarios/b.yaml (Latte order) [Ordering]",
+      "  Orders a large latte; must be asked to confirm.",
       "  channel whatsapp, run 1, trn_2; ended: goal_met, 2 turns",
       "",
       "Checks:",
@@ -821,13 +887,14 @@ test("flow show prints a run's record from the cloud with the CI key: checks wit
     // A run the cloud could not judge reads ERROR, though it ended goal_met, with its code.
     const errored = await cliStreams(["show", "trn_4", "--cloud", url], dir, key);
     assert.equal(errored.code, 0, errored.out);
-    assert.deepEqual(errored.stdout.split("\n").slice(0, 3), [
-      "ERROR  scenarios/b.yaml",
+    assert.deepEqual(errored.stdout.split("\n").slice(0, 4), [
+      "ERROR  scenarios/b.yaml (Latte order) [Ordering]",
+      "  Orders a large latte; must be asked to confirm.",
       "  channel whatsapp, run 1, trn_4; ended: goal_met, 2 turns",
       "  error: judge_failed (the cloud could not play or judge this run; it says nothing about the agent)",
     ]);
     const summaryOnly = await cliStreams(["show", "trn_5", "--cloud", url], dir, key);
-    assert.match(summaryOnly.stdout, /^ERROR {2}scenarios\/b\.yaml\n.*\n {2}error: simulator_failed /);
+    assert.match(summaryOnly.stdout, /^ERROR {2}scenarios\/b\.yaml \(Latte order\) \[Ordering\]\n.*\n.*\n {2}error: simulator_failed /);
 
     // --scenario picks that scenario's first run that did not pass (by its id here, its file name for hello); else its first run.
     asked.length = 0;

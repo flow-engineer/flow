@@ -1,6 +1,8 @@
 // An agent's tools and skills as an MCP server (Streamable HTTP, spec 2026-07-28 with the 2025
 // fallback), on the official SDK. It needs no model, channels or store: mount `fetch` on any
-// web-standard runtime (Cloudflare Workers, Deno, Bun) or `node` on node:http.
+// web-standard runtime (Cloudflare Workers, Deno, Bun) or `node` on node:http, or serve it on
+// stdio (`stdio()`) for a host that runs it as a local command. The CLI (defineCli({ server:
+// handle })) can also call it in the same process, with no network.
 //
 // Sign-in is the host's OAuth against the business's own authorization server; this server only
 // verifies the token on every request (`auth.verify`) and turns it into the person. A call that
@@ -30,10 +32,10 @@ import { unavailableRecords, type Records } from "../../src/records.ts";
 import { loadSkills, mcpInstructions, readAgentFolder, readSkillTool, SKILLS_META, type AgentFiles } from "../../src/skills.ts";
 import { serveNode } from "../../src/http.ts";
 import { traces, tracesFromEnv, type TracesOptions } from "../../src/traces.ts";
-import { FORMATTED, render, toolContext, type CredentialProvider, type McpClientKind, type Tool, type ToolContext } from "../../src/tools.ts";
+import { FORMATTED, JSON_TEXT, jsonTextOf, render, toolContext, ToolError, type CredentialProvider, type McpClientKind, type Tool, type ToolContext } from "../../src/tools.ts";
 import { terminalServer } from "./terminal.ts";
 import { appServer, appViewsOn, uiTools, UI_INSTRUCTIONS, type McpAppOptions } from "./app.ts";
-import { describe, FULL_CATALOG_META, MCP_CLIENT_KINDS, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
+import { describe, FULL_CATALOG_META, IN_PROCESS, MCP_CLIENT_KINDS, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
 
 export interface McpAuth {
   /** The authorization server(s) that issue tokens for this server, as hosts discover them. */
@@ -133,6 +135,13 @@ export interface McpServerHandle {
   plugin?: { path: string; descriptors: McpToolDescriptor[] };
   /** Wait for calls queued for tracing, for shutdown or short-lived servers. */
   flushTraces(): Promise<void>;
+  /**
+   * Serve the standalone endpoint's tools on stdin and stdout, for a host that runs this server as
+   * a local command, until the host closes stdin; then the traces are flushed. Nothing but the
+   * protocol goes to stdout. There is no sign-in on stdio: the person who runs the command is the
+   * caller, anonymous to the tools (auth applies to HTTP), and tools kept to some clients are not served.
+   */
+  stdio(options?: { onerror?: (error: Error) => void }): Promise<void>;
 }
 
 const LOCAL = new Set(localhostAllowedHostnames());
@@ -146,15 +155,15 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   const tools = [...options.tools, ...(skills.length ? [readSkillTool(skills)] : []), ...(feedback ? [feedback] : [])];
   const problems = toolsProblems(tools);
   if (problems.length) throw new Error(`@flow-engineer/flow/mcp: these tools cannot be served as declared:\n- ${problems.join("\n- ")}`);
-  // Only a verified token says which client is calling: without auth, such a tool reaches no one.
+  // A verified token says which client is calling; without auth, only the CLI in this process
+  // (defineCli({ server: handle })) is told apart, so such a tool reaches it alone.
   const kept = tools.filter(t => t.mcp?.clients);
-  if (kept.length && !options.auth) throw new Error(`@flow-engineer/flow/mcp: ${kept.map(t => t.name).join(", ")} ${kept.length === 1 ? "is" : "are"} kept to some clients (mcp.clients), which needs auth to tell the clients apart`);
   const scopes = options.auth?.scopes;
   const deferred = new Set(options.deferred ?? tools.filter(t => t.mcp?.deferred).map(t => t.name));
   for (const name of deferred) if (!tools.some(t => t.name === name)) throw new Error(`@flow-engineer/flow/mcp: deferred tool ${name} does not exist`);
   const sourceDescriptors = tools.map(t => {
     const generated = describe(t, scopes);
-    if (t.name === "read_skill" && skills.length) generated._meta[SKILLS_META] = skills.map(({ name, description }) => ({ name, description }));
+    if (t.name === "read_skill" && skills.length) (generated._meta ??= {})[SKILLS_META] = skills.map(({ name, description }) => ({ name, description }));
     return options.descriptor ? options.descriptor(t, generated) : generated;
   });
   const path = options.path ?? "/mcp";
@@ -185,9 +194,9 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   // Legacy HTTP carries clientInfo only on initialize. Keep bounded metadata, never auth.
   const sessions = new Map<string, { client: { name: string; version: string }; path: string; at: number }>();
   const SESSION_TTL = 24 * 60 * 60 * 1000;
-  function endpointHandler(plugin: boolean) {
+  /** The SDK server for one connection; `headers` are the HTTP request's (none on stdio). */
+  function serverFor(plugin: boolean, headers?: Headers): Server {
     const instructions = options.instructions ?? mcpInstructions(plugin ? [] : skills, Boolean(feedback)) ?? "";
-    return createMcpHandler(({ requestInfo }) => {
     const server = new Server({ name: options.name, version: options.version }, { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) });
     server.setRequestHandler("tools/list", async (_request, ctx) => {
       const surface = surfaceOf(plugin, ctx.http?.authInfo);
@@ -199,7 +208,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
       const person = identity ? `key:${identity.key}` : "mcp:anonymous";
       const meta = ctx.mcpReq._meta ?? {};
       const sentKey = meta["chinwag/idempotency-key"];
-      const session = requestInfo?.headers.get("mcp-session-id") ?? undefined;
+      const session = headers?.get("mcp-session-id") ?? undefined;
       const host = server.getClientVersion() ?? (session ? sessions.get(session)?.client : undefined);
       const detail = {
         surface: meta["chinwag/surface"] === "cli" ? "cli" : plugin ? "mcp-plugin" : "mcp",
@@ -220,6 +229,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         signal: ctx.mcpReq?.signal ?? new AbortController().signal,
         records: options.records ?? NO_RECORDS,
         ...(options.businessEvents ? { events: options.businessEvents } : {}),
+        ...(detail.surface === "cli" ? { cli: { ...(detail.command ? { command: detail.command } : {}) } } : {}),
       }, (ctx.http?.authInfo?.extra?.credentials as CredentialProvider | undefined) ?? options.credentials);
       const started = Date.now();
       emit(context.conversationId, "tool.start", { callId: context.callId, tool: t.name, input, ...detail });
@@ -229,15 +239,16 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     });
     options.extend?.(server);
     return server;
-    });
   }
+  const endpointHandler = (plugin: boolean) => createMcpHandler(({ requestInfo }) => serverFor(plugin, requestInfo?.headers));
   const handler = endpointHandler(false);
   const pluginHandler = pluginPath ? endpointHandler(true) : undefined;
   const terminal = terminalOf(options);
   if (terminal && [path, pluginPath, ...(options.auth?.routes?.paths ?? [])].includes(terminal.path)) throw new Error(`@flow-engineer/flow/mcp: the terminal path ${terminal.path} is already served`);
   const app = options.app ? appServer(options.app, { name: options.name, mcpPath: path, resource: options.auth?.resource, terminalPath: terminal?.path, tools: (audiences.get("cli") ?? audiences.get(undefined)!).standalone.full, chat: appChatOf(options, terminal), verify: options.auth && (async (token, request) => options.auth!.verify(token, request)) }) : undefined;
 
-  async function serve(request: Request): Promise<Response> {
+  /** One request; `local` is the CLI in this process (IN_PROCESS): no sign-in or host checks, and the client kind "cli". */
+  async function serve(request: Request, local = false): Promise<Response> {
     const url = new URL(request.url);
     const metadataPrefix = "/.well-known/oauth-protected-resource";
     const plugin = pluginPath !== undefined && (url.pathname === pluginPath || url.pathname === `${metadataPrefix}${pluginPath}`);
@@ -256,7 +267,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
       });
     }
     if (url.pathname !== servedPath) return new Response("Not found", { status: 404 });
-    const rejected = options.allowedHosts
+    const rejected = local ? undefined : options.allowedHosts
       ? hostHeaderValidationResponse(request, options.allowedHosts)
       : LOCAL.has(url.hostname)
         ? (hostHeaderValidationResponse(request, localhostAllowedHostnames()) ?? originValidationResponse(request, localhostAllowedOrigins()))
@@ -266,9 +277,9 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     for (const [id, saved] of sessions) if (Date.now() - saved.at > SESSION_TTL) sessions.delete(id);
     const session = request.headers.get("mcp-session-id");
     if (session && sessions.get(session)?.path !== servedPath) return new Response("Session not found", { status: 404 });
-    let authInfo: AuthInfo | undefined;
+    let authInfo: AuthInfo | undefined = local ? { token: "", clientId: "", scopes: [], extra: { clientKind: "cli" } } : undefined;
     const bearer = /^Bearer\s+(.+)$/i.exec(request.headers.get("authorization") ?? "")?.[1];
-    if (options.auth && bearer) {
+    if (options.auth && bearer && !local) {
       const identity = await options.auth.verify(bearer, request);
       if (!identity) return challenge(url, servedPath, 401, "invalid_token", "The token is not valid.", []);
       authInfo = { token: bearer, clientId: identity.client?.id ?? "", scopes: identity.scopes ?? [], extra: { key: identity.key, ...(identity.client?.kind ? { clientKind: identity.client.kind } : {}) } };
@@ -281,7 +292,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
       } catch {
         parsedBody = undefined;
       }
-      if (options.auth) {
+      if (options.auth && !local) {
         for (const message of [parsedBody].flat()) {
           const call = message as { method?: unknown; params?: { name?: unknown; arguments?: unknown } } | null;
           if (!call || call.method !== "tools/call" || typeof call.params?.name !== "string") continue;
@@ -331,14 +342,39 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
     return Response.json({ error, error_description: description }, { status, headers: { "WWW-Authenticate": header } });
   }
 
-  return {
-    fetch: serve,
-    node: (req, res) => serveNode(serve, req, res),
+  async function stdio(settings: { onerror?: (error: Error) => void } = {}): Promise<void> {
+    // Loaded only here: the HTTP endpoint runs on runtimes without node:process streams.
+    const { serveStdio } = await import("@modelcontextprotocol/server/stdio");
+    const closed = new Promise<void>((done) => process.stdin.once("close", done).once("end", done));
+    const served = serveStdio(() => serverFor(false), settings.onerror ? { onerror: settings.onerror } : {});
+    await closed;
+    await served.close();
+    await trace?.flush();
+  }
+
+  const handle: McpServerHandle = {
+    fetch: (request) => serve(withHost(request)),
+    node: (req, res) => serveNode((request) => serve(request), req, res),
     descriptors,
     flushTraces: () => trace?.flush() ?? Promise.resolve(),
+    stdio,
     ...(pluginPath ? { plugin: { path: pluginPath, descriptors: pluginDescriptors } } : {}),
     ...(options.auth?.routes || terminal || app ? { paths: [...new Set([path, ...(pluginPath ? [pluginPath] : []), "/.well-known/oauth-protected-resource", ...(options.auth?.routes?.paths ?? []), ...(terminal ? [terminal.path] : []), ...(app?.paths ?? [])])] } : {}),
   };
+  // The CLI in this process reaches the standalone endpoint here, never over the network.
+  Object.defineProperty(handle, IN_PROCESS, { value: { path, fetch: (request: Request) => serve(request, true) }, enumerable: false });
+  return handle;
+}
+
+/**
+ * A request made in code (a client's own fetch to handle.fetch) has no Host header: its URL's host
+ * is the one it is for. A browser always sends Host, so the DNS-rebinding check still reads the browser's.
+ */
+function withHost(request: Request): Request {
+  if (request.headers.has("host")) return request;
+  const headers = new Headers(request.headers);
+  headers.set("host", new URL(request.url).host);
+  return new Request(request, { headers });
 }
 
 /**
@@ -511,18 +547,27 @@ async function callTool(t: Tool, input: unknown, context: ToolContext): Promise<
   try {
     output = await t.run(input, context);
   } catch (error) {
+    // A ToolError is a failure document the caller acts on: structured, and the same as text.
+    if (error instanceof ToolError) {
+      const document = error.document;
+      return { result: { isError: true, structuredContent: document as unknown as CallToolResult["structuredContent"], content: [{ type: "text", text: `${error.message}${error.next ? `\nNext: ${error.next}` : ""}\n${JSON.stringify(document)}` }] } };
+    }
     return { result: { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] } };
   }
-  if (!t.output) return { result: { content: [{ type: "text", text: render(output) }] } };
+  // Output given with its JSON as text (jsonText) is sent as that text, byte for byte.
+  const raw = jsonTextOf(output);
+  const marked = raw === undefined ? {} : { _meta: { [JSON_TEXT]: true } };
+  if (!t.output) return { result: { content: [{ type: "text", text: render(output) }], ...marked } };
   const checked = t.output.safeParse(output);
   if (!checked.success) return { result: { isError: true, content: [{ type: "text", text: `${t.name} returned a result that does not match its output schema.` }] } };
-  const data = { content: [{ type: "text" as const, text: render(checked.data) }], structuredContent: checked.data as CallToolResult["structuredContent"] };
+  const data = { content: [{ type: "text" as const, text: raw ?? render(checked.data) }], structuredContent: checked.data as CallToolResult["structuredContent"], ...marked };
   if (!t.format) return { result: data };
   // The tool has run: a formatter that fails sends the data as JSON, never an error.
   try {
-    const text: unknown = t.format(checked.data);
+    const text: unknown = t.format(checked.data, input);
     if (typeof text !== "string") return { result: data, formatError: `format returned ${typeof text}, not text` };
-    return { result: { ...data, content: [{ type: "text", text }], _meta: { [FORMATTED]: true } } };
+    // A CLI prints the JSON text with --json, so it rides beside the tool's own text; hosts read the text.
+    return { result: { ...data, content: [{ type: "text", text }], _meta: { [FORMATTED]: true, ...(raw !== undefined && context.cli ? { [JSON_TEXT]: raw } : {}) } } };
   } catch (error) {
     return { result: data, formatError: error instanceof Error ? error.message : String(error) };
   }

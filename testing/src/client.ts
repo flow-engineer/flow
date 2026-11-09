@@ -28,11 +28,9 @@ export interface ConnectOptions {
    * A business run (protocol.ts) builds one more per run, with its own channels and clock (`BusinessBuild`); that needs a Flow Framework Agent. */
   build: (options: { tools: Tool[]; events: EventSink[] } & Partial<BusinessBuild>) => AgentUnderTest;
   files: SuiteFile[];
-  /** The tests folder: files a scenario attaches are read from here, and never leave this machine. */
+  /** The tests folder: files a scenario attaches are read from here; they never leave this machine. */
   testsDir?: string;
   runs?: number;
-  /** Ask the cloud to replay no stored person, tool or judge answers (`flow test --fresh`). */
-  fresh?: boolean;
   log?: (line: string) => void;
   /** Headers for the open only (cloudHeaders: the CI key and the attestation); never sent to the tunnel. */
   openHeaders?: Record<string, string>;
@@ -483,8 +481,6 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   const groups = playGroups(agent);
   // Business runs need an agent of this framework: its own channels, routes, clock and nudges.
   const canBusiness = typeof (agent as Partial<BusinessAgent>).reach === "function" && typeof (agent as Partial<BusinessAgent>).fetch === "function";
-  // A restart starts the run's next agent and resumes it on the run's store.
-  const canRestart = canBusiness && typeof (agent as Partial<BusinessAgent>).resume === "function";
 
   const open: OpenSession = {
     agent: {
@@ -502,10 +498,8 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     reopen: true,
     groups: true,
     ...(canBusiness ? { business: true } : {}),
-    ...(canRestart ? { restart: true } : {}),
     ...(typeof agent.seedHistory === "function" ? { history: true } : {}),
     flaky: true,
-    ...(options.fresh ? { fresh: true } : {}),
     ...(only ? { only } : {}),
   };
   const opened = await openOnce(`${base}/api/sessions`, open, options.openHeaders, controller.signal, postTimeoutMs, openRetryCapMs, log);
@@ -524,7 +518,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       what: "file upload",
     });
   }
-  log(`Session ${opened.sessionId}: suite ${suiteHash(options.files).slice(0, 12)}, ${options.files.length} files (${uploads.length} new to the cloud, the rest it already had).`);
+  log(`Session ${opened.sessionId}: suite ${suiteHash(options.files).slice(0, 12)}, ${options.files.length} files (${uploads.length === options.files.length ? "all new to the cloud" : uploads.length ? `${uploads.length} new to the cloud, the rest it already had` : "the cloud already had them all"}).`);
   const limits = sessionLimits(opened.limits);
   if (limits) {
     const line = limitsLine(limits);
@@ -533,7 +527,6 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   }
   dashboard = opened.dashboard;
   options.onDashboard?.(dashboard, opened.sessionId, typeof opened.agent === "string" && opened.agent ? opened.agent : undefined);
-  if (opened.replay === true) log("The cloud replays stored person, tool and judge answers where a scenario has not changed (--fresh plays them all anew).");
   log(`Watch it: ${opened.dashboard}`);
   session = `${tunnel}/api/sessions/${opened.sessionId}`;
 
@@ -550,6 +543,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       watch,
       log,
       sent: sendPath.delivered,
+      file: (ref) => fileAgain(options.testsDir, ref),
     })
     : null;
 
@@ -642,6 +636,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
         channel: command.channel,
         channelName: command.channelName,
         messageId: command.messageId,
+        file: (ref) => fileAgain(options.testsDir, ref),
         });
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
@@ -1090,6 +1085,8 @@ function withFiles(incoming: WireIncoming, testsDir: string | undefined, log: (l
       kind: a.kind,
       mime: mimeOf(a.file),
       name: basename(a.file),
+      // Its path in the tests folder: the agent may read it again (ask_about_video) with fileAgain.
+      ref: a.file,
       data: () => {
         const reading = readAttachment(testsDir, a.file);
         // A caller that never awaits still must not become an uncaught exception.
@@ -1098,6 +1095,16 @@ function withFiles(incoming: WireIncoming, testsDir: string | undefined, log: (l
       },
     })),
   };
+}
+
+/** A file a scenario attached, read again from the tests folder by its path; null once it is no longer there. */
+async function fileAgain(testsDir: string | undefined, file: string): Promise<Uint8Array | null> {
+  try {
+    return await readAttachment(testsDir, file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 function readAttachment(testsDir: string | undefined, file: string): Promise<Uint8Array> {

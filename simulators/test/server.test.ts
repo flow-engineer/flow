@@ -19,7 +19,7 @@ function fakeAgent(channels?: ChannelSummary[]) {
     conversationIds: [] as string[],
     reactions: [] as { conversationId: string; emoji: string; toText: string }[],
     count: 0,
-    options: [] as Array<{ channel: ChannelInfo; channelName?: string }>,
+    options: [] as Array<{ channel: ChannelInfo; channelName?: string; file?: (ref: string) => Promise<Uint8Array | null> }>,
     incomings: [] as Incoming[],
   };
   const connection: AgentConnection = {
@@ -85,6 +85,25 @@ test("a person can react to an agent message on WhatsApp, not on SMS", async () 
     assert.equal(fake.reactions.length, 0);
     assert.equal((await react("whatsapp")).status, 202);
     assert.deepEqual(fake.reactions, [{ conversationId: "whatsapp:p", emoji: "👍", toText: "hello on whatsapp" }]);
+  } finally {
+    await server.close();
+  }
+});
+
+test("WhatsApp shows a video the agent sends, with its caption; the web simulator refuses one, with why", async () => {
+  const { fake, server, send, lines } = await start();
+  try {
+    const video = { url: "https://example.com/tour.mp4" };
+    await send("whatsapp", "show me the flat");
+    assert.ok(fake.options.at(-1)!.channel.videos);
+    await fake.deliver!({ type: "message", text: "The walk-through", video });
+    const out = (await lines("whatsapp")).at(-1);
+    assert.ok(out?.kind === "out");
+    assert.deepEqual([out.text, out.video], ["The walk-through", video]);
+
+    await send("web", "show me the flat");
+    assert.equal(fake.options.at(-1)!.channel.videos, undefined);
+    assert.throws(() => fake.deliver!({ type: "message", text: "The walk-through", video }), /takes no videos here/);
   } finally {
     await server.close();
   }
@@ -156,7 +175,8 @@ test("the web simulator plays the agent's own custom UI, and shows the params it
   const { fake, server, send, lines } = await start(undefined, [app]);
   try {
     await send("web", "show my progress");
-    assert.deepEqual(fake.options.at(-1), { channel: app.info, channelName: "app" });
+    const { file: _file, ...options } = fake.options.at(-1)!;
+    assert.deepEqual(options, { channel: app.info, channelName: "app" });
     await fake.deliver!({ type: "message", text: "Here it is.", fields: { app_link: { url: "https://app.example/progress", screen: "progress" } } });
     const out = (await lines("web")).at(-1);
     assert.ok(out?.kind === "out");
@@ -303,6 +323,53 @@ test("independent local playgrounds keep separate operator cookies", async () =>
     for (const url of urls) assert.equal((await fetch(`${url}/api/platforms`, { headers: { cookie: cookies.join("; ") } })).status, 200);
     assert.equal((await fetch(`${urls[0]}/api/platforms`, { headers: { cookie: cookies[1] } })).status, 401);
   } finally { await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve())))); }
+});
+
+test("a video sent from a simulator reaches the agent as a video it can fetch again by its ref, and the simulator plays it inline", async () => {
+  const { fake, server, post, lines } = await start();
+  try {
+    const bytes = new Uint8Array(2_000).fill(3);
+    assert.equal((await post("/api/messages", { platform: "telegram", person: "p", text: "the leak", attachments: [{ kind: "video", mime: "video/mp4", data: Buffer.from(bytes).toString("base64") }] })).status, 202);
+    const [file] = fake.incomings[0].attachments ?? [];
+    assert.deepEqual({ kind: file.kind, mime: file.mime }, { kind: "video", mime: "video/mp4" });
+    assert.deepEqual(await file.data(), bytes);
+    // The agent can fetch it again by its ref (to ask about it later); one the simulator does not keep is null.
+    assert.deepEqual(await fake.options[0].file!(file.ref!), bytes);
+    assert.equal(await fake.options[0].file!("gone"), null);
+    const [line] = await lines("telegram");
+    assert.ok(line.kind === "in" && line.attachments);
+    const again = await fetch(server.url + line.attachments[0].url);
+    assert.equal(again.headers.get("content-type"), "video/mp4");
+    assert.match(again.headers.get("content-disposition") ?? "", /^inline;/);
+  } finally {
+    await server.close();
+  }
+});
+
+test("the playground shows the agent's 👀 on a video the moment it arrives, while it is still being described, and no typing", async () => {
+  const described = gate<string>();
+  const h = multi({ channels: { whatsapp: { info: WHATSAPP, phone: true } }, testPeople: [SAM], database: sqlite(), describeVideo: () => described.promise });
+  await h.agent.resume();
+  const server = await simulators().listen(h.agent, 0);
+  const where = `channel=whatsapp&person=${encodeURIComponent(SAM.phone)}`;
+  try {
+    const { seq } = (await (await fetch(`${server.url}/api/transcript?${where}`)).json()) as { seq: number };
+    const video = { kind: "video", mime: "video/mp4", data: Buffer.from(new Uint8Array(2_000)).toString("base64") };
+    const sent = await fetch(`${server.url}/api/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ channel: "whatsapp", person: SAM.phone, text: "is this covered?", attachments: [video] }) });
+    assert.equal(sent.status, 202);
+    type Event = { type: string; on?: boolean; line?: { kind: string; id?: string; messageId?: string; emoji?: string; by?: string } };
+    const { events } = (await (await fetch(`${server.url}/api/poll?${where}&after=${seq}`)).json()) as { events: Event[] };
+    const theirs = events.find((e) => e.line?.kind === "in")?.line;
+    const reaction = events.find((e) => e.line?.kind === "reaction")?.line;
+    assert.deepEqual(reaction && { messageId: reaction.messageId, emoji: reaction.emoji, by: reaction.by }, { messageId: theirs?.id, emoji: "👀", by: "agent" }, "👀 shows on the video before the description is back");
+    described.open("A dented rear bumper.");
+    (await h.nextCall(0)).answer(respond(call("send_whatsapp", { text: "Bumper dents are covered." })));
+    await h.agent.conversation((await h.agent.testConversation(SAM.phone))!)!.whenIdle();
+    const after = (await (await fetch(`${server.url}/api/poll?${where}&after=${seq}`)).json()) as { events: Event[] };
+    assert.deepEqual(after.events.filter((e) => e.type === "typing" && e.on), [], "the video's turn showed no typing");
+  } finally {
+    await server.close();
+  }
 });
 
 test("a file sent from a simulator reaches the agent with its bytes, the message box as its caption", async () => {

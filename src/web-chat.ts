@@ -25,6 +25,7 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { gzipSync } from "node:zlib";
 import { replyButton, type Channel, type ChannelAgent } from "./channels.ts";
+import { log } from "./events.ts";
 import { sameSecret, withoutTrailingSlashes, wrongTries } from "./http.ts";
 import type { CarouselCard, ChannelInfo, Outbound, PageContext, Photo, SendReceipt } from "./types.ts";
 import type { TranscriptEntry } from "./conversation.ts";
@@ -316,7 +317,7 @@ export function webChat(options: WebChatOptions = {}): WebChat {
   /** The client's address, as the trusted proxies say; null when none is trusted. */
   function addressOf(request: Request): string | null {
     if (!proxies) {
-      if (!warnedAddress) console.warn("flow web chat: no trusted proxy (trustProxy, FLOW_TRUST_PROXY): limits per network address are off");
+      if (!warnedAddress) log("WARNING", "flow web chat: no trusted proxy (trustProxy, FLOW_TRUST_PROXY): limits per network address are off");
       warnedAddress = true;
       return null;
     }
@@ -460,7 +461,7 @@ export function webChat(options: WebChatOptions = {}): WebChat {
             await news(visitor.address, seen, Math.min(PING_MS - (now() - pinged), ends - now()), stop.signal);
           }
         } catch (error) {
-          if (!stop.signal.aborted) console.warn("flow web chat: a stream ended:", error instanceof Error ? error.name : "unknown");
+          if (!stop.signal.aborted) log("WARNING", "flow web chat: a stream ended:", error instanceof Error ? error.name : "unknown");
         } finally {
           close();
           try {
@@ -527,7 +528,7 @@ export function webChat(options: WebChatOptions = {}): WebChat {
         if (!visitor) return problem(401, "session_invalid", `start a session: POST ${base}/session`, headers);
         return await handle(request, visitor, headers);
       } catch (error) {
-        console.warn("flow web chat: a request failed:", error instanceof Error ? error.message : "unknown");
+        log("WARNING", "flow web chat: a request failed:", error instanceof Error ? error.message : "unknown");
         return problem(500, "failed", "that could not be done; try again", headers, 1);
       }
     };
@@ -735,7 +736,7 @@ export function serveScript(found: ScriptFile, request: Request, cache: string):
 }
 
 function randomKey(): string {
-  console.warn("flow web chat: no FLOW_WEB_CHAT_SESSION_KEY: sessions and anonymous visitors last until this process stops");
+  log("WARNING", "flow web chat: no FLOW_WEB_CHAT_SESSION_KEY: sessions and anonymous visitors last until this process stops");
   return randomBytes(32).toString("base64url");
 }
 

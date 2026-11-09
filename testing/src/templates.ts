@@ -4,10 +4,12 @@
 //     footer?, buttons, values, send_order, ... }], synced_at }
 // `--declare` prints the approved ones as createAgent's `templates: [...]`; `flow test` warns when a
 // declared template differs from the approved one (templateWarnings). A dashboard without the route
-// (404) does not serve templates yet. Exit status: 0 printed, 1 anything else.
+// (404) does not serve templates yet. With --json, stdout is one JSON document: the server's, or
+// { ok: false, error, next } when it did not work. Exit status: 0 printed, 1 not read, 2 a wrong flag.
 
 import type { TemplateDefinition } from "../../src/types.ts";
-import { access, Failed, get, parse, table } from "./conversations.ts";
+import { access, answerOf, Failed, failed, get, hostedOf, parse, table, usageFailed, USAGE_EXIT, withReads, folderAccess } from "./conversations.ts";
+import { KEYS_HELP, type FoundKey } from "./cloud-call.ts";
 import { OBSERVE_URL } from "../../src/traces.ts";
 
 export const TEMPLATES_LINE = `  flow templates [--all] [--declare] [--json]
@@ -26,13 +28,20 @@ Options:
   --all                    Every status (pending, rejected, ...), not only approved
   --declare                The approved templates as createAgent's templates: [...], ready to paste,
                            and one agent.nudge per template with its values in order
-  --json                   The server's JSON on stdout, every status
+  --json                   The server's JSON on stdout, every status (or { ok: false, error, next }
+                           when it did not work)
+  --env, --environment     Taken and ignored: the templates are the project's, in both
   --cloud <url>            Flow's address (default: FLOW_FRAMEWORK_CLOUD, else ${OBSERVE_URL})
   --dotenv <path>          Read the environment from this file instead of the folder's .env
+  --server <url>           Read over a hosted Flow MCP as you (flow mcp login), not with this
+                           folder's keys (default: FLOW_MCP_SERVER)
+  --agent <id|name>        With --server: which of your agents (default: your only one)
   -h, --help               Show this help
 
 Reads with the agent's Flow key, FLOW_KEY (flow setup writes it into .env); it is never printed.
-Exit status: 0 printed, 1 a wrong flag, no key, or the server refused or could not be reached.`;
+Exit status: 0 printed, 1 no key, or the server refused or could not be reached, 2 a wrong flag.
+
+${KEYS_HELP}`;
 
 /** A template as the dashboard lists it. */
 interface Listed {
@@ -48,28 +57,31 @@ interface Listed {
   send_order?: string;
 }
 
-const NOT_SERVED = "the dashboard does not serve templates yet";
 
 /** Runs `flow templates ...`; resolves to the exit status. */
 export async function templatesCli(args: string[]): Promise<number> {
   const name = "flow templates";
   const parsed = parse(name, args, { all: { type: "boolean", default: false }, declare: { type: "boolean", default: false } }, USAGE);
-  if (!parsed) return 1;
+  if (!parsed) return USAGE_EXIT;
   const { values, positionals } = parsed;
+  const json = values.json === true;
   if (values.help) return console.log(USAGE), 0;
-  if (positionals.length) return console.error(`${name} takes no arguments.\n\n${USAGE}`), 1;
-  if (values.declare && (values.all || values.json)) return console.error(`--declare prints the approved templates only: give it alone.\n\n${USAGE}`), 1;
-  const where = access(name, values);
-  if (typeof where === "string") return console.error(where), 1;
+  if (positionals.length) return usageFailed(json, `${name} takes no arguments.`, USAGE);
+  if (values.declare && (values.all || json)) return usageFailed(json, `--declare prints the approved templates only: give it alone.`, USAGE);
+  const hosted = hostedOf(values);
+  if (typeof hosted === "string") return usageFailed(json, hosted, USAGE);
+  const where = hosted ? undefined : access(name, values);
+  if (where instanceof Failed) return failed(json, where);
   let text: string;
   let body: Record<string, unknown>;
   try {
-    ({ text, body } = await get(name, where.cloud, where.key, "/v1/agent/templates"));
+    // list_templates says a dashboard without templates in flow templates' own words.
+    ({ text, body } = await withReads(hosted, "templates", folderAccess(name, values, where), async (read) => answerOf(await read("list_templates", { status: "all" }))));
   } catch (error) {
     if (!(error instanceof Failed)) throw error;
-    return console.error(error.status === 404 ? `${name}: ${NOT_SERVED} (${where.cloud} answered 404).` : error.message), 1;
+    return failed(json, error);
   }
-  if (values.json) return process.stdout.write(text), 0;
+  if (json) return process.stdout.write(text.endsWith("\n") ? text : `${text}\n`), 0;
   const listed = (body.templates as Listed[] | undefined) ?? [];
   const shown = values.all ? listed : listed.filter((t) => t.status === "approved");
   if (values.declare) return console.log(declare(shown).join("\n")), 0;
@@ -168,11 +180,11 @@ export function templateDifferences(declared: TemplateDefinition[], listed: List
  * The lines `flow test` prints when the agent's declared templates are not the approved ones: none
  * when it declares none, has no key, or the dashboard does not serve templates. Never throws.
  */
-export async function templateWarnings(declared: TemplateDefinition[], cloud: string, key: string | undefined): Promise<string[]> {
+export async function templateWarnings(declared: TemplateDefinition[], cloud: string, key: FoundKey | undefined): Promise<string[]> {
   if (!declared.length || !key) return [];
   let body: Record<string, unknown>;
   try {
-    ({ body } = await get("flow test", cloud.replace(/\/+$/, ""), key, "/v1/agent/templates"));
+    ({ body } = await get("flow test", { cloud: cloud.replace(/\/+$/, ""), key }, "/v1/agent/templates"));
   } catch (error) {
     if (error instanceof Failed && error.status === 404) return [];
     return [`Could not compare the declared WhatsApp templates with the dashboard's: ${(error as Error).message.replace(/^flow test: /, "")}`];

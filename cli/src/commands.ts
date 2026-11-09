@@ -9,6 +9,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Command as StricliCommand, CommandContext } from "@stricli/core";
 import { FEEDBACK_NUDGE } from "../../src/skills.ts";
+import type { McpServerHandle } from "../../mcp/src/server.ts";
 
 export interface ToolCommand {
   /** The tool this command calls. */
@@ -79,8 +80,14 @@ export interface CliConfig {
   name: string;
   /** The CLI client version sent to the server (default "1"). */
   version?: string;
-  /** The organization's MCP endpoint. Else `--server` or <NAME>_SERVER. */
-  server?: string;
+  /**
+   * The organization's MCP endpoint. Else `--server` or <NAME>_SERVER. Or an mcpServer handle in
+   * this process: the CLI calls its tools with no network and no sign-in (as the client kind "cli"),
+   * unless --server or <NAME>_SERVER names a URL.
+   */
+  server?: string | McpServerHandle;
+  /** The variable a server's URL is read from (default <NAME>_SERVER). */
+  serverEnv?: string;
   /**
    * The MCP server a CLI packed for an environment uses (`flow cli pack --server production`, and
    * flow deploy), in place of the hosted agent's address: an https URL such as
@@ -206,9 +213,9 @@ export interface Brand {
 export interface SignInPage {
   status: "signed-in" | "failed";
   brand: Brand & { name: string };
-  /** The command's name ("olostep"), to say where to go back to. */
+  /** The command's name ("acme"), to say where to go back to. */
   cli: string;
-  /** How to sign in from the terminal ("olostep login"), to say how to try again. */
+  /** How to sign in from the terminal ("acme login"), to say how to try again. */
   command: string;
   message: string;
 }
@@ -585,8 +592,12 @@ export function logoProblem(logo: string): string | undefined {
   return /^https:\/\/[^\s"'<>]+$|^data:image\/[a-z0-9.+-]+(;[^,\s"'<>]*)?,[^\s"'<>]+$/i.test(logo) && URL.canParse(logo) ? undefined : "brand.logo must be an https URL or a data:image URL";
 }
 
-/** What is wrong in a CLI file against the server's tools, one sentence each; warnings apart. */
-export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: string[]; warnings: string[] } {
+/**
+ * What is wrong in a CLI file against the server's tools, one sentence each; warnings apart.
+ * `listed`: the tools are what the server lists (the default). false: they are the agent's tools,
+ * and whether the server serves each is not known, so a command is "reachable" only if it does.
+ */
+export function cliProblems(config: CliConfig, tools: ToolInfo[], listed = true): { errors: string[]; warnings: string[] } {
   const errors: string[] = [];
   const warnings: string[] = [];
   const { accent, logo } = brandOf(config);
@@ -671,7 +682,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[]): { errors: str
     if (commandEntries(config).some(([w, c]) => w.trim() === derivedName(t.name) && isCustom(c))) continue;
     if (derivedName(t.name) === "update" && updatesItself(config)) errors.push(`tool ${t.name} would be the command "update", which is the CLI's own while update is set; give it another name in commands`);
     claim(derivedName(t.name), `tool ${t.name}`);
-    if (config.commands) warnings.push(`tool ${t.name} has no command in the CLI file; it is reachable as "${derivedName(t.name)}"`);
+    if (config.commands) warnings.push(`tool ${t.name} has no command in the CLI file; it is reachable as "${derivedName(t.name)}"${listed ? "" : " if the CLI's MCP server serves it"}`);
   }
   for (const [group, sub] of Object.entries(config.defaultCommands ?? {})) {
     const key = group.trim().split(/\s+/).join(" ");
@@ -755,6 +766,10 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     for (const e of c.config && !isCustom(c.config) ? (c.config.examples ?? []) : []) lines.push("", "```bash", e, "```");
   }
   return lines.join("\n") + "\n";
+}
+
+export function serverEnvOf(config: CliConfig): string {
+  return config.serverEnv ?? `${config.name.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_SERVER`;
 }
 
 export function tokenEnvOf(config: CliConfig): string {

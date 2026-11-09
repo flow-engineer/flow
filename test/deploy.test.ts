@@ -2,16 +2,18 @@
 // `flow deploy` (testing/src/deploy.ts) against a fake cloud: the CI key from the environment or
 // the agent's .env, the folder packed without its secrets or dependencies, a deploy followed until
 // live or refused, an agent on a newer Flow Framework than hosting's refused before the upload,
-// and secrets sent with their names printed and their values never.
+// secrets sent with their names printed and their values never, set or taken away and applied by a
+// restart, logs filtered and their start said, and a 429 waited out.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { deployCli, logsCli, pack, parseEnv, sinceSeconds } from "../testing/src/deploy.ts";
+import { addLogLines, deployCli, logsCli, logsWindow, pack, parseEnv, sinceSeconds } from "../testing/src/deploy.ts";
+import { hostLogs, type HostLogLine } from "./helpers.ts";
 
 interface Call {
   method: string;
@@ -21,8 +23,11 @@ interface Call {
   bytes: number;
 }
 
+/** The CLI's now in these tests (run's ctx.now), and the fake host's. */
+const NOW = Date.parse("2026-10-20T11:00:00Z");
+
 /** A fake cloud: the routes `flow deploy` calls, a deploy that builds once then ends as `ending`. */
-async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean; neverDeployed?: boolean; framework?: string; traceText?: { on: boolean; source: "flow" | "owner" } } = {}) {
+async function cloud(options: { ending?: "live" | "refused"; address?: boolean; refuseSecret?: string; list?: boolean; logs?: boolean | "unfiltered"; neverDeployed?: boolean; framework?: string; traceText?: { on: boolean; source: "flow" | "owner" }; restart?: "ok" | "nothing"; unset?: boolean; health?: boolean; limitOnce?: boolean } = {}) {
   const calls: Call[] = [];
   let looks = 0;
   const server = createServer(async (req, res) => {
@@ -33,7 +38,9 @@ async function cloud(options: { ending?: "live" | "refused"; address?: boolean; 
     const isJson = String(req.headers["content-type"]).includes("json");
     calls.push({ method: req.method!, path, auth: String(req.headers.authorization), body: isJson && raw.length ? JSON.parse(raw.toString()) : null, bytes: raw.length });
     const send = (status: number, body: unknown) => res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
-    const env = (calls.find((c) => c.path === "/v1/hosting/deploys")?.body?.environment as string) ?? "production";
+    const env = (calls.find((c) => c.path === "/v1/hosting/deploys" || c.path === "/v1/hosting/restart")?.body?.environment as string) ?? "production";
+    // As Flow's read limit: the first call is told to wait, then answered.
+    if (options.limitOnce && calls.length === 1) return res.writeHead(429, { "content-type": "application/json", "retry-after": "2" }).end(JSON.stringify({ error: { code: "rate_limited", message: "slow down" } }));
     const deploy = (status: string, id = "hdp_1") => ({ id, created_at: `2026-10-20T10:0${id.at(-1)}:00Z`, updated_at: `2026-10-20T10:0${id.at(-1)}:30Z`, environment: env, status, version: "abc123", error: null, findings: status === "refused" ? [{ level: "error", code: "ignores_host", message: "buildAgent does not pass host" }] : [{ level: "warning", code: "ignores_host", message: "state in memory" }] });
     if (req.method === "GET" && path === "/v1/hosting/framework" && options.framework) return send(200, { framework: { version: options.framework } });
     if (req.method === "POST" && path === "/v1/hosting/deploys") return send(201, { deploy: deploy("uploading"), upload_url: `${url}/upload/hdp_1` });
@@ -41,16 +48,40 @@ async function cloud(options: { ending?: "live" | "refused"; address?: boolean; 
     if (req.method === "POST" && path === "/v1/hosting/deploys/hdp_1/start") return send(200, { deploy: deploy("building") });
     if (req.method === "GET" && path === "/v1/hosting/deploys/hdp_1") return send(200, { deploy: deploy(looks++ === 0 ? "building" : (options.ending ?? "live")) });
     if (req.method === "POST" && path === "/v1/hosting/promote") return send(201, { deploy: deploy("building") });
+    if (req.method === "POST" && path === "/v1/hosting/restart" && options.restart === "ok") return send(202, { deploy: { ...deploy("building"), source: "restart" } });
+    if (req.method === "POST" && path === "/v1/hosting/restart" && options.restart === "nothing") return send(409, { error: { code: "nothing_to_restart", message: "nothing is live in staging" } });
+    if (req.method === "DELETE" && path.startsWith("/v1/hosting/secrets/") && options.unset) {
+      const name = path.split("?")[0]!.split("/").at(-1)!;
+      return name === "ABSENT" ? send(404, { error: { code: "not_found", message: `no secret ${name}` } }) : send(200, { ok: true, name, environment: new URL(path, url).searchParams.get("environment"), applies: "next deploy" });
+    }
+    // An older host, as Go's router answers it: DELETE where only PUT is routed, and no restart route.
+    if (req.method === "DELETE" && path.startsWith("/v1/hosting/secrets/")) return res.writeHead(405, { "content-type": "text/plain" }).end("Method Not Allowed");
+    if (path === "/v1/hosting/restart") return res.writeHead(404, { "content-type": "text/plain" }).end("404 page not found");
     if (req.method === "GET" && path.startsWith("/v1/hosting/address")) return options.address ? send(200, { url: "https://agent-staging.example.com" }) : send(404, { error: { code: "not_found", message: "no such route" } });
     if (req.method === "GET" && path.startsWith("/v1/hosting/deploys?")) {
       if (!options.list) return res.writeHead(404, { "content-type": "text/plain" }).end("404 page not found");
       const live = options.traceText ? { ...deploy("live", "hdp_1"), trace_text: options.traceText } : deploy("live", "hdp_1");
-      return send(200, { deploys: [live, deploy("building", "hdp_2"), deploy("replaced", "hdp_0")] });
+      const health = options.health ? {
+        framework: { version: "0.15.6" },
+        traces: { [new URL(path, url).searchParams.get("environment")!]: { state: "refused", accepted_at: "2026-10-28T09:00:00Z", refused: { at: "2026-10-29T09:00:00Z", status: 403, code: "not_live", message: "this workspace takes no production traces yet", hint: "ask Flow to let it go live" } } },
+      } : {};
+      return send(200, { deploys: [options.health ? { ...live, framework: { package: "@flow-engineer/flow", version: "0.15.0" } } : live, deploy("building", "hdp_2"), deploy("replaced", "hdp_0")], ...health });
     }
     if (req.method === "GET" && path.startsWith("/v1/hosting/logs?")) {
       if (!options.logs) return res.writeHead(404, { "content-type": "text/plain" }).end("404 page not found");
-      const after = new URL(path, url).searchParams.get("after");
-      return send(200, after ? { lines: [{ time: "2026-10-20T10:00:02Z", severity: "ERROR", text: "second" }], next: "c2" } : { lines: [{ time: "2026-10-20T10:00:01Z", severity: "INFO", text: "first" }], next: "c1" });
+      const asked = new URL(path, url).searchParams;
+      const after = asked.get("after");
+      // The host's own refusals (limit, since and until) first, as hosting answers them.
+      const refused = hostLogs(asked, [], NOW);
+      if (refused.status !== 200) return send(refused.status, refused.body);
+      // An older host: every line in its 24 hours, whatever until, severity and grep said, and no from.
+      if (options.logs === "unfiltered") return send(200, { lines: [
+        { time: "2026-10-20T08:00:00Z", severity: "INFO", text: "booted" },
+        { time: "2026-10-20T09:00:00Z", severity: "ERROR", text: "tool book failed: timeout" },
+        { time: "2026-10-20T09:30:00Z", severity: "WARNING", text: "Tool book slow" },
+        { time: "2026-10-20T10:30:00Z", severity: "ERROR", text: "tool book failed: refused" },
+      ], next: "c1" });
+      return send(200, after ? { lines: [{ time: "2026-10-20T10:00:02Z", severity: "ERROR", text: "second" }], next: "c2" } : { lines: [{ time: "2026-10-20T10:00:01Z", severity: "INFO", text: "first" }], next: "c1", from: "2026-10-18T11:00:00Z" });
     }
     if (req.method === "PUT" && path.startsWith("/v1/hosting/secrets/")) {
       const name = path.split("/").at(-1)!;
@@ -67,16 +98,20 @@ async function cloud(options: { ending?: "live" | "refused"; address?: boolean; 
   return { url, calls };
 }
 
+/** What the last run's calls waited, in milliseconds: its wait records and never sleeps. */
+const waited: number[] = [];
+
 /** Runs the CLI, keeping stdout and stderr apart. */
-async function run(argv: string[], env: NodeJS.ProcessEnv, stdin?: string) {
+async function run(argv: string[], env: NodeJS.ProcessEnv, stdin?: string, polls: number | null = 2) {
   const out: string[] = [];
   const err: string[] = [];
+  waited.length = 0;
   const log = console.log;
   const error = console.error;
   console.log = (...a: unknown[]) => void out.push(a.join(" "));
   console.error = (...a: unknown[]) => void err.push(a.join(" "));
   try {
-    const options = { pollMs: 1, maxPolls: 2, now: () => Date.parse("2026-10-20T11:00:00Z"), readStdin: () => stdin ?? "" };
+    const options = { pollMs: 1, maxPolls: polls ?? undefined, now: () => NOW, readStdin: () => stdin ?? "", waits: { wait: async (ms: number) => void waited.push(ms), note: (line: string) => void err.push(line) } };
     const code = argv[0] === "logs" ? await logsCli(argv.slice(1), env, options) : await deployCli(argv, env, options);
     return { code, stdout: out.join("\n"), printed: [...out, ...err].join("\n") };
   } finally {
@@ -122,6 +157,22 @@ test("deploy packs the folder, uploads it, starts the build and follows it to li
   assert.match(printed, /Live in staging\.\nURL: https:\/\/agent-staging\.example\.com\n/);
   assert.match(printed, /Next: .*npx @flow-engineer\/flow deploy promote/);
   assert.ok(!printed.includes("oci_key"), "the key is never printed");
+});
+
+test("an MCP server alone (src/mcp.ts, no src/agent.ts) deploys; a folder with neither stops before any call", async () => {
+  const fake = await cloud();
+  const dir = agentFolder();
+  rmSync(join(dir, "src", "agent.ts"));
+  writeFileSync(join(dir, "src", "mcp.ts"), "export const mcp = { fetch: () => new Response(null, { status: 404 }) };");
+  const { code, printed } = await run(["--dir", dir, "--no-secrets"], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url });
+  assert.equal(code, 0, printed);
+  assert.ok(fake.calls.some((c) => c.method === "PUT" && c.path === "/upload/hdp_1" && c.bytes > 0), "the folder is uploaded");
+  rmSync(join(dir, "src", "mcp.ts"));
+  const calls = fake.calls.length;
+  const neither = await run(["--dir", dir, "--no-secrets"], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url });
+  assert.equal(neither.code, 2);
+  assert.match(neither.printed, /src\/agent\.ts is missing: .*an MCP server alone needs only src\/mcp\.ts/);
+  assert.equal(fake.calls.length, calls);
 });
 
 test("deploy --json prints one answer on stdout; a cloud without the address route still works", async () => {
@@ -216,6 +267,23 @@ test("secrets --from-env sends each value once, never the CI key or a name Flow 
   for (const value of ["oci_fromdotenv", "fk_test_messaging_value", "sk-ant-value", "line\nbreak", "never-sent", "refused-value"]) assert.ok(!printed.includes(value), `${value} is never printed`);
 });
 
+test("a live Flow key is never sent to staging; a test one goes to production with a warning; FLOW_KEY goes to both; only prefixes are printed", async () => {
+  const fake = await cloud();
+  const dir = agentFolder(
+    ["FLOW_FRAMEWORK_CLOUD_KEY=oci_key", `FLOW_FRAMEWORK_CLOUD=${fake.url}`, "FLOW_MESSAGING_KEY=fk_live_messagingvalue", "OBSERVE_KEY=otk_test_tracevalue", "FLOW_KEY=flow_test_flowkeyvalue"].join("\n"),
+  );
+  const staging = await run(["secrets", "--from-env", "--dir", dir, "--json"], {});
+  assert.equal(staging.code, 0, staging.printed);
+  const production = await run(["secrets", "--from-env", "--env", "production", "--dir", dir, "--json"], {});
+  assert.equal(production.code, 0, production.printed);
+  const puts = fake.calls.filter((c) => c.method === "PUT").map((c) => `${c.body!.environment} ${c.path.split("/").at(-1)}`);
+  assert.deepEqual(puts, ["staging OBSERVE_KEY", "staging FLOW_KEY", "production FLOW_MESSAGING_KEY", "production OBSERVE_KEY", "production FLOW_KEY"]);
+  assert.deepEqual(JSON.parse(staging.stdout).skipped, [{ name: "FLOW_MESSAGING_KEY", why: "a live key (fk_live_) goes to production only; staging takes a test key (fk_test_), set with npx @flow-engineer/flow deploy secret FLOW_MESSAGING_KEY --env staging" }]);
+  assert.deepEqual(JSON.parse(production.stdout).skipped, []);
+  assert.match(production.printed, /Warning: OBSERVE_KEY is a test key \(otk_test_\) and goes to production as one; production should run on a live key \(otk_live_\)\./);
+  for (const value of ["messagingvalue", "tracevalue", "flowkeyvalue"]) assert.ok(!staging.printed.includes(value) && !production.printed.includes(value), "only the prefix is printed");
+});
+
 test("parseEnv reads quotes, export and comments", () => {
   const env = parseEnv("export A='x # y'\nB=\"1\\n2\"\nC=plain  # note\n# D=no\nbad line");
   assert.deepEqual([...env], [["A", "x # y"], ["B", "1\n2"], ["C", "plain"]]);
@@ -286,14 +354,17 @@ test("logs on a Flow without the logs route says it is not available yet", async
 
 const route = (calls: Call[]) => calls.map((c) => `${c.method} ${c.path.split("?")[0]}`);
 
-test("a first deploy sends the .env's values as secrets before the build starts, printing names only", async () => {
+test("a first deploy sends the .env's values as secrets before the build starts, printing names only, and never the CLI's own settings", async () => {
   const fake = await cloud({ neverDeployed: true });
-  const dir = agentFolder("FLOW_FRAMEWORK_CLOUD_KEY=oci_key\nANTHROPIC_API_KEY=sk-ant-secret-value\nFLOW_FRAMEWORK_TRACES_KEY=tk_1\nEMPTY=\n");
+  // What flow setup and link write for the CLI alone (the join code, the phone page, the workspace)
+  // stays home; the sender ids go, since the hosted agent starts conversations from them.
+  const setupLines = "FLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\nFLOW_FRAMEWORK_TRY_URL=https://flow.example/try/brave-otter-1?c=telegram\nFLOW_FRAMEWORK_WORKSPACE=acc_1\nFLOW_MESSAGING_TELEGRAM_SENDER=snd_tg\n";
+  const dir = agentFolder(`FLOW_FRAMEWORK_CLOUD_KEY=oci_key\nANTHROPIC_API_KEY=sk-ant-secret-value\nFLOW_FRAMEWORK_TRACES_KEY=tk_1\nEMPTY=\n${setupLines}`);
   const { code, printed } = await run(["--dir", dir, "--version", "v1"], { FLOW_FRAMEWORK_CLOUD: fake.url });
   assert.equal(code, 0, printed);
-  assert.deepEqual(route(fake.calls).slice(0, 4), ["POST /v1/hosting/deploys", "PUT /v1/hosting/secrets/ANTHROPIC_API_KEY", "PUT /upload/hdp_1", "POST /v1/hosting/deploys/hdp_1/start"]);
+  assert.deepEqual(route(fake.calls).slice(0, 5), ["POST /v1/hosting/deploys", "PUT /v1/hosting/secrets/ANTHROPIC_API_KEY", "PUT /v1/hosting/secrets/FLOW_MESSAGING_TELEGRAM_SENDER", "PUT /upload/hdp_1", "POST /v1/hosting/deploys/hdp_1/start"]);
   assert.deepEqual(fake.calls[1]!.body, { environment: "staging", value: "sk-ant-secret-value" });
-  assert.match(printed, /Sent 1 secret from \.env to staging: ANTHROPIC_API_KEY\./);
+  assert.match(printed, /Sent 2 secrets from \.env to staging: ANTHROPIC_API_KEY, FLOW_MESSAGING_TELEGRAM_SENDER\./);
   assert.ok(!printed.includes("sk-ant-secret-value") && !printed.includes("oci_key"), "no value is printed");
   const kept = readFileSync(join(dir, ".flow", "secrets.json"), "utf8");
   assert.ok(!kept.includes("sk-ant-secret-value") && kept.includes("ANTHROPIC_API_KEY"), "a hash per name, never the value");
@@ -397,4 +468,283 @@ test("the framework check deploys as before on the same line, or when the cloud 
     assert.equal(code, 0, printed);
     assert.deepEqual(fake.calls.slice(0, 2).map((c) => `${c.method} ${c.path}`), ["GET /v1/hosting/framework", "POST /v1/hosting/deploys"]);
   }
+});
+
+test("secret --apply saves the value, then restarts the live version and follows it to live; deploy restart alone does the same", async () => {
+  const fake = await cloud({ restart: "ok" });
+  const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url };
+  const { code, stdout, printed } = await run(["secret", "API_TOKEN", "--environment", "production", "--apply", "--json", "--dir", agentFolder()], env, "tok-secret-value\n");
+  assert.equal(code, 0, printed);
+  assert.deepEqual(route(fake.calls), ["PUT /v1/hosting/secrets/API_TOKEN", "POST /v1/hosting/restart", "GET /v1/hosting/deploys/hdp_1", "GET /v1/hosting/deploys/hdp_1", "GET /v1/hosting/address"]);
+  assert.deepEqual(fake.calls[1]!.body, { environment: "production" });
+  const answer = JSON.parse(stdout);
+  assert.deepEqual({ ok: answer.ok, secret: answer.secret, status: answer.deploy.status }, { ok: true, secret: { name: "API_TOKEN", last4: "abcd", environment: "production" }, status: "live" });
+  assert.match(printed, /Restarting production's abc123 with its secrets as they are now \(hdp_1\)/);
+  assert.ok(!printed.includes("tok-secret-value"));
+  const alone = await cloud({ restart: "ok" });
+  const restarted = await run(["restart", "--dir", agentFolder()], { ...env, FLOW_FRAMEWORK_CLOUD: alone.url });
+  assert.equal(restarted.code, 0, restarted.printed);
+  assert.match(restarted.printed, /Live in staging\./);
+  // Without --apply it says when the value applies, and how to apply it now.
+  const plain = await run(["secret", "API_TOKEN", "--dir", agentFolder()], env, "v");
+  assert.match(plain.printed, /It takes effect on the next deploy or promote \(--apply restarts the live version now\)\.\nNext: npx @flow-engineer\/flow deploy restart/);
+  // Nothing live: the value is saved for the first deploy, and that is no failure.
+  const empty = await cloud({ restart: "nothing" });
+  const nothing = await run(["secret", "API_TOKEN", "--apply", "--dir", agentFolder()], { ...env, FLOW_FRAMEWORK_CLOUD: empty.url }, "v");
+  assert.equal(nothing.code, 0, nothing.printed);
+  assert.match(nothing.printed, /Nothing is live in staging to restart: nothing is live in staging\. The secrets apply at its first deploy\./);
+});
+
+test("secret --unset takes a secret away; one not set says so; a cloud without the routes says it cannot yet and when a value applies", async () => {
+  const fake = await cloud({ unset: true });
+  const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url };
+  const unset = await run(["secret", "--unset", "OLD_TOKEN", "--env", "production", "--json", "--dir", agentFolder()], env);
+  assert.equal(unset.code, 0, unset.printed);
+  assert.equal(fake.calls[0]!.method, "DELETE");
+  assert.equal(fake.calls[0]!.path, "/v1/hosting/secrets/OLD_TOKEN?environment=production");
+  assert.deepEqual(JSON.parse(unset.stdout).secret, { name: "OLD_TOKEN", environment: "production", unset: true });
+  const absent = await run(["secret", "--unset", "ABSENT", "--json", "--dir", agentFolder()], env);
+  assert.equal(absent.code, 1);
+  assert.match(JSON.parse(absent.stdout).error.message, /ABSENT is not set for staging/);
+  const older = await cloud();
+  const olderEnv = { ...env, FLOW_FRAMEWORK_CLOUD: older.url };
+  const cannot = await run(["secret", "--unset", "OLD_TOKEN", "--json", "--dir", agentFolder()], olderEnv);
+  assert.deepEqual({ code: cannot.code, error: JSON.parse(cannot.stdout).error.code }, { code: 1, error: "not_available" });
+  assert.match(cannot.printed, /This Flow's cloud cannot take a secret away yet/);
+  const noRestart = await run(["secret", "API_TOKEN", "--apply", "--dir", agentFolder()], olderEnv, "v");
+  assert.equal(noRestart.code, 1);
+  assert.match(noRestart.printed, /This Flow's cloud cannot restart an agent yet; the secret is saved: a secret's value applies at the next deploy or promote/);
+});
+
+test("a value that cannot be read from stdin is said as stdin's failure, never as the cloud being unreachable", async () => {
+  const fake = await cloud();
+  const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url };
+  const out: string[] = [];
+  const err: string[] = [];
+  const [log, error] = [console.log, console.error];
+  console.log = (...a: unknown[]) => void out.push(a.join(" "));
+  console.error = (...a: unknown[]) => void err.push(a.join(" "));
+  let code: number;
+  try {
+    code = await deployCli(["secret", "API_TOKEN", "--json", "--dir", agentFolder()], env, { readStdin: () => { throw Object.assign(new Error("EAGAIN: resource temporarily unavailable, read"), { code: "EAGAIN" }); } });
+  } finally {
+    [console.log, console.error] = [log, error];
+  }
+  assert.equal(code, 1);
+  const answer = JSON.parse(out.join("\n"));
+  assert.equal(answer.error.code, "stdin");
+  assert.match(answer.error.message, /^Could not read API_TOKEN's value from stdin: EAGAIN/);
+  assert.match(answer.next, /pipe the value in/);
+  assert.doesNotMatch(err.join("\n"), /Could not reach/);
+  assert.equal(fake.calls.length, 0, "nothing was sent");
+});
+
+test("a refused traces setting says hosting already sends message text and how to turn it off", async () => {
+  const fake = await cloud({ refuseSecret: "FLOW_FRAMEWORK_TRACES_KEY" });
+  const { code, printed } = await run(["secret", "FLOW_FRAMEWORK_TRACES_KEY", "--env", "production", "--dir", agentFolder()], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url }, "otk_x");
+  assert.equal(code, 1);
+  assert.match(printed, /FLOW_FRAMEWORK_TRACES_KEY is set by Flow\. Flow's hosting sets the traces settings itself: message text in traces is already on for a hosted agent \(hosting sets FLOW_FRAMEWORK_TRACES_CONTENT=1 and CHINWAG_TRACES_CONTENT=1\)/);
+  assert.match(printed, /printf 0 \| npx @flow-engineer\/flow deploy secret FLOW_FRAMEWORK_TRACES_CONTENT --env production --apply/);
+});
+
+test("logs asks from --since up to 30 days with --until, --severity and --grep, filters what an older Flow sends anyway, and says where the logs start", async () => {
+  const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key" };
+  const older = await cloud({ logs: "unfiltered" });
+  const { code, stdout, printed } = await run(["logs", "--since", "3d", "--until", "1h", "--severity", "warning", "--grep", "tool book", "--json", "--dir", agentFolder()], { ...env, FLOW_FRAMEWORK_CLOUD: older.url });
+  assert.equal(code, 0, printed);
+  assert.deepEqual(stdout.split("\n").map((l) => JSON.parse(l)), [
+    { time: "2026-10-20T09:00:00Z", severity: "ERROR", text: "tool book failed: timeout" },
+    { time: "2026-10-20T09:30:00Z", severity: "WARNING", text: "Tool book slow" },
+  ]);
+  const asked = new URL(older.calls[0]!.path, older.url).searchParams;
+  assert.deepEqual(Object.fromEntries(asked), { environment: "staging", since: "2026-10-17T11:00:00.000Z", limit: "500", until: "2026-10-20T10:00:00.000Z", grep: "tool book" }, "up to ERROR every line is asked for (a DEFAULT line may be read as ERROR) and filtered here");
+  assert.match(printed, /Logs start at 2026-10-19T11:00:00\.000Z: this Flow keeps 24 hours back\./, "an older host keeps 24 hours and says nothing of it");
+  const newer = await cloud({ logs: true });
+  const kept = await run(["logs", "--since", "30d", "--dir", agentFolder()], { ...env, FLOW_FRAMEWORK_CLOUD: newer.url });
+  assert.equal(kept.code, 0, kept.printed);
+  assert.match(kept.printed, /Logs start at 2026-10-18T11:00:00\.000Z: this Flow keeps 2 days back\./, "the host's from");
+  for (const bad of [["--since", "31d"], ["--severity", "LOUD"], ["--until", "2h", "--follow"], ["--grep", ""]]) {
+    assert.equal((await run(["logs", ...bad, "--dir", agentFolder()], { ...env, FLOW_FRAMEWORK_CLOUD: newer.url })).code, 2, bad.join(" "));
+  }
+});
+
+// 0.16.0's release candidate printed hosting's line as "framework" and it read as the agent's own: each now says whose it is.
+test("deploy status prints the framework the agent pins, the line hosting runs, each deploy's own, and whether observe takes its traces", async () => {
+  const fake = await cloud({ list: true, address: true, health: true });
+  const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url };
+  const dir = agentFolder();
+  writeFileSync(join(dir, "package.json"), JSON.stringify({ dependencies: { "@flow-engineer/flow": "0.15.6" } }));
+  const human = await run(["status", "--env", "production", "--dir", dir], env);
+  assert.equal(human.code, 0, human.printed);
+  assert.match(human.printed, /^This agent pins Flow Framework 0\.15\.6 \(package\.json\)\.\nFlow's hosting runs agents on Flow Framework up to 0\.15\.x \(0\.15\.6; hosting's own, not this agent's\)\.\nproduction: live/);
+  assert.match(human.printed, /built with: @flow-engineer\/flow 0\.15\.0\n {2}traces: REFUSED \(403 not_live\) at 2026-10-29T09:00:00Z: this workspace takes no production traces yet \(ask Flow to let it go live\)/);
+  const json = JSON.parse((await run(["status", "--env", "production", "--json", "--dir", dir], env)).stdout);
+  assert.equal(json.agent_framework, "0.15.6");
+  assert.equal(json.hosting_framework, "0.15.6");
+  assert.equal(json.environments.production.traces.state, "refused");
+  assert.deepEqual(json.environments.production.deploy.framework, { package: "@flow-engineer/flow", version: "0.15.0" });
+});
+
+test("a 429 from the cloud is waited out for its Retry-After and the call sent again", async () => {
+  const fake = await cloud({ list: true, address: true, limitOnce: true });
+  const { code, printed } = await run(["status", "--env", "staging", "--dir", agentFolder()], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: fake.url });
+  assert.equal(code, 0, printed);
+  assert.deepEqual(waited, [2000]);
+  assert.match(printed, /rate limiting this key \(429\): waiting 2 s, then trying again\./);
+  assert.equal(fake.calls.filter((c) => c.path.startsWith("/v1/hosting/deploys?")).length, 2);
+});
+
+/** A host with `count` log lines a minute apart from 2026-10-18T00:00Z (or `lines`), answering by hosting's rules (helpers' hostLogs): 500 a page, oldest first, `next` the last line's cursor, unchanged when there are no more. */
+async function pagedLogs(count: number, given?: HostLogLine[]) {
+  const asked: URLSearchParams[] = [];
+  const all = given ?? Array.from({ length: count }, (_, i) => ({ time: new Date(Date.parse("2026-10-18T00:00:00Z") + i * 60_000).toISOString(), severity: "INFO", text: `line ${i}` }));
+  const http = createServer((req, res) => {
+    const query = new URL(req.url!, "http://x").searchParams;
+    asked.push(query);
+    const { status, body } = hostLogs(query, all, NOW);
+    res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+  });
+  await new Promise<void>((done) => http.listen(0, "127.0.0.1", done));
+  return { url: `http://127.0.0.1:${(http.address() as AddressInfo).port}`, asked, close: () => http.close() };
+}
+
+test("logs without --follow reads every 500-line page to the end and prints them all, oldest first", async () => {
+  const host = await pagedLogs(1200);
+  try {
+    const { code, stdout, printed } = await run(["logs", "--env", "production", "--since", "3d", "--json", "--dir", agentFolder()], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url }, undefined, null);
+    assert.equal(code, 0, printed);
+    const texts = stdout.split("\n").map((l) => JSON.parse(l).text);
+    assert.equal(texts.length, 1200);
+    assert.deepEqual([texts[0], texts[499], texts[500], texts.at(-1)], ["line 0", "line 499", "line 500", "line 1199"]);
+    assert.deepEqual(host.asked.map((q) => q.get("after")), [null, "499", "999", "1199"], "the last page's cursor did not move: the end");
+  } finally { host.close(); }
+});
+
+test("logs over --limit keeps the newest lines and says on stderr where they start and how to get the older ones", async () => {
+  const host = await pagedLogs(1200);
+  try {
+    const { code, stdout, printed } = await run(["logs", "--since", "3d", "--limit", "1000", "--json", "--dir", agentFolder()], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url }, undefined, null);
+    assert.equal(code, 0, printed);
+    const texts = stdout.split("\n").map((l) => JSON.parse(l).text);
+    assert.deepEqual([texts.length, texts[0], texts.at(-1)], [1000, "line 200", "line 1199"]);
+    assert.match(printed, /Printed the newest 1000 of 1200 lines, from 2026-10-18T03:20:00\.000Z \(--limit 1000\)\. The 200 older ones: npx @flow-engineer\/flow logs --since 2026-10-17T11:00:00\.000Z --until 2026-10-18T03:19:00\.000Z/);
+    assert.equal((await run(["logs", "--limit", "0", "--dir", agentFolder()], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url })).code, 2);
+  } finally { host.close(); }
+});
+
+// 0.16.0's release candidate refused every --until: a page after the first sent after without since,
+// and the host checked until against its 1h default ("until is before since").
+test("logs --until is a duration back from now or a time, as --since is, and every page of the window is read", async () => {
+  const host = await pagedLogs(1200);
+  try {
+    const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url };
+    const cases: Array<[string[], string, string, number]> = [
+      [["--since", "3d", "--until", "2d"], "line 0", "line 660", 661],
+      [["--since", "2026-10-18T06:00:00Z", "--until", "2026-10-18T07:00:00Z"], "line 360", "line 420", 61],
+      [["--since", "2026-10-18T10:00:00Z", "--until", "1d"], "line 600", "line 1199", 600],
+    ];
+    for (const [args, first, last, count] of cases) {
+      host.asked.length = 0;
+      const { code, stdout, printed } = await run(["logs", ...args, "--json", "--dir", agentFolder()], env, undefined, null);
+      assert.equal(code, 0, `${args.join(" ")}: ${printed}`);
+      const texts = stdout.split("\n").map((l) => JSON.parse(l).text);
+      assert.deepEqual([texts[0], texts.at(-1), texts.length], [first, last, count], args.join(" "));
+      assert.ok(host.asked.length >= 2 && host.asked.every((q) => q.has("since") && q.has("until")), "since and until on every page");
+    }
+    assert.equal((await run(["logs", "--since", "2d", "--until", "3d", "--dir", agentFolder()], env)).code, 2, "until before since");
+  } finally { host.close(); }
+});
+
+// 0.16.0c joined only lines whose time was the same string, but Cloud Run stamps each line of a
+// split stack microseconds apart (a hosted 0.15.6 agent's, 11-03T06:45:13.313942Z to .313990Z).
+test("logs joins a stack Cloud Run split into an entry per line into the line before it, keeping the higher severity", async () => {
+  const at = "2026-10-20T10:45:13.313942Z";
+  const host = await pagedLogs(0, [
+    { time: "2026-10-20T10:45:00Z", severity: "INFO", text: "booted", instance: "a" },
+    { time: at, severity: "DEFAULT", text: "scheduled messages: DOMException [TimeoutError]", instance: "a" },
+    { time: "2026-10-20T10:45:13.313968Z", severity: "DEFAULT", text: "    at Timeout._onTimeout (file:///app/a.js:1:2)", instance: "a" },
+    { time: "2026-10-20T10:45:13.314990Z", severity: "ERROR", text: "    at listOnTimeout (node:internal/timers:594:17)", instance: "a" },
+    { time: "2026-10-20T10:45:13.314991Z", severity: "DEFAULT", text: "    at another instance's line", instance: "b" },
+    { time: "2026-10-20T10:46:00Z", severity: "DEFAULT", text: "  later, indented", instance: "a" },
+  ]);
+  try {
+    const { code, stdout, printed } = await run(["logs", "--json", "--dir", agentFolder()], { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url }, undefined, null);
+    assert.equal(code, 0, printed);
+    assert.deepEqual(stdout.split("\n").map((l) => JSON.parse(l)), [
+      { time: "2026-10-20T10:45:00Z", severity: "INFO", text: "booted" },
+      { time: at, severity: "ERROR", text: "scheduled messages: DOMException [TimeoutError]\n    at Timeout._onTimeout (file:///app/a.js:1:2)\n    at listOnTimeout (node:internal/timers:594:17)" },
+      { time: "2026-10-20T10:45:13.314991Z", severity: "DEFAULT", text: "    at another instance's line" },
+      { time: "2026-10-20T10:46:00Z", severity: "DEFAULT", text: "  later, indented" },
+    ]);
+  } finally { host.close(); }
+  // A stack across two pages joins too.
+  const kept = [{ time: at, severity: "DEFAULT", text: "Error: x" }];
+  addLogLines(kept, [{ time: at, severity: "DEFAULT", text: "    at y" }]);
+  assert.deepEqual(kept, [{ time: at, severity: "DEFAULT", text: "Error: x\n    at y" }]);
+});
+
+// A hosted 0.15.x runtime writes Flow's own errors as plain console text, which Cloud Run keeps at
+// DEFAULT, so --severity ERROR missed them (and the host, asked for ERROR, never sent them).
+test("logs --severity ERROR reads a DEFAULT line that is plainly an uncaught error as ERROR, a stack split across pages too", async () => {
+  const at = (minute: number, micros = "") => new Date(Date.parse("2026-10-18T00:00:00Z") + minute * 60_000).toISOString().replace(/Z$/, `${micros}Z`);
+  const lines: HostLogLine[] = Array.from({ length: 499 }, (_, i) => ({ time: at(i), severity: "INFO", text: `line ${i}` }));
+  lines.push(
+    // The 500th line and its stack's next one: the stack goes over the first page's end.
+    { time: at(499, "313"), severity: "DEFAULT", text: "flow: scheduled messages: Error: flow-agent-store: unfinished: HTTP 503", instance: "a" },
+    { time: at(499, "314"), severity: "DEFAULT", text: "    at Store.call (file:///app/store.js:1:2)", instance: "a" },
+    { time: at(500), severity: "DEFAULT", text: "TimeoutError: The operation was aborted due to timeout" },
+    { time: at(501), severity: "DEFAULT", text: "scheduled messages: DOMException [TimeoutError]" },
+    { time: at(502, "100"), severity: "DEFAULT", text: "something went wrong", instance: "a" },
+    { time: at(502, "101"), severity: "DEFAULT", text: "    at run (file:///app/a.js:3:4)", instance: "a" },
+    { time: at(503), severity: "DEFAULT", text: "listening on 8080: no Error: here" },
+    { time: at(504), severity: "DEFAULT", text: "    at the start, alone" },
+    { time: at(505), severity: "WARNING", text: "TypeError: kept as written" },
+  );
+  const host = await pagedLogs(0, lines);
+  try {
+    const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url };
+    const { code, stdout, printed } = await run(["logs", "--since", "3d", "--severity", "error", "--json", "--dir", agentFolder()], env, undefined, null);
+    assert.equal(code, 0, printed);
+    assert.deepEqual(stdout.split("\n").map((l) => JSON.parse(l)), [
+      { time: at(499, "313"), severity: "ERROR", text: "flow: scheduled messages: Error: flow-agent-store: unfinished: HTTP 503\n    at Store.call (file:///app/store.js:1:2)" },
+      { time: at(500), severity: "ERROR", text: "TimeoutError: The operation was aborted due to timeout" },
+      { time: at(501), severity: "ERROR", text: "scheduled messages: DOMException [TimeoutError]" },
+      { time: at(502, "100"), severity: "ERROR", text: "something went wrong\n    at run (file:///app/a.js:3:4)" },
+    ]);
+    assert.ok(host.asked.length >= 2 && host.asked.every((q) => !q.has("severity")), "the host is asked for every line, DEFAULT too");
+    host.asked.length = 0;
+    const plain = await run(["logs", "--since", "3d", "--json", "--dir", agentFolder()], env, undefined, null);
+    assert.deepEqual(plain.stdout.split("\n").slice(-3).map((l) => JSON.parse(l).severity), ["DEFAULT", "DEFAULT", "WARNING"], "without --severity too, only the errors are raised");
+    host.asked.length = 0;
+    assert.equal((await run(["logs", "--since", "3d", "--severity", "critical", "--json", "--dir", agentFolder()], env, undefined, null)).code, 0);
+    assert.ok(host.asked.every((q) => q.get("severity") === "CRITICAL"), "above ERROR the host filters");
+  } finally { host.close(); }
+});
+
+test("logsWindow, flow logs' and read_logs' one rule: durations are back from now for since and until alike, times as given, since at most 30 days back, until after since", () => {
+  assert.deepEqual(logsWindow("30d", undefined, NOW), { since: "2026-09-20T11:00:00.000Z" });
+  assert.deepEqual(logsWindow("3d", "2d", NOW), { since: "2026-10-17T11:00:00.000Z", until: "2026-10-18T11:00:00.000Z" });
+  assert.deepEqual(logsWindow("2026-10-18T06:00:00Z", "1d", NOW), { since: "2026-10-18T06:00:00.000Z", until: "2026-10-19T11:00:00.000Z" });
+  assert.deepEqual(logsWindow("2026-10-18T06:00:00+05:30", "2026-10-18T07:00:00Z", NOW), { since: "2026-10-18T00:30:00.000Z", until: "2026-10-18T07:00:00.000Z" });
+  assert.deepEqual(logsWindow("31d", undefined, NOW), { wrong: "since" });
+  assert.deepEqual(logsWindow("2d", "3d", NOW), { wrong: "until" });
+  assert.deepEqual(logsWindow("1h", "1h", NOW), { wrong: "until" });
+  assert.deepEqual(logsWindow("1h", "soon", NOW), { wrong: "until" });
+});
+
+// 0.16.0c: grep "question to team" found 0 of 14 lines holding it in a JSON line's step field (the
+// host searched only msg); and a grep of the line as printed ("step":"question to team") is in no value.
+test("logs --grep finds text in any field of a JSON line, and JSON as printed is matched here over the whole window", async () => {
+  const line = (i: number, step: string) => ({ time: new Date(Date.parse("2026-10-18T00:00:00Z") + i * 60_000).toISOString(), severity: "INFO", text: JSON.stringify({ severity: "INFO", msg: "vingo ask", step, outcome: "ok" }) });
+  const host = await pagedLogs(0, Array.from({ length: 900 }, (_, i) => line(i, i % 100 === 7 ? "question to team" : "answered")));
+  try {
+    const env = { FLOW_FRAMEWORK_CLOUD_KEY: "oci_key", FLOW_FRAMEWORK_CLOUD: host.url };
+    for (const grep of ["question to team", "TO TEAM", '"step":"question to team"']) {
+      host.asked.length = 0;
+      const { code, stdout, printed } = await run(["logs", "--since", "3d", "--grep", grep, "--json", "--dir", agentFolder()], env, undefined, null);
+      assert.equal(code, 0, printed);
+      assert.equal(stdout.split("\n").length, 9, grep);
+      assert.equal(host.asked[0]!.get("grep"), grep.includes('"') ? null : grep, "JSON as printed is not sent");
+    }
+  } finally { host.close(); }
 });

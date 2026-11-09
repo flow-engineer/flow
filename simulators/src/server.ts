@@ -59,6 +59,7 @@ import {
   type ListRow,
   type Outbound,
   type Photo,
+  type Video,
   type ReplyButton,
   type FlowEvent,
   type PlaygroundSink,
@@ -71,6 +72,7 @@ import {
   type TranscriptEntry,
 } from "../../src/index.ts";
 import type { Agent } from "../../src/agent.ts";
+import { log, logFields } from "../../src/events.ts";
 import { signInWords, type CliConfig } from "../../cli/src/commands.ts";
 import type { CliIO } from "../../cli/src/run.ts";
 import { requireToken, sameSecret, serveNode, wrongTries } from "../../src/http.ts";
@@ -79,7 +81,7 @@ import { PLATFORMS, channelOf, platform as platformOf, smsSegments, wirePayload,
 /** What the test cloud's simulators need from an agent. */
 export interface AgentConnection {
   /** A person's message; returns its id, or null when the agent answered it without a turn. */
-  receive(conversationId: string, incoming: Incoming, deliver: Deliver, options: { channel: ChannelInfo; channelName?: string }): string | null;
+  receive(conversationId: string, incoming: Incoming, deliver: Deliver, options: { channel: ChannelInfo; channelName?: string; file?: (ref: string) => Promise<Uint8Array | null> }): string | null;
   /**
    * The agent's own channels, if it has any: a simulator plays the one of its kind (SMS, WhatsApp,
    * and the web simulator for a custom UI) with its definition.
@@ -344,6 +346,8 @@ export type Line =
       authentication?: boolean;
       /** A photo above the text, which is its caption. */
       image?: Photo;
+      /** A video above the text, which is its caption. */
+      video?: Video;
       /** The channel's own params the agent filled in (an app_link): shown under the message. */
       fields?: Record<string, unknown>;
       /**
@@ -612,6 +616,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
           ...(outbound.link ? { link: outbound.link } : {}),
           ...(outbound.authentication ? { authentication: true } : {}),
           ...(outbound.image ? { image: outbound.image } : {}),
+          ...(outbound.video ? { video: outbound.video } : {}),
           ...(outbound.fields ? { fields: outbound.fields } : {}),
           ...(sms ? { sms: { segments: sms.segments, encoding: sms.encoding } } : {}),
         });
@@ -691,7 +696,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
   const guarded = (work: (req: IncomingMessage, res: ServerResponse) => Promise<void>): Handler => (req, res) =>
     work(req, res).catch((error) => {
-      console.warn("flow simulators:", error);
+      log("WARNING", "flow simulators:", error);
       if (!res.headersSent) res.writeHead(500).end();
     });
 
@@ -741,15 +746,16 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     const replyId = replies && typeof body?.replyTo === "string" ? body.replyTo : undefined;
     const quoted = replyId ? findLine(k, replyId) : undefined;
     const choice = body?.choice && typeof body.choice === "object" ? (body.choice as { id?: string; title?: string }) : undefined;
-    const sent = filesOf(body);
-    const attachments: Attachment[] = sent.map(({ bytes, ...a }) => ({ ...a, data: async () => bytes }));
+    // Each file is kept by an id first: the line shows it, and the agent may fetch it again by it (its ref).
+    const sent = filesOf(body).map((f) => ({ ...f, id: keep(f) }));
+    const attachments: Attachment[] = sent.map(({ bytes, id, ...a }) => ({ ...a, ref: id, data: async () => bytes }));
     const incoming: Incoming = {
       text,
       ...(quoted && (quoted.kind === "in" || quoted.kind === "out") ? { replyTo: { text: quoted.text, fromAgent: quoted.kind === "out" } } : {}),
       ...(choice?.title ? { choice: { ...(choice.id ? { id: String(choice.id) } : {}), title: String(choice.title) } } : {}),
       ...(attachments.length ? { attachments } : {}),
     };
-    const files = sent.map((f) => ({ kind: f.kind, ...(f.name ? { name: f.name } : {}), mime: f.mime, size: f.bytes.length, url: `/api/media/${keep(f)}` }));
+    const files = sent.map((f) => ({ kind: f.kind, ...(f.name ? { name: f.name } : {}), mime: f.mime, size: f.bytes.length, url: `/api/media/${f.id}` }));
     const line: Extract<Line, { kind: "in" }> = { kind: "in", id: null, text, at: Date.now(), ...(quoted ? { replyTo: replyId } : {}), ...(choice?.title ? { choice: true } : {}), ...(choice?.title && choice.id && choice.id !== choice.title ? { choiceId: String(choice.id) } : {}), ...(files.length ? { attachments: files } : {}) };
     return { incoming, line };
   }
@@ -829,7 +835,9 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
         const id = conversationId(k);
         const own = ownChannel(agent, p, id);
         const who = { name: person, phone: person };
-        const messageId = agent.receive(id, incoming, deliverer(p, k, [], who), own ? { channel: own.info, channelName: own.name } : { channel: channelOf(p) });
+        // A file the person sent is fetched again from what the simulator keeps, until it is dropped for newer ones.
+        const file = async (ref: string) => media.get(ref)?.bytes ?? null;
+        const messageId = agent.receive(id, incoming, deliverer(p, k, [], who), own ? { channel: own.info, channelName: own.name, file } : { channel: channelOf(p), file });
         line.id = messageId;
         push(k, { type: "id", at: line.at, messageId, api: wired(p, line, who, k).api });
         return json(res, 202, { messageId, at: line.at });
@@ -869,7 +877,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     const known = people.get(event.conversationId);
     const person = known?.values().next().value;
     // A failed turn (a wrong or expired model key, say) on the terminal too, also for no known person.
-    if (event.type === "model.error") console.error(`flow: model error${person ? ` (${person.name})` : ""}: ${String(event.error)}`);
+    if (event.type === "model.error") log("ERROR", `flow: model error${person ? ` (${person.name})` : ""}: ${String(event.error)}`);
     if (!known || !playing) return;
     for (const person of known.values()) for (const c of playing.channels()) show(threadKey(c.name, person), event);
   };
@@ -1115,7 +1123,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       const text = typeof body?.text === "string" ? body.text.trim().slice(0, 4_000) : "";
       if (!text && !filesOf(body).length) return json(res, 400, { error: "text or a file is required" });
       const { incoming, line } = incomingOf(k, body, text, Boolean(p.replies));
-      console.info(JSON.stringify({ chinwag: "playground.message", person: person.name, channel: channel.name, at: new Date(line.at).toISOString() }));
+      logFields("INFO", { chinwag: "playground.message", person: person.name, channel: channel.name, at: new Date(line.at).toISOString() });
       emitLine(k, line);
       carrier(p, k, text);
       const taken = person.key || person.visitor ? await agent.simulateVisitor!({ key: person.key, address: visitorAddress, channel: channel.name, message: incoming })
@@ -1279,7 +1287,7 @@ function asDeclared(d: TemplateDefinition): Omit<FilledTemplate, "body"> {
 function filesOf(body: Record<string, unknown> | null): Array<{ kind: Attachment["kind"]; mime: string; name?: string; bytes: Uint8Array }> {
   if (!Array.isArray(body?.attachments)) return [];
   return body.attachments.slice(0, MAX_FILES).flatMap((a) => {
-    if (!a || typeof a !== "object" || typeof a.mime !== "string" || typeof a.data !== "string" || !["image", "audio", "document"].includes(a.kind)) return [];
+    if (!a || typeof a !== "object" || typeof a.mime !== "string" || typeof a.data !== "string" || !["image", "audio", "video", "document"].includes(a.kind)) return [];
     const bytes = new Uint8Array(Buffer.from(a.data, "base64"));
     return [{ kind: a.kind as Attachment["kind"], mime: a.mime.slice(0, 100), ...(typeof a.name === "string" && a.name ? { name: a.name.slice(0, 200) } : {}), bytes }];
   });

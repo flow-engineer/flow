@@ -7,9 +7,9 @@ import { createAgent, sqlite, tool, type AgentOptions, type Database, type Templ
 import type { ChannelInfo, ChannelKind, ChatMessage, Keywords, Model, ModelRequest, ModelResponse, Outbound, FlowEvent, ToolCall } from "../src/index.ts";
 
 /**
- * A model the test drives: each call waits for the test to answer it. The step Flow Framework adds after a
- * reply that was only delivered messages is answered with nothing, and counted in `followUps`,
- * unless `followUps: "manual"`: then it is a call like any other.
+ * A model the test drives: each call waits for the test to answer it. The step after a reply that was
+ * only delivered messages (one said next: "act", or something came in meanwhile) is answered with
+ * nothing, and counted in `followUps`, unless `followUps: "manual"`: then it is a call like any other.
  */
 export function scriptedModel(options: { followUps?: "auto" | "manual" } = {}) {
   const calls: Array<{ request: ModelRequest; answer(r: ModelResponse): void; fail(error: Error): void }> = [];
@@ -121,6 +121,7 @@ export function multi(options: {
   fallbackTemplate?: AgentOptions["fallbackTemplate"];
   beforeSend?: AgentOptions["beforeSend"];
   wakeUps?: AgentOptions["wakeUps"];
+  describeVideo?: AgentOptions["describeVideo"];
 }) {
   const dir = options.dir ?? mkdtempSync(join(tmpdir(), "flow-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
@@ -168,6 +169,7 @@ export function multi(options: {
     fallbackTemplate: options.fallbackTemplate,
     beforeSend: options.beforeSend,
     wakeUps: options.wakeUps,
+    describeVideo: options.describeVideo,
     scheduleCheckMs: 0,
   });
   const texts = (channel?: string) =>
@@ -217,4 +219,80 @@ if (${options.guard ?? "process.argv[1] && realpathSync(process.argv[1]) === fil
   git("add", "-A");
   git("commit", "-qm", "agent");
   return dir;
+}
+
+/** A log line as Flow's hosting answers it: the line's words, and which instance wrote it. */
+export interface HostLogLine {
+  time: string;
+  severity: string;
+  text: string;
+  instance?: string;
+}
+
+const HOST_DURATION = /^(\d{1,5})(s|m|h|d)$/;
+const HOST_UNIT_MS: Record<string, number> = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+const HOST_ISO_TIME = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2}))?$/;
+const HOST_SEVERITIES = ["DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY"];
+
+/**
+ * GET /v1/hosting/logs over `lines` (oldest first) by Flow's hosting's own rules (flow-mono
+ * hosting/src/host/deploys.ts, logs; observe relays the query as it comes): limit 1 to 500;
+ * since and until each a duration back from `now` (15m, 3d) or an ISO time; since 1h back when
+ * not sent, after or not; since clamped to 30 days back; until before since refused ("until is
+ * before since"); severity the lowest a line may have; grep, any case, as hosting's Cloud Logging
+ * search then its own check: a substring of one of the entry's values (a JSON line's every field's,
+ * never its keys or quotes) and of the line's text; after a previous answer's next (here the last
+ * line's index), unchanged when nothing is left.
+ */
+export function hostLogs(query: URLSearchParams, lines: HostLogLine[], now: number): { status: number; body: unknown } {
+  const refuse = (message: string) => ({ status: 400, body: { error: { code: "invalid_request", message } } });
+  const limitAsked = query.get("limit");
+  if (limitAsked !== null && (!/^\d{1,4}$/.test(limitAsked) || Number(limitAsked) < 1)) return refuse("limit is 1 to 500");
+  const limit = Math.min(Number(limitAsked ?? 500), 500);
+  const timeOf = (value: string) => {
+    const d = HOST_DURATION.exec(value);
+    return d ? now - Number(d[1]) * HOST_UNIT_MS[d[2]!]! : HOST_ISO_TIME.test(value) ? Date.parse(value) : NaN;
+  };
+  const floor = now - 30 * 86_400_000;
+  const since = query.get("since");
+  const asked = since ? timeOf(since) : now - 3_600_000;
+  if (Number.isNaN(asked)) return refuse("since is an ISO time or a duration such as 15m, 1h or 3d");
+  const from = Math.min(Math.max(asked, floor), now);
+  const untilAsked = query.get("until");
+  const until = untilAsked ? timeOf(untilAsked) : null;
+  if (until !== null && Number.isNaN(until)) return refuse("until is an ISO time or a duration such as 15m, 1h or 3d");
+  if (until !== null && until < from) return refuse("until is before since");
+  const severity = query.get("severity")?.toUpperCase();
+  if (severity && !HOST_SEVERITIES.includes(severity)) return refuse(`severity is one of ${HOST_SEVERITIES.join(", ")}`);
+  const grep = query.get("grep")?.toLowerCase();
+  const after = query.get("after");
+  const start = after === null ? from : floor;
+  const page = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line, index }) => {
+      const at = Date.parse(line.time);
+      return at >= start && (until === null || at <= until) && (after === null || index > Number(after)) &&
+        (!severity || HOST_SEVERITIES.indexOf(line.severity) >= HOST_SEVERITIES.indexOf(severity)) &&
+        (!grep || (entryValues(line.text).some((v) => v.toLowerCase().includes(grep)) && line.text.toLowerCase().includes(grep)));
+    })
+    .slice(0, limit);
+  const next = page.length ? String(page.at(-1)!.index) : (after ?? "-1");
+  return { status: 200, body: { lines: page.map((p) => p.line), next, from: after === null ? new Date(from).toISOString() : (lines[Number(after)]?.time ?? new Date(floor).toISOString()) } };
+}
+
+/** A line's values as Cloud Logging searches them: a JSON line's every value, else its text. */
+function entryValues(text: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [text];
+  }
+  const out: string[] = [];
+  const walk = (v: unknown): void => {
+    if (v && typeof v === "object") Object.values(v).forEach(walk);
+    else out.push(String(v));
+  };
+  walk(parsed);
+  return out;
 }

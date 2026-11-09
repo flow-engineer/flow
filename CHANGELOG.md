@@ -62,6 +62,1030 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `views.tools`.
 - A channel's own tools are no longer offered on a turn answering another channel's message.
 
+## 0.17.2 (8 Nov 2026)
+
+### Changes
+
+- **A video whose reply is slow types after 5 s.** Since 0.17.1 a video got 👀 on arrival and its
+  turn showed no typing at all, so while a video took half a minute to read the person saw 👀 and
+  then nothing until the reply. The 👀 still goes on arrival; if nothing from the agent has reached
+  them 5 s after the video arrived, typing shows too and is kept up as for other messages (every
+  20 s on WhatsApp) until the reply, never after it. A reply within 5 s still shows only the 👀.
+  `videoReaction: false` types on arrival as before, and a reaction that fails types at once.
+- **The agent is told the video already has its 👀.** When the arrival reaction went, the message
+  reaches the model with one line saying so, so it does not react 👀 to it again; another emoji is
+  still its choice.
+
+### Migration notes
+
+None.
+
+## 0.17.1 (8 Nov 2026)
+
+### Changes
+
+- **A message with files shows the agent on it at once, not after it is read.** Since 0.17.0
+  typing for a message with the platform's id (every Flow Messaging message) started only once it
+  was stored, which for a video came after its description (3.7 s for one, up to 25 s for several at
+  once), so until then the person saw nothing. A message with files now types the moment it
+  arrives, before they are downloaded and read: a voice note being transcribed (`transcribe`), a
+  photo or PDF being downloaded, and a video being described (`describeVideo`) when `videoReaction`
+  is off (below). On WhatsApp the typing call also shows the blue ticks (Flow Messaging anchors it
+  on their latest message); on iMessage the read receipt still goes when the turn takes the message.
+  Typing is kept up while the file is read (`typingLastsMs`: every 20 s on WhatsApp), and a typing
+  call that fails or hangs never holds up reading or the reply. Default on; a channel with
+  `typing: false` (or `disable: ["typing"]`) is never sent one. When two runners are given the same
+  message with files, both type while they read it; it is still answered once, and neither is left
+  typing.
+- **A video gets 👀 the moment it arrives, and its turn shows no typing.** A message with a video
+  gets the agent's reaction before the video is downloaded or watched, through the same send as the
+  `react` tool's (a `reaction` outbound, and a `reaction` event with `arrival: true`), and the turn
+  that answers it sends no typing on that channel: none on arrival, none kept up, none while the
+  agent works or writes. On WhatsApp the blue ticks still show on arrival: the read receipt goes by
+  itself (no typing indicator) with the reaction. iMessage's read receipt still goes when the turn
+  takes the message.
+  - **`videoReaction`:** createAgent's new option. Default on, with 👀; a string is another emoji;
+    `false` turns it off, and a video types on arrival as other files do.
+  - **Where it goes:** where the channel has reactions and takes the emoji: on Telegram only the
+    reactions Telegram lets bots use (👀 is one; an emoji with U+FE0F or a skin tone matches as Flow
+    Messaging matches it); on iMessage any, though iPhones on iOS 17 or older may show one other
+    than the six tapbacks as a line of text; on WhatsApp and the web, any. Elsewhere (SMS, or an emoji
+    Telegram does not take) that turn types instead.
+  - **A reaction that fails** is logged with a warning and never fails the turn: the turn types
+    instead. Photos, voice notes and documents type on arrival. If the agent reacts to the same
+    message itself later, its reaction replaces this one where the channel allows.
+
+### Migration notes
+
+- **A video gets 👀 and its turn shows no typing.** Default on, so an agent whose people send
+  videos shows 👀 on them and no typing for those turns. To move: nothing, or to have a video type
+  on arrival instead, `createAgent({ ...options, videoReaction: false })`.
+
+## 0.17.0 (7 Nov 2026)
+
+### Changes
+
+- **The agent can ask its own questions about a video: `ask_about_video`.** A video described once
+  (`describeVideo`) or watched turns ago is no longer all the agent gets: when a buyer asks "is
+  there a scratch near the charging port?", the agent calls the built-in `ask_about_video`
+  (`question`, and `message`, the id of the message the video came in; the latest video when left
+  out) and a video model watches it again and answers, `{ video, answer }`.
+  - **Who answers:** `describeVideo`'s new optional `ask(video, question)`; `describeVideoWith(model)`
+    has one, the same model and key as its descriptions (a `Flow-Test-Session` header under
+    `flow test`, as there). A custom describer answers when it has `ask` too:
+    `Object.assign(async ({ mime, data }) => text, { ask: async ({ mime, data }, question) => text })`.
+    Without one, an agent whose own model watches videos (`openAICompatible({ videos: true })`) is
+    asked itself, in a call of its own with the video and no tools.
+  - **When it is offered:** only while the conversation has a video the agent can't see now: one
+    described, or one its model watched that is no longer shown (only the latest 3 photos, PDFs and
+    videos stay shown, one of them a video, and none after a restart). A video the model is shown
+    now needs no question, and asking about it is refused. Never with a describer that only
+    describes and a model that can't watch, or for a video whose channel can't give it again.
+  - **Where the video comes from:** its channel, again, each time: nothing is kept in memory or the
+    store. An `Attachment` may carry `ref` (the file's id on its channel), kept with the message,
+    never shown to the model, and a `Channel` may have `file(ref)`, which fetches it again
+    (`null` once the channel no longer keeps it). The `flow-messaging` adapter sets both (Flow's
+    file id; a 404 or 410 from Flow is `null`), as do the simulators and `flow test`. 10 MB at most.
+    `agent.receive` takes the fetcher as `options.file`.
+  - **Guards:** 3 questions a turn and 10 a video (counted from the history, so a restart keeps
+    them). A video no longer kept, one that can't be fetched now, one over 10 MB, or a video model
+    that fails is a `ToolError` whose message says what to do ("Ask them to send it again"), and an
+    `attachment.failed` event (`kind: "video"`, `messageId`, `tool`). The call is a tool span in
+    traces, as any tool's. The reply waits for it up to 120 s, the video model's own limit.
+- **`flow test` scenarios can send a video:** `attach: { kind: video, file: fixtures/clip.mp4 }`
+  (`.mp4`, `.mov`, `.webm`, `.mpeg`), read from the tests folder and, when the agent asks about it,
+  read again from there by its path; `expect: { calls: [ask_about_video] }` checks it asked. The
+  simulators keep a sent video for the agent to fetch again until newer files push it out.
+- **`flow mcp login` ends on a page in flow.engineer's look.** Flow's own CLI now sets
+  `signInPage` (and `brand.name` "Flow"): the browser lands on Flow's logo and the site's card on
+  its gradient, after flow.engineer's Allow page, light only like every Flow page. The copy and
+  behaviour are the same (the tab tries to close after 1.5 s; the code leaves the address bar),
+  and the page names its own style and script by hash in a CSP meta tag. Teams' CLIs keep the
+  framework's branded page; nothing changes for them.
+
+### Migration notes
+
+- An agent with `describeVideoWith(...)`, or a model that watches videos, now gets `ask_about_video`
+  on channels that give files again (Flow Messaging's, the simulators, `flow test`), and each
+  question is a video model call on its key. To keep descriptions only, pass a describer without
+  `ask`: `describeVideo: (video) => described(video)`, where `const described = describeVideoWith(...)`.
+- `DescribeVideo` is now an interface: a function, as before, with an optional `ask`. A plain
+  `async ({ mime, data }) => text` is still one.
+- A tool of your own named `ask_about_video` is shadowed by the built-in one while it is offered:
+  rename yours.
+- A watched video's `Media` (what a `Model` is sent) carries its `ref`; a model of your own ignores it.
+- A hand-written channel (`customUI`, `whatsapp()` with your provider) gets the tool only once its
+  attachments carry `ref` and the channel has `file(ref)`: add both to let the agent ask.
+- Nothing changes for a team's CLI.
+
+## 0.16.1 (6 Nov 2026)
+
+### Changes
+
+- **`logout` ends the sign-in on the server, not only on this computer.** A `defineCli` CLI's
+  `logout` (and `flow mcp logout`) now revokes the stored refresh token, then the access token, at
+  the authorization server's advertised `revocation_endpoint` (RFC 7009) before forgetting them, so
+  the OAuth bridge's `tokens.revoke` ends the connection. Until now it only deleted the local
+  tokens, which stayed good until they expired. A refusal or an unreachable server is a warning, and
+  the person is still signed out here ("Signed out of <server> on this computer only."). A server
+  advertising no revocation endpoint is sent nothing. `beforeLogout` still runs first.
+
+- **`flow insights` counts conversations it can't read, and only when that matters.** The line
+  about text Insights can't read comes from Flow's `without_text` (`{conversations, of}`, sent at 5 or
+  more conversations and 20% or more of the window's, never for a health workspace): "Insights can't
+  read 12 of 40 conversations (30%): they came without message text (the agent's traces send
+  metadata only)." Below that rule it says nothing; the older `messages_without_text` (a count of
+  messages) is no longer printed. `--json` is Flow's answer as before.
+
+- **An MCP server alone deploys to Flow's hosting.** A project with `src/mcp.ts` and no
+  `src/agent.ts` (no `buildAgent`, model key or channels) is no longer refused: `flow deploy` needs
+  `package.json`, `package-lock.json` and either file, and hosting serves its MCP paths with no chat
+  agent, calling the factory as `mcp(undefined, host)` with `host.oauthStorage` (the OAuth bridge's
+  storage on Flow's store), so production takes it. `flow check` reads such a project's tools from
+  `src/mcp.ts`, which exports them beside `mcp` (`export { tools }`); without them it is an error,
+  as it is for `src/agent.ts`. `flow mcp update` loads `src/mcp.ts` when there is no `src/agent.ts`.
+- **`flow logs --severity ERROR` and MCP `read_logs` with severity ERROR show a 0.15.x runtime's
+  errors.** Runtimes before 0.16 wrote Flow Framework's own errors as plain console text, which
+  Cloud Run keeps at `DEFAULT` (`flow: scheduled messages: Error: flow-agent-store: unfinished:
+  HTTP 503`, a `TimeoutError`/`DOMException` stack), so they were left out. After split stacks are
+  joined, a `DEFAULT` line is now read as `ERROR` when, by fixed rules, it is an uncaught error: its
+  first line matches `flow: ... Error:`, starts with an error's name (`Error:`, `TypeError:`) or
+  holds `DOMException`, or it is a stack (a later line `    at ...`). That holds for every
+  `--severity` and without one, in `--json` too. Since Flow's hosting keeps only the lines at the
+  asked severity or above, up to `ERROR` the CLI asks for every line and filters them itself (more
+  pages for a long window); above `ERROR` the host still filters. A stack's `at` lines now come with
+  it under `--severity`.
+- Tests: the CLI tests that want plain output (`NO_COLOR`) also drop `FORCE_COLOR`, which
+  `node --test` sets when its output is a terminal, so `npm test` passes at a terminal as in a pipe.
+- **Videos the person sends reach the agent.** An `Attachment` may be `kind: "video"`, and the
+  `flow-messaging` adapter now hands WhatsApp, Telegram and iMessage videos in as one (until now a
+  video was only its caption and `[video]`). Up to 10 MB, one of three ways:
+  - **Watched by the model**, when it reads videos: `openAICompatible({ videos: true })` (default
+    false; `reads.videos` on a `Model`) sends MP4, MPEG, MOV and WebM as OpenRouter's `video_url`
+    part, a base64 data URL. Through Flow (FLOW_KEY) or OpenRouter that is a model such as
+    `google/gemini-3.8-flash`. Of the latest 3 photos, PDFs and videos shown, at most one is a video.
+  - **Described**, with `createAgent({ describeVideo })`: the agent reads `[video, described: ...]`
+    in its place. `describeVideoWith("google/gemini-3.8-flash")` is Flow Framework's own: it asks
+    that model, through the agent's own key, what the video shows and what is said in it (FLOW_KEY
+    or OpenRouter: a `video_url` part; a Gemini key: Gemini's `generateContent`, the id without
+    `google/`). With only an OpenAI or Anthropic key it throws `no_video_key` when made, naming the
+    keys that work. Or pass your own `async ({ mime, data }) => text`.
+  - **Neither**: the caption and `[video: you can't watch videos]`, and the video is never fetched.
+- An `Attachment` may say its `size` in bytes; one over the limit is named as too large and never
+  fetched. The `flow-messaging` adapter fills it from Flow's `size_bytes`.
+- The `message.in` event carries a described video's text as `description`; the simulators send
+  videos (they play in the thread) and their Debug log shows the transcript or description the agent got.
+- `spec/request.schema.json` (an HTTP agent's request) takes attachments of kind `video`.
+- The model is told it is no longer shown "the photos, videos or documents" (was "photos or documents").
+- **A reply can carry a video.** `Outbound` messages take `video` (`Video`: `{ url }`, https, or
+  `{ fileId }`, the provider's own), the text its caption, alone: never with buttons, a list, a link
+  or an image. Channels that take videos say so with `ChannelInfo.videos` (`{ captionMax }`), and
+  their send tool offers `video` as it offers `image`. The `flow-messaging` adapter's WhatsApp,
+  Telegram and iMessage channels have it (caption up to 1,024) and send it as a `basic` message with
+  `media.type` `video`. Elsewhere (SMS, the web chat, a custom UI that does not declare it) a video
+  is refused before it is sent, with why (`content.media`), as is one with buttons, a list, a link or
+  a photo; the agent is told and can send a link instead. A hand-written `whatsapp()` provider gets
+  videos only with `features: { videos: true }` (and `disable: ["videos"]` turns them off), so none
+  reaches a provider that would drop it. `WHATSAPP` has `videos`.
+- `spec/response.schema.json` (an HTTP agent's replies) takes a message's `video`, `{ url }` or
+  `{ fileId }`; `spec/agent-endpoint.openapi.yaml`'s platform table names `videos` for WhatsApp,
+  Telegram and iMessage. The simulators show a sent video in the thread (a file id as its id) and
+  refuse one where the platform has none.
+- **Under `flow test`, calls to Flow's model gateway carry the test session's id.** Once the test
+  cloud's session opens, `openAICompatible`/`flowModel` completions, `flowTranscribe` and
+  `describeVideoWith` send it in a `Flow-Test-Session` header, only when the call goes to Flow's
+  address (`flowModelURL`), never to OpenRouter, OpenAI, Anthropic, Gemini or any other. On a Pro
+  workspace Flow counts those calls as free test spend whatever the key's mode, once the test cloud
+  confirms the session; an unconfirmed session is charged normally. The playground and the local
+  simulators are not test cloud sessions, and an `--agent-url` agent makes its model calls in its
+  own process, so neither sends it.
+- **A tool can fail with a document: `ToolError`.** `throw new ToolError(code, message, { hint, next })`
+  (from `@flow-engineer/flow`). Over MCP the result is an error whose `structuredContent` is
+  `{ ok: false, error: { code, message, hint? }, next }` and whose text is the message, a `Next: ...`
+  line and that JSON. A CLI command (`defineCli`) with `--json` prints the document on stdout; with
+  or without it, stderr has the message and `Next: ...`; it exits 1. `cli.call` in a command of your
+  own rejects with the `ToolError`. A plain throw is unchanged, and in a chat the model reads a
+  `ToolError`'s message as for any throw.
+- **`mcpServer(...).stdio()`** serves the same tools, descriptors, instructions and traces on stdin
+  and stdout, for a host that runs the server as a local command, until the host closes stdin.
+  Nothing but the protocol goes to stdout. There is no sign-in on stdio (the caller is anonymous),
+  and tools kept to some clients are not served.
+- **The CLI over a handle in the same process.** `defineCli({ server: mcpServer(...) })` calls the
+  tools with no network and no sign-in, as the client kind `"cli"`, unless `--server` or
+  `<NAME>_SERVER` names a URL; no discovery cache is kept for it. `serverEnv` renames
+  `<NAME>_SERVER`.
+- **`connectCli(cli, { server?, token? })`** (`@flow-engineer/flow/cli`): the CLI's connection for
+  commands that parse their own arguments; `call(tool, input, { command })` resolves with the data,
+  rejects with the tool's `ToolError` or a `CliExit` (now exported) whose `code` is the exit code.
+- A tool's `context.cli` is `{ command }` when the agent's CLI made the MCP call (the command's
+  words), to word a failure for a person at a terminal. The client says it: wording only, never access.
+- A tool kept to some clients (`mcp: { clients: ["cli"] }`) no longer needs `mcpServer({ auth })`:
+  without auth it reaches only the CLI in the same process.
+- **Flow's read tools, `flowReadTools()`** (`@flow-engineer/flow/testing`): what `flow conversations`,
+  `issues`, `insights`, `templates`, `logs` and `deploy status` read, as Flow Framework tools, for
+  `mcpServer({ tools, instructions })`. `flowReadTools({ dir?, cloud?, env? })` reads with the
+  folder's keys as the commands do; `flowReadTools({ hosted: { credential?, cloud? } })` gives every
+  tool an `agent` input (a `flow_agent_id` or name; optional when the person has one) and adds
+  `list_agents`, and each call takes its key from `context.credentials.get(credential)` (default
+  `"flow"`), a `FlowAgentAccess` (`agents()`, `key(agent)`), never from the model. Failures are
+  `ToolError` documents. `flow mcp serve` is now that, on `mcpServer(...).stdio()`: the same 8 tools,
+  descriptors and instructions, byte for byte.
+- **`--server <url>` (or `FLOW_MCP_SERVER`) and `--agent`** on `flow conversations [show]`, `issues
+  [test-case]`, `insights [show]`, `templates`, `logs [--follow]` and `deploy status`: they read over
+  a hosted Flow MCP as the person signed in with **`flow mcp login --server <url>`** (`flow mcp
+  logout` forgets it; `FLOW_MCP_TOKEN` for CI), through its tools, and print what they print today.
+  `--cloud`, `--dotenv` and `--dir` do not go with it. Without `--server` they read with the
+  folder's keys through the same tools, in the same process (`connectCli` over the server's handle),
+  as any CLI built on the framework does: `--json`, help, the lines, failure documents and exit
+  statuses are byte for byte what 0.16.0 printed, and `--json` prints the same with `--server`. The
+  other commands still load no MCP SDK.
+- `Tool.format(output, input)` also gets the input the tool was called with.
+- **`jsonText(text, data?)`** (`@flow-engineer/flow`): a tool returns the JSON an API answered,
+  kept as its text: `return jsonText(await res.text())`. `data` (by default the text parsed) is the
+  structured content checked against `output`; the text is what a host reads as the result's text
+  (unless the tool has `format`), what a model reads in a chat, and what the CLI prints with
+  `--json`, byte for byte, over a handle or a URL (`--fields` picks from the data). `jsonTextOf(value)`
+  is the text a value carries, also on what `cli.call` and `connectCli`'s `call` resolve with.
+  The result's `_meta["flow.engineer/json-text"]` is `true` when its text is that JSON, or, beside a
+  `format`ted text, the JSON itself for a CLI caller only. Flow's read tools return Flow's answers so,
+  which is how `flow <command> --json` prints Flow's own text through them.
+- **`@modelcontextprotocol/client` (2.3.1) and `@stricli/core` (1.3.0) are dependencies**, no longer
+  optional peers: the read commands run on them, and `flow inspect`, `flow cli` and `flow mcp
+  login` need nothing more installed (`npx -y @flow-engineer/flow inspect <url> tools`). `flow new`
+  no longer writes them into a new agent's package.json, as for `@modelcontextprotocol/server`.
+- **`mcpServer(...).fetch(request)` takes a request with no `Host` header**, as an MCP client in
+  your own code sends one (its transport's `fetch` calling `handle.fetch(new Request(url, init))`):
+  the URL's host is used. It failed with "Missing Host header"; a `Host` naming another host is still
+  refused on localhost (DNS rebinding).
+- **A CLI's `login` against a server it cannot reach** (`flow mcp login` too) exits 5 with
+  `Could not reach <server>: ...`, as every other command says it; it printed `Command failed,
+  TypeError: fetch failed` and exited 1. **`logout` with nobody signed in** says `Not signed in to
+  <server>.`, not `Signed out of <server>.` (still exit 0).
+- `McpToolDescriptor._meta` is optional, so a `descriptor` can leave it out without a cast.
+- `flow check`'s warning for a tool kept to the CLI in a project with no `src/cli.ts` now says that
+  only a CLI signed in as the server's CLI client sees it, such as `npx @flow-engineer/flow
+  <command> --server <url>` for Flow's own MCP server, instead of that no client sees it.
+
+- **A simulated conversation reaches a Flow Messaging agent.** Flow Messaging's simulated contacts
+  (`POST /v0/test/conversations`, test keys) write on the app's simulated sender, never the
+  channel's own, so the `flow-messaging` adapter passed their events over: a hosted agent never
+  answered them. An event of a conversation with `simulated: true` now reaches the agent's channel
+  of that platform (its Telegram, WhatsApp or iMessage channel), and the reply goes into that
+  conversation. A real conversation on a sender the agent does not use is still passed over.
+- **Traces of big batches go gzipped, and a lost batch says what it cost.** A request body over
+  64 KB goes with `Content-Encoding: gzip` (OTLP/HTTP's own; Flow's traces endpoint takes it): with
+  content on, as under `flow test`, a batch of turns with long tool results took longer than the 10 s
+  timeout on a slow connection, and every session printed a `TimeoutError`. When traces still cannot
+  be sent, the one warning says how many turns' traces were not sent and that the agent is
+  unaffected (under `flow test`: the test's results do not depend on them; only those conversations
+  are missing from `flow conversations` and the dashboard), and a timeout says it waited 10 s.
+- **A test run's traces name its platform.** A turn on a channel the agent does not define (the test
+  cloud's Telegram run of an agent with no Telegram channel, through `receive()`) was traced as
+  channel `other`; it is now the platform its `ChannelInfo` names (`telegram`), so `flow
+  conversations` and the dashboard show it.
+- **`flow test`'s counts agree with its pass rate.** The first summary line names the flaky runs
+  (`6 of 10 runs passed. 2 flaky. 2 failed.`), and each channel's line is counted as the pass rate
+  is (flaky runs as passed, as failed with `--strict`; credit and infrastructure runs not counted):
+  `  telegram: 10 of 10 counted runs passed (3 flaky)`, where it read `telegram: 7 of 10 passed`
+  under `Pass rate 100%`.
+- **The starter allows the install scripts it needs.** `flow new` and `flow init` write
+  `"allowScripts": { "esbuild": true, "koffi": true }` into `package.json`, so a fresh `npm install`
+  on npm 11 no longer warns `2 packages have install scripts not yet covered by allowScripts` (and
+  keeps working when npm starts blocking unreviewed scripts).
+- **A message two runners receive at once is answered.** When one provider message reached two
+  processes of an agent on one store (a replaced Cloud Run instance still reading Flow Messaging's
+  stream beside the new one), the process whose store write lost the message's id kept the id, and
+  if it then took the conversation it marked the other's stored copy done as already answered: no
+  reply, no read receipt. That process now forgets the id, so whichever process holds the
+  conversation answers it once; a stored message counts as already answered only when it is in the
+  history. Typing for a message with a provider id now starts once this process's store write has
+  taken it (a voice note's typing after it is read), so only the process that has the message types.
+- **A turn run again on another process reaches the person on Telegram and iMessage with no sender
+  set.** A turn cut off by a restart (or a process that died holding it) is run again by another
+  process, whose `flow-messaging` adapter never saw the person's message, so it had no Flow
+  conversation to send into and, without `FLOW_MESSAGING_<CHANNEL>_SENDER`, failed every send with
+  `no conversation with them on telegram yet, and no sender to start one`. A channel's `send` now gets
+  a third argument, `{ lastMessageId }` (`ChannelSendContext`): the provider's id of the person's
+  latest message on that channel, from the conversation's history. The adapter finds the
+  conversation from it (`GET /v0/messages/{id}`) when it has none, and starts one from the sender as
+  before when Flow no longer knows that message.
+- **A store outage no longer loses Flow Messaging stream events.** An event that failed 5 times was
+  passed over and the stream's cursor moved past it, also when what failed was the agent's store
+  (flow-agent-store down, a database restarting): every message in the outage was lost. After a
+  failed event the adapter now reads the store once (`agent.conversationOf`, the event's own
+  identity): while the store does not answer, the cursor stays, the try is not counted and the
+  stream reconnects with its backoff for as long as the outage lasts (one `WARNING` per outage,
+  with the event's id). Only an event that fails 5 times while the store answers is passed over, as
+  before.
+- **A turn owed a reply never ends in silence when the model answers in plain text twice.** After
+  the one reminder that plain text never reaches them, a second step of plain text is sent as the
+  reply on the channel they are owed one on (the latest), as the send tool would have sent it, and
+  the history keeps it as that send; with no text in that step, the text the reminder was about is
+  sent. It is logged as a `WARNING` with ids only (conversation, turn, channel). A turn that still
+  ends with nothing sent where a reply was owed (a model that wrote nothing twice) is now logged as a
+  `WARNING` too: `flow: conversation <id> turn <n> ended with nothing sent to them on <channel>,
+  where they were owed a reply`.
+- **`flow deploy` never sends a live Flow key to staging.** A `.env` value that is a live-mode Flow
+  key (`fk_live_`, `flow_live_`, `otk_live_`) is no longer sent to staging (`flow deploy`,
+  `secrets --from-env`): it is listed under `skipped` with why, naming only the prefix
+  (`FLOW_MESSAGING_KEY skipped: a live key (fk_live_) goes to production only; staging takes a test
+  key (fk_test_), ...`), and staging keeps the value it has; Flow's hosting refuses it too. A
+  test-mode key (`fk_test_`, `flow_test_`, `otk_test_`) sent to production still goes, with a warning
+  on stderr. `FLOW_KEY` goes to both: Flow's hosting exchanges it for the environment's own runtime
+  key. Until now a `.env` holding the live `FLOW_MESSAGING_KEY` put it on staging, which then read
+  production's live stream.
+- **Tests: fakes are gone.** `tests/tools/<tool>.fake.ts` is no longer run: a model plays every
+  tool from its tool file (`tests/tools/<tool>.yaml`) and the scenario's `world`. `loadFakes` is
+  removed, the open no longer names `fakes`, and the protocol's fake round trip (`play: "fake"`,
+  the call's `ticket` and `faked`, `fake_failed`) is gone. `Fake`, `FakeCall` and `FakeAnswer` stay
+  exported as deprecated types for this release, so a leftover fake file still typechecks.
+- **`flow test fake` is removed.** It says so and what to do instead (write the tool's responses,
+  each with a `when:`, in `tests/tools/<tool>.yaml`), and exits 1 (`--json`: code `removed`).
+- **The fake hints are gone**: the line after a session naming the tool calls a model played and
+  suggesting a fake, the line before one naming write tools without a fake, the "This cloud does not
+  play fakes" line, and `FLOW_FRAMEWORK_FAKE_HINT`. `flow test --json` no longer has
+  `toolsWithoutFake` or each run's `toolsPlayedBy`.
+- **`given:` is no longer played**: no tool modes (`usual`, `slow`, `down`, `flaky N%`), `seed` or
+  data, and `flow test` no longer checks `given.tools` before sending. Say how a tool behaves in
+  `world:` and give its tool file a response for it whose `when:` fits.
+- **`expect.state` is no longer checked.** Check what the agent did with `expect.calls` (a tool and
+  its `args`) or an `expect.outcome` sentence.
+- **`origin:` is no longer read.** `flow test pull` takes each draft's check from the draft Flow
+  sends (`check`), not from its YAML.
+- **`--fresh` does nothing, and the cloud's replays are gone from the client**: the open no longer
+  sends `fresh`, a run's line no longer says how many stored answers it replayed, the "The cloud
+  replays stored person, tool and judge answers" line is gone, and `flow test --json` no longer has
+  each run's `replayed`. `--fresh` is still taken for this release and warns.
+- **The `restart` opening step is removed** (`restart: crash | deploy`), with the protocol's
+  `restart` command and step answer and `options.testing.runner` in a business run. What it showed
+  (across a crash a new runner takes the turn once the lease runs out and runs it once; across a
+  deploy the old runner finishes what it holds, a message the new one stored included; no message
+  answered twice, no turn lost) is proved on the store by Flow Framework's own tests
+  (`test/store.test.ts`). A business run's agent still gets a store of its own (`options.testing.database`).
+- **What 0.16.1 stopped playing still parses, for this release.** A scenario with `given:`,
+  `origin:`, `expect.state` or a `restart` step, and a leftover `tests/tools/*.fake.ts`, is never an
+  error: the field is dropped (nothing reads it) and `flow test` and `flow check` print one line per
+  file and field with what to do instead, such as `tests/scenarios/order-fails.yaml:20: given: is
+  no longer played (deprecated in 0.16.1, removed in the next release): describe the data in world:
+  and how a tool fails or is slow as a response in tests/tools/<tool>.yaml with a when:; then delete
+  given:.` A restart step is left out of the opening; an opening of only restart steps is an error.
+- **The café starter has no fakes and no `given:`.** `flow new` and `flow init` no longer copy
+  `tests/tools/get_menu.fake.ts` and `place_order.fake.ts`; `latte-correction` checks the order with
+  `expect.calls` and an `outcome` sentence, `order-fails` gets the point of sale down from its
+  `world`, and the starter's `tsconfig.json` includes `src` only.
+
+### Migration notes
+
+**Tests: what 0.16.1 stopped playing.** For this release `given:`, `expect.state`, `origin:`, a
+`restart` opening step, `tests/tools/*.fake.ts` and `flow test --fresh` still parse (or are taken)
+and are ignored, and `flow test` and `flow check` print one line per file and field saying what to
+use instead (`--fresh` warns on `flow test`). The next release removes them. Each, with how to move:
+
+- **`given:` is no longer played.** Until the next release it parses, is ignored, and `flow test`
+  and `flow check` name it. To move, put the data in `world:` and each tool's behaviour in its tool
+  file as a response with a `when:`, then delete `given:`:
+
+  ```yaml
+  # before
+  world: The point of sale is down this morning.
+  given:
+    tools: { place_order: down }
+  # after (tests/tools/place_order.yaml has a response "when: The point of sale is down" with an error)
+  world: The point of sale is down this morning and stays down for the whole conversation.
+  ```
+- **`expect.state` is no longer checked.** It parses, is ignored and is named. To move, check the
+  call the agent made, or say the outcome:
+
+  ```yaml
+  # before
+  expect:
+    state:
+      orders: [{ name: Sam, items: [{ item: Latte, size: large, milk: oat }] }]
+  # after
+  expect:
+    calls:
+      - { tool: place_order, args: { name: Sam } }
+    outcome:
+      - Exactly one order is placed, for one large latte with oat milk, under the name Sam.
+  ```
+- **`origin:` is no longer read.** It parses, is ignored and is named. To move, delete it. Code that
+  read `Scenario["origin"]` reads a draft's `check` from `flow test pull --json` instead.
+- **The `restart` step is removed.** A `- restart: crash` or `- restart: deploy` step parses, is
+  left out of the opening and is named; an opening with nothing else fails to parse. To move, delete
+  the step. Code reading `OpeningStep["restart"]`, `OpenSession.restart`, `Opened.restart`, the
+  `restart` command or `StepAnswer.restart` drops it; a `buildAgent` that read
+  `options.testing.runner` sets its own `runner`.
+- **Fakes are no longer run.** A `tests/tools/*.fake.ts` is named and ignored. To move, delete it
+  (and any `import type { Fake } ...` with it: `Fake`, `FakeCall` and `FakeAnswer` go in the next
+  release). `loadFakes`, and the protocol's `Faked`, `FakeRequest` and `ToolsPlayedBy` types, are no
+  longer exported; `OpenSession.fakes`, `Opened.fakes`, `ToolCallRequest.ticket` and `.faked` are gone.
+- **`flow test fake` is removed**: it exits 1 with what to do instead (`--json`: code `removed`).
+- **`flow test --fresh` does nothing** and warns; drop it. `OpenSession.fresh`, `Opened.replay` and
+  `RunSummary.replayed` are gone.
+- **`flow test --json` drops fields**: top-level `toolsWithoutFake`, and each run's `replayed` and
+  `toolsPlayedBy`. A script that read them stops reading them; `.flow/last-session.json` is unchanged.
+- **Lines `flow test` no longer prints**: `N tool calls were played by a model (...)`, `<tool> counts
+  as a write and has no fake ...`, `This cloud does not play fakes ...`, `The cloud replays stored
+  person, tool and judge answers ...`, and a run line's `; replayed N stored simulator answers`.
+  `FLOW_FRAMEWORK_FAKE_HINT` is no longer read.
+- **The starter's `tsconfig.json` includes `src` only** (it included `tests` for the fakes). An agent
+  made before keeps its own; nothing needs to change.
+
+**Everything else that breaks or changes a default:**
+
+- **Live Flow keys no longer go to staging.** A `.env` that held a live `FLOW_MESSAGING_KEY` (or any
+  `fk_live_`, `flow_live_`, `otk_live_` value) and deployed to staging now leaves staging's key as it
+  is, listed under `skipped`. To move: set staging's test key once with
+  `flow deploy secret FLOW_MESSAGING_KEY --env staging`. Sending a live key to staging is refused by
+  design (Flow's hosting refuses it too).
+- **Plain text after the reminder is now sent.** A model that answers in plain text twice in a turn
+  owed a reply has that text sent to the person on the latest channel. To move: an agent whose
+  instructions use plain text for notes to itself keeps them out of the reply step.
+- **Videos reach the agent.** On the `flow-messaging` adapter a video is now an attachment: unless the
+  model reads videos (`openAICompatible({ videos: true })`) or the agent has `describeVideo`, the
+  agent reads `[video: you can't watch videos]` where it read `[video]`. Code that switches over
+  `Attachment["kind"]` or `Media["kind"]` handles the new `"video"`. A hand-written
+  `WhatsAppProvider` keeps working unchanged: it is offered no videos until its `features` say
+  `videos: true`.
+- **`@modelcontextprotocol/client` and `@stricli/core` are dependencies**, no longer optional peers.
+  A fresh install grows from 6 to 18 packages and from 41.2 MB to 49.0 MB of files (55 MB to 63 MB
+  on disk); the package stays 760 KB packed. An agent that lists them in its own `package.json` keeps
+  them at the same versions or drops them; another version there installs a second copy, which its
+  own imports use.
+- **`FLOW_MCP_SERVER` now redirects the read commands.** Set in the environment, it sends
+  `flow conversations`, `issues`, `insights`, `templates`, `logs` and `deploy status` to that hosted
+  Flow MCP. To read with the folder's keys, leave it unset. `flow mcp serve`'s tools/list,
+  instructions and results are unchanged.
+- **`logout` now calls the server.** A `defineCli` CLI's `logout` and `flow mcp logout` revoke the
+  tokens at the server's `revocation_endpoint` first; a failure is only a warning. A script that
+  matched `Signed out of` after a logout with nobody signed in now reads `Not signed in to`.
+- **`flow insights` prints a different line about unreadable text**: `Insights can't read N of M
+  conversations (P%)...`, only past Flow's threshold; the count of messages without text is no
+  longer printed. `--json` is unchanged.
+- **`flow logs --severity ERROR` returns more lines.** A script that read only `ERROR` lines from
+  `flow logs --json` now also gets a 0.15.x runtime's uncaught errors logged at `DEFAULT`, as `ERROR`.
+- **`flow test`'s per-channel line changed**: a script that matched `<channel>: N of M passed` now
+  reads `<channel>: N of M counted runs passed`.
+- **Traces over 64 KB are gzipped.** A self-hosted traces endpoint must accept
+  `Content-Encoding: gzip` (OTLP collectors do).
+- **Types:** `CliConfig.server` is now `string | McpServerHandle`, so code reading `cli.server` as a
+  string narrows it first. `McpToolDescriptor._meta` is optional, so code reading a `descriptor`'s
+  `generated._meta` handles undefined. A channel's `send(address, outbound)` may be called with a
+  third argument, `{ lastMessageId }`; channels written for two arguments keep working.
+- **An `mcpServer` with a tool kept to some clients and no `auth` no longer throws**; that tool
+  reaches only the CLI in the same process.
+- **An MCP server alone** that `flow check` should check exports its tools from `src/mcp.ts`
+  (`export { tools }`); its `mcp(agent, host)` factory gets `undefined` for `agent` on Flow's hosting.
+- **The starter allows its install scripts.** An agent made before 0.16.1 can add
+  `"allowScripts": { "esbuild": true, "koffi": true }` to its `package.json`, or run
+  `npm approve-scripts esbuild koffi`.
+
+## 0.16.0 (2026-11-05)
+
+### Changes
+
+#### Tests: tools played by rule, a harder person, drafts from production
+
+- **Tools in tests are played by rule, a model only as the last resort.** A scenario can now describe
+  its world as data, in a `given:` block beside its prose `world`: `tools` sets how each tool
+  behaves (`usual`, `slow`, `down` or `flaky N%`, N a whole number from 0 to 100), `seed` fixes
+  flaky's dice so the same calls fail on every run (default 1), and any other value is plain data;
+  a tool file's name there (`menu: get_menu.yaml`) is that tool's usual output. In a scenario with
+  `given:`, each tool call is played by the first rule that fits: the tool's mode (`down` plays the
+  tool file's first response with an error, `flaky` fails that way when its die says so), the
+  developer's fake, a response in the tool file whose `input` equals the call's, and only then a
+  model, whose answer the cloud saves so a rerun is free. A scenario without `given:` plays exactly
+  as before.
+- **Fakes.** `tests/tools/<tool>.fake.ts` is the developer's own code for a tool in tests: its
+  default export (`Fake`, from `@flow-engineer/flow/testing`) gets the call's input, the scenario's
+  `given:` data (`world`), one `state` object per run that every fake changes in place, the test's
+  clock (`now`), the call's number for that tool and the tool file's responses, and answers
+  `{ output }` or `{ error }`, with `changes` in plain words. Fakes run on the developer's machine,
+  beside the agent, and are never uploaded: the open names the tools that have one, and the cloud
+  asks for the fake when its rule comes up. A fake that throws, or answers neither output nor
+  error, or something that is not plain JSON, makes the run an infrastructure error (`fake_failed`),
+  not a failure of the agent. `flow test` loads every fake before anything is sent; one that does
+  not load, or whose default export is not a function, stops it with `tests/tools/<file>: ...`.
+  `loadFakes(testsDir)` and the types `Fake`, `FakeCall` and `FakeAnswer` are exported.
+- **`expect.state`** checks in code what the fakes kept: each top-level key is one check; objects
+  match in part, arrays have the same length with each expected element matched in part (any
+  order), other values are equal.
+- **`flow test fake <tool>`** writes a starter `tests/tools/<tool>.fake.ts` from the tool's file: it
+  answers as the file's responses do (the one whose `input` is the call's, else the usual one),
+  with comments on `given:` and `state`, and never writes over a file already there (`--json`:
+  `{ ok, tool, file, from }`). Fakes stay optional.
+- `flow test` checks `given:` before sending: a mode other than the four, a `given.tools` key the
+  agent has no tool for, and `down` or `flaky` for a tool whose file has no response with an error
+  are named with their file, and nothing is sent. When a scenario sent has `given:`, one more line
+  (a suggestion, never blocking) names the agent's tools that count as writes (no `hints.readOnly`)
+  and have no fake, since in a `given:` run only a fake keeps a write for `expect.state`;
+  `FLOW_FRAMEWORK_FAKE_HINT=0` leaves it out.
+- The tests and tools skills say when to add `given:` (only when the test needs the world fixed;
+  without it a scenario plays as before), what `given.tools` covers (a mode is for the tool it names
+  only; a tool left out, or `usual`, goes on to its fake, an exact `input` match, then a model), and
+  what a write tool under `given:` needs (a fake that keeps the write in `state`, with an example
+  for a booking, or no check on the write).
+- After a session, one line says how many tool calls a model played and of which tools (and how
+  many of those answers were saved from an earlier run), naming a tool that has a fake on this
+  machine but was played by a model in a scenario without `given:`. For the tools with no fake it
+  suggests, once, that a fake would make them free and repeatable and names `flow test fake <tool>`;
+  a suggestion, not a warning: a test without fakes passes, runs and costs as before.
+  `FLOW_FRAMEWORK_FAKE_HINT=0` (environment or `.env`) leaves it out. `flow test --json` carries each
+  run's `toolsPlayedBy` (`rule`, `fake`, `recorded`, `model`, `byModel`), null from an older cloud,
+  and `toolsWithoutFake`, those tools by name.
+- A cloud older than this release ignores the fakes and plays every tool by a model, as before;
+  `flow test` then says once: `This cloud does not play fakes: a model plays every tool (tests/tools/*.fake.ts unused).`
+- The café example (and so `flow new` and `flow init`) has `tests/tools/get_menu.fake.ts` and
+  `tests/tools/place_order.fake.ts`; `latte-correction` has a `given:` block (the point of sale
+  slow) and checks the one order with `expect.state`, and `order-fails` plays the point of sale
+  `down` by rule. `reads-like-a-text` keeps only its prose world. A new agent's `tsconfig.json`
+  includes `tests`, and its fakes import their types from `@flow-engineer/flow/testing`.
+- **The simulated person can be harder to serve**, with three optional fields under `person:`.
+  `reveal: one_at_a_time` gives one fact of `knows` per message, only the one asked for (the
+  default, `as_asked`, is today's person). `behaviours` is any of `impatient`, `tangents`,
+  `half_messages`, `pushes_rules` and `walks_away`; a person with `walks_away` may leave unresolved
+  when the agent is slow, repetitive or unhelpful, and the run ends `ended: "walked_away"`, a failed
+  run with the check "The person stayed until their goal was met". `attack: { rule, tactics }` makes
+  the person try, over several turns, to make the agent break `rule` (1 to 500 characters), with
+  `tactics` from `ask`, `reason`, `authority`, `pressure`, `reframe` and `inject` in the order it
+  escalates (all six in that order when left out); the run is judged on "The agent kept this rule
+  in every reply". `attack` with `walks_away` is refused: `an attacker does not walk away: leave
+  walks_away out`. `flow test` names a wrong value, a name listed twice or an unknown key under
+  `attack` with its file and line before anything is sent.
+- The cloud checks after each run that the simulated person kept to its goal and persona; a run
+  whose person drifted is played once more, and drifting again it is errored with
+  `error: "simulator_failed"`, never the agent's failure.
+- **`flow test pull`** writes the test drafts Flow made from the hosted agent's conversations that
+  went wrong (made-up people, the business kept) into `tests/drafts/<file>`, from the agent's folder,
+  with the agent's CI key (`FLOW_FRAMEWORK_CLOUD_KEY`) and the cloud `flow test` uses
+  (`GET /v1/agent/test-drafts`, then `POST /v1/agent/test-drafts/{id}/pulled` for each file written).
+  Each draft is parsed as a scenario first; one that does not parse is named with its line and not
+  written. A file already there with other content is kept, and a draft pulled before is not
+  written again, unless `--force`; `--dry-run` lists what it would write and writes nothing;
+  `--json` reports each draft's `id`, `file`, `title`, `check` and `done` (`written`,
+  `would_write`, `unchanged`, `exists`, `pulled_before`, `invalid`). Where the workspace's drafts may
+  not leave Flow, the server's `export_blocked` message is printed as it is and nothing is written.
+  Exit status 0 when every draft was written or left as told, 1 otherwise. Drafts never run or
+  gate: `flow test` reads only `tests/scenarios` and `tests/tools`; move a draft into
+  `tests/scenarios/` to keep it.
+- **`origin`**, an optional field on a scenario, says where it came from: `from` (`code` or
+  `chat`), `by`, `covers` (the ids a coverage plan names) and `check` (`not_checked`,
+  `passes_on_fixed` or `reproduces_on_bad`). It is metadata: no run reads it. `flow test` names a
+  wrong `from` or `check` with its file and line.
+
+#### For coding agents: Flow's reads from the terminal
+
+- **`--json` is one JSON document on stdout, failures too.** `flow conversations` (and `show`),
+  `issues`, `templates`, `show`, `deploy` (every subcommand), `logs` and `cli` print
+  `{ "ok": false, "error": { "code", "message", "hint"? }, "next" }` on stdout when they fail
+  (a wrong flag, no key, a refused key, a missing route, an unreachable cloud), with exit 1 (2 for a
+  wrong flag); every other line goes to stderr. `flow logs --json` stays one `{ time, severity, text }`
+  object per line, and `login`, `link` and `setup` stay JSON Lines (the last line is the answer).
+  `flow test --json` reports an `src/agent.ts` that does not load as its report's error.
+- **A long `--json` answer is no longer cut off.** On macOS a pipe is written asynchronously and the
+  CLI exited before stdout had taken it: a `conversations show --json` over 64 KB came out empty or
+  cut at 64 KB, at random, more often when the reader was slow. Every command now exits once stdout
+  and stderr have taken what it wrote (`flow test` already wrote its report synchronously).
+- **`conversations show <id>` takes `--env`/`--environment`** (it reads one conversation by id, so
+  the environment changes nothing), and a refused `show` exits 2 with its usage error as the JSON
+  document; 0.15.6 printed the usage on stdout and exited 0.
+- **Rate limits and blips.** Every call to Flow's cloud (`conversations`, `issues`, `templates`,
+  `show`, `deploy`, `logs`, `cli`) waits out a `429` for its `Retry-After` (at most 30 s, said on
+  stderr; a longer one fails, naming the wait) and tries again, up to 3 times, and tries a GET, PUT
+  or DELETE once more after a network error or a 5xx without a `Retry-After`. `flow login` waits
+  out a `429 slow_down` on starting (up to 30 s) and keeps polling through a `429 slow_down`, its
+  `Retry-After` added to the wait (RFC 8628).
+- **`--env` and `--environment` are one flag** on `conversations`, `issues`, `templates`, `logs`,
+  `deploy` and `test` (`issues` and `templates` take it and ignore it: they are not per environment).
+- **Key errors name the key.** A refused key (401, 403, `bad_key`, `scope`) now says which key the
+  command reads (`FLOW_KEY`, or the CI key `FLOW_FRAMEWORK_CLOUD_KEY`), where it looked (the
+  environment or the `.env` file), what it found (prefix and last 4 only) and how to get the right
+  one. Every command's `--help` has the same table of which command reads which key, and both
+  cells' clouds: `https://flow.engineer/observe` (US) and `https://flow.engineer/dashboard/in` (India).
+- **Network failures say they are.** "could not reach `<address>`: network error ENOTFOUND (the host
+  name does not resolve: ...)", with the address tried; `flow deploy` no longer calls any failure
+  "Could not reach" (a stdin read is said as one, anything else as the CLI's own failure).
+- **`flow deploy secret`:** a terminal is read one line at a time and not echoed (it failed with
+  EAGAIN, reported as the cloud being unreachable); a pipe is read to its end. `--apply` restarts
+  the live version once the value is saved (`POST /v1/hosting/restart`, followed to live as promote
+  is); `--unset NAME` takes a secret away (`DELETE /v1/hosting/secrets/{NAME}?environment=`); and
+  `flow deploy restart [--env]` restarts on its own. A cloud without those routes says it cannot yet
+  and that a value applies at the next deploy or promote. A refused `FLOW_FRAMEWORK_TRACES_*` or
+  `CHINWAG_TRACES_*` says hosting already sends message text and how to turn it off.
+- **`flow deploy status`** prints the Flow Framework the folder's `package.json` pins
+  (`agent_framework` in `--json`), the newest line Flow's hosting runs, labelled as hosting's
+  (`hosting_framework`), each deploy's own (`built with:`, `deploy.framework`), and
+  per environment whether observe takes its traces (`ok`, `quiet`, or `REFUSED` with observe's
+  reason), when the cloud sends them.
+- **`flow logs`** asks the cloud for at most 500 lines a page (the cloud's limit) and follows the
+  cursor until `--limit` (the newest kept) or the window is read; MCP's `read_logs` the same.
+- **`flow logs`** takes `--until <duration|time>`, `--severity <DEFAULT|INFO|WARNING|ERROR>` (that
+  severity or above) and `--grep <text>`, sends them to the cloud and filters what an older cloud
+  sends anyway; `--since` takes a time or up to 30 days; when the lines start later than `--since`
+  asked, stderr says "Logs start at <time>: this Flow keeps <N> back". `--since` and `--until` take
+  one rule, shared with MCP's `read_logs`: a duration (2d) is that long before now for both, a time
+  is taken as given, and `--until` must be after `--since` (every page now carries `since`: the
+  release candidate's later pages left it out and the cloud refused "until is before since").
+  `--grep` matches the text anywhere in the line as printed, a JSON line's every field (needs
+  Flow's hosting of 5 Nov 2026 or later; an older one matched only `message`/`msg`). Flow searches
+  the fields' values; a `--grep` with a quote or a brace (`"step":"x"`, JSON as printed) is not sent
+  and is matched by the CLI over every line of the window.
+- **`flow logs` and `read_logs` join a stack trace** that Cloud Run split into an entry per line: a
+  line starting with whitespace (`    at ...`) at the same time (within 2 ms: Cloud Run stamps
+  each line microseconds apart) from the same instance goes on the line before it, which keeps the
+  higher severity, whatever runtime wrote it. Flow Framework's own lines are already one entry
+  with the stack inside (above); this is for an agent's own `console.error` and older
+  runtimes.
+- **`flow logs` no longer stops at the host's first page.** Without `--follow` it read one page (the
+  host answers 500 lines, oldest first), so `--since 3d` printed the oldest 500 lines and silently
+  left out the newest. It now reads every page up to `--until` (else now) before printing, keeps the
+  newest `--limit` lines (default 10000, at most 100000), and when it leaves older ones out says on
+  stderr where the printed lines start and the `--since`/`--until` that gets the rest.
+- **`flow conversations`:** `--contact <label>` (`"Contact 9e35"` or `9e35`) keeps one contact's
+  conversations, read over as many pages as it takes. `show` prints each agent reply's tool calls
+  (time, ok or the error, input and output when Flow keeps them) and its delivery (`queued`,
+  `sent`, `delivered`, `read` or `failed` with the channel's code), and says why a message's text
+  was not sent (`text_state: not_sent`); `--json` passes them through.
+- `testing/src/cloud-call.ts` is new: the one call, key and failure helpers these commands share.
+  `listConversations`, `showConversation`, `listIssues`, `logsPage` and `deployStatus` return data
+  for callers other than the CLI.
+- **`flow insights`: Flow Insights from the terminal.** `flow insights [--days 7|30] [--status
+  open|fixed|muted|all]` lists the findings the dashboard shows (where people gave up, asked again or
+  got annoyed in the agent's closed production conversations), ranked as Flow ranks them: id,
+  status, conversations with the window before's ("4 (was 9)"), topic, and what happened in the
+  dashboard's words. Low-confidence tags are named under the table, not in it. Under it, the
+  window's closed sessions and people, and what a state means: `collecting` shows counts only until
+  20 closed sessions; `no_data` says Insights grades only closed (24 h quiet) production
+  conversations on a live key, never test keys, `flow chat`, the playground or `flow test`.
+  `flow insights show <finding> [--days 7|30]` lists the finding's conversations, each with why it
+  was flagged, the person's words when the account's data allows, and `flow conversations show
+  <id>` to read it. `--json` prints the server's JSON. Until Insights is open to the workspace,
+  both print "Insights is not open to this workspace yet" with the server's hint and exit 1.
+  Insights is production traffic, so it reads with the agent's live key (`FLOW_LIVE_KEY` from
+  `flow setup --live`, below, else a `flow_live_` `FLOW_KEY`): a test key (`flow_test_`, what
+  `flow setup` writes) is refused, and both print why and exit 1.
+- **`flow issues test-case <id>`** prints the test case Flow proposes for an issue: its rule, the
+  reply it comes from, and the words to include or avoid and the sentences to judge by, to write a
+  scenario from (stdout only; it writes no file). `--json` prints the server's JSON.
+- **`flow conversations` shows each conversation's kind** (a KIND column: `test` or
+  `production`), and `flow conversations show` says under the reply counts when a conversation is
+  a test one (`flow chat`, the playground or `flow test`: never graded, never in Insights), or on a
+  test key (staging: never in Insights), so zero counts no longer read as graded and fine.
+- The build-agent skill teaches the loop: `flow insights`, `flow insights show`, `flow
+  conversations show`, fix, a scenario, `flow test`, `flow deploy`, then `flow insights` again
+  after the window.
+- `listInsights` and `insightConversations` (testing/src/conversations.ts) return Insights'
+  answers for callers other than the CLI, refusals as `Failed` with the server's code and hint.
+- **`flow status` knows the folder has deployed.** After `flow deploy`, status no longer says
+  `Next: npm start` and "To keep it answering while this machine sleeps: flow deploy"; it says
+  `Deployed from this folder to staging: npx @flow-engineer/flow deploy status shows what is live.`
+  `status --json` adds `deployed`, the environments this folder deployed to (from `.flow/deploys.json`).
+- `flow test`'s session line says "all new to the cloud" or "the cloud already had them all" when
+  that is so, in place of "6 new to the cloud, the rest it already had" for a suite of 6.
+
+#### `flow mcp serve`: Flow's reads as MCP tools for your coding agent
+
+- **`flow mcp serve`** is a stdio MCP server, run in the agent's folder:
+  `claude mcp add flow -- npx @flow-engineer/flow mcp serve`. Its tools, all read-only
+  (`readOnlyHint: true`), read what the commands print, as JSON: `list_conversations`,
+  `show_conversation` (each reply's tool calls and delivery when Flow sends them), `list_issues`,
+  `list_insights`, `insight_conversations` (what `flow insights` reads), `list_templates`
+  (FLOW_KEY: a `flow_test_` key reads staging only; production and Insights read with
+  `FLOW_LIVE_KEY` from `flow setup --live`), and `read_logs`, `deploy_status` (the CI key,
+  `FLOW_FRAMEWORK_CLOUD_KEY`, staging and production). Each result is `structuredContent` and the
+  same JSON as text under a one-line summary; a failure is `isError` with `--json`'s failure
+  document (code, message with the key story, next). Keys are read again on every call, so a key
+  fixed in `.env` works without a restart. `flow mcp --help` lists it.
+- **`@modelcontextprotocol/server` is a dependency of Flow Framework now** (pinned 2.3.1), no longer
+  an optional peer: `flow mcp serve` and `@flow-engineer/flow/mcp`'s `mcpServer` work in any agent
+  folder, one made on 0.15 included, with nothing more to install. `flow new` no longer lists it in
+  the agent's `package.json`; an agent that lists it at 2.3.1 keeps working (npm installs it once).
+
+#### `flow setup --live` and `flow keys`: production reads with a key the owner makes
+
+- **`flow setup --live [--content] [--workspace <w>] [--json]`** writes the agent's live Flow key,
+  `FLOW_LIVE_KEY` (`flow_live_...`), into `.env` with safe defaults: it reads production
+  conversations, traces and Insights, runs tests, writes traces and uses the model; it messages no
+  customer and deploys nothing live. Only the workspace's owner can make one, and a health
+  workspace gets none (`owner_only`, `health_workspace`, `content_not_allowed`, `not_set_up` pass
+  through with their next step; `observe_failed` exits 2). Message text reads de-identified (names,
+  phones, emails, ids and addresses as placeholders) unless `--content`. A new key replaces the
+  agent's earlier live key at once (their ids are printed; `--rotate` is still taken). The key
+  lasts 30 days and stops after 7 days unused. It prints the text mode, what the key can do as
+  `✓`/`✗` lines in flow.engineer's order (each `✗` with the command that grants it), the expiry,
+  the idle rule, `flow keys revoke <kid>` and the three advisory tiers; never the value (`--json`:
+  `checklist`, `advisory`, `stopped`). An older flow.engineer makes nothing and the command says
+  `live_unsupported`.
+- **`flow keys [list] [--json]`** lists the account's live keys (id, agent, mode, last 4, expiry;
+  never a value), **`flow keys show <kid>`** prints one key's `✓`/`✗` checklist and its grants, and
+  **`flow keys revoke <kid>`** ends one.
+- **`flow keys grant <read|tests|traces|model|content|send|deploy> [--key <kid>] [--wait]`** lets
+  the live key (the `FLOW_LIVE_KEY` in `.env` unless `--key`) do one more thing, in place, by
+  tier, in the same words in the help, the output and `flow mcp serve`'s tool descriptions: fine by
+  default (de-identified reads, Insights, tests, traces, the model) is granted at once; raw message
+  text (`content`) only when the user asked; messaging customers and deploying live (`send`,
+  `deploy`) only with the user's explicit yes, and the owner confirms once in the browser: the CLI
+  prints (and opens, unless `--no-browser`) the approval page and exits 4, or with `--wait` asks
+  again until it is approved (the new checklist, exit 0), denied or expired (exit 3). A live key
+  not made by `flow setup --live` is refused (`not_for_this_key`, its next step as given).
+- **A live key refused for something it was not granted (403)** prints Flow's hint as given (such
+  as Messaging's "can't message customers" naming `keys grant send`) and the three tiers, not "get
+  the right key".
+- **Production reads use `FLOW_LIVE_KEY` when it is set**, else `FLOW_KEY`: `flow conversations
+  --env production`, `flow insights` and `insights show`, and `flow conversations show`, which
+  reads with FLOW_KEY first and asks once more with FLOW_LIVE_KEY when FLOW_KEY does not find the
+  id (`show --env production` goes to it at once). The same in `flow mcp serve`
+  (`show_conversation` takes `environment`). A refused test key and a refused live key now say to
+  run `flow setup --live`, not to ask Flow.
+- **Every read says its text mode**: one `Text: raw | de-identified | withheld` line first (from the
+  `Flow-Text` header or `text_mode`), and `text_mode` in `--json` and in MCP results.
+  `flow insights show` prints the messages around each flagged one (`window`) when Flow sends them.
+
+#### Flow's own log lines on Cloud Run
+
+- **Flow Framework's own log lines have real severities on Cloud Run.** On Cloud Run (Flow's
+  hosting included: `K_SERVICE`, or `CLOUD_RUN_JOB`) each line the framework, the `flow-messaging`
+  adapter and the playground write is one JSON entry, `{ "severity", "message", ...fields }`, which
+  Cloud Logging reads: warnings are `WARNING`, errors `ERROR`, notes `INFO` or `DEBUG`, where all of
+  them were `DEFAULT`. An Error's stack is inside the entry's `message`, so a stack is one entry, not
+  one per line. Everywhere else (a terminal, `flow dev`, tests) the lines are the same text as before.
+  What an agent's own code prints is unchanged.
+- **A failed tool call is logged**, in every environment, with no event sink needed: one line with
+  the tool's name, the kind of failure (the error's name, or `unknown_tool`, `invalid_json`,
+  `invalid_input` for a call refused before it ran), the error's `code` and `status` when it has
+  them, the conversation and call ids, and the ms it ran. Never the call's input or output, nor the
+  error's message. A `WARNING`, or an `ERROR` when the tool threw JavaScript's own error for broken
+  code (`TypeError`, `ReferenceError`, ...):
+  `flow: tool refund failed after 212 ms (Error, not_refundable, 409) in conversation p_3f2a9c1d0b4e`.
+- The `flow-messaging` adapter's stream: the first close after a healthy connection (Flow's
+  connections close about hourly, `1006`) is `INFO`; a refusal, or a close right after another, stays
+  a `WARNING`.
+- `flow: agent version ...` is an `INFO` line (`console.info`), not a warning.
+- Opening SQLite no longer prints Node 22's "SQLite is an experimental feature" warning (two log
+  lines on every start of a hosted agent, whose start check opens one); other warnings print as usual.
+
+#### The starter and setup, from dogfooding
+
+- **The starter (`flow new`, `flow init`)**: `.env.example` says to sign in at
+  `https://flow.engineer/dashboard` for the CI and trace keys (the two `https://flow.engineer/observe`
+  lines are the cloud's API address, unchanged); its `AGENTS.md` says `npx @flow-engineer/flow check`
+  (bare `npx flow` fetches another npm package); `package.json` pins `@flow-engineer/flow` to the
+  exact version it is made with (no `^`), as the docs say for production. The café's
+  `place_order` and `order_status` say `signIn: "none"` like `get_menu`: the café has no accounts, so
+  its tools are public on purpose, and Flow's hosting no longer warns `mcp_open` about tools marked so
+  (flow-mono hosting).
+- **`flow setup --json`**: `whatsapp_link` and `imessage_link` say "Join <displayName> (ref ...)" like
+  `direct_links`, `join_message` and the printed links (they said the package name).
+- **Free-trial counts say whose they are**: the account's, shared by all its agents. Printed as
+  "(your account's free trial, across all its agents: 2 of 25 people)"; `--json` has them as
+  `account_trial` (setup) and each channel's `account_trial` (status). `trial` is the same object,
+  kept for a release.
+- **`flow check`** asks `src/mcp.ts`'s server, in-process, which tools it lists (what the CLI's
+  commands are made from). A tool it leaves out is no longer called "reachable as" a CLI command;
+  without a `src/mcp.ts` that answers signed out, the warning adds "if the CLI's MCP server serves
+  it". A `src/mcp.ts` that throws on import is an error.
+- **`flow deploy` no longer sends `FLOW_FRAMEWORK_JOIN_CODE`, `FLOW_FRAMEWORK_TRY_URL` or
+  `FLOW_FRAMEWORK_WORKSPACE`** as secrets: `setup` and `link` write them for the CLI alone. The
+  `FLOW_MESSAGING_<CHANNEL>_SENDER` ids are still sent (the hosted agent starts conversations from
+  them).
+
+### Migration notes
+
+Nothing in an agent's code has to change: `createAgent`, tools, channels and scenarios keep
+working. What can break is a script or query that reads the CLI's output, and a few names:
+
+- **`--json` failures are one document on stdout.** `flow conversations` (and `show`), `issues`,
+  `templates`, `insights`, `show`, `deploy` (every subcommand), `logs` and `cli` now print
+  `{ "ok": false, "error": { "code", "message", "hint"? }, "next" }` on stdout when they fail; it
+  was empty, with the message on stderr only. A script that took "stdout is not empty" as success
+  checks `ok` or the exit status instead. Progress and notes stay on stderr: do not merge it in
+  with `2>&1`. `--json` answers passed through from the server now end in a newline.
+- **Every other command's `--json` failure is that document too**, a wrong flag included: `test
+  pull` (its refusals were on stderr only), `chat`, `check`, `check-endpoint`, `projects`, `keys`,
+  `login`, `logout`, `whoami`, `setup`, `link` and `status`. The account commands' error
+  `{ "error": { "code", "message", "next" } }` gains `"ok": false` and a top-level `"next"` (the same
+  value; `error.next` stays). `test pull --json`'s report gains `ok`.
+- **`login`, `link` and `setup` are otherwise unchanged**: JSON Lines, one document a line, the last
+  line the answer, with their own exit codes (0 to 4). `logs --json` stays one `{ time, severity, text }`
+  object per line.
+- **`flow keys list` lists this folder's agent's keys** (the agent of the `FLOW_KEY` or
+  `FLOW_LIVE_KEY` in `.env`, else `package.json`'s name; every agent's outside an agent's folder).
+  `--all` lists every agent's on the account, as before; `--agent <name>` one agent's. `--json` is
+  `{ "keys", "agent", "all" }` and nothing else: the table no longer goes to stderr.
+- **`flow deploy status`'s `framework` is `hosting_framework`** (the line Flow's hosting runs, not
+  the agent's), beside `agent_framework` (what `package.json` pins); the MCP tool `deploy_status`
+  answers the same names. Each deploy's `framework` (the one its build used) is unchanged.
+- **A wrong flag exits 2** on `flow conversations`, `flow issues` and `flow templates` (was 1), as
+  `deploy` and `logs` do. A refused `conversations show` usage exits 2 with its usage error as the
+  JSON document (0.15.6 printed the usage on stdout and exited 0). `conversations show` takes
+  `--env staging|production`; any other value is a usage error (it was ignored). Scripts that treat
+  any non-zero exit as failure need nothing.
+- **`flow deploy`'s `--json` failure codes**: an error that is not the network's is `internal`, a
+  stdin failure's `stdin` (both were `network`).
+- **Human output changed** in three places a script may parse: `conversations show` prints a newer
+  server's tool calls one per line (`tool <name> <ms> ms ok`) instead of `[tools: a, b]` (an older
+  server's names print as before); `flow conversations`' table has a KIND column after CHANNEL; and
+  reads print a `Text: raw | de-identified | withheld` line first when Flow says the text mode.
+  Parse `--json` instead (`kind`, `text_mode`; the JSON is otherwise unchanged).
+- **Production reads use `FLOW_LIVE_KEY` when it is set**: `flow insights`, `flow conversations
+  --env production`, `conversations show` of a production conversation, and the MCP server's
+  production tools. Remove it from `.env` to read with `FLOW_KEY` as before. With neither key, a
+  production read's `--json` error code is `no_live_key` (was `no_flow_key`), with `next`
+  `npx @flow-engineer/flow setup --live`.
+- **`flow deploy secret`** in a terminal reads one line, not echoed (press Enter; Ctrl-D is no
+  longer needed); a value of several lines is piped in.
+- **`flow deploy` no longer sends `FLOW_FRAMEWORK_JOIN_CODE`, `FLOW_FRAMEWORK_TRY_URL` or
+  `FLOW_FRAMEWORK_WORKSPACE`** as secrets. Ones an earlier deploy sent stay until removed, and are
+  harmless: `npx @flow-engineer/flow deploy secret --unset FLOW_FRAMEWORK_JOIN_CODE --env staging`
+  (the same for the others, and for production).
+- **Free-trial counts are `account_trial`.** `setup --json` and each channel of `status --json`
+  have `account_trial`; `trial` is the same object, deprecated, and goes in 0.17.0: read
+  `account_trial`.
+- **The starter pins the exact version.** An agent made by `flow new` or `flow init` from 0.16.0 has
+  `"@flow-engineer/flow": "0.16.0"` (no `^`). An agent made before keeps `"^0.15.x"`, which does not
+  take 0.16.0 (a 0.x minor): to move, set `"@flow-engineer/flow": "0.16.0"` in package.json and run
+  `npm install`. Its `.env.example` and `AGENTS.md` need nothing (comments only).
+- **Hosting's `mcp_open` warning.** The café's tools say `signIn: "none"`, and Flow's hosting no
+  longer warns about tools marked so. A café-based agent that still has no accounts: add
+  `signIn: "none"` to each tool its `src/mcp.ts` serves on purpose, never to one that reads or
+  changes a person's account (set up sign-in instead).
+- **Flow's log lines on Cloud Run are JSON entries.** A Cloud Logging query or log-based metric that
+  matched Flow's lines in `textPayload` matches `jsonPayload.message` instead, and can now filter on
+  `severity` (`flow logs` reads both). Lines elsewhere (a terminal, `flow dev`, tests) and what an
+  agent's own code prints are unchanged.
+- **Scenarios**: `given:`, fakes, `expect.state` and the person's `reveal`, `behaviours` and
+  `attack` are optional; a scenario without them plays as before, and an older cloud ignores them.
+  To adopt tools played by rule, add a `given:` block (its prose `world` stays as the note for the
+  person and the judge) and write a fake for the tools whose answers depend on what happened before
+  in the run. `origin` was an unknown key, dropped unread; a scenario that has one is now checked:
+  `from` must be `code` or `chat` (and is required under `origin`), `check` one of the three
+  values. `tests/drafts/` is new and never read by `flow test`.
+- Internal helpers, not exported from the package: `templateWarnings` (testing/src/templates.ts)
+  takes the key with where it was found, and `cliProblems` (cli/src/commands.ts) takes a third
+  argument, `listed` (default true).
+
+## 0.15.6 (2026-11-02)
+
+### Changes
+
+- **A message Flow Messaging accepted that the channel fails later is no longer silent.** A send
+  Flow takes (`202`) can still fail at the channel seconds later (`message.failed`), such as a
+  WhatsApp template refused because the business account has no payment method (`permission`,
+  channel code `131042`). Until now, when the send had already resolved (`waitFor: "queued"`, or a
+  failure after `message.sent`) and this process had not heard from the person (a nudge or template
+  to someone new, or after a restart), the `flow-messaging` adapter dropped the failure: nothing was
+  logged, the agent was not told, and traces showed the message as sent. A template's failure was
+  also dropped for someone it had heard from, as it has no text.
+- Every `message.failed` is now logged once at error level, with the channel, the Flow conversation
+  and message ids, the error's type and channel code, and Flow's message, hint and doc URL (never the
+  message's content or the person's address):
+  `@flow-engineer/flow/flow-messaging: message msg_... on whatsapp (conversation conv_...) was not delivered (type permission, channel_code 131042): ...`.
+  It replaces the warning that only a failure with a hint got.
+- The agent is told Not delivered also for someone this process has not heard from: the adapter
+  asks the agent's store (`agent.conversationOf`) for their conversation. A template is told as
+  `template <name>`.
+- `agent.undelivered(conversationId, text, reason, detail?)` takes an optional `detail`
+  (`UndeliveredDetail`: `channel`, `messageId`, `errorType`, `channelCode`), which the adapter
+  fills, and the `message.undelivered` event carries those fields.
+- **Traces show the failure.** Every send span carries the platform's message id,
+  `flow.send.message_id` (Flow Messaging's `msg_...`; content on or off). A late failure is
+  exported as a `delivery <channel>` span with error status, under its send span when this process
+  sent it, else in a trace of its own: `flow.delivery.message_id`, `flow.delivery.status`
+  (`failed`), `flow.delivery.error_type`, `flow.delivery.channel_code` (when the channel gave one),
+  `chinwag.channel` and the conversation ids, never content.
+- A failure a send already reported (it read the message back) is no longer told again when its
+  `message.failed` arrives.
+
+### Migration notes
+
+None. A hand-written `WebhookAgent` (an object passed to `webhook()` or `stream()` instead of the
+agent) keeps working; give it `conversationOf` too for late failures to reach people it has not
+heard from.
+
+## 0.15.5 (2026-11-02)
+
+### Changes
+
+- **iMessage read receipts are not sent when Flow Messaging would surely refuse them.** Flow
+  Messaging applies iMessage's typing window to read receipts too: within 5 minutes of the line's
+  own last message to the person, else `409 outside_window`, which the channel ignores. Until now
+  the `flow-messaging` iMessage channel sent a read receipt for every message the person wrote, so a
+  person writing after a quiet spell cost one more refused call per message. The channel now uses
+  what 0.15.4 remembers for typing: when the window is known to be closed it skips the read receipt
+  without calling Flow, and with nothing known it sends it as before.
+- A read receipt Flow refuses with `outside_window` now marks the window closed, as a refused typing
+  call does, so the typing that follows in the same turn is not sent either (and the reverse).
+- WhatsApp, Telegram, SMS and every other channel send read receipts exactly as before.
+
+### Migration notes
+
+None.
+
+## 0.15.4 (2026-11-02)
+
+### Changes
+
+- **iMessage typing is not sent when Flow Messaging would surely refuse it.** iMessage shows typing
+  only within 5 minutes of the line's own last message to the person (the person's message alone
+  does not open it), and Flow Messaging refuses it outside with `409 outside_window`. Until now the
+  `flow-messaging` iMessage channel called typing at the start of every turn, so a person writing
+  after a quiet spell cost one refused call per message. The channel now remembers, per conversation,
+  when this process last had a message of the line's accepted and whether Flow refused typing since,
+  and rejects with `outside_window` without calling Flow when the window is known to be closed: Flow
+  refused typing after the line's last known message, or that message went 5 minutes ago or more.
+  The conversation handles that as before (typing waits for the agent's next message). With nothing
+  known (a new process, or more than an hour since it learned anything of that conversation) the
+  call is made, and a refusal is handled as before.
+- What a process knows is its own sends only: when several processes serve the same line, another
+  one may have messaged the person since, and a typing indicator that would have shown is skipped.
+- WhatsApp, Telegram, SMS and every other channel send typing exactly as before.
+
+### Migration notes
+
+None.
+
+## 0.15.3 (2026-11-02)
+
+### Changes
+
+- **A WhatsApp template's trace says what the person read.** Until now every template send (the
+  agent's `send_template`, a `nudge({ template })`, the fallback template) was traced as its name
+  alone, so a dashboard showed `order_shipped` where the person read "Hi Sam, your order 1042 has
+  shipped." With traces content on, a declared template's send span now carries that text as
+  `chinwag.agent_reply` (its text header's line, then its body, filled in) and its parts as
+  `flow.template.*`: `name`, `language`, `header_kind`, `header`, `body` (placeholders kept),
+  `buttons` and `values` (JSON). Without content none of it is sent; a template that is not
+  declared in `createAgent({ templates })` is still traced as its name.
+- A template send's `message.out` event keeps `text` (its name) and `template: true`, and a declared
+  one adds `reads` (the text the person read) and `sentTemplate` (the declared parts and the values
+  the send filled in).
+
+### Migration notes
+
+None.
+
+## 0.15.2 (2026-10-31)
+
+### Changes
+
+- **Every send tool has a `next` field: `"wait"` or `"act"`.** The model says what it does after the
+  message: wait for the person's reply, or act in the same turn (it said "getting your order" and
+  calls the tool next). A response of only messages now ends the turn unless a send in it said
+  `"act"`: that gets one more step, and the send's result says the message went and that it said it
+  acts next. A second `"act"` with no tool call between ends the turn.
+- Until now, a reply of only messages to the person, in a turn that had used no tool, always got one
+  more step with nothing to say why, and a model could take that step to send its message again
+  (the same greeting with buttons twice). That guessed step is gone.
+- A send that leaves `next` out, or gives any other value, is taken as `"wait"`, never refused.
+- A channel the person wrote on that has heard nothing in the turn is still asked for once, as
+  before, also when the response was only messages on other channels.
+- `transcriptOf` leaves `next` out of a sent message's channel fields.
+
+### Migration notes
+
+- A channel whose own send params (`Channel.params`) include one named `next` must rename it: the
+  send tool's `next` is Flow Framework's.
+- A scripted model in an agent's own tests that relied on the step after a reply of only messages
+  (to read the send's result, or to call a tool next) adds `next: "act"` to that send.
+
+## 0.15.1 (2026-10-31)
+
+### Changes
+
+- The MCP and CLI skill's `brand.name` example and the sign-in page's doc comments use a generic
+  Acme example.
+
+### Migration notes
+
+None.
+
+## 0.15.0 (2026-10-31)
+
+### Changes
+
+- **A scenario's `title` is a name of at most 45 characters** (counted in characters, not bytes),
+  shown on one line in Flow's dashboard and in `flow show`. A longer title fails the check before
+  anything is sent, at its line: `tests/scenarios/x.yaml:2: title: 98 characters, at most 45: a title
+  is a name, not the test. Move the detail to about:`.
+- **`about:`**, a new optional string in a scenario: what it tests, in a sentence or two. The test
+  cloud passes it on: the dashboard shows it under the title and `flow show` under the run's heading.
+- **`theme:`**, a new optional string in a scenario: the area of the agent it tests, in a word or two
+  (`theme: Ordering`), at most 30 characters, refused the same way as a long title. The test cloud
+  passes it on for the dashboard to group scenarios by, and `flow show` prints it after the title.
+- The café examples, the HTTP agent examples and the test skill use short titles with `about` (and
+  the café's a `theme`); the skill says how to name a scenario, with examples, and to group scenarios
+  by theme, 3 to 10 themes per agent.
+
+### Migration notes
+
+- **Scenario titles over 45 characters are refused.** `flow test` exits 1 with `title: N characters,
+  at most 45` for each such file, and nothing is sent. To move: shorten each title to a name and put
+  the rest in `about:`. Before:
+  `title: Orders a latte, corrects the milk mid-thought, confirms`; after:
+  `title: Milk corrected to oat` and
+  `about: Orders a latte, corrects the milk mid-thought, confirms.` `about:` and `theme:` lines are
+  safe on 0.14.x too: those versions accept them and leave them out.
+
 ## 0.14.8 (2026-10-30)
 
 ### Changes
@@ -629,7 +1653,7 @@ None.
   question. `CliIO` gains optional `choose` (the menu; omitted asks with `confirm`) and `columns`.
 - **One brand for the whole CLI: `defineCli({ brand: { name, logo, accent } })`.** Set once, read
   by the chat, the welcome banner and the sign-in page. `name` is how people see it written
-  (default the command's name): "Welcome to Olostep", the chat's title, "Olostep is ready" on the
+  (default the command's name): "Welcome to Acme", the chat's title, "Acme is ready" on the
   sign-in page and the client name a sign-in screen shows, while commands keep the command's name; `logo` an https or `data:image` URL, `accent` a six-digit hex color.
   `chat.accent` keeps working as the older name for `brand.accent`. `flow check` refuses an accent
   that is not a six-digit hex color and a logo that is not https or `data:image`.

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, type FlowEvent } from "../../src/index.ts";
+import { createAgent, sqlite, Store, type FlowEvent } from "../../src/index.ts";
 import { call, respond, scriptedModel, users } from "./helpers.ts";
 import { fakeFlow, received, SENDERS, type Recorded } from "./fake.ts";
 import { flowMessaging, type StreamOptions } from "../src/index.ts";
@@ -95,6 +95,48 @@ test("a reconnect frame, a dropped socket and a failed event each reconnect from
   assert.equal(live.calls.length, 2);
   again.answer(respond(call("send_telegram", { text: "got two" })));
   await live.agent.conversation(live.events.find((e) => e.type === "message.in" && e.conversationId !== live.events[0]!.conversationId)!.conversationId)!.whenIdle();
+});
+
+test("while the agent's store does not answer, an event is never passed over: the stream keeps its place, and the event is handled once the store is back", async (t) => {
+  t.mock.method(Math, "random", () => 0); // no backoff wait, so the reconnects come at once
+  const warnings: string[] = [];
+  t.mock.method(console, "warn", (line: string) => void warnings.push(line));
+  const flow = await fakeFlow();
+  t.after(() => flow.close());
+  flow.contacts.ct_tg = { address: { telegram_user_id: "777" } };
+  let down = false;
+  const real = new Store(sqlite(), "default");
+  const store = new Proxy(real, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function") return value;
+      return (...args: unknown[]) => (down ? Promise.reject(new Error("flow-agent-store: HTTP 503")) : value.apply(target, args));
+    },
+  });
+  const dir = mkdtempSync(join(tmpdir(), "flow-fm-stream-"));
+  writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
+  const scripted = scriptedModel();
+  const fm = flowMessaging({ apiKey: "fk_test_key", webhookSecret: "", baseUrl: flow.url });
+  const agent = createAgent({ dir, model: scripted.model, channels: [fm.telegram({ sender: SENDERS.telegram })], store, debounceMs: 0, deadlineMs: 50, scheduleCheckMs: 0 });
+  await agent.resume();
+  const handle = fm.start(agent);
+  t.after(() => handle.close());
+
+  down = true;
+  const one = received(TG, "msg_1", { kind: "basic", text: "one" });
+  for (let i = 0; i < 8; i++) {
+    const s = await flow.stream(i);
+    assert.equal(s.url.searchParams.get("after"), null, `connection ${i} still starts before the event`);
+    s.send({ type: "event", event: one });
+  }
+  down = false;
+  const turn = await scripted.nextCall(0);
+  assert.equal(lastUser(turn.request.messages), "[msg_1] one");
+  turn.answer(respond(call("send_telegram", { text: "got it" })));
+  await flow.request(post("/v0/conversations/conv_tg/basic"));
+  assert.ok(!warnings.some((w) => w.includes("going on without it")), "never passed over");
+  assert.equal(warnings.filter((w) => w.includes("the agent's store does not answer")).length, 1, "said once per outage, with the event's id");
+  assert.match(warnings.find((w) => w.includes("does not answer"))!, new RegExp(`event ${one.id} waits`));
 });
 
 /**
@@ -199,6 +241,23 @@ test("the backoff starts again only once a connection delivers an event or stays
   last.frame({ type: "event", event: { id: "evt_1", type: "contact.deleted", data: {} } });
   last.closed(1006);
   s.reconnectsAfter(500);
+});
+
+// Flow drops a healthy stream about hourly (1006); logged as a warning each time, it buried the real ones.
+test("a healthy stream that closes reconnects with an INFO line; a refusal, or a close right after another, is a WARNING", (t) => {
+  const s = timedStream(t);
+  const infos: string[] = [];
+  t.mock.method(console, "info", (line: string) => void infos.push(line));
+  s.sockets.at(-1)!.open();
+  t.mock.timers.tick(30_000);
+  s.sockets.at(-1)!.closed(1006);
+  s.reconnectsAfter(500);
+  assert.deepEqual([infos, s.warnings], [["@flow-engineer/flow/flow-messaging: the stream closed (1006); reconnecting in 0.5 s"], []]);
+  s.sockets.at(-1)!.closed(1006); // never healthy: a close in a row
+  s.reconnectsAfter(1_000);
+  s.refuse(4500, { type: "api_error" });
+  assert.equal(infos.length, 1);
+  assert.deepEqual(s.warnings, ["@flow-engineer/flow/flow-messaging: the stream closed (1006); reconnecting in 1.0 s", "@flow-engineer/flow/flow-messaging: the stream closed (4500 api_error); reconnecting in 2.0 s"]);
 });
 
 test("a stream stopped because the plan ended says why and Flow's hint, for the developer to show rather than retry", async (t) => {

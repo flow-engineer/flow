@@ -21,9 +21,8 @@ Read the relevant section:
 
 ## Serve the tools over MCP
 
-The same tools and skills go to Claude, ChatGPT and any MCP host as an MCP server. Install the
-SDK it runs on (`npm i @modelcontextprotocol/server@2.3.1`, the version Flow Framework pins) and add
-`src/mcp.ts`:
+The same tools and skills go to Claude, ChatGPT and any MCP host as an MCP server. The SDK it runs
+on, `@modelcontextprotocol/server`, comes with Flow Framework; add `src/mcp.ts`:
 
 ```ts
 import { createServer } from "node:http";
@@ -43,7 +42,15 @@ createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamabl
 
 - `mcp.fetch(request)` serves a web-standard `Request` instead (Cloudflare Workers, Deno, Bun), so
   it mounts beside the chat agent in one process or runs on its own: it needs no model, channels
-  or store.
+  or store. A project that is only an MCP server has `src/mcp.ts` and no `src/agent.ts`; it exports
+  `tools` beside `mcp` for `flow check`, and `flow deploy` puts it on Flow's hosting
+  (`oauth-bridge-skill.md`, "Deploy").
+- `await mcp.stdio()` serves the same tools and instructions on stdin and stdout, for a host that
+  runs the server as a local command (`claude mcp add acme -- node src/mcp.ts`), until the host
+  closes stdin. Nothing but the protocol goes to stdout. There is no sign-in on stdio: the caller is
+  anonymous, and tools kept to some clients are not served.
+- A tool's `context.cli` is set when the agent's CLI made the call (`{ command: "order place" }`), to
+  word a failure for a person at a terminal; it is the client's say-so, never for access.
 - Hosts get the skills as the server's instructions (each one's description) and read one with the
   `read_skill` tool. A skill that tells the chat agent to use `send_*` or `share_updates` makes
   no sense to a host: `flow check` warns about it.
@@ -57,7 +64,7 @@ createServer((req, res) => void mcp.node(req, res)).listen(8790);   // Streamabl
   client for testing, whether or not the agent has a CLI, and installs nothing into it. Start `npm run mcp` as a
   process that outlives your turn (`mkdir -p .flow && nohup npm run mcp > .flow/mcp.log 2>&1 &`; a
   coding agent's background tasks can be stopped), then, with
-  `inspect` standing for `npx -y -p @flow-engineer/flow -p @modelcontextprotocol/client@2.3.1 flow inspect http://127.0.0.1:8790/mcp`:
+  `inspect` standing for `npx -y @flow-engineer/flow inspect http://127.0.0.1:8790/mcp`:
   `inspect tools` lists what a host sees, schemas included, and `inspect call <tool> '<json>'` calls a
   tool as a host would and prints the raw result (`resources`, `read <uri>`, `prompts` and `prompt <name>` too).
   Tools that need sign-in: run `inspect auth` in the background (it prints what the server
@@ -131,7 +138,8 @@ export const apiKeysReveal = tool({
 
 The caller is told apart by the OAuth client its token was issued to, never by anything a client
 says about itself (MCP's `clientInfo` is not a signal). It needs `mcpServer({ auth })`; without
-it `mcpServer` refuses such a tool, since no caller could be told apart.
+it no host is told apart, so such a tool reaches only the CLI in the same process
+(`defineCli({ server: handle })`).
 - **With the OAuth bridge** (`flow-framework-oauth-bridge`), nothing else to write: the bridge
   serves the CLI's Client ID Metadata Document at `<origin>/.well-known/oauth-client/cli`,
   advertises it as `flow_cli_client_id`, notes which client each token went to, and `verify` returns
@@ -155,9 +163,8 @@ Which commands get short forms (a group's default, positional arguments, short f
 The same tools as commands, over the organization's MCP server, with the same sign-in and gating.
 It runs on Stricli (`@stricli/core`, the framework Sentry's CLI is built on). Every tool is already a
 command under its own name (`place_order` is `acme place-order`); a CLI file adds what needs
-judgement. Install `@modelcontextprotocol/client@2.3.1` and `@stricli/core@1.3.0`, plus
-`marked@12.0.2` and `marked-terminal@7.3.0` to render tools' Markdown in a terminal (the versions
-Flow Framework pins), and write `src/cli.ts`:
+judgement. Stricli and the MCP client SDK come with Flow Framework; install `marked@12.0.2` and `marked-terminal@7.3.0` to
+render tools' Markdown in a terminal (the versions Flow Framework pins), and write `src/cli.ts`:
 
 ```ts
 #!/usr/bin/env node
@@ -184,6 +191,12 @@ export const cli = defineCli({
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) process.exit(await runCli(cli, process.argv.slice(2)));
 ```
 
+- `server` may be an `mcpServer(...)` handle instead of a URL: the CLI then calls those tools in the
+  same process (no network, no sign-in, the client kind `"cli"`), unless `--server` or `ACME_SERVER`
+  (`serverEnv` renames it) names a URL. No discovery cache is kept for it.
+- Commands that parse their own arguments use the CLI's connection one level down:
+  `const c = await connectCli(cli, { server })` and `await c.call("get_order", { order_id }, { command:
+  "order view" })` (the data, or the tool's `ToolError`, or a `CliExit` whose `code` is the exit code).
 - Words are groups then a verb: `order` is a **command group**, `list`, `view` and `place` its
   subcommands. `acme order` and `acme order -h` list the group's subcommands, `acme order place -h`
   that command's flags and examples, and `acme -h` the groups and top-level commands. A word is a
@@ -234,7 +247,7 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
   so `this.cli.call` still reaches them; `flow check` refuses a name the server has no tool for.
 - `brand: { name, logo, accent }` is set once and read everywhere the CLI shows the brand: the chat,
   the welcome banner and the browser page a sign-in ends on. `name` is how people see it written
-  (default the command's name): "Welcome to Olostep", the chat's title, "Olostep is ready" on the
+  (default the command's name): "Welcome to Acme", the chat's title, "Acme is ready" on the
   sign-in page and the client name a sign-in screen shows, while commands keep the command's name; `logo` an https or `data:image` URL, `accent` a six-digit hex color
   (`chat.accent` is its older name and still works); `flow check` refuses a bad color or logo.
 - `acme login` ends on a branded page in the browser: the logo (else the name's initial), the
@@ -273,7 +286,9 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
 - Every tool command takes `--json` and `--fields a,b`; one that changes things takes `--dry-run`; one
   that may delete or overwrite asks first in a terminal and needs `--yes` without one. Exit codes: 0
   done, 1 the tool failed, 2 wrong command or arguments (with the help to read), 3 sign-in needed, 4
-  needs `--yes`, 5 the server could not be reached. `--server <url>` and `--token <token>` work on
+  needs `--yes`, 5 the server could not be reached. A tool that throws `ToolError` fails as a document:
+  `--json` prints `{ ok: false, error: { code, message, hint }, next }` on stdout, stderr the message and
+  `Next: ...`. `--server <url>` and `--token <token>` work on
   every command; `acme --version` prints the version, with no server or sign-in. `acme login` signs in on the organization's own login (tokens in
   `~/.config/acme/`, mode 600), `ACME_TOKEN` is for CI, `acme tools` lists every tool and schema, and
   `acme skill list` (or bare `skill`) lists the generated `acme-cli` guide and workflow skill names
@@ -303,19 +318,19 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
 
 ### Ship the CLI
 
-On Flow's hosting, `npx flow deploy` ships it: with `src/cli.ts` in the folder it packs the CLI for
+On Flow's hosting, `npx @flow-engineer/flow deploy` ships it: with `src/cli.ts` in the folder it packs the CLI for
 the environment's address before anything is sent (a CLI that does not pack stops the deploy;
 `--no-cli` leaves it out), and once the deploy is live publishes it, so `curl -fsSL <the agent's
 URL> | sh` installs it and the CLIs already out there are offered it (`acme update`).
-`flow deploy promote` publishes a production build from the folder. On its own: `npx flow cli
-publish --env staging|production`, `npx flow cli status [--env]` (the version served, the last
-releases) and `npx flow cli rollback --env production <version>` (serves an earlier version again;
+`flow deploy promote` publishes a production build from the folder. On its own: `npx @flow-engineer/flow cli
+publish --env staging|production`, `npx @flow-engineer/flow cli status [--env]` (the version served, the last
+releases) and `npx @flow-engineer/flow cli rollback --env production <version>` (serves an earlier version again;
 people on the one it replaces are offered it). Show the person the install line it prints.
 Publishing refuses a build whose server differs from the one served (`server_changed`: everyone
 who installed it would sign in again); set `servers.<env>` to the served one, or pass
 `--change-server` only when the person means to sign everyone out.
 
-`npx flow cli pack --server production` (or `staging`, or an https MCP URL) bundles `src/cli.ts`
+`npx @flow-engineer/flow cli pack --server production` (or `staging`, or an https MCP URL) bundles `src/cli.ts`
 with every dependency into one package that needs only Node.js 20.19 or newer, and writes
 `release/acme.tgz`, `release/install.sh` and `release/release.json` (`{ name, display_name,
 version, sha256, size, server }`). `staging` and `production` are the hosted agent's address

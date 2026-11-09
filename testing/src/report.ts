@@ -41,8 +41,6 @@ export interface ReportRun {
   rerun: { runId: string; passed: boolean; watch: string } | null;
   /** On a failed run played again: flaky when the second play passed, failing when it failed too; else null. */
   label: "flaky" | "failing" | null;
-  /** How many person, tool and judge answers this run replayed from stored ones; null when the cloud said none. */
-  replayed: { person: number; tools: number; judge: number } | null;
 }
 
 /** A scenario the cloud could not play, once per scenario. */

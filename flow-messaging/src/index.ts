@@ -29,7 +29,8 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
-import { carouselMessages, replyButton, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type SendReceipt, type Template, type WhatsAppFeature } from "../../src/index.ts";
+import { carouselMessages, replyButton, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type SendReceipt, type Template, type Video, type WhatsAppFeature } from "../../src/index.ts";
+import { log } from "../../src/events.ts";
 import { Client, FlowMessagingError, idSegment, verifySignature } from "./client.ts";
 import { imessageStyles, telegramHTML } from "./richtext.ts";
 
@@ -79,8 +80,12 @@ interface Piece {
   body: Record<string, unknown>;
   preview?: false;
 }
-/** What the webhook and the stream need of an agent. */
-export type WebhookAgent = Pick<Agent, "message" | "reacted" | "undelivered">;
+/**
+ * What the webhook and the stream need of an agent. With `conversationOf`, a message the channel fails
+ * after its send resolved reaches the agent also when this process has not heard from the person
+ * (a nudge or template to someone new, or after a restart).
+ */
+export type WebhookAgent = Pick<Agent, "message" | "reacted" | "undelivered"> & Partial<Pick<Agent, "conversationOf">>;
 
 export interface StreamOptions {
   /**
@@ -113,7 +118,7 @@ export interface StreamHandle {
 }
 
 /**
- * Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos (one with
+ * Telegram as Flow sends it: an inline keyboard of up to 10 buttons (or one link), photos and videos (a photo with
  * buttons is one message), carousels (their text, then one message per card: its photo, text and
  * buttons), Markdown (sent as Telegram's HTML), edits and unsends (Flow refuses an unsend past 48
  * hours, and the agent is told), no read receipts for bots.
@@ -129,6 +134,7 @@ export const TELEGRAM: ChannelInfo = {
   buttonIds: true,
   linkButton: { labelMax: 20 },
   images: { captionMax: 1024 },
+  videos: { captionMax: 1024 },
   carousels: WHATSAPP_CAROUSELS,
   readReceipts: false,
   templates: false,
@@ -140,7 +146,7 @@ export const TELEGRAM: ChannelInfo = {
 
 /**
  * iMessage as Flow sends it: text up to 9999 characters, its Markdown sent as iMessage's own styles
- * (bold, italic, underline, strikethrough), photos, inline replies, tapbacks (other emoji go as emoji
+ * (bold, italic, underline, strikethrough), photos and videos, inline replies, tapbacks (other emoji go as emoji
  * reactions), typing and read receipts (the whole conversation), edits and unsends (Flow refuses one
  * that comes too late, and the agent is told). No buttons, lists or templates. No reply window is
  * set: the line only answers people who wrote to it, and a send it will not deliver comes back as
@@ -154,6 +160,7 @@ export const IMESSAGE: ChannelInfo = {
   maxLength: 9999,
   replies: true,
   images: { captionMax: 1024 },
+  videos: { captionMax: 1024 },
   readReceipts: true,
   templates: false,
   edits: true,
@@ -162,6 +169,14 @@ export const IMESSAGE: ChannelInfo = {
   typingLastsMs: 15_000,
 };
 
+/**
+ * iMessage shows typing and sends read receipts only within this long of the line's own last message
+ * to the person (Flow Messaging's rule for a two-way conversation: the person's message alone does not
+ * open it), and refuses either outside with 409 outside_window.
+ */
+const IMESSAGE_LINE_WINDOW_MS = 5 * 60_000;
+/** What this process learned of a conversation's line window is forgotten this long after it last learned something, so the map stays bounded; typing and read receipts are then tried, as when nothing is known. */
+const LINE_WINDOW_KEPT_MS = 60 * 60_000;
 /** WhatsApp's most reply buttons in one message; more choices go as a list. */
 const WHATSAPP_REPLY_BUTTONS = 3;
 /** The label of the button that opens a list made of more than 3 buttons (Flow Messaging's own, before V0). */
@@ -216,7 +231,7 @@ interface FlowMessage {
 interface FlowEvent {
   id: string;
   type: string;
-  conversation?: { id: string; type?: "direct" | "group"; channel: string; sender: string; contact: string };
+  conversation?: { id: string; type?: "direct" | "group"; channel: string; sender: string; contact: string; simulated?: boolean };
   data?: { message?: FlowMessage; message_id?: string; emoji?: string; contact?: string };
 }
 
@@ -241,9 +256,25 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   /** Sends waiting for their message's status, by Flow message id: true once settled by it. */
   const waiting = new Map<string, (status: string, error?: FlowMessage["error"]) => boolean>();
   const early = new Map<string, { status: string; error?: FlowMessage["error"] }>();
+  /** Messages whose failure was told already (a send that read it back, then its message.failed): told once. */
+  const failures = new Set<string>();
+  const firstFailure = (id: string): boolean => {
+    if (failures.has(id)) return false;
+    failures.add(id);
+    if (failures.size > EARLY_MAX) failures.delete(failures.values().next().value!);
+    return true;
+  };
   // A status can beat its POST response, before we know the message id to wait on.
   const posting = new Map<string, Set<Promise<void>>>();
   const key = (channel: string, address: string) => `${channel}\u0000${address}`;
+  /**
+   * iMessage's line window per Flow conversation, as this process saw it: when it last had a message
+   * of the line's accepted, and when Flow last refused typing or a read receipt as outside_window.
+   * Oldest first (an entry moves to the end when updated). Only this process's sends are known: another
+   * one may have messaged the person since, and then a typing indicator or read receipt is skipped that
+   * would have gone, which is harmless.
+   */
+  const lineWindows = new Map<string, { sent?: number; refused?: number; at: number }>();
 
   function register(kind: Kind, o: FlowChannelOptions): Route {
     const route: Route = { kind, name: o.name ?? kind, sender: o.sender ?? (process.env[`FLOW_MESSAGING_${kind.toUpperCase()}_SENDER`] || undefined) };
@@ -260,6 +291,20 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     return found;
   }
 
+  /**
+   * The conversation the person's latest message is in, for a send this process has no conversation
+   * for (a turn run again after a restart: ChannelSendContext). Undefined when Flow does not know it
+   * (past its retention) or it is no Flow message id: the send then starts one from the sender, as before.
+   */
+  async function conversationOfLatest(channel: string, to: string, latest?: string): Promise<string | undefined> {
+    if (!latest?.startsWith("msg_")) return undefined;
+    try {
+      return await conversationFor(channel, to, latest);
+    } catch {
+      return undefined;
+    }
+  }
+
   function recipient(kind: Kind, to: string): Record<string, string> {
     if (to.startsWith("ct_")) return { contact: to };
     if (kind === "telegram") return { telegram_user_id: to };
@@ -272,7 +317,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * or a new one from the channel's sender (`POST /v0/messages`, which takes a basic message or a
    * template only).
    */
-  async function send(route: Route, to: string, piece: Piece, about?: string, idempotencyKey?: string): Promise<SendReceipt> {
+  async function send(route: Route, to: string, piece: Piece, about?: string, idempotencyKey?: string, latest?: string): Promise<SendReceipt> {
     const person = key(route.name, to);
     let resolve!: () => void;
     const ready = new Promise<void>((done) => { resolve = done; });
@@ -285,7 +330,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       if (!posts.size) posting.delete(person);
     };
     try {
-      const conversation = await conversationFor(route.name, to, about);
+      const conversation = (await conversationFor(route.name, to, about)) ?? (await conversationOfLatest(route.name, to, latest));
       let sent: FlowMessage;
       if (conversation) sent = await client.post(`/v0/conversations/${idSegment("conv", conversation)}/${piece.kind.replace("_", "-")}`, piece.body, undefined, idempotencyKey);
       else {
@@ -294,9 +339,13 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         sent = await client.post("/v0/messages", { sender: route.sender, to: recipient(route.kind, to), kind: first.kind, ...first.body }, undefined, idempotencyKey);
       }
       flowConversation.set(key(route.name, to), sent.conversation);
+      if (route.kind === "imessage") learned(sent.conversation, "sent");
       const receipt = arrived(route, sent);
       registered();
-      return await receipt;
+      const done = await receipt;
+      // Flow counts the window from when the channel sent it, which may be later than its 202.
+      if (route.kind === "imessage") learned(sent.conversation, "sent");
+      return done;
     } catch (error) {
       if (!(error instanceof FlowMessagingError)) throw error;
       if (!error.retryable) hinted(`a send on ${route.name}`, error);
@@ -323,9 +372,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   /** Several messages one after another, each after the last went; their receipt is the least far of theirs. */
-  async function sendAll(route: Route, to: string, pieces: Array<{ piece: Piece; about?: string; idempotencyKey?: string }>): Promise<SendReceipt> {
+  async function sendAll(route: Route, to: string, pieces: Array<{ piece: Piece; about?: string; idempotencyKey?: string; latest?: string }>): Promise<SendReceipt> {
     const receipts: SendReceipt[] = [];
-    for (const p of pieces) receipts.push(await send(route, to, p.piece, p.about, p.idempotencyKey));
+    for (const p of pieces) receipts.push(await send(route, to, p.piece, p.about, p.idempotencyKey, p.latest));
     return receipts.find((r) => r.status === "unconfirmed") ?? receipts.find((r) => r.status === "queued") ?? receipts.find((r) => r.status === "sent") ?? receipts[0]!;
   }
 
@@ -354,7 +403,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         if (done || !status) return done;
         if (status === "failed" || status === "unsent") {
           const type = error?.type ?? (status === "unsent" ? "unsent" : "channel_error");
-          hinted(`message ${message.id} on ${route.name}`, { type, channelCode: error?.channel_code, hint: error?.hint, docUrl: error?.doc_url });
+          if (status === "unsent") hinted(`message ${message.id} on ${route.name}`, { type, channelCode: error?.channel_code, hint: error?.hint, docUrl: error?.doc_url });
+          else if (firstFailure(message.id)) notDelivered(route.name, { ...message, error });
           finish(new Error(reason({ type, channelCode: error?.channel_code, param: error?.param, channel: error?.channel, message: error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" })));
         } else if ((PROGRESS[status] ?? -1) >= PROGRESS[target]!) finish(PROGRESS[status]! >= PROGRESS.delivered! ? "delivered" : "sent");
         return done;
@@ -365,7 +415,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       if (heard && take(heard.status, heard.error)) return;
       waiting.set(message.id, take);
       timeout = setTimeout(() => {
-        console.warn(`@flow-engineer/flow/flow-messaging: ${message.id} on ${route.name} was not ${target} within ${waitTimeoutMs} ms; going on (it may still arrive, and is not sent again)`);
+        log("WARNING", `@flow-engineer/flow/flow-messaging: ${message.id} on ${route.name} was not ${target} within ${waitTimeoutMs} ms; going on (it may still arrive, and is not sent again)`);
         finish("unconfirmed");
       }, waitTimeoutMs);
       let delay = POLL_FIRST;
@@ -402,17 +452,48 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   /**
    * A read receipt is a courtesy: Flow's spec says to ignore its failures. Outside the window
-   * (on iMessage, more than 5 minutes after the line's last message to that person) it is expected
-   * to be refused, so that is not logged; any other failure is.
+   * (on iMessage, 5 minutes or more after the line's last message to that person) it is expected
+   * to be refused, so that is not logged; any other failure is. On iMessage, when this process knows
+   * the window is closed, Flow is not called.
    */
   async function markRead(route: Route, to: string, body: Record<string, unknown>, messageId?: string): Promise<void> {
+    let conversation: string | undefined;
     try {
-      const conversation = await conversationFor(route.name, to, messageId);
-      if (conversation) await client.post(`/v0/conversations/${idSegment("conv", conversation)}/read`, body, 1);
+      conversation = await conversationFor(route.name, to, messageId);
+      if (!conversation || (route.kind === "imessage" && lineWindowClosed(conversation))) return;
+      await client.post(`/v0/conversations/${idSegment("conv", conversation)}/read`, body, 1);
     } catch (error) {
-      if (error instanceof FlowMessagingError && error.type === "outside_window") return;
-      console.warn(`@flow-engineer/flow/flow-messaging: read on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
+      if (error instanceof FlowMessagingError && error.type === "outside_window") {
+        if (route.kind === "imessage" && conversation) learned(conversation, "refused");
+        return;
+      }
+      log("WARNING", `@flow-engineer/flow/flow-messaging: read on ${route.name} failed (${error instanceof FlowMessagingError ? error.type : "error"})`);
     }
+  }
+
+  /** Something learned of an iMessage conversation's line window: a message of the line's went, or Flow refused typing or a read receipt. */
+  function learned(conversation: string, what: "sent" | "refused"): void {
+    const now = Date.now();
+    const known = lineWindows.get(conversation);
+    lineWindows.delete(conversation);
+    lineWindows.set(conversation, { ...known, [what]: now, at: now });
+    for (const [id, state] of lineWindows) {
+      if (now - state.at < LINE_WINDOW_KEPT_MS) break;
+      lineWindows.delete(id);
+    }
+  }
+
+  /**
+   * Whether iMessage would surely refuse typing or a read receipt now: Flow refused one after the
+   * line's last message this process knows of, or that message went more than the window ago. Nothing
+   * known (a restart, or forgotten): false, and the call is made.
+   */
+  function lineWindowClosed(conversation: string): boolean {
+    const state = lineWindows.get(conversation);
+    const now = Date.now();
+    if (!state || now - state.at >= LINE_WINDOW_KEPT_MS) return false;
+    if (state.refused !== undefined && (state.sent === undefined || state.refused > state.sent)) return true;
+    return state.sent !== undefined && now - state.sent >= IMESSAGE_LINE_WINDOW_MS;
   }
 
   /**
@@ -421,22 +502,28 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * for "off". Each call has its own Idempotency-Key, so a second call shows the indicator again.
    * A refusal rejects for the conversation to act on: `outside_window` waits for the agent's
    * next message, anything else ends typing for the turn. On iMessage typing works for 5 minutes after
-   * the line's last message to that person. On WhatsApp it works within 24 hours of their last message. The conversation logs it.
+   * the line's last message to that person, so when this process knows the window is closed it rejects
+   * with outside_window without calling Flow. On WhatsApp it works within 24 hours of their last
+   * message. The conversation logs it.
    */
   async function typing(route: Route, to: string): Promise<void> {
+    const conversation = await conversationFor(route.name, to);
+    if (!conversation) return;
+    const imessage = route.kind === "imessage";
+    if (imessage && lineWindowClosed(conversation)) throw new Error("outside_window");
     try {
-      const conversation = await conversationFor(route.name, to);
-      if (conversation) await client.post(`/v0/conversations/${idSegment("conv", conversation)}/typing`, {}, 1);
+      await client.post(`/v0/conversations/${idSegment("conv", conversation)}/typing`, {}, 1);
     } catch (error) {
       if (!(error instanceof FlowMessagingError)) throw error;
+      if (imessage && error.type === "outside_window") learned(conversation, "refused");
       throw new Error(error.type === "outside_window" ? "outside_window" : detailed({ type: error.type, channelCode: error.channelCode, param: error.param, channel: error.channel }));
     }
   }
 
   /**
    * A message as one Flow kind. A link is a buttons message with one URL button (WhatsApp's
-   * cta_url), a photo a basic message with the text as its caption; a photo with buttons or a link is
-   * their message's image header. On WhatsApp a list, or more than 3 buttons, is a list message.
+   * cta_url), a photo or a video a basic message with the text as its caption; a photo with buttons or
+   * a link is their message's image header. On WhatsApp a list, or more than 3 buttons, is a list message.
    */
   function pieceOf(kind: Kind, message: Message): Piece {
     const replyTo = message.replyTo ? { reply_to: message.replyTo } : {};
@@ -449,6 +536,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       return { kind: "list", body: { text: message.text, button: message.list?.button ?? LIST_BUTTON, sections: [{ rows }], ...replyTo }, ...preview };
     }
     const text = styled(kind, message.text);
+    if (message.video) return { kind: "basic", body: { media: { type: "video", ...file(message.video) }, ...(message.text ? text : {}), ...replyTo } };
     if (buttons) return { kind: "buttons", body: { ...text, buttons, ...(message.image ? { header: { type: "image", ...file(message.image) } } : {}), ...replyTo }, ...preview };
     if (message.image) return { kind: "basic", body: { media: { type: "image", ...file(message.image) }, ...(message.text ? text : {}), ...replyTo } };
     return { kind: "basic", body: { ...text, ...replyTo, ...(message.preview === false ? { link_preview: false } : {}) } };
@@ -474,13 +562,13 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * photo with the card's text as caption and its buttons or link under it (a card with neither is the
    * photo alone). Each has its own Idempotency-Key, the carousel's plus what it is (`:text`, `:card:0`, ...).
    */
-  function telegramCarousel(route: Route, to: string, carousel: Carousel): Promise<SendReceipt> {
+  function telegramCarousel(route: Route, to: string, carousel: Carousel, latest?: string): Promise<SendReceipt> {
     const bare = carousel.cards.findIndex((card) => (card.buttons?.length || card.link) && !card.text);
     if (bare >= 0) return Promise.reject(new Error(`Telegram shows a card's buttons under its text, and card ${bare + 1} has none: give every card with buttons a text`));
     const keyed = (what: string) => (carousel.idempotencyKey ? `${carousel.idempotencyKey}:${what}` : undefined);
     const preview = carousel.preview === false ? { preview: false as const } : {};
     return sendAll(route, to, [
-      { piece: pieceOf("telegram", { text: carousel.text, ...(carousel.replyTo ? { replyTo: carousel.replyTo } : {}), ...preview }), about: carousel.replyTo, idempotencyKey: keyed("text") },
+      { piece: pieceOf("telegram", { text: carousel.text, ...(carousel.replyTo ? { replyTo: carousel.replyTo } : {}), ...preview }), about: carousel.replyTo, idempotencyKey: keyed("text"), latest },
       ...carousel.cards.map((card, i) => ({
         piece: pieceOf("telegram", { text: card.text ?? "", image: card.image, ...(card.link ? { link: card.link } : card.buttons?.length ? { buttons: card.buttons } : {}) }),
         idempotencyKey: keyed(`card:${i}`),
@@ -512,9 +600,10 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   function provider(route: Route) {
     return {
-      sendMessage: (to: string, message: Message) => send(route, to, pieceOf(route.kind, message), message.replyTo, message.idempotencyKey),
-      sendCarousel: (to: string, carousel: Carousel) =>
-        route.kind === "telegram" ? telegramCarousel(route, to, carousel) : send(route, to, carouselOf(carousel), carousel.replyTo, carousel.idempotencyKey),
+      // `latest`: the person's latest message, to find the conversation by in a process that never saw it (ChannelSendContext).
+      sendMessage: (to: string, message: Message, latest?: string) => send(route, to, pieceOf(route.kind, message), message.replyTo, message.idempotencyKey, latest),
+      sendCarousel: (to: string, carousel: Carousel, latest?: string) =>
+        route.kind === "telegram" ? telegramCarousel(route, to, carousel, latest) : send(route, to, carouselOf(carousel), carousel.replyTo, carousel.idempotencyKey, latest),
       react: async (to: string, messageId: string, emoji: string) => void (await send(route, to, { kind: "reaction", body: { message_id: messageId, emoji } }, messageId)),
       // An edit or unsend Flow refuses (too late, or a channel without them) rejects with its reason, for the agent.
       editMessage: (to: string, messageId: string, text: string) => change(() => client.patch(`/v0/messages/${idSegment("msg", messageId)}`, styled(route.kind, text))),
@@ -531,18 +620,18 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     };
   }
 
-  /** WhatsApp from a Flow sender: buttons (a list past 3), lists, link buttons, photos (as the header of buttons or a link), carousels, quotes, reactions, typing, blue ticks, templates. */
+  /** WhatsApp from a Flow sender: buttons (a list past 3), lists, link buttons, photos (as the header of buttons or a link), videos, carousels, quotes, reactions, typing, blue ticks, templates. */
   function whatsapp(o: FlowChannelOptions & { disable?: WhatsAppFeature[] } = {}): Channel {
     const route = register("whatsapp", o);
-    const channel = whatsappChannel(provider(route), { name: route.name, disable: o.disable, instructions: o.instructions });
+    const channel = whatsappChannel({ ...provider(route), features: { videos: true } }, { name: route.name, disable: o.disable, instructions: o.instructions });
     // Flow Messaging sends every reply button's own id and gives it back on the tap.
-    return { ...channel, info: { ...channel.info, ...(channel.info.buttons ? { buttonIds: true } : {}) } };
+    return { ...channel, info: { ...channel.info, ...(channel.info.buttons ? { buttonIds: true } : {}) }, file: fileAgain };
   }
 
   /** US SMS from a Flow number: plain text; STOP, START and HELP are Flow's. */
   function sms(o: FlowChannelOptions = {}): Channel {
     const route = register("sms", o);
-    return smsChannel(provider(route), { name: route.name, instructions: o.instructions });
+    return { ...smsChannel(provider(route), { name: route.name, instructions: o.instructions }), file: fileAgain };
   }
 
   /** A Telegram bot connected to Flow. Flow Framework has no Telegram kind yet, so it is a custom channel. */
@@ -586,7 +675,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       traceChannel: route.kind,
       info,
       instructions: o.instructions,
-      send: (to, outbound) => {
+      file: fileAgain,
+      send: (to, outbound, context) => {
+        const latest = context?.lastMessageId;
         switch (outbound.type) {
           case "message":
             return p.sendMessage(to, {
@@ -595,14 +686,15 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
               ...(outbound.buttons && info.buttons ? { buttons: outbound.buttons } : {}),
               ...(outbound.link && info.linkButton ? { link: outbound.link } : {}),
               ...(outbound.image && info.images ? { image: outbound.image } : {}),
+              ...(outbound.video && info.videos ? { video: outbound.video } : {}),
               ...(outbound.idempotencyKey ? { idempotencyKey: outbound.idempotencyKey } : {}),
-            });
+            }, latest);
           case "carousel": {
             const { type: _type, ...carousel } = outbound;
-            if (info.carousels) return p.sendCarousel(to, carousel);
+            if (info.carousels) return p.sendCarousel(to, carousel, latest);
             return (async () => {
               const receipts: SendReceipt[] = [];
-              for (const m of carouselMessages(info, carousel)) receipts.push(await p.sendMessage(to, m));
+              for (const m of carouselMessages(info, carousel)) receipts.push(await p.sendMessage(to, m, latest));
               // The carousel got as far as its least far card; its id is its first message's.
               const least = receipts.find((r) => r.status === "unconfirmed") ?? receipts.find((r) => r.status === "queued") ?? receipts.find((r) => r.status === "sent") ?? receipts[0];
               return least && { ...least, messageId: receipts[0]!.messageId };
@@ -631,7 +723,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   function routeOf(event: FlowEvent) {
     const c = event.conversation;
     if (!c) return undefined;
-    return routes.find((r) => r.sender === c.sender) ?? routes.find((r) => r.kind === c.channel && !r.sender);
+    // A simulated conversation (POST /v0/test/conversations, test keys only) is on the app's simulated
+    // sender, never the channel's own: it reaches the channel of its platform, as a real one would.
+    return routes.find((r) => r.sender === c.sender) ?? routes.find((r) => r.kind === c.channel && (!r.sender || c.simulated === true));
   }
 
   async function addressOf(route: { kind: Kind }, contactId: string): Promise<string> {
@@ -642,6 +736,16 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     const address = (route.kind === "telegram" ? a?.telegram_user_id : route.kind === "imessage" ? (a?.phone ?? a?.handle) : a?.phone) ?? contactId;
     contacts.set(contactId, address);
     return address;
+  }
+
+  /** A file the person sent, fetched again by its file id (ask_about_video): null once Flow no longer keeps it (404 or 410, past its retention). */
+  async function fileAgain(fileId: string): Promise<Uint8Array | null> {
+    try {
+      return await client.download(fileId);
+    } catch (error) {
+      if (error instanceof FlowMessagingError && (error.status === 404 || error.status === 410)) return null;
+      throw error;
+    }
   }
 
   async function quoted(id: string): Promise<{ text: string; fromAgent: boolean } | undefined> {
@@ -665,15 +769,16 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       const title = String(c.label ?? id);
       base = { text: title, choice: id ? { id, title } : { title } };
     } else if (c.kind === "voice" && c.transcript) base = { text: String(c.transcript) }; // Flow transcribed it already
-    else if ((c.kind === "voice" && c.file_id) || (media?.file_id && media.type !== "video")) {
-      // Photos, audio and documents go as attachments, their bytes fetched from Flow only when the agent can use them.
+    else if ((c.kind === "voice" && c.file_id) || media?.file_id) {
+      // Photos, audio, videos and documents go as attachments, their bytes fetched from Flow only when the agent can use them.
       const file = media ?? c;
-      const kind = c.kind === "voice" || file.type === "audio" ? "audio" : file.type === "image" ? "image" : "document";
+      const kind = c.kind === "voice" || file.type === "audio" ? "audio" : file.type === "image" ? "image" : file.type === "video" ? "video" : "document";
       const fileId = String(file.file_id);
-      const attachment: Attachment = { kind, mime: String(file.mime_type ?? "application/octet-stream"), ...(file.filename ? { name: String(file.filename) } : {}), data: () => client.download(fileId) };
+      const size = Number(file.size_bytes);
+      const attachment: Attachment = { kind, mime: String(file.mime_type ?? "application/octet-stream"), ...(file.filename ? { name: String(file.filename) } : {}), ...(Number.isFinite(size) && size > 0 ? { size } : {}), ref: fileId, data: () => client.download(fileId) };
       base = { text: caption, attachments: [attachment] };
     } else if (media || c.kind === "file_blocked") {
-      // A video (Flow Framework reads none), or a file Flow did not keep: the caption, and what it was.
+      // A file with no file id, or one Flow did not keep: the caption, and what it was.
       const what = String((media ? media.type : c.media_type) ?? "file");
       base = { text: [media ? caption : c.caption, c.kind === "file_blocked" ? `[${what}: not received (${String(c.reason)})]` : `[${what}]`].filter(Boolean).join(" ") };
     } else if (c.kind === "location") base = { text: `[location: ${[c.name, c.address].filter(Boolean).join(", ")} (${c.lat}, ${c.lng})]` };
@@ -723,12 +828,14 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         early.set(m.id, { status, error: m.error });
         if (early.size > EARLY_MAX) early.delete(early.keys().next().value!);
       }
-      if (event.type !== "message.failed") return;
+      if (event.type !== "message.failed" || !firstFailure(m.id)) return;
+      // Its send resolved already (on the 202 with waitFor "queued", or as sent): the developer hears of it here.
+      notDelivered(routeOf(event)?.name ?? event.conversation?.channel ?? "an unknown channel", { ...m, conversation: m.conversation ?? event.conversation?.id });
     }
     if (event.conversation?.type === "group") {
       // An iMessage group has no one address to answer, so the agent never takes part: nothing is
       // answered there, and no typing or read receipt goes to it.
-      if (!groupsWarned) console.warn("@flow-engineer/flow/flow-messaging: group conversations are not handled; their events are passed over");
+      if (!groupsWarned) log("WARNING", "@flow-engineer/flow/flow-messaging: group conversations are not handled; their events are passed over");
       groupsWarned = true;
       return;
     }
@@ -744,8 +851,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       if (arrived) frameworkConversation.set(person, arrived.conversationId);
       return;
     }
-    const conversationId = frameworkConversation.get(person);
-    if (!conversationId) return; // not heard from since this process started: nothing to tell
+    // A failed message may be to someone this process has not heard from (a nudge or template to someone new, or after a restart): the agent's store knows them.
+    const conversationId = frameworkConversation.get(person) ?? (event.type === "message.failed" ? ((await agent.conversationOf?.({ channel: route.name, address })) ?? undefined) : undefined);
+    if (!conversationId) return; // not one of the agent's conversations: nothing to tell
     if (event.type === "reaction.added" && event.data?.message_id && event.data.emoji) {
       const target = await quoted(event.data.message_id);
       if (target?.fromAgent) agent.reacted(conversationId, event.data.emoji, target.text);
@@ -754,11 +862,16 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       // An edit or unsend Flow took and the channel then refused (it waited behind earlier messages past the limit, say): told as what it was.
       const c = kindOf(m.content);
       const target = typeof c.message_id === "string" ? c.message_id : "";
-      const text = c.kind === "edit" ? `edit of ${target}: ${textOf(c)}` : c.kind === "unsend" ? `unsend of ${target}` : textOf(m.content);
+      const text = c.kind === "edit" ? `edit of ${target}: ${textOf(c)}` : c.kind === "unsend" ? `unsend of ${target}` : c.kind === "template" ? `template ${templateName(route, c.template_id)}` : textOf(m.content);
       const type = m.error?.type ?? "channel_error";
-      hinted(`message ${m.id}`, { type, channelCode: m.error?.channel_code, hint: m.error?.hint, docUrl: m.error?.doc_url });
-      if (text) agent.undelivered(conversationId, text, reason({ type, channelCode: m.error?.channel_code, param: m.error?.param, channel: m.error?.channel, message: m.error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" }));
+      const channelCode = m.error?.channel_code;
+      if (text) agent.undelivered(conversationId, text, reason({ type, channelCode, param: m.error?.param, channel: m.error?.channel, message: m.error?.message ?? "The channel did not take it.", retryable: type === "api_error" || type === "rate_limited" }), { channel: route.name, messageId: m.id, errorType: type, ...(channelCode ? { channelCode } : {}) });
     }
+  }
+
+  /** A template's approved name by its Flow id, as this process listed the sender's templates; else the id. */
+  function templateName(route: Route, id: unknown): string {
+    return templates.get(route.sender ?? "")?.find((t) => t.id === id)?.name ?? String(id ?? "");
   }
 
   /** Hands one event to the agent once: a redelivery (or the same event by webhook and stream) is dropped. */
@@ -774,8 +887,17 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     if (seen.size > SEEN_MAX) seen.delete(seen.values().next().value!);
   }
 
+  /**
+   * Whether the agent's store answers, after an event failed: a read of the event's own identity
+   * (agent.conversationOf). Without conversationOf the store is taken to answer.
+   */
+  const storeAnswers = (agent: WebhookAgent, event: FlowEvent): Promise<boolean> =>
+    agent.conversationOf
+      ? agent.conversationOf({ channel: event.conversation?.channel ?? "", address: event.conversation?.contact ?? event.id }).then(() => true, () => false)
+      : Promise.resolve(true);
+
   const failed = (event: FlowEvent, error: unknown) =>
-    console.warn(`@flow-engineer/flow/flow-messaging: event ${event.id} (${event.type}) failed: ${error instanceof FlowMessagingError ? error.type : error instanceof Error ? error.name : "error"}`);
+    log("WARNING", `@flow-engineer/flow/flow-messaging: event ${event.id} (${event.type}) failed: ${error instanceof FlowMessagingError ? error.type : error instanceof Error ? error.name : "error"}`);
 
   /**
    * One delivery: checks Flow-Signature, drops a redelivered event, hands the event to the agent.
@@ -833,8 +955,9 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    * came after it: at once after a reconnect frame, else after a jittered backoff (up to 1 s, doubling
    * to 30 s; 30 s to 5 min after 4404 or 4429), never sooner than Flow's retry_after. The backoff starts
    * again only once a connection delivers an event or stays open 30 s, so a stream refused right after
-   * it opens never reconnects in a tight loop. An event that fails 5 times in a row is passed over, so
-   * it cannot hold up every later one. A refused key or request stops the stream (`stopped`). Replies
+   * it opens never reconnects in a tight loop. An event that fails 5 times in a row while the agent's
+   * store answers is passed over, so it cannot hold up every later one; while the store does not
+   * answer, the stream keeps its place and tries again for as long as that lasts. A refused key or request stops the stream (`stopped`). Replies
    * go over HTTP (with Idempotency-Keys), so they do not depend on the stream being up.
    */
   function stream(agent: WebhookAgent, o: StreamOptions = {}): StreamHandle {
@@ -845,7 +968,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     let healthy: NodeJS.Timeout | undefined;
     let closed = false;
     let tries = 0;
-    let failing: { id: string; times: number } | undefined;
+    let failing: { id: string; times: number; storeDown: boolean } | undefined;
     let generation = 0;
     let queue = Promise.resolve();
     let stop!: (reason: StreamStop) => void;
@@ -894,7 +1017,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         if (STREAM_FINAL.has(code)) {
           if (code === 4400 && refusal?.param === "after" && cursor) {
             // The cursor's event has left Flow's log (past retention): start again from now.
-            console.warn("@flow-engineer/flow/flow-messaging: the last handled event is no longer in Flow's log; the stream starts again from now");
+            log("WARNING", "@flow-engineer/flow/flow-messaging: the last handled event is no longer in Flow's log; the stream starts again from now");
             moveCursor(undefined);
             return void later(0);
           }
@@ -904,16 +1027,18 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
           const hint = refusal?.hint || undefined;
           const docUrl = refusal?.doc_url || undefined;
           const channelCode = refusal?.channel_code || undefined;
-          console.warn(`@flow-engineer/flow/flow-messaging: the stream stopped: ${type} (${channelCode ? `${channelCode}, ` : ""}${code})${hint ? `. ${hint}` : ""}${docUrl ? ` (${docUrl})` : ""}`);
+          log("WARNING", `@flow-engineer/flow/flow-messaging: the stream stopped: ${type} (${channelCode ? `${channelCode}, ` : ""}${code})${hint ? `. ${hint}` : ""}${docUrl ? ` (${docUrl})` : ""}`);
           return void stop({ code, type, message: why, ...(channelCode ? { channelCode } : {}), ...(hint ? { hint } : {}), ...(docUrl ? { docUrl } : {}) });
         }
         // 1012 follows a reconnect frame: at once. Else back off, never less than Flow's retry_after.
         if (code === 1012) {
-          console.debug("@flow-engineer/flow/flow-messaging: the stream closed (1012) after a reconnect frame; reconnecting now");
+          log("DEBUG", "@flow-engineer/flow/flow-messaging: the stream closed (1012) after a reconnect frame; reconnecting now");
           return void later(0);
         }
+        // The first close after a healthy connection (Flow's ~hourly 1006, say) is routine; a refusal, or closes in a row, are not.
+        const routine = tries === 0 && !refusal?.type;
         const ms = streamWait(code, refusal?.retry_after, tries++);
-        console.warn(`@flow-engineer/flow/flow-messaging: the stream closed (${code}${refusal?.type ? ` ${refusal.type}` : ""}); reconnecting in ${(ms / 1000).toFixed(1)} s`);
+        log(routine ? "INFO" : "WARNING", `@flow-engineer/flow/flow-messaging: the stream closed (${code}${refusal?.type ? ` ${refusal.type}` : ""}); reconnecting in ${(ms / 1000).toFixed(1)} s`);
         later(ms);
       };
     }
@@ -930,13 +1055,19 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
         await once(agent, event);
       } catch (error) {
         failed(event, error);
-        const times = failing?.id === event.id ? failing.times + 1 : 1;
-        if (times < STREAM_EVENT_TRIES) {
-          failing = { id: event.id, times };
+        // The agent's store not answering is no fault of the event's: the cursor stays and the try is
+        // not counted, however long the outage lasts (the reconnect's backoff paces it). Only an event
+        // that fails while the store answers is counted, and passed over at STREAM_EVENT_TRIES.
+        const store = await storeAnswers(agent, event);
+        const before = failing?.id === event.id ? failing.times : 0;
+        const times = store ? before + 1 : before;
+        if (!store || times < STREAM_EVENT_TRIES) {
+          if (!store && !failing?.storeDown) log("WARNING", `@flow-engineer/flow/flow-messaging: event ${event.id} waits: the agent's store does not answer; the stream keeps its place and tries again`);
+          failing = { id: event.id, times, storeDown: !store };
           if (mine === generation) ws.close(1000, "event failed; resuming");
           return;
         }
-        console.warn(`@flow-engineer/flow/flow-messaging: event ${event.id} failed ${times} times; going on without it (it stays in Flow's log, GET /v0/events)`);
+        log("WARNING", `@flow-engineer/flow/flow-messaging: event ${event.id} failed ${times} times; going on without it (it stays in Flow's log, GET /v0/events)`);
       }
       failing = undefined;
       tries = 0;
@@ -1014,7 +1145,7 @@ function styled(kind: Kind, text: string): { text: string; telegram?: { parse_mo
 }
 
 /** A photo as Flow takes it: by URL, or by a file uploaded to Flow. */
-function file(image: Photo): { url: string } | { file_id: string } {
+function file(image: Photo | Video): { url: string } | { file_id: string } {
   return "url" in image ? { url: image.url } : { file_id: image.fileId };
 }
 
@@ -1076,7 +1207,19 @@ function detailed(e: { type: string; channelCode?: string; param?: string; chann
  */
 function hinted(what: string, e: { type: string; channelCode?: string; hint?: string; docUrl?: string }): void {
   if ((!e.hint && !e.docUrl) || e.type === "outside_window") return;
-  console.warn(`@flow-engineer/flow/flow-messaging: ${what} was refused, ${detailed(e)}.${e.hint ? ` ${e.hint}` : ""}${e.docUrl ? ` (${e.docUrl})` : ""}`);
+  log("WARNING", `@flow-engineer/flow/flow-messaging: ${what} was refused, ${detailed(e)}.${e.hint ? ` ${e.hint}` : ""}${e.docUrl ? ` (${e.docUrl})` : ""}`);
+}
+
+/**
+ * A message Flow accepted that the channel then failed (`message.failed`), on the console at error
+ * level, once: its channel, Flow conversation and message ids, the error's type and channel code, and
+ * Flow's sentence for the developer (with its hint and doc_url). Never the content or an address.
+ */
+function notDelivered(channel: string, m: { id: string; conversation?: string; error?: FlowError }): void {
+  const e = m.error;
+  const code = e?.channel_code ? `, channel_code ${e.channel_code}` : "";
+  const why = [e?.message ?? "The channel did not take it.", e?.hint, e?.doc_url && `(${e.doc_url})`].filter(Boolean).join(" ");
+  log("ERROR", `@flow-engineer/flow/flow-messaging: message ${m.id} on ${channel}${m.conversation ? ` (conversation ${m.conversation})` : ""} was not delivered (type ${e?.type ?? "channel_error"}${code}): ${why}`);
 }
 
 function reason(e: { type: string; channelCode?: string; param?: string; channel?: string; message: string; retryable: boolean }): string {
