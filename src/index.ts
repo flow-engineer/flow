@@ -46,7 +46,7 @@ export { WAKE_UP_LIMITS, type WakeUp, type WakeUpInput, type WakeUpResult, type 
 export { RECORD_LIMITS, type ExportedRecord, type RecordCollection, type RecordCursor, type RecordEntry, type Records, type RecordScalar, type RecordValue } from "./records.ts";
 export type { AgentFiles } from "./skills.ts";
 export type { TracesOptions } from "./traces.ts";
-export { tool, toSpec, ToolError, jsonText, jsonTextOf, type FailureDocument, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Credentials, type McpClientKind, type SignIn, type Tool, type ToolContext, type ToolHints } from "./tools.ts";
+export { tool, toolGroup, toSpec, ToolError, jsonText, jsonTextOf, type FailureDocument, type ToolGroup, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Credentials, type McpClientKind, type SignIn, type Tool, type ToolContext, type ToolHints } from "./tools.ts";
 export type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, DescribeVideo, Incoming, ListRow, Media, Model, ModelRequest, ModelResponse, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateButton, TemplateDefinition, ToolCall, ToolSpec, Transcribe, UndeliveredDetail, Video } from "./types.ts";
 export { z } from "zod";
 export * from "./business-events/index.ts";

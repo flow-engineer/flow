@@ -77,9 +77,12 @@ export interface Usage {
   costUsd: number;
 }
 
+/** A tool of the agent under test: one of a tool group's (createAgent's `groups`) says which, and its channels (absent: every channel). */
+export type SessionToolSpec = ToolSpec & { group?: string; channels?: string[] };
+
 export interface OpenSession {
   /** name: a stable key (the package name) that keeps the agent's history together; title: for people. */
-  agent: { name: string; title?: string; tools: ToolSpec[]; channels?: ChannelSummary[] };
+  agent: { name: string; title?: string; tools: SessionToolSpec[]; channels?: ChannelSummary[] };
   /** Every file in the local suite; only these tests run. */
   files: Array<{ path: string; hash: string }>;
   /** How many times each scenario runs. */
@@ -92,6 +95,8 @@ export interface OpenSession {
   resume?: boolean;
   /** The client opens one new session for the unfinished runs when this cloud says session_gone. */
   reopen?: boolean;
+  /** The client plays the agent's tool groups like its tools, and tags theirs in `agent.tools` (SessionToolSpec). */
+  groups?: boolean;
   /** The client plays business runs (open, event, nudge, advance, close). */
   business?: boolean;
   /** The client reports flaky runs: when a run fails, the cloud plays it once more and labels it. */

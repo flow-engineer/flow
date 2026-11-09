@@ -26,6 +26,13 @@ export interface OpenAICompatibleOptions {
   videos?: boolean;
   /** Its context window in tokens, so the history sent is kept within it. */
   contextTokens?: number;
+  /**
+   * The most tokens one reply may use. Unset, a provider such as OpenRouter takes the model's own
+   * maximum and holds credit for it on every call.
+   */
+  maxTokens?: number;
+  /** How hard a reasoning model thinks before it answers (OpenRouter's reasoning effort). Unset, the model's default. */
+  reasoning?: "minimal" | "low" | "medium" | "high";
 }
 
 /** Flow's OpenAI-compatible model API, reached with FLOW_KEY. */
@@ -109,6 +116,8 @@ export function openAICompatible(options: OpenAICompatibleOptions = {}): Model {
           {
             model,
             temperature: options.temperature,
+            ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
+            ...(options.reasoning ? ({ reasoning: { effort: options.reasoning } } as Record<string, unknown>) : {}),
             messages: [{ role: "system", content: request.system }, ...request.messages.map(toWire)],
             ...(request.tools.length
               ? { tools: request.tools.map((t) => ({ type: "function" as const, function: t })) }

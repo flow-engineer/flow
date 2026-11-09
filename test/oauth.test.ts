@@ -1,4 +1,4 @@
-// covers: oauth/src/bridge.ts oauth/src/store.ts cli/src/auth.ts cli/src/run.ts mcp/src/server.ts
+// covers: oauth/src/bridge.ts oauth/src/store.ts cli/src/auth.ts cli/src/run.ts mcp/src/server.ts mcp/src/app.ts
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -61,6 +61,12 @@ function brand(...users: string[]) {
     /** Called while the person is on the login page, before the code goes back. */
     signingIn: () => {},
     page, calls, access,
+    /** The brand's own site minting the login page's code for a sign-in, as a signed-in page does. */
+    mint(nonce: string, returnTo: string) {
+      const code = randomBytes(24).toString("base64url");
+      codes.set(code, { nonce, returnTo, key: brand.who });
+      return code;
+    },
     login: {
       async exchange({ code, nonce, redirectUri }: { code: string; nonce: string; redirectUri: string }) {
         calls.exchange++;
@@ -282,7 +288,7 @@ test("a tool kept to the CLI is listed and called only for the CLI's own sign-in
 });
 
 /** The bridge and its MCP server for a brand, on a loopback origin of their own. */
-async function served(acme: ReturnType<typeof brand>, login: { pendingTtlSeconds?: number } = {}): Promise<string> {
+async function served(acme: ReturnType<typeof brand>, login: { pendingTtlSeconds?: number } = {}, app?: string[]): Promise<string> {
   const loginPage = await listen(acme.page);
   let handle: RequestListener = (_q, s) => void s.writeHead(503).end();
   const origin = await listen((req, res) => handle(req, res));
@@ -296,8 +302,9 @@ async function served(acme: ReturnType<typeof brand>, login: { pendingTtlSeconds
     login: { url: `${loginPage}/login`, ...acme.login, ...login },
     tokens: acme.tokens,
     development: true,
+    app: !!app,
   });
-  const mcp = mcpServer({ name: "acme", version: "1", tools: [tool({ name: "whoami", description: "Who is signed in.", input: z.object({}), hints: { readOnly: true }, run: (_i, ctx) => ({ key: ctx.key }) })], auth: bridge.auth });
+  const mcp = mcpServer({ name: "acme", version: "1", tools: [tool({ name: "whoami", description: "Who is signed in.", input: z.object({}), hints: { readOnly: true }, run: (_i, ctx) => ({ key: ctx.key }) })], auth: bridge.auth, ...(app ? { app: { origins: app } } : {}) });
   handle = (req, res) => void mcp.node(req, res);
   return `${origin}/mcp`;
 }
@@ -331,4 +338,33 @@ test("a sign-in that comes back after ten minutes finishes within login.pendingT
   assert.equal(await keyOf(acme, server, (await hostSignIn(server)).tokens.access_token), "customer-7");
   await assert.rejects(hostSignIn(await served(acme)), /came back with a code/);
   await assert.rejects(served(acme, { pendingTtlSeconds: 2 * 86400 }), /pendingTtlSeconds/);
+});
+
+// The web app on the brand's own site signs in with no page shown: the site, where the person is
+// already signed in, mints the login page's code for the app's sign-in, which only the app's own
+// page can start and finish, once. Its tokens are the brand's, refreshed and revoked through it, and
+// the app is served only into the sites it names.
+test("the web app signs in with a code the brand's own site mints, once, from its own origin", async () => {
+  const acme = brand("customer-7");
+  const server = await served(acme, {}, ["https://shop.example"]);
+  const origin = new URL(server).origin;
+  const page = await fetch(`${origin}/app?origin=https://shop.example`);
+  assert.equal(page.status, 200);
+  assert.match(page.headers.get("content-security-policy")!, /frame-ancestors https:\/\/shop\.example$/);
+  assert.equal((await fetch(`${origin}/app?origin=https://elsewhere.example`)).status, 403);
+  const session = (body: object, from = origin) => fetch(`${origin}/app/session`, { method: "POST", headers: { origin: from, "content-type": "application/json" }, body: JSON.stringify(body) });
+  assert.equal((await session({ step: "start" }, "https://shop.example")).status, 403, "only the app's own page starts a sign-in");
+  const start = async () => await (await session({ step: "start" })).json() as { nonce: string; returnTo: string; clientId: string; resource: string };
+  const wrong = await start();
+  assert.equal((await session({ step: "finish", returnTo: wrong.returnTo, code: acme.mint(wrong.nonce, wrong.returnTo), state: "another" })).status, 400);
+  const request = await start();
+  assert.equal(request.resource, server);
+  const finish = { step: "finish", returnTo: request.returnTo, code: acme.mint(request.nonce, request.returnTo), state: request.nonce };
+  const tokens = await (await session(finish)).json() as { access_token: string; refresh_token: string };
+  assert.equal(await keyOf(acme, server, tokens.access_token), "customer-7");
+  assert.equal((await session(finish)).status, 400, "a sign-in finishes once");
+  const renewed = await (await session({ step: "refresh", refreshToken: tokens.refresh_token })).json() as { access_token: string };
+  assert.equal(await keyOf(acme, server, renewed.access_token), "customer-7");
+  assert.equal((await session({ step: "revoke", token: renewed.access_token })).status, 200);
+  assert.equal(await keyOf(acme, server, renewed.access_token), undefined);
 });

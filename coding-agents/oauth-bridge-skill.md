@@ -179,6 +179,18 @@ Make the signing key with `crypto.generateKeyPairSync("rsa", { modulusLength: 20
 add `kid`, `use: "sig"` and `alg: "RS256"`, and keep it, the encryption key and the cookie key as
 secrets.
 
+### 3. The web app (optional): sign-in from the site itself
+
+With `oauthBridge({ ..., app: true })` the agent's web app (mcp-skill.md, "The web app") signs a
+person in from the brand's own site, where they are already signed in, with no page shown. The
+panel asks the bridge for a sign-in and the site's `FlowAppConfig.signIn(request)` receives
+`{ nonce, returnTo, clientId, resource }`, exactly the four values the login page gets as `nonce`,
+`return_to`, `client` and `resource`. The site mints the same single-use code it would mint there
+(from its own signed-in session, on its own server) and returns `{ code, state: nonce }`; it never
+redirects. `returnTo` has the login page's shape (`<agent origin>/interaction/<id>/callback`), so the
+code-minting step needs no change: it is bound to the same four values and redeemed once by the same
+`login.exchange`. Return `null` when no one is signed in on the site.
+
 ## Test it on the laptop
 
 Everything runs on localhost. Claude and ChatGPT cannot reach localhost; `flow inspect` runs the

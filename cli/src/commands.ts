@@ -41,6 +41,13 @@ export interface ToolCommand {
   input?: (input: Record<string, unknown>, options: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>;
   /** Your own output for people: gets the tool's result, returns the text to print. --json and --fields still print the data. */
   print?: (result: unknown) => string | Promise<string>;
+  /**
+   * Your own code after the tool succeeds, on the person's machine (saving files, more calls): gets
+   * the tool's result, the options' values, the CLI's tools and whether JSON was asked for. What it
+   * returns is printed in place of the result, the way results are (--json and --fields apply);
+   * undefined prints the result.
+   */
+  after?: (result: unknown, options: Record<string, unknown>, cli: CliContext["cli"], output: { json: boolean }) => unknown | Promise<unknown>;
   /** Another name for the command. */
   alias?: string;
   /** One line under the command in help (default: the tool's title). */
@@ -80,6 +87,12 @@ export interface CliConfig {
   name: string;
   /** The CLI client version sent to the server (default "1"). */
   version?: string;
+  /**
+   * The contract of the server's tools this CLI is built against (mcpServer's `contracts.current`),
+   * named on every request so the server keeps answering in it after its tools change. Omitted: the
+   * server decides (its `contracts.pick`, else its current contract).
+   */
+  contract?: number;
   /**
    * The organization's MCP endpoint. Else `--server` or <NAME>_SERVER. Or an mcpServer handle in
    * this process: the CLI calls its tools with no network and no sign-in (as the client kind "cli"),
@@ -347,6 +360,11 @@ export class CommandBuilder {
     this.spec.print = fn;
     return this;
   }
+  /** Run your own code after the tool succeeds; what it returns is printed in place of the result. */
+  after(fn: NonNullable<ToolCommand["after"]>): this {
+    this.spec.after = fn;
+    return this;
+  }
   /** For a list: the columns of the table people see. */
   columns(...fields: string[]): this {
     this.spec.columns = fields;
@@ -509,6 +527,40 @@ export function feedbackUsage(config: CliConfig, tools: ToolInfo[]): string | un
   return `${config.name} ${c.words.join(" ")} ${about ? `${about} ` : ""}tooling|product ${message ? `${message} ` : ""}"<what happened>"`;
 }
 
+/**
+ * The line that calls `tool` with `input` in this CLI, as a person types it: the command's words, its
+ * positional arguments, then a flag for each other field (a list repeats its flag, an object is JSON;
+ * fields left at the CLI file's defaults are left out). Undefined when no command calls the tool, and
+ * when a positional argument is missing, since the line would not run.
+ */
+export function commandLine(config: CliConfig, tools: ToolInfo[], tool: string, input: Record<string, unknown>): string | undefined {
+  const c = commandTable(config, tools).find((x) => x.tool?.name === tool);
+  if (!c?.tool) return undefined;
+  const settings = c.config && !isCustom(c.config) ? c.config : undefined;
+  const props = c.tool.inputSchema.properties ?? {};
+  const required = new Set(c.tool.inputSchema.required ?? []);
+  const shell = (value: unknown) => {
+    const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+    return /^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`;
+  };
+  const words = [config.name, ...c.words];
+  for (const field of settings?.args ?? []) {
+    const value = input[field];
+    if (value === undefined || value === null) return undefined;
+    words.push(...[value].flat().map(shell));
+  }
+  for (const { field, flag } of flagsOf(c.tool, settings)) {
+    const value = input[field];
+    if (value === undefined || value === null || JSON.stringify(value) === JSON.stringify(settings?.defaults?.[field])) continue;
+    const kind = flagKind(props[field] ?? {});
+    // An optional boolean flag has no negation: false is its absence.
+    if (kind === "boolean") words.push(...(required.has(field) ? [`--${flag}`, String(value)] : value === true ? [`--${flag}`] : []));
+    else if (kind === "list" && Array.isArray(value)) for (const item of value) words.push(`--${flag}`, shell(item));
+    else words.push(`--${flag}`, shell(value));
+  }
+  return words.join(" ");
+}
+
 /** The command the words start with, the longest match first, and the words left after it. */
 export function findCommand(commands: Command[], words: string[]): { command: Command; rest: string[] } | null {
   let best: Command | null = null;
@@ -632,7 +684,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[], listed = true)
       if (option.short && (letters.has(option.short) || OWN_LETTERS.has(option.short))) errors.push(`command "${w}": option --${name}'s -${option.short} is already taken`);
       if (option.short) letters.add(option.short);
     }
-    if (c.options && Object.keys(c.options).length && !c.input) errors.push(`command "${w}": it has options but no input code to read them`);
+    if (c.options && Object.keys(c.options).length && !c.input && !c.after) errors.push(`command "${w}": it has options but no input or after code to read them`);
     const lists = (c.args ?? []).filter((a) => input.has(a) && flagKind(tool.inputSchema.properties![a]!) === "list");
     if (lists.length && c.args!.length > 1) errors.push(`command "${w}": ${lists[0]} takes many values, so it must be the only positional argument`);
     const output = outputFields(tool);

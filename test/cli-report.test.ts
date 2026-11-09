@@ -210,10 +210,10 @@ test("what is wrong on this machine is said before the cloud is called, an addre
   assert.equal(noAgent.code, 1);
   assert.match(noAgent.out, /^No src\/agent\.ts in .+ Run flow test from your agent's folder/);
   const dir = agentDir();
-  writeFileSync(join(dir, "tests", "scenarios", "bad.yaml"), "id: bad\nchannels: [sms, fax]\nperson:\n  persona: a\nopening:\n  - say: hi\n");
+  writeFileSync(join(dir, "tests", "scenarios", "bad.yaml"), "id: bad\nchannels: [sms, Fax]\nperson:\n  persona: a\nopening:\n  - say: hi\n");
   assert.deepEqual(await cliOutput(["test", "--cloud", closed], dir), {
     code: 1,
-    out: `${join("tests", "scenarios", "bad.yaml")}:2: channels[1]: Invalid option: expected one of "sms"|"whatsapp"|"imessage"|"telegram"|"web"\n${join("tests", "scenarios", "bad.yaml")}:3: person.goal: missing\n\nNothing was sent: fix the test files above.\n`,
+    out: `${join("tests", "scenarios", "bad.yaml")}:2: channels[1]: a platform (sms, whatsapp, imessage, telegram, web) or a custom UI's name\n${join("tests", "scenarios", "bad.yaml")}:3: person.goal: missing\n\nNothing was sent: fix the test files above.\n`,
   });
   const good = agentDir();
   assert.match((await cliOutput(["test", "--cloud", closed, "--agent-url", "http://127.0.0.1:9/flow"], good)).out, /^Could not reach your agent at http:\/\/127\.0\.0\.1:9\/flow: ECONNREFUSED\. Start it first/m);
@@ -723,6 +723,9 @@ test("test files: old ones parse as before, the clock, calls and never parse, an
   for (const now of ["2026-10-16T09:00:30Z", "2026-10-16T09:00-04:00"]) assert.equal(parseScenario(scenario(`now: ${now}\n`)).now, now);
   // A run that starts from an earlier conversation: what each side said, oldest first.
   assert.deepEqual(parseScenario(scenario("history:\n  - person: Book Friday\n  - agent: Done, {{now + 1d | weekday}}.\n")).history, [{ person: "Book Friday" }, { agent: "Done, {{now + 1d | weekday}}." }]);
+  // A custom UI by its name (the web app's app), beside a platform; not a name that could be no channel's.
+  assert.deepEqual(parseScenario({ path: "scenarios/x.yaml", content: old.replace("[sms]", "[app, web]") }).channels, ["app", "web"]);
+  assert.throws(() => parseScenario({ path: "scenarios/x.yaml", content: old.replace("[sms]", "[My App]") }), /channels\[0\]/);
   // A title is a short name, counted in characters, not bytes; the test's detail goes in about.
   // A theme groups scenarios by the area they test: a word or two, at most 30 characters.
   const named = parseScenario(scenario(`title: Café order, milk to oat ${"é".repeat(21)}\nabout: Orders a latte, corrects the milk mid-thought, confirms.\ntheme: Ordering\n`));

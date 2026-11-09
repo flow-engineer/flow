@@ -23,6 +23,7 @@ own assistant, the same product capabilities should be available to them.
 | [Plugin](https://flow.engineer/docs/plugins) | Hosts that load native skills and an MCP connection |
 | [CLI](https://flow.engineer/docs/cli) | People, scripts, Claude Code, Codex and other coding agents |
 | [Messaging agent](https://flow.engineer/docs/conversations) | WhatsApp, iMessage, Telegram, SMS and your own web or app chat |
+| [Web app](https://flow.engineer/docs/framework/web-app) | People on your own site, in a side panel beside its pages |
 
 Tools are typed TypeScript functions that call your APIs. Skills teach the workflows around them.
 Flow exposes the same capabilities through each interface, with authentication hooks for your

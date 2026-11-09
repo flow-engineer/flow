@@ -18,7 +18,7 @@ import { buildCommand } from "@stricli/core";
 import { cliProblems, command, commandTable, connectCli, defineCli, runCli, skillFile, type CliConfig, type CliIO } from "../cli/src/index.ts";
 import { isSignedIn, signOut, storedProvider } from "../cli/src/auth.ts";
 import { palette } from "../cli/src/colors.ts";
-import { feedbackUsage } from "../cli/src/commands.ts";
+import { commandLine, feedbackUsage } from "../cli/src/commands.ts";
 import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
 import { scriptedModel, respond, call } from "./helpers.ts";
 import { createAgent, jsonText, jsonTextOf, tool, ToolError } from "../src/index.ts";
@@ -223,6 +223,17 @@ test("a command written as code: short and renamed flags, the long name still wo
   assert.match(skill, /`-n, --limit` integer, default 1/);
 });
 
+// The web app shows, beside each step the chat ran, the line that does the same in the CLI: it has to be
+// the CLI file's own shape (positional arguments, renamed and short flags, defaults), or it does not run.
+test("the command line for a tool call is the one the CLI file reads: arguments, its flag names, lists, JSON, no defaults", () => {
+  const tools = [{ name: "update_order", inputSchema: { properties: { order_id: { type: "string" }, status: { type: "string" }, tags: { type: "array", items: { type: "string" } }, note: { type: "object" }, notify: { type: "boolean" }, limit: { type: "integer" } }, required: ["order_id"] } }];
+  const cli = defineCli({ name: "acme", server: "http://127.0.0.1:1/mcp", commands: { "order update": command("update_order").arg("order_id").flag("state", "status").default("limit", 10) } });
+  assert.equal(commandLine(cli, tools, "update_order", { order_id: "BL-1042", status: "ready to go", tags: ["a", "b"], note: { gift: true }, notify: true, limit: 10 }),
+    `acme order update BL-1042 --state 'ready to go' --tags a --tags b --note '{"gift":true}' --notify`);
+  assert.equal(commandLine(cli, tools, "update_order", { status: "ready" }), undefined, "no line without its positional argument");
+  assert.equal(commandLine(cli, tools, "no_such_tool", {}), undefined);
+});
+
 test("a command's code hides inputs, words its flags, adds its own options, takes many values, refuses cleanly and prints its own way", async () => {
   const tagOrders = tool({
     name: "tag_orders",
@@ -329,8 +340,9 @@ test("flow check holds shorthands and defaults to the tool's input and away from
   assert.deepEqual(problems({ options: { limit: { help: "x" }, mine: { help: "y", short: "h" } } }), [
     'command "keys list": option --limit clashes with limit\'s flag',
     'command "keys list": option --mine\'s -h is already taken',
-    'command "keys list": it has options but no input code to read them',
+    'command "keys list": it has options but no input or after code to read them',
   ]);
+  assert.deepEqual(problems({ options: { out: { help: "Where to save it" } }, after: () => undefined }), [], "after reads the options too");
 });
 
 test("a tool's format is what people see, rendered at a terminal; --json, --fields and the CLI file's view show its data", async () => {

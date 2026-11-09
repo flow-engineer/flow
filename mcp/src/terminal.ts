@@ -1,7 +1,9 @@
 // A terminal channel beside MCP. Mount fetch wherever the agent's HTTP routes live. A bearer token
 // makes the person whoever auth.verify says; without one, a guest chats under the id its CLI keeps.
+// `{ reset: true }` instead of a message starts a new chat: the agent no longer sees what came before.
 import { customUI } from "../../src/channels.ts";
 import type { Agent } from "../../src/agent.ts";
+import type { Tool } from "../../src/tools.ts";
 import type { McpAuth } from "./server.ts";
 
 export interface TerminalServerOptions {
@@ -13,11 +15,21 @@ export interface TerminalServerOptions {
   guests?: boolean;
   path?: string;
   channel?: string;
+  /** Guidance for the agent while the person is on this channel. */
+  instructions?: string;
+  /** The channel's name in traces. Default "cli". */
+  traceChannel?: string;
+  /** The client draws each tool call as it runs (ChannelInfo.showsTools): the agent then answers once, with no acknowledgement first. Default off. */
+  showsTools?: boolean;
+  /** @deprecated Give createAgent a group limited to this channel instead (toolGroup); see Channel.tools. */
+  tools?: () => Tool[];
+  /** Called as each request starts, with the person it is for (key:<key> or guest:<id>), before the agent runs. */
+  onRequest?: (person: string) => void;
 }
 
 export function terminalServer(options: TerminalServerOptions) {
   const path = options.path ?? "/agent/terminal";
-  const channel = { ...customUI(options.channel ?? "terminal", { sendMessage: async () => { throw new Error("No terminal request is listening"); } }), traceChannel: "cli" };
+  const channel = { ...customUI(options.channel ?? "terminal", { sendMessage: async () => { throw new Error("No terminal request is listening"); }, ...(options.instructions ? { instructions: options.instructions } : {}), ...(options.showsTools ? { info: { showsTools: true } } : {}), ...(options.tools ? { tools: options.tools } : {}) }), traceChannel: options.traceChannel ?? "cli" };
   let inFlight = 0;
   const pending = new Map<string, Promise<unknown>>();
   return {
@@ -33,9 +45,15 @@ export function terminalServer(options: TerminalServerOptions) {
       if (!identity?.key && !guest) return Response.json({ error: "sign_in_required" }, { status: 401, headers: { "www-authenticate": "Bearer" } });
       if (guest && !/^[A-Za-z0-9_-]{16,128}$/.test(guest)) return Response.json({ error: "invalid_request" }, { status: 400 });
       const person = identity?.key ? { key: identity.key, credentials: identity.credentials } : { guest: guest! };
+      options.onRequest?.(identity?.key ? `key:${identity.key}` : `guest:${guest}`);
       const queue = identity?.key ? `key:${identity.key}` : `guest:${guest}`;
       let input;
-      try { input = await request.json() as { text?: unknown; conversationId?: unknown }; } catch { return Response.json({ error: "invalid_request" }, { status: 400 }); }
+      try { input = await request.json() as { text?: unknown; conversationId?: unknown; reset?: unknown }; } catch { return Response.json({ error: "invalid_request" }, { status: 400 }); }
+      // A new chat: the agent stops seeing what came before (kept, not deleted), on this channel's person.
+      if (input?.reset === true) {
+        const reset = await options.agent().resetHistory({ to: { channel: channel.name, address: identity?.key ?? `guest:${guest}` }, note: "They started a new chat here." });
+        return Response.json({ reset: reset.status === "reset" });
+      }
       if (!input || typeof input.text !== "string" || !input.text.trim() || input.text.length > 32_768 || (input.conversationId !== undefined && typeof input.conversationId !== "string")) return Response.json({ error: "invalid_request" }, { status: 400 });
       if (inFlight >= 128) return Response.json({ error: "busy" }, { status: 429 });
       inFlight++;

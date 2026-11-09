@@ -22,6 +22,7 @@ import { chooseAtTerminal, person, signInQuestion, tips, waitsForSignIn, welcome
 import { SKILLS_META } from "../../src/skills.ts";
 import { FORMATTED, JSON_TEXT, jsonText, jsonTextOf, ToolError } from "../../src/tools.ts";
 import { FULL_CATALOG_META, IN_PROCESS } from "../../mcp/src/describe.ts";
+import { CONTRACT_META } from "../../mcp/src/contracts.ts";
 import type { McpServerHandle } from "../../mcp/src/server.ts";
 import {
   BUILT_IN,
@@ -141,8 +142,21 @@ function connectionFlags(config: CliConfig, argv: string[]): { rest: string[]; s
   return { rest, server: found.server, token: found.token, refresh };
 }
 
-function callMeta(config: CliConfig, command: string): Record<string, string> {
-  return { "chinwag/surface": "cli", "chinwag/command": command, "chinwag/client-version": config.version ?? "1", "chinwag/idempotency-key": randomUUID() };
+function callMeta(config: CliConfig, command: string): Record<string, unknown> {
+  return { "chinwag/surface": "cli", "chinwag/command": command, "chinwag/client-version": config.version ?? "1", "chinwag/idempotency-key": randomUUID(), ...contractMeta(config) };
+}
+
+/** The contract this CLI speaks, on every request (defineCli's `contract`). */
+function contractMeta(config: CliConfig): Record<string, number> {
+  return config.contract === undefined ? {} : { [CONTRACT_META]: config.contract };
+}
+
+/** The server no longer serves this CLI's contract: say how to get a newer CLI, never a protocol error. */
+function upgradeRequired(config: CliConfig, server: string, error: unknown): CliExit | undefined {
+  const data = error instanceof ProtocolError ? (error.data as Record<string, { update?: boolean } | undefined> | undefined)?.[CONTRACT_META] : undefined;
+  if (!data) return undefined;
+  const how = updatesItself(config) ? `Run \`${config.name} update\` to get the newest version.` : "Install its newest version.";
+  return new CliExit(EXIT.failed, data.update ? `This ${config.name} (${config.version ?? "1"}) is too old for ${server}. ${how}` : short((error as Error).message.replace(/^MCP error -?\d+:\s*/, "")));
 }
 
 function noServer(config: CliConfig): string {
@@ -212,7 +226,7 @@ export async function connectCli(config: CliConfig, options: { server?: string; 
         result = await client.callTool({ name: tool, arguments: input, _meta: callMeta(config, settings.command ?? "custom") });
       } catch (error) {
         if (error instanceof ProtocolError && error.code === ProtocolErrorCode.InvalidParams) throw new CliExit(EXIT.usage, short(error.message.replace(/^MCP error -?\d+:\s*/, "")));
-        throw explain(config, server, error);
+        throw upgradeRequired(config, server, error) ?? explain(config, server, error);
       }
       return valueOf(result);
     },
@@ -288,7 +302,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     const before = JSON.stringify(tools);
     const started = Date.now();
     const connected = await getClient();
-    const current = await listTools(connected);
+    const current = await listTools(connected, config);
     io.signal?.throwIfAborted();
     tools = current;
     cached = undefined;
@@ -324,6 +338,8 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     try {
       return await connected.callTool({ name: tool, arguments: input, _meta: callMeta(config, command) }, { toolDefinition: tools.find(t => t.name === tool) as McpTool | undefined });
     } catch (error) {
+      const upgrade = upgradeRequired(config, server!, error);
+      if (upgrade) throw upgrade;
       // A tool request has already been sent. Refresh the help, but never replay a call:
       // third-party servers and custom commands can have side effects before reporting errors.
       if (!recoveredCall && error instanceof ProtocolError && error.code === ProtocolErrorCode.InvalidParams) {
@@ -454,11 +470,11 @@ async function withoutRefreshWarning<T>(run: () => Promise<T>): Promise<T> {
   finally { if (--connecting === 0) { console.warn = consoleWarn!; consoleWarn = undefined; } }
 }
 
-async function listTools(client: Client): Promise<ToolInfo[]> {
+async function listTools(client: Client, config: CliConfig): Promise<ToolInfo[]> {
   const tools: ToolInfo[] = [];
   let cursor: string | undefined;
   do {
-    const page = await client.listTools({ ...(cursor ? { cursor } : {}), _meta: { [FULL_CATALOG_META]: true } }, { cacheMode: "refresh" });
+    const page = await client.listTools({ ...(cursor ? { cursor } : {}), _meta: { [FULL_CATALOG_META]: true, ...contractMeta(config) } }, { cacheMode: "refresh" });
     tools.push(...(page.tools as unknown as ToolInfo[]));
     cursor = page.nextCursor;
   } while (cursor);
@@ -540,7 +556,7 @@ function backgroundDiscovery(config: CliConfig, server: string, token: string | 
       const started = Date.now();
       signal.throwIfAborted();
       client = await connect(config, server, token, signal);
-      const tools = await listTools(client);
+      const tools = await listTools(client, config);
       signal.throwIfAborted();
       writeDiscovery(await discoveryFile(config, server, token), { format: 2, at: started, server: serverVersion(client), tools });
     } catch {
@@ -581,7 +597,7 @@ if (refreshWorker) {
     file = job.file;
     const started = Date.now();
     client = await connect(job.config, job.server, job.token);
-    const tools = await listTools(client);
+    const tools = await listTools(client, job.config);
     writeDiscovery(await discoveryFile(job.config, job.server, job.token), { format: 2, at: started, server: serverVersion(client), tools });
   } catch {} finally { await client?.close(); clearTimeout(timeout); release(); }
 }
@@ -597,6 +613,8 @@ async function signInHere(config: CliConfig, server: string, io: CliIO): Promise
 
 /** Why the server could not be used, as one line and an exit code. */
 function explain(config: CliConfig, server: string, error: unknown): CliExit {
+  const upgrade = upgradeRequired(config, server, error);
+  if (upgrade) return upgrade;
   if (needsSignIn(error)) return new CliExit(EXIT.signIn, `Sign in first: ${signInCommand(config)} (or set ${tokenEnvOf(config)}).`);
   const status = error instanceof SdkHttpError ? (error.data as { status?: number } | undefined)?.status : undefined;
   const why = short((error as Error).message);
@@ -842,8 +860,8 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
         });
       }
       for (const [key, field] of byFlag) if (parsed[key] !== undefined) input[field] = parsed[key];
+      const given = Object.fromEntries(options.map(([name]) => [name, parsed[name]]).filter(([, v]) => v !== undefined));
       if (settings?.input) {
-        const given = Object.fromEntries(options.map(([name]) => [name, parsed[name]]).filter(([, v]) => v !== undefined));
         try { input = await settings.input(input, given); } catch (error) { throw refuse(error); }
       }
       if (writes && parsed["dry-run"]) return void io.write(`${JSON.stringify({ dryRun: true, tool: tool.name, arguments: input }, null, parsed.json ? undefined : 2)}\n`);
@@ -866,6 +884,10 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
           throw new CliExit(EXIT.failed, `${failure.message}${failure.next ? `\nNext: ${failure.next}` : ""}${reportLine}`);
         }
         throw new CliExit(EXIT.failed, `${textOf(result.content as Block[]) || `${tool.name} failed.`}${reportLine}`);
+      }
+      if (settings?.after) {
+        const shown = await settings.after(valueOf(result), given, this.cli, { json: Boolean(parsed.json || parsed.fields) });
+        if (shown !== undefined) return void io.write(`${render(shown, { json: Boolean(parsed.json), fields: parsed.fields as string[] | undefined })}\n`);
       }
       // The tool's own text, unless the person asked for data or the CLI file chose what to show.
       if (settings?.print && !parsed.json && !parsed.fields) return void io.write(`${(await settings.print(valueOf(result))).replace(/\n*$/, "")}\n`);

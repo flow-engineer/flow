@@ -18,7 +18,8 @@
 //   its edits and unsends of what it sent, where the channel has them.
 // - Acknowledgement first: after the person writes, the agent's first response must reach them,
 //   on every channel they are waiting on. A first response that only calls tools is held, and the
-//   agent is asked to acknowledge in the same response as those calls.
+//   agent is asked to acknowledge in the same response as those calls. Not on a channel that shows
+//   each tool call as it runs (ChannelInfo.showsTools): there the tools run, and the answer comes once.
 // - Tools in one response run together, and the reply waits for all of them: one answer, not an
 //   acknowledgement and a result later. A tool moves to the background (the agent is told, the
 //   person is not) only when the person writes again meanwhile, when another tool of the response
@@ -130,6 +131,8 @@ export interface ConversationSettings {
   links(conversationId: string): Promise<ChannelLink[]>;
   /** What the person said, and was sent, lately in their other conversations (the same verified number), oldest first. */
   elsewhere?(conversationId: string): Promise<Elsewhere[]>;
+  /** The tools offered on a channel besides the agent's own (its tool groups for that channel), read every turn. */
+  groupTools?(channel: string): Tool[];
   /** Records how a scheduled run or a nudge ended. */
   settle(target: { run?: string; nudge?: string }, status: string, reason?: string, messageId?: string): Promise<void>;
   /** A window-closed prompt nudge the agent sent no template for: held until they reply, and the fallback goes. */
@@ -334,6 +337,8 @@ export class Conversation {
   readonly history: ChatMessage[] = [];
   private readonly settings: ConversationSettings;
   private readonly channels = new Map<string, ChannelLink>();
+  /** The tool groups offered this turn: those for the channel of the message it answers. */
+  private channelTools = new Map<string, Tool>();
   private pending: Pending[] = [];
   private notes: Note[] = [];
   /** A tool's result is in the history and no message has gone out since: from the background, or returned to a response. */
@@ -1554,9 +1559,12 @@ export class Conversation {
       const page = this.pageNow();
       const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, wakeUps, elsewhere, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), page ? pageLine(page) : "", context].filter(Boolean).join("\n\n");
       const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
+      // The groups for the channel of the message this turn answers, never another channel the person used;
+      // read this step (a UI's catalog can grow), and never one named like the agent's own or a built-in.
+      this.channelTools = new Map((this.settings.groupTools?.(this.currentChannel()) ?? []).filter((t) => !this.settings.tools.has(t.name) && !this.builtins.has(t.name)).map((t) => [t.name, t]));
       // ask_about_video only while there is a video it can ask about.
       const builtinSpecs = this.builtins.has(ASK_VIDEO) && !this.videosToAsk().some((v) => !v.shown) ? this.builtinSpecs.filter((spec) => spec.name !== ASK_VIDEO) : this.builtinSpecs;
-      const specs = [...ownSpecs, ...builtinSpecs, ...talkSpecs(views, this.settings.talk)];
+      const specs = [...ownSpecs, ...[...this.channelTools.values()].map(toSpec), ...builtinSpecs, ...talkSpecs(views, this.settings.talk)];
       const abort = new AbortController();
       if (restarts < this.settings.maxRestarts) this.stepAbort = abort;
       const callStarted = Date.now();
@@ -1589,7 +1597,8 @@ export class Conversation {
       this.firstResponse = false;
 
       const reached = new Set(talk.flatMap((c) => this.targets(c)));
-      const waiting = [...this.unanswered].filter((c) => !reached.has(c));
+      // A channel that shows each tool call as it runs (ChannelInfo.showsTools) needs no acknowledgement first.
+      const waiting = [...this.unanswered].filter((c) => !reached.has(c) && !this.channelInfo(c)?.showsTools);
       if (first && waiting.length && work.length) {
         // Acknowledgement first: these calls do not run until the person has heard from the agent.
         this.settings.emit(this.id, "ack.required", { held: work.map((c) => c.name), channels: waiting });
@@ -2285,7 +2294,9 @@ export class Conversation {
         break;
       }
       const now = Date.now();
-      const all: Detach | null = this.unread() ? "message" : firstDoneAt !== null && now - firstDoneAt >= this.settings.partialAfterMs ? "partial" : null;
+      // Where the person sees each tool as it runs (ChannelInfo.showsTools), the answer waits for every result: no early partial one.
+      const partial = firstDoneAt !== null && now - firstDoneAt >= this.settings.partialAfterMs && !this.channelInfo(this.currentChannel())?.showsTools;
+      const all: Detach | null = this.unread() ? "message" : partial ? "partial" : null;
       if (all) {
         for (const { i, r } of open) results[i] = this.detach(r, all);
         break;
@@ -2293,7 +2304,7 @@ export class Conversation {
       const late = open.filter(({ r }) => now - r.startedAt >= r.limitMs);
       for (const { i, r } of late) results[i] = this.detach(r, "limit");
       if (late.length) continue;
-      const wakeAt = Math.min(...open.map(({ r }) => r.startedAt + r.limitMs), firstDoneAt === null ? Infinity : firstDoneAt + this.settings.partialAfterMs);
+      const wakeAt = Math.min(...open.map(({ r }) => r.startedAt + r.limitMs), firstDoneAt === null || this.channelInfo(this.currentChannel())?.showsTools ? Infinity : firstDoneAt + this.settings.partialAfterMs);
       await new Promise<void>((resolve) => {
         const timer = setTimeout(wake, Math.max(0, wakeAt - Date.now()));
         function wake() {
@@ -2310,7 +2321,7 @@ export class Conversation {
 
   /** Start one tool call; the model's input is checked first (a refusal is the call's result). */
   private start(call: ToolCall): Running | string {
-    const tool = this.builtins.get(call.name) ?? this.settings.tools.get(call.name);
+    const tool = this.builtins.get(call.name) ?? this.settings.tools.get(call.name) ?? this.channelTools.get(call.name);
     if (!tool) return toolFailed(this.id, call, 0, { refused: "unknown_tool" }), `There is no tool named ${call.name}.`;
     let raw: unknown;
     try {

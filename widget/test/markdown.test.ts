@@ -13,11 +13,15 @@ test("raw HTML in the agent's text is shown as text, never as markup", () => {
   );
 });
 
-test("only http(s) links become links, opening in a new tab with noopener", () => {
+test("only http(s) links and the site's own paths become links, opening in a new tab with noopener", () => {
   assert.equal(markdown("[tap](javascript:alert(1))"), "[tap](javascript:alert(1))");
   assert.equal(markdown("[tap](data:text/html,hi)"), "[tap](data:text/html,hi)");
   assert.equal(markdown("[Order](https://shop.example/o?a=1&b=2)"), `<a href="https://shop.example/o?a=1&amp;b=2" target="_blank" rel="noopener noreferrer">Order</a>`);
   assert.equal(markdown("See https://shop.example/x."), `See <a href="https://shop.example/x" target="_blank" rel="noopener noreferrer">https://shop.example/x</a>.`);
+  assert.equal(markdown("[Your crawls](/dashboard/crawls?q=1)"), `<a href="/dashboard/crawls?q=1" target="_blank" rel="noopener noreferrer">Your crawls</a>`);
+  // A path starting // or /\ is another site.
+  assert.equal(markdown("[tap](//evil.example)"), "[tap](//evil.example)");
+  assert.equal(markdown("[tap](/\\evil.example)"), "[tap](/\\evil.example)");
 });
 
 test("the subset is drawn: bold, italics, code, lists and line breaks", () => {

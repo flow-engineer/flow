@@ -2,6 +2,101 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.18.0 (9 Nov 2026)
+
+### Changes
+
+- **An onboard button for the site ("Set up with AI"): `app.onboard`.** `{ prompt, label?, agents?, askLabel? }`.
+  The site places `<div data-flow-onboard></div>` (or calls `FlowApp.onboard(element, { label?, variant? })`)
+  and the embed draws a pill with the assistants' icons (`agents`: Claude, ChatGPT, Cursor). It opens a
+  popover showing the setup prompt, with "Copy prompt" and a button that opens the app to ask (`askLabel`,
+  default "Ask <title>"). Its "Powered by Flow" line is always shown. The prompt is also in the page itself
+  (`[data-flow-onboard-prompt]`, visually hidden), so agents and scrapers reading the page find it. The
+  label defaults to "Onboard with AI"; the site sets its own label and variant with `FlowAppConfig.onboard`
+  or `data-label` / `data-variant`.
+- **`FlowAppConfig.launcher: false`:** no floating launcher on that page; the panel still opens from
+  `FlowApp.open()` or the onboard button.
+- **`openAICompatible({ maxTokens })`.** The most tokens one reply may use, sent as `max_tokens`. Unset, providers
+  such as OpenRouter take the model's maximum and hold credit for it on every call.
+- **`openAICompatible({ reasoning })`.** How hard a reasoning model thinks before it answers: `"minimal"`,
+  `"low"`, `"medium"` or `"high"`, sent as OpenRouter's `reasoning: { effort }`. Unset, the model's default.
+- **A CLI command's own code after its tool: `after`.** `command(tool).after((result, options, cli, output) => …)`
+  (or `after` on a tool command) runs on the person's machine once the tool succeeds, with its result, the
+  command's own options, the CLI's tools (`cli.call`) and whether JSON was asked for. What it returns is
+  printed in place of the result (`--json` and `--fields` apply); undefined prints the result. For work such
+  as saving files from a result's links. `flow check` accepts a command's own `options` read only by `after`.
+- **Tool groups: tools offered only on their channels.** `createAgent({ tools, groups: [toolGroup({ name,
+  channels, tools })] })`: `tools` stays the default group, offered on every channel; a group with `channels`
+  is offered only on a turn that answers a message on one of them. A tool's name is unique across them all
+  (`agent.addGroup`, `agent.group(name)`). `uiTools(ui, pages, site)` returns the web app's views as a group,
+  `views` limited to `app`; mcpServer adds it to the agent unless the agent has a `views` group of its own.
+  **Fixed:** a channel's own tools were offered on every channel the person had used in the conversation;
+  now only on the channel of the turn's message.
+- **`flow test` plays group tools** like the agent's own (the cloud records and simulates them, and `calls` /
+  `never` work on them), and lists them in the session tagged with their group and channels. A cloud that
+  knows groups shows the agent's tool calls to the simulated person and the judge on a channel with
+  `showsTools`, and runs scenarios on a custom UI by name (`channels: [app]`).
+- **The web app: the agent in the brand's own site.** `mcpServer({ app })` serves a chat panel that
+  a site embeds with `<script async src="<origin>/app/embed.js"></script>`. It docks at the side of
+  the page (the page moves over), chats over `/app/chat` (channel `app`, traced as `web`), shows each
+  tool call as a step with its CLI command (`app.cli`), opens links to the site's pages in the site
+  (`FlowAppConfig.navigate`), and shows how to add the same tools to Claude, ChatGPT, Cursor, VS Code
+  and the terminal. `origins` (required), `title`, `subtitle`, `logo`, `greeting`, `placeholder`,
+  `suggestions`, `launcher`, `width`, `site`, `pages`, `url`, `cli` and `theme` set it up; `window.FlowApp`
+  has `open`, `close`, `configure` and `signOut`.
+- **Signed in from the site, no page shown.** `oauthBridge({ app: true })` serves `/app/session`; the
+  site's `FlowAppConfig.signIn(request)` returns the code its login page would mint for the request.
+  The person's token stays in the panel's own origin.
+- **Views (`app.ui`).** Each `AppUi` (`name`, `description`, `input`, an HTML `template`) is the tool
+  `ui_<name>`, offered only on the `app` channel and only on Flow's hosting (`FLOW_APP_SERVICE_URL` and
+  `FLOW_KEY`). At most one view per answer; with `app.pages`, a view linking a page the site does not
+  have is refused. `uiTools` and `UI_INSTRUCTIONS` are exported for an agent's own channels.
+- **The panel's look.** `theme`: `mode`, `accent`, `accentText`, `colors`, `dark`, `font`, `fontUrl`,
+  `monoFont`, `radius`, `style`, `pattern`, `density` and `css`. Every part's root has
+  `data-part="<name>"` beside its class (`header` `.head`, `message` `.msg`, `typing` `.msg.typing`,
+  `background` `.backdrop`, `composer` `.composer` with `.field` and `.send`).
+- **The panel's parts in the agent's own code.** `app.panel` names a browser module (a file URL or a
+  path; one file that imports only types, TypeScript types stripped), served at `/app/parts.js`. It
+  exports any of `header`, `message`, `typing`, `background` and `composer` (type `AppPanel`), each
+  given the part the panel drew and returning the node to show. The composer's field and send button
+  keep their behaviour wherever they go. A part not exported, or one that throws, stays the panel's own.
+- **The bottom row.** "Use it in" and "Powered by Flow" are always shown, outside the reach of
+  `theme.css` and the panel module. `app.places` sets which places it offers and in what order
+  (`"terminal"`, `"claude"`, `"chatgpt"`, `"cursor"`, `"vscode"`); their addresses are `url` and
+  `cli.install`.
+- **`ChannelInfo.showsTools`** (default off): on a channel that draws each tool call, the agent sends no
+  acknowledgement, progress or early partial answer, and answers once. `Channel.tools` (and
+  `customUI`'s `tools`) offers tools only on that channel, read every turn.
+- **`terminalServer`** takes `showsTools`, `instructions`, `traceChannel`, `tools` and `onRequest`, and
+  `{ "reset": true }` starts a new chat (the agent stops seeing the earlier messages, which are kept).
+  `commandLine` (`@flow-engineer/flow/cli`) gives the CLI line for a tool call.
+- **Versioned MCP contracts: a server changes its tools and every CLI already published keeps
+  working.** `mcpServer({ contracts: { current, supported, pick } })` keeps only the current tools;
+  each older contract is one adapter over them (`supported[n]`): a tool's old name, its old input
+  schema with `mapInput`, its old output schema with `mapOutput`, and `legacy` tools for one
+  removed (a stand-in calling its replacement, or a small implementation of its own). A request is
+  answered in the contract it names (`_meta["flow.engineer/contract"]`), else the one `pick` chooses
+  from its clientInfo (for CLIs published before they named one), else the current one, which is
+  what MCP hosts get. A contract no longer served is refused with how to update (`run \`acme
+  update\``). `tools/list` says the contract it answered in, and traces' tool events carry it.
+- **`defineCli({ contract })`:** the CLI names its contract on every request; a CLI too old for
+  its server prints one line, `This acme (0.1.4) is too old for <server>. Run \`acme update\` to
+  get the newest version.` (exit 1).
+- **`contractSnapshot` and `contractProblems`** (`@flow-engineer/flow/mcp`): save a contract's tools
+  and sample calls, and check in CI that a change still keeps it (additions pass).
+- **A coding-agent skill, `flow-framework-contracts`** (`coding-agents/contracts-skill.md`): when a
+  change is breaking, how to bump the contract, write its adapter and snapshot, and when to drop one.
+
+### Migration notes
+
+- `Channel.tools` (and `tools` on `customUI` and `terminalServer`) is deprecated and will be removed: give
+  createAgent a group limited to that channel, `groups: [toolGroup({ name, channels: ["<channel>"], tools })]`.
+  Until then it works as that group, and Flow warns once.
+- `uiTools()` returns a `ToolGroup` (`{ name, channels, tools, answer }`), not `{ tools: () => Tool[], answer }`:
+  pass it in createAgent's `groups` (or `agent.addGroup`) instead of a channel's `tools`, and read its tools as
+  `views.tools`.
+- A channel's own tools are no longer offered on a turn answering another channel's message.
+
 ## 0.17.2 (8 Nov 2026)
 
 ### Changes

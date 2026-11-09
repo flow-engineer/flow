@@ -11,6 +11,12 @@
 // bridge serves (CLI_CLIENT_PATH) and advertises (flow_cli_client_id in its metadata); every other
 // client registers itself. The bridge notes which client each access token went to (hashed, sealed),
 // so `verify` says when the caller is the CLI, for tools kept to it (Tool.mcp.clients).
+//
+// With `app`, the agent's web app (mcpServer's `app`, in an iframe on the brand's site) signs in
+// with no page shown: it asks APP_SESSION_PATH for a sign-in, the brand's own page, where the
+// person is already signed in, mints the same one-time code its login page would for it, and the
+// app redeems that code here for the brand's tokens. The code is bound to a return URL of the
+// login page's shape, so the brand's code minting needs no change; nothing is ever sent there.
 
 import { createHash, randomBytes } from "node:crypto";
 import { IncomingMessage, ServerResponse } from "node:http";
@@ -54,6 +60,8 @@ export interface OAuthBridgeOptions {
   clients?: ClientMetadata[];
   /** Local development: http on loopback and a database that does not survive a restart are allowed. */
   development?: boolean;
+  /** Sign-in for the agent's web app (mcpServer's `app`) from the brand's own pages, with no login page shown. */
+  app?: boolean;
 }
 
 export interface BrandTokens {
@@ -72,6 +80,11 @@ export interface OAuthBridge {
 const ROUTES = { authorization: "/auth", token: "/token", registration: "/reg", revocation: "/token/revocation", jwks: "/jwks" };
 /** Where the CLI's Client ID Metadata Document is served; its URL is the CLI's client_id. */
 const CLI_CLIENT_PATH = "/.well-known/oauth-client/cli";
+/** Where the web app starts, finishes, refreshes and ends its sign-ins; its client id is the app's own URL. */
+const APP_SESSION_PATH = "/app/session";
+const APP_CLIENT_PATH = "/app";
+/** How long the brand's page has to mint the code for an app sign-in, in seconds: as long as the code it mints lives. */
+const APP_LOGIN_TTL = 300;
 const PATHS = ["/.well-known/oauth-authorization-server", "/.well-known/openid-configuration", "/.well-known/oauth-client", "/auth", "/reg", "/token", "/jwks", "/interaction"];
 const LOOPBACK = ["127.0.0.1", "localhost", "[::1]"];
 /** A provider session's life, in seconds; a sign-in in progress never outlives it. */
@@ -101,6 +114,8 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
   const pending = store.adapter("BrandLogin");
   const authorizations = store.adapter("BrandAuthorization");
   const tokenClients = store.adapter("BrandTokenClient");
+  const appLogins = store.adapter("AppLogin");
+  const appClientId = `${issuer}${APP_CLIENT_PATH}`;
   // A public client with loopback redirects on any port (RFC 8252), as the CLI signs in.
   const cliClient: ClientMetadata = {
     client_id: `${issuer}${CLI_CLIENT_PATH}`,
@@ -249,6 +264,39 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
     return grant.save();
   }
 
+  // Only the app's own page calls this (same origin); a code alone is useless without its sign-in here.
+  async function appSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
+    if (req.headers.origin !== issuer) return json(res, 403, { error: "invalid_origin" });
+    const body = await readJson(req);
+    if (!body) return json(res, 400, { error: "invalid_request" });
+    const resource = [...resources][0]!;
+    if (body.step === "start") {
+      const uid = randomBytes(16).toString("base64url"), nonce = randomBytes(32).toString("base64url");
+      await appLogins.upsert(uid, { nonce }, APP_LOGIN_TTL);
+      return json(res, 200, { nonce, returnTo: `${issuer}/interaction/${uid}/callback`, clientId: appClientId, resource });
+    }
+    if (body.step === "finish") {
+      const { returnTo, code, state } = body;
+      const uid = typeof returnTo === "string" ? /^\/interaction\/([A-Za-z0-9_-]+)\/callback$/.exec(returnTo.slice(issuer.length))?.[1] : undefined;
+      if (!uid || returnTo !== `${issuer}/interaction/${uid}/callback` || typeof code !== "string" || code.length > 512) return json(res, 400, { error: "invalid_login_response" });
+      const saved = await store.take("AppLogin", uid);
+      if (typeof saved?.nonce !== "string" || state !== saved.nonce) return json(res, 400, { error: "invalid_login_response" });
+      const result = await options.login.exchange({ code, nonce: saved.nonce, redirectUri: returnTo, clientId: appClientId, resource });
+      if (!result.key || !result.authorization || !(await options.login.active(result.key))) return json(res, 401, { error: "account_unavailable" });
+      const tokens = checked(await options.tokens.issue({ key: result.key, clientId: appClientId, resource, connection: randomBytes(16).toString("base64url"), authorization: result.authorization }));
+      return json(res, 200, await issued(tokens, appClientId));
+    }
+    if (body.step === "refresh" && typeof body.refreshToken === "string") {
+      return json(res, 200, await issued(checked(await options.tokens.refresh({ clientId: appClientId, resource, refreshToken: body.refreshToken })), appClientId));
+    }
+    if (body.step === "revoke" && typeof body.token === "string") {
+      await options.tokens.revoke({ clientId: appClientId, token: body.token });
+      return json(res, 200, {});
+    }
+    return json(res, 400, { error: "invalid_request" });
+  }
+
   async function node(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", issuer);
     res.setHeader("cache-control", "no-store");
@@ -262,6 +310,7 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
         url.searchParams.set("scope", "openid account");
         req.url = `${url.pathname}${url.search}`;
       }
+      if (options.app && url.pathname === APP_SESSION_PATH) return await appSession(req, res);
       if (url.pathname === CLI_CLIENT_PATH) {
         if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
         return json(res, 200, cliClient);
@@ -317,7 +366,7 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
       issuer,
       resource: [...resources][0]!,
       verify: (token, request) => verify(token, resourceOf(request)),
-      routes: { paths: PATHS, fetch: (request) => served(node, request) },
+      routes: { paths: options.app ? [...PATHS, APP_SESSION_PATH] : PATHS, fetch: (request) => served(node, request) },
     },
   };
 }
@@ -353,6 +402,21 @@ async function served(handler: (req: IncomingMessage, res: ServerResponse) => Pr
   const headers = new Headers();
   for (const [name, value] of Object.entries(res.getHeaders())) for (const one of [value].flat()) if (one !== undefined) headers.append(name, String(one));
   return new Response(chunks.length && res.statusCode !== 204 && res.statusCode !== 304 ? Buffer.concat(chunks) : null, { status: res.statusCode, headers });
+}
+
+/** A small JSON object body; anything else (too big, not JSON, not an object) is null. */
+async function readJson(req: IncomingMessage, limit = 4096): Promise<Record<string, unknown> | null> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req as AsyncIterable<Buffer>) {
+    size += chunk.length;
+    if (size > limit) return null;
+    chunks.push(chunk);
+  }
+  try {
+    const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  } catch { return null; }
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {

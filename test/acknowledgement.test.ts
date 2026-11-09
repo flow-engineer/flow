@@ -34,6 +34,23 @@ test("a first response that only calls tools is held until the agent acknowledge
   assert.ok(h.events.some((e) => e.type === "ack.required"));
 });
 
+// Where the person sees each tool call as it runs (a web app that draws them), no acknowledgement is
+// asked for: the tools run straight away and one answer follows.
+test("on a channel that shows its tool calls, a first response that only calls tools runs, and one answer follows", async () => {
+  let ran = 0;
+  const lookup = tool({ name: "lookup", description: "", input: z.object({}), run: () => (ran++, { next: "Thursday 10am" }) });
+  const h = harness([lookup], 50, { ...WEB, showsTools: true });
+  h.send("c3", "when is my session?");
+  (await h.nextCall(0)).answer(respond(call("lookup")));
+  const second = await h.nextCall(1);
+  assert.equal(ran, 1, "the calls ran without an acknowledgement");
+  assert.doesNotMatch(last(second.request.messages).content, /have not heard from you/);
+  second.answer(respond(say("Thursday at 10.")));
+  await h.agent.conversation("c3")!.whenIdle();
+  assert.deepEqual(h.sent(), ["Thursday at 10."]);
+  assert.ok(!h.events.some((e) => e.type === "ack.required"));
+});
+
 /**
  * A person on a channel whose typing indicator lasts 1 s (sent again every 800 ms), with timers
  * faked: every typing call is recorded, then `typing(on)` decides what it does (throw to refuse it). Tools wait 60 s

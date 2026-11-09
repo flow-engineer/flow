@@ -1,12 +1,16 @@
-// covers: mcp/src/server.ts mcp/src/describe.ts src/skills.ts src/tools.ts src/records.ts
+// covers: mcp/src/server.ts mcp/src/describe.ts mcp/src/app.ts src/skills.ts src/tools.ts src/records.ts src/web-chat.ts
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { after, test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { isSpecType } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { tools as cafeTools } from "../examples/cafe/src/tools.ts";
-import { mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
+import { mcpServer, uiTools, type McpServerOptions } from "../mcp/src/index.ts";
 import { createAgent, flowEvents, jsonText, tool, type ToolContext } from "../src/index.ts";
 
 const servers: Server[] = [];
@@ -367,6 +371,95 @@ test("plugin routes can be moved or disabled and keep instruction overrides", as
   const disabled = mcpServer({ name: "cafe", version: "1", tools: [], plugin: false });
   assert.equal(disabled.plugin, undefined);
   assert.equal((await disabled.fetch(new Request("http://127.0.0.1/mcp/plugin"))).status, 404);
+});
+
+// The web app's panel: what an agent may change (its parts, in its own module; which places it offers)
+// and what it may not (Flow's row is drawn by the panel, never by the module).
+const appDir = mkdtempSync(join(tmpdir(), "flow-app-panel-"));
+after(() => rmSync(appDir, { recursive: true, force: true }));
+const SITE = "https://shop.example";
+function appOf(app: Omit<NonNullable<McpServerOptions["app"]>, "origins">) {
+  const handle = mcpServer({ name: "cafe", version: "1", tools: cafeTools, app: { origins: [SITE], ...app } });
+  const get = (path: string) => handle.fetch(new Request(`https://cafe.example${path}`));
+  /** The settings the panel's page carries. */
+  const settings = async () => JSON.parse(/<script type="application\/json" id="flow-app">(.*?)<\/script>/.exec(await (await get(`/app?origin=${SITE}`)).text())![1]!) as { parts: boolean; places: string[] };
+  return { get, settings };
+}
+
+test("an agent's own panel module is served from its process with its types stripped, and the panel loads it", async () => {
+  const file = join(appDir, "panel.ts");
+  writeFileSync(file, `import type { AppPanel } from "@flow-engineer/flow/mcp";\nexport const message: AppPanel["message"] = (element: HTMLElement) => element;\n`);
+  for (const panel of [file, pathToFileURL(file)]) {
+    const app = appOf({ panel });
+    assert.equal((await app.settings()).parts, true);
+    const served = await app.get("/app/parts.js");
+    assert.equal(served.status, 200);
+    assert.equal(served.headers.get("content-type"), "text/javascript; charset=utf-8");
+    const code = await served.text();
+    assert.match(code, /export const message\s+= \(element\s*\) => element;/);
+    assert.doesNotMatch(code, /import|AppPanel|HTMLElement/);
+  }
+  const plain = appOf({});
+  assert.equal((await plain.settings()).parts, false);
+  assert.equal((await plain.get("/app/parts.js")).status, 404);
+});
+
+test("a panel module the browser could not load is refused at start: a missing file, or one that imports", () => {
+  assert.throws(() => appOf({ panel: join(appDir, "missing.ts") }), /app\.panel: cannot read/);
+  const imports = join(appDir, "imports.js");
+  for (const code of [`import { x } from "./x.js";`, `import "./x.js";`, `export { x } from "./x.js";`]) {
+    writeFileSync(imports, `${code}\nexport const header = (element) => element;\n`);
+    assert.throws(() => appOf({ panel: imports }), /is one file: import only types/, code);
+  }
+});
+
+test("app.onboard is served in the embed's config with its defaults, and the embed draws it with FlowApp.onboard", async () => {
+  const app = appOf({ onboard: { prompt: "Set up Cafe in this project.", agents: ["claude", "cursor"] }, theme: { accent: "#1469e6" } });
+  const config = await (await app.get(`/app/config?origin=${SITE}`)).json() as { accent: string; onboard: Record<string, unknown> };
+  assert.equal(config.accent, "#1469e6");
+  assert.deepEqual(config.onboard, { label: "Onboard with AI", prompt: "Set up Cafe in this project.", agents: ["claude", "cursor"], askLabel: "Ask cafe", askHint: "Questions before you start" });
+  assert.equal(((await (await appOf({}).get(`/app/config?origin=${SITE}`)).json()) as { onboard?: unknown }).onboard, undefined);
+  assert.throws(() => appOf({ onboard: { prompt: "x", agents: ["gemini" as never] } }), /onboard\.agents are claude, chatgpt, cursor/);
+  const embed = await (await app.get("/app/embed.js")).text();
+  assert.match(embed, /onboard\(element, look/);
+  assert.match(embed, /data-flow-onboard/);
+  assert.match(embed, /utm_source=onboard[^"]*"[^>]*>Powered by <svg[^]*?<b>Flow<\/b><\/a>/);
+  assert.match(embed, /data-flow-onboard-prompt/, "the prompt is in the page for agents reading it");
+});
+
+test("places sets which of the row's places show and in what order; nothing else of the row is an option", async () => {
+  const cli = { file: { name: "cafe" } as never, install: "curl -fsSL https://cli.cafe.example | sh" };
+  assert.deepEqual((await appOf({}).settings()).places, ["claude", "chatgpt", "cursor", "vscode"], "the terminal only with a CLI");
+  assert.deepEqual((await appOf({ cli }).settings()).places, ["terminal", "claude", "chatgpt", "cursor", "vscode"]);
+  assert.deepEqual((await appOf({ cli, places: ["vscode", "terminal", "vscode"] }).settings()).places, ["vscode", "terminal"]);
+  assert.deepEqual((await appOf({ places: [] }).settings()).places, []);
+  assert.throws(() => appOf({ places: ["terminal"] }), /places has terminal, which needs app\.cli/);
+  assert.throws(() => appOf({ places: ["slack" as never] }), /app\.places are terminal, claude, chatgpt, cursor, vscode, not "slack"/);
+});
+
+// The web app's views (uiTools) are a group of the agent's limited to its channel "app", so its chat offers them
+// and no other channel does; an agent that already has a views group of its own keeps it.
+test("the web app's views join the agent as a group limited to app, unless it has its own", () => {
+  const saved = { url: process.env.FLOW_APP_SERVICE_URL, key: process.env.FLOW_KEY };
+  process.env.FLOW_APP_SERVICE_URL = "https://views.example";
+  process.env.FLOW_KEY = "test-key";
+  try {
+    const card = { name: "card", description: "One thing.", input: z.object({ title: z.string() }), template: "<b>{{title}}</b>" };
+    const model = { complete: () => Promise.reject(new Error("no model")) };
+    const agent = createAgent({ files: { "AGENTS.md": "Test." }, model, scheduleCheckMs: 0 });
+    mcpServer({ name: "cafe", version: "1", tools: [], agent, terminal: {}, app: { origins: [SITE], ui: [card] } });
+    const views = agent.group("views");
+    assert.deepEqual(views?.channels, ["app"]);
+    assert.deepEqual(views?.tools.map((t) => t.name), ["ui_card"]);
+    assert.ok(agent.channel("app"), "its chat's channel");
+    const own = uiTools([card]);
+    const keeps = createAgent({ files: { "AGENTS.md": "Test." }, model, scheduleCheckMs: 0, groups: [own] });
+    mcpServer({ name: "cafe", version: "1", tools: [], agent: keeps, terminal: {}, app: { origins: [SITE], ui: [card] } });
+    assert.equal(keeps.group("views"), own);
+  } finally {
+    if (saved.url === undefined) delete process.env.FLOW_APP_SERVICE_URL; else process.env.FLOW_APP_SERVICE_URL = saved.url;
+    if (saved.key === undefined) delete process.env.FLOW_KEY; else process.env.FLOW_KEY = saved.key;
+  }
 });
 
 test("stdio serves the same tools and instructions to a host that runs the server as a command, anonymous, without the tools kept to the CLI", async () => {

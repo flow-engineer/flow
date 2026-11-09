@@ -4,7 +4,7 @@
 // marked-terminal (optional peers) render tools' Markdown at a terminal.
 // @mariozechner/pi-tui (optional) provides the full-screen human chat interface.
 
-export { cliFile, cliProblems, command, commandTable, defineCli, derivedName, skillFile, type Brand, type CliConfig, type ColorPart, type CliContext, type CliOption, type CommandBuilder, type CommandConfig, type CustomCommand, type SignInPage, type ToolCommand, type ToolInfo, type Welcome } from "./commands.ts";
+export { cliFile, cliProblems, command, commandLine, commandTable, defineCli, derivedName, skillFile, type Brand, type CliConfig, type ColorPart, type CliContext, type CliOption, type CommandBuilder, type CommandConfig, type CustomCommand, type SignInPage, type ToolCommand, type ToolInfo, type Welcome } from "./commands.ts";
 export { CliExit, connectCli, EXIT, processIO, runCli, type CliConnection, type CliIO } from "./run.ts";
 
 export type { ChatSession, ChatUpdate } from "./terminal.ts";
