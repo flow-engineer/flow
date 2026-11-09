@@ -340,8 +340,9 @@ test("flow check holds shorthands and defaults to the tool's input and away from
   assert.deepEqual(problems({ options: { limit: { help: "x" }, mine: { help: "y", short: "h" } } }), [
     'command "keys list": option --limit clashes with limit\'s flag',
     'command "keys list": option --mine\'s -h is already taken',
-    'command "keys list": it has options but no input code to read them',
+    'command "keys list": it has options but no input or after code to read them',
   ]);
+  assert.deepEqual(problems({ options: { out: { help: "Where to save it" } }, after: () => undefined }), [], "after reads the options too");
 });
 
 test("a tool's format is what people see, rendered at a terminal; --json, --fields and the CLI file's view show its data", async () => {

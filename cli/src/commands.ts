@@ -684,7 +684,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[], listed = true)
       if (option.short && (letters.has(option.short) || OWN_LETTERS.has(option.short))) errors.push(`command "${w}": option --${name}'s -${option.short} is already taken`);
       if (option.short) letters.add(option.short);
     }
-    if (c.options && Object.keys(c.options).length && !c.input) errors.push(`command "${w}": it has options but no input code to read them`);
+    if (c.options && Object.keys(c.options).length && !c.input && !c.after) errors.push(`command "${w}": it has options but no input or after code to read them`);
     const lists = (c.args ?? []).filter((a) => input.has(a) && flagKind(tool.inputSchema.properties![a]!) === "list");
     if (lists.length && c.args!.length > 1) errors.push(`command "${w}": ${lists[0]} takes many values, so it must be the only positional argument`);
     const output = outputFields(tool);

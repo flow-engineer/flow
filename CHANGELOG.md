@@ -24,7 +24,7 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   (or `after` on a tool command) runs on the person's machine once the tool succeeds, with its result, the
   command's own options, the CLI's tools (`cli.call`) and whether JSON was asked for. What it returns is
   printed in place of the result (`--json` and `--fields` apply); undefined prints the result. For work such
-  as saving files from a result's links.
+  as saving files from a result's links. `flow check` accepts a command's own `options` read only by `after`.
 - **Tool groups: tools offered only on their channels.** `createAgent({ tools, groups: [toolGroup({ name,
   channels, tools })] })`: `tools` stays the default group, offered on every channel; a group with `channels`
   is offered only on a turn that answers a message on one of them. A tool's name is unique across them all
