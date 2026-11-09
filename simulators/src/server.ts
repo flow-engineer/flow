@@ -427,6 +427,10 @@ interface Thread {
   agentCount: number;
   carrierCount: number;
   optedOut: boolean;
+  /** Their messages handed to the agent whose id it has not given back yet. */
+  arriving: number;
+  /** Reactions and read receipts sent meanwhile on a message with no id yet (a video's 👀 goes as it arrives): shown once its id is given. */
+  early: Line[];
 }
 
 export function simulators(options: SimulatorsOptions & { testCloud: true }): TestCloudSimulators;
@@ -478,7 +482,7 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
 
   const thread = (k: string) => {
     let t = threads.get(k);
-    if (!t) threads.set(k, (t = { lines: [], agentCount: 0, carrierCount: 0, optedOut: false }));
+    if (!t) threads.set(k, (t = { lines: [], agentCount: 0, carrierCount: 0, optedOut: false, arriving: 0, early: [] }));
     return t;
   };
 
@@ -530,6 +534,30 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
     if (changes.some((l) => l.kind === "unsend")) return undefined;
     const edit = changes.findLast((l) => l.kind === "edit");
     return edit?.kind === "edit" ? { ...line, text: edit.text } : line;
+  }
+
+  /** Every message a reaction or read receipt names has a line with its id. */
+  function named(k: string, line: Line): boolean {
+    const ids = line.kind === "reaction" ? [line.messageId] : line.kind === "read" ? line.messageIds : [];
+    return ids.every((id) => thread(k).lines.some((l) => (l.kind === "in" || l.kind === "out") && l.id === id));
+  }
+
+  /**
+   * Their message is with the agent while `take` runs, which gives the open pages its id: what the
+   * agent sends meanwhile on it (a video's 👀 and read receipt go as it arrives) is shown after that.
+   */
+  async function arriving<T>(k: string, take: () => Promise<T>): Promise<T> {
+    const t = thread(k);
+    t.arriving++;
+    try {
+      return await take();
+    } finally {
+      t.arriving--;
+      // A thread reset meanwhile drops them with it.
+      const shown = threads.get(k) === t ? t.early.filter((l) => !t.arriving || named(k, l)) : [];
+      t.early = t.early.filter((l) => !shown.includes(l));
+      for (const l of shown) emitLine(k, l);
+    }
   }
 
   /** Tool calls in progress, by call id, so later events update the same line. */
@@ -639,12 +667,12 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
         emitLine(k, edit ? { kind: "edit", messageId: outbound.messageId, text: outbound.text, at: Date.now() } : { kind: "unsend", messageId: outbound.messageId, at: Date.now() });
         return;
       }
-      if (outbound.type === "reaction") {
-        emitLine(k, { kind: "reaction", messageId: outbound.messageId, emoji: outbound.emoji, at: Date.now(), by: "agent" });
-        return;
-      }
-      if (outbound.type === "read") {
-        emitLine(k, { kind: "read", messageIds: outbound.messageIds, at: Date.now() });
+      if (outbound.type === "reaction" || outbound.type === "read") {
+        const line: Line = outbound.type === "reaction"
+          ? { kind: "reaction", messageId: outbound.messageId, emoji: outbound.emoji, at: Date.now(), by: "agent" }
+          : { kind: "read", messageIds: outbound.messageIds, at: Date.now() };
+        if (t.arriving && !named(k, line)) t.early.push(line);
+        else emitLine(k, line);
         return;
       }
       push(k, { ...outbound, at: Date.now() });
@@ -837,10 +865,12 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
         const who = { name: person, phone: person };
         // A file the person sent is fetched again from what the simulator keeps, until it is dropped for newer ones.
         const file = async (ref: string) => media.get(ref)?.bytes ?? null;
-        const messageId = agent.receive(id, incoming, deliverer(p, k, [], who), own ? { channel: own.info, channelName: own.name, file } : { channel: channelOf(p), file });
-        line.id = messageId;
-        push(k, { type: "id", at: line.at, messageId, api: wired(p, line, who, k).api });
-        return json(res, 202, { messageId, at: line.at });
+        return arriving(k, async () => {
+          const messageId = agent.receive(id, incoming, deliverer(p, k, [], who), own ? { channel: own.info, channelName: own.name, file } : { channel: channelOf(p), file });
+          line.id = messageId;
+          push(k, { type: "id", at: line.at, messageId, api: wired(p, line, who, k).api });
+          return json(res, 202, { messageId, at: line.at });
+        });
       }
       res.writeHead(404).end();
     }
@@ -935,8 +965,14 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       }
     }
     const stored = new Set(lines.flatMap((l) => (l.kind === "in" && l.id ? [l.id] : [])));
-    const onlyHere = t.lines.filter((l) => (l.kind === "out" && l.carrier) || (l.kind === "in" && !(l.id && stored.has(l.id))));
-    t.lines = [...lines, ...onlyHere].sort((a, b) => a.at - b.at);
+    const onlyHere = t.lines.filter((l) => (l.kind === "out" && l.carrier) || (l.kind === "in" && !(l.id && stored.has(l.id))) || l.kind === "read");
+    const sorted = [...lines, ...onlyHere].sort((a, b) => a.at - b.at);
+    // A reaction or read receipt sent as their message arrived is older than the message's place in
+    // the history (when a turn took it): it goes right after the message it is on.
+    const place = new Map(sorted.flatMap((l, i) => ((l.kind === "in" || l.kind === "out") && l.id ? [[l.id, i] as const] : [])));
+    const on = (l: Line) => (l.kind === "reaction" ? [l.messageId] : l.kind === "read" ? l.messageIds : []);
+    const rank = sorted.map((l, i) => Math.max(i, ...on(l).map((id) => (place.get(id) ?? -1) + 0.5)));
+    t.lines = sorted.map((l, i) => ({ l, r: rank[i] })).sort((a, b) => a.r - b.r).map(({ l }) => l);
     t.agentCount = count;
     for (const l of t.lines) wired(p, l, person, k);
     return t;
@@ -1126,12 +1162,14 @@ export function simulators(options: SimulatorsOptions & { testCloud?: boolean } 
       logFields("INFO", { chinwag: "playground.message", person: person.name, channel: channel.name, at: new Date(line.at).toISOString() });
       emitLine(k, line);
       carrier(p, k, text);
-      const taken = person.key || person.visitor ? await agent.simulateVisitor!({ key: person.key, address: visitorAddress, channel: channel.name, message: incoming })
-        : await agent.simulate({ person: person.phone, channel: channel.name, message: incoming });
-      if (taken) rememberPerson(taken.conversationId, person);
-      line.id = taken?.messageId ?? null;
-      push(k, { type: "id", at: line.at, messageId: line.id, api: wired(p, line, person, k).api });
-      return json(res, 202, { messageId: line.id, at: line.at });
+      return arriving(k, async () => {
+        const taken = person.key || person.visitor ? await agent.simulateVisitor!({ key: person.key, address: visitorAddress, channel: channel.name, message: incoming })
+          : await agent.simulate({ person: person.phone, channel: channel.name, message: incoming });
+        if (taken) rememberPerson(taken.conversationId, person);
+        line.id = taken?.messageId ?? null;
+        push(k, { type: "id", at: line.at, messageId: line.id, api: wired(p, line, person, k).api });
+        return json(res, 202, { messageId: line.id, at: line.at });
+      });
     }
     res.writeHead(404).end();
   }

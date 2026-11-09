@@ -110,6 +110,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - **The agent is told the video already has its 👀.** When the arrival reaction went, the message
   reaches the model with one line saying so, so it does not react 👀 to it again; another emoji is
   still its choice.
+- **The playground shows a video's 👀 and read receipt on it.** Both go the moment a video
+  arrives, before the playground had given the page the message's id, so the page had no message
+  to put them on and dropped them. The playground now shows them once the id is given, and after
+  a reload too: the agent's history keeps the arrival reaction (`agent.transcript()` lists it
+  after the message), and the playground keeps the read receipts it showed. Channels through Flow
+  Messaging and the web chat were never affected: their messages carry the platform's id from
+  the start.
 
 ### Migration notes
 

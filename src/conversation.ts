@@ -1403,19 +1403,20 @@ export class Conversation {
     if (messages.length) {
       const tag = this.settings.tagChannels || this.channels.size > 1;
       const line = (m: Pending) => `[${tag ? `${m.channel} · ` : ""}${m.id}${m.text}`;
-      const said = (m: Pending): PersonMessage => ({ id: m.id, channel: m.channel, text: m.shown, ...(m.choice ? { choice: true } : {}), ...(m.choiceId ? { choiceId: m.choiceId } : {}), ...(m.video ? { video: m.video } : {}) });
+      const said = (m: Pending, reaction?: string): PersonMessage => ({ id: m.id, channel: m.channel, text: m.shown, ...(m.choice ? { choice: true } : {}), ...(m.choiceId ? { choiceId: m.choiceId } : {}), ...(m.video ? { video: m.video } : {}), ...(reaction ? { reaction } : {}) });
       // In order: the messages the agent answers, together in one entry, and each answered with no
       // model call as one of its own, with what was sent back as the agent's (as a text nudge is).
       let group: Pending[] = [];
       const read = () => {
         if (!group.length) return;
         const media = group.flatMap((m) => m.media ?? []);
-        const reacted = group.flatMap((m) => {
+        const emojis = group.map((m) => {
           const emoji = this.reactedOnArrival.get(m.id);
           this.reactedOnArrival.delete(m.id);
-          return emoji ? [reactedLine(m.id, emoji)] : [];
+          return emoji;
         });
-        this.history.push({ role: "user", content: [...group.map(line), ...reacted].join("\n"), ...(media.length ? { media } : {}), messages: group.map(said) });
+        const reacted = group.flatMap((m, i) => (emojis[i] ? [reactedLine(m.id, emojis[i])] : []));
+        this.history.push({ role: "user", content: [...group.map(line), ...reacted].join("\n"), ...(media.length ? { media } : {}), messages: group.map((m, i) => said(m, emojis[i])) });
         if (media.length) this.showLatestMedia();
         group = [];
       };
@@ -2496,7 +2497,7 @@ const SEND_KEYS = new Set(["text", "reply_to", "buttons", "list", "link", "image
 
 /**
  * The history as the person saw it: their messages (with their ids and channels), what the agent
- * delivered with its send tools and reactions, its edits and unsends, and its other tool calls with their results.
+ * delivered with its send tools and reactions (also a video's on arrival), its edits and unsends, and its other tool calls with their results.
  * Flow Framework's notes and the agent's plain text never reached the person and are left out. `only` is
  * the channel of untagged messages (an agent with one channel does not tag them).
  */
@@ -2515,6 +2516,8 @@ export function transcriptOf(history: Array<{ entry: ChatMessage; at: number }>,
       for (const m of personMessages(entry, only)) {
         channelOf.set(m.id, m.channel);
         lines.push({ kind: "in", channel: m.channel, id: m.id, text: m.text, at, ...(m.choice ? { choice: true } : {}), ...(m.choiceId ? { choiceId: m.choiceId } : {}) });
+        // The agent's reaction as it arrived (videoReaction), right after the message.
+        if (m.reaction) lines.push({ kind: "reaction", channel: m.channel, messageId: m.id, emoji: m.reaction, at });
       }
       continue;
     }

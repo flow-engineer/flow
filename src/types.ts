@@ -33,6 +33,8 @@ export interface PersonMessage {
   choiceId?: string;
   /** A video in it the agent can ask about later (ask_about_video): its type and its channel's `ref`. */
   video?: { mime: string; ref: string };
+  /** The emoji the agent reacted to it with as it arrived (videoReaction), so the transcript shows it. */
+  reaction?: string;
 }
 
 /**
