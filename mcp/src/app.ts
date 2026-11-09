@@ -213,6 +213,12 @@ export interface McpAppOptions {
    * is told the pages there are), and a link that still is not one opens the nearest page that is.
    */
   pages?: string[];
+  /**
+   * An "Onboard with AI" button for the site's own pages: the site places `<div data-flow-onboard></div>`
+   * (or calls `FlowApp.onboard(element)`) and the embed draws it there. Its main part copies `prompt` for
+   * any coding agent; its menu opens it in the chosen assistants and asks the app. In the theme's accent.
+   */
+  onboard?: AppOnboard;
   /** The MCP URL people add to their assistant. Default: auth.resource, else this origin's MCP path. */
   url?: string;
   /** The agent's CLI: how to install it, and its CLI file, which says the command for each tool the chat runs. */
@@ -222,6 +228,23 @@ export interface McpAppOptions {
     /** e.g. "curl -fsSL https://cli.example.com | sh". */
     install: string;
   };
+}
+
+/** The assistants the onboard button opens its prompt in. */
+export type OnboardAgent = "claude" | "chatgpt" | "cursor";
+const AGENTS: OnboardAgent[] = ["claude", "chatgpt", "cursor"];
+
+export interface AppOnboard {
+  /** The setup prompt it copies and opens: what a coding agent should do to start with the product. */
+  prompt: string;
+  /** Default "Onboard with AI"; the site may set its own (FlowAppConfig.onboard, data-label). */
+  label?: string;
+  /** Which assistants its menu opens the prompt in, in this order. Default all. */
+  agents?: OnboardAgent[];
+  /** The menu's item that opens the app. Default "Ask <title>". */
+  askLabel?: string;
+  /** The line under it. Default "Questions before you start". */
+  askHint?: string;
 }
 
 export const APP_PATH = "/app";
@@ -252,6 +275,9 @@ export function appServer(options: McpAppOptions, server: { name: string; mcpPat
   const places = [...new Set(options.places ?? PLACES.filter((place) => place !== "terminal" || options.cli))];
   const parts = options.panel === undefined ? undefined : panelModule(options.panel);
   const title = options.title ?? server.name;
+  const onboard = options.onboard;
+  if (onboard && !onboard.prompt?.trim()) throw new Error("@flow-engineer/flow/mcp: app.onboard needs a prompt");
+  for (const agent of onboard?.agents ?? []) if (!AGENTS.includes(agent)) throw new Error(`@flow-engineer/flow/mcp: app.onboard.agents are ${AGENTS.join(", ")}, not "${agent}"`);
   const width = Math.min(720, Math.max(340, Math.round(options.width ?? 420)));
   // What the launcher on the site needs before the panel exists.
   const launcher = {
@@ -265,6 +291,13 @@ export function appServer(options: McpAppOptions, server: { name: string; mcpPat
     radius: theme.radius ?? 14,
     font: theme.font,
     width,
+    onboard: onboard && {
+      label: onboard.label ?? "Onboard with AI",
+      prompt: onboard.prompt,
+      agents: [...new Set(onboard.agents ?? AGENTS)],
+      askLabel: onboard.askLabel ?? `Ask ${title}`,
+      askHint: onboard.askHint ?? "Questions before you start",
+    },
   };
   const allowed = (origin: string | null): origin is string => !!origin && origins.includes(origin);
   return {

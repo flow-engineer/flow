@@ -6,6 +6,11 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **An "Onboard with AI" button for the site: `app.onboard`.** `{ prompt, label?, agents?, askLabel?, askHint? }`.
+  The site places `<div data-flow-onboard></div>` (or calls `FlowApp.onboard(element, { label?, variant? })`)
+  and the embed draws a pill in the theme's accent: it copies the setup prompt, and its menu opens it in
+  Claude, ChatGPT or Cursor or opens the app to ask. Its "Powered by flow.engineer" line is always shown.
+  The site sets its own label and variant with `FlowAppConfig.onboard` or `data-label` / `data-variant`.
 - **`openAICompatible({ maxTokens })`.** The most tokens one reply may use, sent as `max_tokens`. Unset, providers
   such as OpenRouter take the model's maximum and hold credit for it on every call.
 - **A CLI command's own code after its tool: `after`.** `command(tool).after((result, options, cli, output) => …)`

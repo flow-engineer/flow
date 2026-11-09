@@ -413,6 +413,19 @@ test("a panel module the browser could not load is refused at start: a missing f
   }
 });
 
+test("app.onboard is served in the embed's config with its defaults, and the embed draws it with FlowApp.onboard", async () => {
+  const app = appOf({ onboard: { prompt: "Set up Cafe in this project.", agents: ["claude", "cursor"] }, theme: { accent: "#1469e6" } });
+  const config = await (await app.get(`/app/config?origin=${SITE}`)).json() as { accent: string; onboard: Record<string, unknown> };
+  assert.equal(config.accent, "#1469e6");
+  assert.deepEqual(config.onboard, { label: "Onboard with AI", prompt: "Set up Cafe in this project.", agents: ["claude", "cursor"], askLabel: "Ask cafe", askHint: "Questions before you start" });
+  assert.equal(((await (await appOf({}).get(`/app/config?origin=${SITE}`)).json()) as { onboard?: unknown }).onboard, undefined);
+  assert.throws(() => appOf({ onboard: { prompt: "x", agents: ["gemini" as never] } }), /onboard\.agents are claude, chatgpt, cursor/);
+  const embed = await (await app.get("/app/embed.js")).text();
+  assert.match(embed, /onboard\(element, look/);
+  assert.match(embed, /data-flow-onboard/);
+  assert.match(embed, /Powered by <b>flow\.engineer<\/b>/);
+});
+
 test("places sets which of the row's places show and in what order; nothing else of the row is an option", async () => {
   const cli = { file: { name: "cafe" } as never, install: "curl -fsSL https://cli.cafe.example | sh" };
   assert.deepEqual((await appOf({}).settings()).places, ["claude", "chatgpt", "cursor", "vscode"], "the terminal only with a CLI");
