@@ -81,6 +81,12 @@ export interface CliConfig {
   /** The CLI client version sent to the server (default "1"). */
   version?: string;
   /**
+   * The contract of the server's tools this CLI is built against (mcpServer's `contracts.current`),
+   * named on every request so the server keeps answering in it after its tools change. Omitted: the
+   * server decides (its `contracts.pick`, else its current contract).
+   */
+  contract?: number;
+  /**
    * The organization's MCP endpoint. Else `--server` or <NAME>_SERVER. Or an mcpServer handle in
    * this process: the CLI calls its tools with no network and no sign-in (as the client kind "cli"),
    * unless --server or <NAME>_SERVER names a URL.

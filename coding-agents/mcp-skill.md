@@ -276,6 +276,10 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
   this is already the newest, and a person at a terminal sees one line after a command when a newer
   one is out, asked at most once a day; never agents, CI or `--json`. Each release must raise the
   version and update `latest`. A command of the team's own named `update` replaces Flow's.
+- `contract: <n>` names the server's contract this CLI is built against (`mcpServer({ contracts:
+  { current: n } })`), so the server keeps answering it in that shape after its tools change. A
+  CLI too old for the server says so in one line and names `acme update`. Renaming, removing or
+  reshaping a tool once a CLI is out: `flow-framework-contracts` (`contracts-skill.md`).
 - A tool with `format` prints its own text, rendered at a terminal (as written when piped, for
   `NO_COLOR`, or without `marked`); `--json`, `--fields`, `columns` and `view` show its data.
   Every color the CLI shows (help, welcome, chat, Markdown) comes from one palette made from
