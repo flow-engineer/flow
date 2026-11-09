@@ -2,6 +2,22 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.18.1 (10 Nov 2026)
+
+### Changes
+
+- **The playground shows a video's 👀 and read receipt on it.** Both go the moment a video
+  arrives, before the playground had given the page the message's id, so the page had no message
+  to put them on and dropped them. The playground now shows them once the id is given, and after
+  a reload too: the agent's history keeps the arrival reaction (`agent.transcript()` lists it
+  after the message; `PersonMessage.reaction`), and the playground keeps the read receipts it
+  showed. Channels through Flow Messaging and the web chat were never affected: their messages
+  carry the platform's id from the start.
+
+### Migration notes
+
+None.
+
 ## 0.18.0 (9 Nov 2026)
 
 ### Changes
@@ -86,6 +102,17 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   and sample calls, and check in CI that a change still keeps it (additions pass).
 - **A coding-agent skill, `flow-framework-contracts`** (`coding-agents/contracts-skill.md`): when a
   change is breaking, how to bump the contract, write its adapter and snapshot, and when to drop one.
+- **Video changes merged as 0.17.2, which was tagged on GitHub but never published to npm; they
+  first shipped in 0.18.0:**
+  - **A video whose reply is slow types after 5 s.** Since 0.17.1 a video got 👀 on arrival and its
+    turn showed no typing at all, so while a video took half a minute to read the person saw 👀 and
+    then nothing until the reply. The 👀 still goes on arrival; if nothing from the agent has reached
+    them 5 s after the video arrived, typing shows too and is kept up as for other messages (every
+    20 s on WhatsApp) until the reply, never after it. A reply within 5 s still shows only the 👀.
+    `videoReaction: false` types on arrival as before, and a reaction that fails types at once.
+  - **The agent is told the video already has its 👀.** When the arrival reaction went, the message
+    reaches the model with one line saying so, so it does not react 👀 to it again; another emoji is
+    still its choice.
 
 ### Migration notes
 
@@ -96,31 +123,6 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   pass it in createAgent's `groups` (or `agent.addGroup`) instead of a channel's `tools`, and read its tools as
   `views.tools`.
 - A channel's own tools are no longer offered on a turn answering another channel's message.
-
-## 0.17.2 (8 Nov 2026)
-
-### Changes
-
-- **A video whose reply is slow types after 5 s.** Since 0.17.1 a video got 👀 on arrival and its
-  turn showed no typing at all, so while a video took half a minute to read the person saw 👀 and
-  then nothing until the reply. The 👀 still goes on arrival; if nothing from the agent has reached
-  them 5 s after the video arrived, typing shows too and is kept up as for other messages (every
-  20 s on WhatsApp) until the reply, never after it. A reply within 5 s still shows only the 👀.
-  `videoReaction: false` types on arrival as before, and a reaction that fails types at once.
-- **The agent is told the video already has its 👀.** When the arrival reaction went, the message
-  reaches the model with one line saying so, so it does not react 👀 to it again; another emoji is
-  still its choice.
-- **The playground shows a video's 👀 and read receipt on it.** Both go the moment a video
-  arrives, before the playground had given the page the message's id, so the page had no message
-  to put them on and dropped them. The playground now shows them once the id is given, and after
-  a reload too: the agent's history keeps the arrival reaction (`agent.transcript()` lists it
-  after the message), and the playground keeps the read receipts it showed. Channels through Flow
-  Messaging and the web chat were never affected: their messages carry the platform's id from
-  the start.
-
-### Migration notes
-
-None.
 
 ## 0.17.1 (8 Nov 2026)
 
