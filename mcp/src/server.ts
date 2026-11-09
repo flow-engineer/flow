@@ -351,7 +351,7 @@ function appChatOf(options: McpServerOptions, terminal: ReturnType<typeof termin
   const views = appViewsOn();
   const ui = views && options.app.ui?.length ? uiTools(options.app.ui, options.app.pages, options.app.site) : undefined;
   const chat = terminalServer({
-    agent: () => { const built = typeof given === "function" ? given() : given; built.addChannel(chat.channel); return built; },
+    agent: () => { const built = typeof given === "function" ? given() : given; join(built); return built; },
     ...(options.auth ? { auth: { verify: (token: string, request: Request) => options.auth!.verify(token, request) } } : {}),
     path: "/app/chat",
     channel: "app",
@@ -359,9 +359,11 @@ function appChatOf(options: McpServerOptions, terminal: ReturnType<typeof termin
     // The panel draws every tool call as it runs, so the agent answers once instead of acknowledging first.
     showsTools: true,
     // On Flow's hosting the answer is shown with the brand's UI tools (uiTools), picked by the agent.
-    ...(ui ? { instructions: UI_INSTRUCTIONS, tools: ui.tools, onRequest: ui.answer } : {}),
+    ...(ui ? { instructions: UI_INSTRUCTIONS, onRequest: ui.answer } : {}),
   });
-  if (typeof given !== "function") given.addChannel(chat.channel);
+  // The views are a group of the agent's, limited to this channel; an agent that has its own views group keeps it.
+  const join = (built: Agent) => { built.addChannel(chat.channel); if (ui && !built.group(ui.name)) built.addGroup(ui); };
+  if (typeof given !== "function") join(given);
   return chat;
 }
 

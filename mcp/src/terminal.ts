@@ -21,7 +21,7 @@ export interface TerminalServerOptions {
   traceChannel?: string;
   /** The client draws each tool call as it runs (ChannelInfo.showsTools): the agent then answers once, with no acknowledgement first. Default off. */
   showsTools?: boolean;
-  /** Tools of this client's own, offered only on its channel and read every turn (Channel.tools). */
+  /** @deprecated Give createAgent a group limited to this channel instead (toolGroup); see Channel.tools. */
   tools?: () => Tool[];
   /** Called as each request starts, with the person it is for (key:<key> or guest:<id>), before the agent runs. */
   onRequest?: (person: string) => void;

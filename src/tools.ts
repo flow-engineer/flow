@@ -162,6 +162,26 @@ export function tool<Input, Output = any>(definition: Tool<Input, Output>): Tool
 }
 
 /**
+ * A named set of tools, offered only on its channels (createAgent's `groups`): a turn offers the agent's
+ * `tools` and the groups for the channel of the message it answers. A tool's name is unique across them all.
+ */
+export interface ToolGroup {
+  name: string;
+  /** The channels it is offered on, by name. Default: every channel. */
+  channels?: string[];
+  tools: Tool[];
+}
+
+/** Flow's test client asks an agent for its groups with this, and has their tools played in the test cloud. */
+export const PLAY_GROUPS = Symbol("flow.playGroups");
+
+export function toolGroup<G extends ToolGroup>(group: G): G {
+  if (!group.name?.trim()) throw new Error("flow: a tool group needs a name");
+  if (group.channels && !group.channels.length) throw new Error(`flow: tool group ${group.name} has an empty channels list; leave it out for every channel`);
+  return group;
+}
+
+/**
  * Marks a tool whose input schema is given as JSON Schema (a tool another MCP server defines): the
  * model is shown that schema exactly, not one rebuilt from the zod that validates it.
  */

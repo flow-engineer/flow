@@ -33,9 +33,8 @@ export interface Channel {
   /** Your own guidance for the agent on this channel, added to its prompt while the person uses it. */
   instructions?: string;
   /**
-   * Tools offered only while the person is on this channel, read afresh every turn so the list can
-   * change: a UI's own tools (the web app's views), never offered on other channels. A name the
-   * agent's own tools use is left out.
+   * @deprecated Give createAgent a group instead: `groups: [toolGroup({ name, channels: [<this channel>], tools })]`.
+   * Until it is removed, a group limited to this channel, read afresh every turn.
    */
   tools?: () => Tool[];
   /** Opt-out keywords this channel honours (SMS and WhatsApp have them by default). */
@@ -177,7 +176,7 @@ export interface CustomUIProvider {
   params?: Record<string, z.ZodType>;
   /** Your own guidance for the agent on this channel, such as how to use your params. */
   instructions?: string;
-  /** Tools of this UI's own, offered only on this channel and read every turn (Channel.tools). */
+  /** @deprecated Give createAgent a group limited to this channel instead (toolGroup); see Channel.tools. */
   tools?: () => Tool[];
   /** Resolves once your UI has the message (stored or shown); rejects when it could not take it. */
   sendMessage(to: string, message: Message & Record<string, unknown>): Promise<void | SendReceipt>;

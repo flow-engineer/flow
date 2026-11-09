@@ -195,9 +195,13 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   gets each channel's own rule. The web app's own chat sets it for you (mcp-skill.md, "The web app").
 - `instructions` (on `customUI`, and in `whatsapp()`'s and `sms()`'s options) is your guidance for
   the agent on that channel, in its prompt only while the person uses it.
-- `tools` (on `customUI`, or `Channel.tools`) is a function returning tools of that UI's own, offered
-  only while the person is on that channel and read again every turn, so the list can change (the web
-  app's UI tools). Another channel never sees them, and one named like the agent's own tool is left out. Data a param carries,
+- Tools of one channel's own (the web app's UI tools) are a group: `createAgent({ tools, groups:
+  [toolGroup({ name: "views", channels: ["app"], tools })] })`. `tools` is the default group, offered
+  on every channel; a group with `channels` is offered only on turns answering a message on one of
+  them, never because the person also used that channel, and it is read again every turn, so its list
+  can grow. A tool's name is unique across the agent's tools and every group. `flow test` plays group
+  tools like the agent's own. `tools` on `customUI` (`Channel.tools`) is deprecated: it still works, as
+  a group limited to that channel, for one release. Data a param carries,
   such as a link, comes from your tools' results: a tool that has a screen returns its link
   (`{ ..., app_link }`), and the agent only passes it on.
 - One person is one conversation across every channel they use. Channels are joined only by what

@@ -514,7 +514,8 @@ so the person's token never reaches the site's page. Its chat is its own channel
 - **Views are Flow's hosted service only.** On Flow's hosting (`FLOW_APP_SERVICE_URL` and the
   agent's `FLOW_KEY`) each of the brand's `ui` (`AppUi`: `name`, `description`, `input` as a Zod
   schema, `template` as HTML) is a `ui_<name>` tool, offered only on the web app's channel
-  (`Channel.tools`). The agent fills the input in its own words (never a copy of a tool's response)
+  (`uiTools(ui, pages, site)` is that group, `views` limited to `app`; mcpServer adds it to the agent
+  unless the agent already has a `views` group, so an agent can pass it in `groups` itself and test it). The agent fills the input in its own words (never a copy of a tool's response)
   and the panel draws the template in a sandboxed frame. It shows a view when one helps, at most one
   per answer, and its words add only what the view does not show. A view linking a page not in
   `pages` (a `{name}` is one segment, e.g. `/dashboard/orders/{order_id}`) is refused, and the agent

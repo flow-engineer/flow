@@ -117,6 +117,8 @@ export interface ConversationSettings {
   links(conversationId: string): Promise<ChannelLink[]>;
   /** What the person said, and was sent, lately in their other conversations (the same verified number), oldest first. */
   elsewhere?(conversationId: string): Promise<Elsewhere[]>;
+  /** The tools offered on a channel besides the agent's own (its tool groups for that channel), read every turn. */
+  groupTools?(channel: string): Tool[];
   /** Records how a scheduled run or a nudge ended. */
   settle(target: { run?: string; nudge?: string }, status: string, reason?: string, messageId?: string): Promise<void>;
   /** A window-closed prompt nudge the agent sent no template for: held until they reply, and the fallback goes. */
@@ -143,8 +145,6 @@ export interface ChannelLink {
   params?: Record<string, z.ZodType>;
   /** The agent author's guidance for this channel, in the system prompt while it is in use. */
   instructions?: string;
-  /** The channel's own tools (Channel.tools), offered while it is in use. */
-  tools?: () => Tool[];
   address: string;
   deliver: Deliver;
   lastMessageAt: number | null;
@@ -300,7 +300,7 @@ export class Conversation {
   readonly history: ChatMessage[] = [];
   private readonly settings: ConversationSettings;
   private readonly channels = new Map<string, ChannelLink>();
-  /** The tools the channels in use offered this turn (ChannelLink.tools). */
+  /** The tool groups offered this turn: those for the channel of the message it answers. */
   private channelTools = new Map<string, Tool>();
   private pending: Pending[] = [];
   private notes: Note[] = [];
@@ -1337,8 +1337,9 @@ export class Conversation {
       const page = this.pageNow();
       const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, wakeUps, elsewhere, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), page ? pageLine(page) : "", context].filter(Boolean).join("\n\n");
       const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
-      // The channels' own tools, read this turn (a UI's catalog can grow); never one named like the agent's.
-      this.channelTools = new Map([...this.channels.values()].flatMap((c) => c.tools?.() ?? []).filter((t) => !this.settings.tools.has(t.name) && !this.builtins.has(t.name)).map((t) => [t.name, t]));
+      // The groups for the channel of the message this turn answers, never another channel the person used;
+      // read this step (a UI's catalog can grow), and never one named like the agent's own or a built-in.
+      this.channelTools = new Map((this.settings.groupTools?.(this.currentChannel()) ?? []).filter((t) => !this.settings.tools.has(t.name) && !this.builtins.has(t.name)).map((t) => [t.name, t]));
       const specs = [...ownSpecs, ...[...this.channelTools.values()].map(toSpec), ...this.builtinSpecs, ...talkSpecs(views, this.settings.talk)];
       const abort = new AbortController();
       if (restarts < this.settings.maxRestarts) this.stepAbort = abort;

@@ -209,8 +209,8 @@ const historyItem = z.union(
 const scenarioSchema = z.object({
   id: z.string().min(1),
   title: z.string().optional(),
-  /** Every platform it runs on; each is a run of its own, with its own result. */
-  channels: z.array(z.enum(["sms", "whatsapp", "imessage", "telegram", "web"])).min(1),
+  /** Every platform it runs on, or the agent's custom UI by its name (app; web is the first custom UI); each is a run of its own, with its own result. */
+  channels: z.array(z.union([z.enum(["sms", "whatsapp", "imessage", "telegram", "web"]), z.string().regex(/^[a-z][a-z0-9_]{0,31}$/, "a platform (sms, whatsapp, imessage, telegram, web) or a custom UI's name")])).min(1),
   /** The IANA time zone of the test's clock; UTC when left out. */
   timezone: z.string().refine(isTimeZone, "not a time zone: use an IANA name such as America/New_York or UTC").optional(),
   /** The test's clock when each run starts, local to `timezone` unless it has an offset; the real time when left out.

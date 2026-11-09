@@ -691,6 +691,9 @@ test("test files: old ones parse as before, the clock, calls and never parse, an
   for (const now of ["2026-10-16T09:00:30Z", "2026-10-16T09:00-04:00"]) assert.equal(parseScenario(scenario(`now: ${now}\n`)).now, now);
   // A run that starts from an earlier conversation: what each side said, oldest first.
   assert.deepEqual(parseScenario(scenario("history:\n  - person: Book Friday\n  - agent: Done, {{now + 1d | weekday}}.\n")).history, [{ person: "Book Friday" }, { agent: "Done, {{now + 1d | weekday}}." }]);
+  // A custom UI by its name (the web app's app), beside a platform; not a name that could be no channel's.
+  assert.deepEqual(parseScenario({ path: "scenarios/x.yaml", content: old.replace("[sms]", "[app, web]") }).channels, ["app", "web"]);
+  assert.throws(() => parseScenario({ path: "scenarios/x.yaml", content: old.replace("[sms]", "[My App]") }), /channels\[0\]/);
   // The café example, as shipped, is valid.
   for (const file of loadSuite(fileURLToPath(new URL("../examples/cafe/tests", import.meta.url)))) (file.path.startsWith("scenarios/") ? parseScenario : parseToolFile)(file);
 

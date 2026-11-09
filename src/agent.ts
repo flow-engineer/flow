@@ -27,7 +27,7 @@ import { addWakeUp, businessSchedule, claimDue, summary, wakeUpsOf, type WakeUp,
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
 import { Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
 import { clock, quietUntil, validZone } from "./time.ts";
-import { STAND_IN, toSpec, type ChatAuth, type CredentialProvider, type Tool } from "./tools.ts";
+import { PLAY_GROUPS, STAND_IN, toolGroup, toSpec, type ChatAuth, type CredentialProvider, type Tool, type ToolGroup } from "./tools.ts";
 import { activeCall, agentVersion, setting, traces, tracesFromEnv, type QueuedBy, type Traces, type TracesOptions, type TurnTrigger } from "./traces.ts";
 import type { BeforeSend, ChannelInfo, Deliver, Incoming, Model, Outbound, SendReceipt, Template, TemplateDefinition, Transcribe } from "./types.ts";
 
@@ -66,7 +66,13 @@ export interface AgentOptions {
    * marked as a voice note. Without it, it is told a voice note came that it can't listen to.
    */
   transcribe?: Transcribe;
+  /** The agent's own tools: the default group, offered on every channel. */
   tools?: Tool[];
+  /**
+   * More tools, in named groups offered only on their channels (`toolGroup`), such as the web app's views
+   * (`uiTools`): a turn offers `tools` and the groups for the channel of the message it answers.
+   */
+  groups?: ToolGroup[];
   /** Backend credentials or clients for a verified person, available only to tool code as context.credentials. */
   credentials?: CredentialProvider;
   /** Enforce per-tool signIn in chat and send the brand's login challenge when needed. */
@@ -281,6 +287,14 @@ export interface AgentStatus {
 
 /** Whether this process has logged the agent's version (once, at the first agent made). */
 let versionLogged = false;
+let toolsWarned = false;
+
+/** Channel.tools still works, as a group limited to its channel; once per process, the agent's author is told what replaces it. */
+function deprecatedTools(channel: Channel): void {
+  if (!channel.tools || toolsWarned || process.env.NODE_TEST_CONTEXT) return;
+  toolsWarned = true;
+  console.warn(`flow: channel ${channel.name} has its own tools (Channel.tools), which is deprecated: give createAgent a group instead, groups: [toolGroup({ name, channels: ["${channel.name}"], tools })]`);
+}
 
 export interface ReceiveOptions {
   /** What the channel can show. Default: plain text only (no reactions, no status). */
@@ -422,6 +436,11 @@ export class Agent {
   private readonly countryCode: string | undefined;
   private readonly traces: Traces | null;
   private readonly version: string | undefined;
+  /** The tool groups (`groups`, `addGroup`), in order. */
+  private readonly groupList: ToolGroup[] = [];
+  /** Flow's test client plays group tools in the cloud (PLAY_GROUPS): each tool's played copy, made once. */
+  private play: ((tool: Tool) => Tool) | undefined;
+  private readonly played = new WeakMap<Tool, Tool>();
   /** The HTTP the channels serve themselves (`Channel.serve`), by path. */
   private readonly served: Array<{ path: string; handle(request: Request): Promise<Response> }> = [];
 
@@ -522,7 +541,10 @@ export class Agent {
       // What the person said on their other channels is extra context: a store that fails it leaves the turn without it.
       elsewhere: (id) => this.elsewhere(id).catch((error) => (console.warn("flow: the person's other conversations could not be read:", error instanceof Error ? error.message : error), [])),
       settle: (target, status, reason, messageId) => this.settle(target, status, reason, messageId),
+      groupTools: (channel) => this.groupTools(channel),
     };
+    for (const group of options.groups ?? []) this.addGroup(group);
+    for (const channel of this.channelsByName.values()) deprecatedTools(channel);
     for (const channel of this.channelsByName.values()) {
       if (!channel.serve) continue;
       const served = channel.serve({
@@ -654,7 +676,7 @@ export class Agent {
       this.via.set(lock, via);
       if (via === "playground") this.playgroundVisitors.set(lock, { key: input.key });
       this.rows.set(row.id, row);
-      this.open(row.id).link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, tools: adapter.tools, address: input.address, deliver: this.deliverer(adapter, input.address, row.id), lastMessageAt: identity.lastMessageAt });
+      this.open(row.id).link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: input.address, deliver: this.deliverer(adapter, input.address, row.id), lastMessageAt: identity.lastMessageAt });
       return { conversationId: row.id };
     });
     this.arriving.set(lock, work.catch(() => undefined));
@@ -868,7 +890,7 @@ export class Agent {
     this.via.set(viaKey(input.channel, input.from), input.via);
     const conversation = this.open(conversationId);
     const deliver = this.deliverer(adapter, input.from, conversationId);
-    conversation.link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, tools: adapter.tools, address: input.from, deliver, lastMessageAt: null });
+    conversation.link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: input.from, deliver, lastMessageAt: null });
     const text = typeof input.message === "string" ? input.message : input.message.text;
     const kind = keywordIn(adapter.keywords, input.message);
     const fixed = this.intercepted(conversationId, text, { keyword: kind, channel: input.channel });
@@ -1054,7 +1076,7 @@ export class Agent {
     const isNew = !this.conversations.has(conversationId) && !this.rows.has(conversationId);
     const conversation = this.open(conversationId, `${name}:${conversationId}`);
     if (isNew) conversation.persist(() => this.store.addIdentity(conversationId, name, conversationId, "channel"));
-    conversation.link({ name, info: defined?.info ?? options.channel ?? NO_EXTRAS, params: defined?.params, instructions: defined?.instructions, tools: defined?.tools, address: conversationId, deliver, lastMessageAt: null });
+    conversation.link({ name, info: defined?.info ?? options.channel ?? NO_EXTRAS, params: defined?.params, instructions: defined?.instructions, address: conversationId, deliver, lastMessageAt: null });
     const answer = kind ? this.keyword(conversation, defined!.keywords!, kind, text, fixed, name) : null;
     const reply = answer ? answer.reply : fixed;
     if (reply === null) return conversation.receive(message, { channel: name, messageId: options.messageId });
@@ -1278,7 +1300,7 @@ export class Agent {
     const adapter = this.channelOf(to.channel);
     const identity = await this.conversationFor(adapter, to.channel, to.address);
     const conversation = this.open(identity.conversationId);
-    conversation.link({ name: to.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, tools: adapter.tools, address: to.address, deliver: this.deliverer(adapter, to.address, identity.conversationId), lastMessageAt: identity.lastMessageAt });
+    conversation.link({ name: to.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: to.address, deliver: this.deliverer(adapter, to.address, identity.conversationId), lastMessageAt: identity.lastMessageAt });
     return { conversationId: identity.conversationId };
   }
 
@@ -1349,6 +1371,65 @@ export class Agent {
     if (existing) throw new Error(`flow: the agent already has a channel named ${channel.name}`);
     if (channel.name === "key" || channel.name === "phone") throw new Error(`flow: "${channel.name}" is reserved; give the channel another name`);
     this.channelsByName.set(channel.name, channel);
+    deprecatedTools(channel);
+  }
+
+  /**
+   * Adds a tool group (`groups`) to the agent, as mcpServer adds the web app's views; it is offered from the
+   * next turn on. Its name, and each of its tools' names, must be new to the agent.
+   */
+  addGroup(group: ToolGroup): void {
+    toolGroup(group);
+    const existing = this.group(group.name);
+    if (existing === group) return;
+    if (existing) throw new Error(`flow: the agent already has a tool group named ${group.name}`);
+    const taken = new Map([...this.settings.tools.keys()].map((name) => [name, "the agent's tools"]));
+    for (const g of this.groupList) for (const t of g.tools) taken.set(t.name, `group ${g.name}`);
+    const seen = new Set<string>();
+    for (const t of group.tools) {
+      const other = taken.get(t.name) ?? (seen.has(t.name) ? `group ${group.name}` : undefined);
+      if (other) throw new Error(`flow: tool ${t.name} of group ${group.name} has the name of one in ${other}; a tool's name is unique across groups`);
+      seen.add(t.name);
+    }
+    this.groupList.push(group);
+  }
+
+  /** A tool group of the agent's, by name. */
+  group(name: string): ToolGroup | undefined {
+    return this.groupList.find((g) => g.name === name);
+  }
+
+  /**
+   * The tools offered on `channel` besides the agent's own: its groups for that channel, then the channel's own
+   * (Channel.tools, deprecated), read now (a UI's catalog can grow). A name already taken is left out.
+   */
+  private groupTools(channel: string): Tool[] {
+    const offered = [...this.groupList.filter((g) => !g.channels || g.channels.includes(channel)).flatMap((g) => g.tools), ...(this.channelsByName.get(channel)?.tools?.() ?? [])];
+    const seen = new Set(this.settings.tools.keys());
+    const out: Tool[] = [];
+    for (const t of offered) {
+      if (seen.has(t.name)) continue;
+      seen.add(t.name);
+      out.push(this.playedTool(t));
+    }
+    return out;
+  }
+
+  private playedTool(t: Tool): Tool {
+    if (!this.play) return t;
+    let copy = this.played.get(t);
+    if (!copy) this.played.set(t, (copy = this.play(t)));
+    return copy;
+  }
+
+  /**
+   * Flow's test client: from now on every group tool runs as `play` makes it (in the test cloud), in place of its
+   * own code. Returns the groups, a channel's own tools (Channel.tools) as a group of that channel.
+   */
+  [PLAY_GROUPS](play: (tool: Tool) => Tool): ToolGroup[] {
+    this.play = play;
+    const own = [...this.channelsByName.values()].flatMap((c) => (c.tools ? [{ name: c.name, channels: [c.name], tools: c.tools() }] : []));
+    return [...this.groupList.map((g) => ({ ...g, tools: [...g.tools] })), ...own];
   }
 
   /** A channel the agent was given, by name, as it was given (the test cloud plays a copy of it). */
@@ -1644,7 +1725,7 @@ export class Agent {
       const adapter = this.channelsByName.get(i.channel);
       if (!adapter) return [];
       this.via.set(viaKey(i.channel, i.address), i.via);
-      return [{ name: i.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, tools: adapter.tools, address: i.address, deliver: this.deliverer(adapter, i.address, conversationId), lastMessageAt: i.lastMessageAt }];
+      return [{ name: i.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, address: i.address, deliver: this.deliverer(adapter, i.address, conversationId), lastMessageAt: i.lastMessageAt }];
     });
   }
 

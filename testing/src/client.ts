@@ -10,8 +10,8 @@ import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { basename, relative, resolve } from "node:path";
 import { toSpec, type Agent, type Incoming, type EventSink, type Outbound, type SendReceipt, type FlowEvent, type Tool } from "../../src/index.ts";
 import { PROFILE_TOOL, profileTool } from "../../src/conversation.ts";
-import { STAND_IN } from "../../src/tools.ts";
-import { outboundReceipt, type Command, type Opened, type WireIncoming, type OpenSession, type Receipt, type RunKey, type RunSummary, type SessionLimits, type SessionSummary, type ToolCallRequest, type ToolCallResult } from "./protocol.ts";
+import { PLAY_GROUPS, STAND_IN, type ToolGroup } from "../../src/tools.ts";
+import { outboundReceipt, type Command, type Opened, type WireIncoming, type OpenSession, type Receipt, type SessionToolSpec, type RunKey, type RunSummary, type SessionLimits, type SessionSummary, type ToolCallRequest, type ToolCallResult } from "./protocol.ts";
 import { mimeOf, parseScenario, parseToolFile, suiteHash, type SuiteFile } from "./suite.ts";
 import { businessRuns, type BusinessAgent, type BusinessBuild } from "./business.ts";
 
@@ -188,7 +188,7 @@ export function postBudgetMs(baseMs: number, bytes: number): number {
 }
 
 /** What the cloud plays: a Flow Framework Agent's channels, messages in and reactions. */
-export type AgentUnderTest = Pick<Agent, "channels" | "receive" | "reacted"> & Partial<Pick<Agent, "hasProfile" | "seedHistory">>;
+export type AgentUnderTest = Pick<Agent, "channels" | "receive" | "reacted"> & Partial<Pick<Agent, "hasProfile" | "seedHistory" | typeof PLAY_GROUPS>>;
 
 export interface CloudAccess {
   /** The cloud's front door, as given to --cloud. */
@@ -385,12 +385,13 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   const standIn = ownProfile ? [] : [Object.assign(profileTool(() => null), { [STAND_IN]: true })];
   const played = [...options.tools, ...standIn];
   const toolWait = new Map(played.map((t) => [t.name, toolTimeoutMs(options.files, t.name, toolBudget)]));
-  const tools: Tool[] = played.map((t) => ({
+  const playTool = (t: Tool): Tool => ({
     ...t,
     run: (input: unknown, context: { conversationId: string }) => {
       const call = (async () => {
         const request: ToolCallRequest = { conversationId: context.conversationId, tool: t.name, input };
-        const result = await tunnelPost<ToolCallResult>(`${session}/tool-calls`, request, toolWait.get(t.name) ?? postTimeoutMs, {
+        const wait = toolWait.get(t.name) ?? toolTimeoutMs(options.files, t.name, toolBudget);
+        const result = await tunnelPost<ToolCallResult>(`${session}/tool-calls`, request, wait, {
           mode: idempotent ? "idempotent" : "never", key: `tool:${randomUUID()}`, budgetMs: retryBudgetMs, what: "tool call",
         });
         if (!result.ok) throw new ToolFailed(result.error);
@@ -406,7 +407,10 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       });
       return call;
     },
-  }));
+  });
+  const tools: Tool[] = played.map(playTool);
+  // The agent's tool groups (the web app's views) are played the same way: its own run never runs in a test.
+  const playGroups = (built: AgentUnderTest): ToolGroup[] => built[PLAY_GROUPS]?.(playTool) ?? [];
 
   // Events go up in small batches, so the cloud can show the trace and time the agent.
   const queued: Array<{ json: string; bytes: number; at: number }> = [];
@@ -476,19 +480,27 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   events.context = true;
   try {
   const agent = options.build({ tools, events: [events] });
+  const groups = playGroups(agent);
   // Business runs need an agent of this framework: its own channels, routes, clock and nudges.
   const canBusiness = typeof (agent as Partial<BusinessAgent>).reach === "function" && typeof (agent as Partial<BusinessAgent>).fetch === "function";
   // A restart starts the run's next agent and resumes it on the run's store.
   const canRestart = canBusiness && typeof (agent as Partial<BusinessAgent>).resume === "function";
 
   const open: OpenSession = {
-    agent: { name: options.name, title: options.title, tools: [...options.tools, ...(agent.hasProfile?.() ? standIn : [])].map(toSpec), channels: agent.channels() },
+    agent: {
+      name: options.name, title: options.title, channels: agent.channels(),
+      tools: [
+        ...[...options.tools, ...(agent.hasProfile?.() ? standIn : [])].map(toSpec),
+        ...groups.flatMap((g) => g.tools.map((t): SessionToolSpec => ({ ...toSpec(t), group: g.name, ...(g.channels ? { channels: g.channels } : {}) }))),
+      ],
+    },
     files: options.files.map(({ path, hash }) => ({ path, hash })),
     runs: options.runs ?? 1,
     deliveryReceipts: true,
     retries: true,
     resume: true,
     reopen: true,
+    groups: true,
     ...(canBusiness ? { business: true } : {}),
     ...(canRestart ? { restart: true } : {}),
     ...(typeof agent.seedHistory === "function" ? { history: true } : {}),
@@ -528,7 +540,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   const business = canBusiness && opened.business === true
     ? businessRuns({
       sessionAgent: agent as unknown as BusinessAgent,
-      build: (built) => options.build(built) as unknown as BusinessAgent,
+      build: (built) => { const next = options.build(built); playGroups(next); return next as unknown as BusinessAgent; },
       tunnelTools: tools,
       realTools: options.tools,
       events,

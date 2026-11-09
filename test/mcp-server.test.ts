@@ -10,7 +10,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { isSpecType } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { tools as cafeTools } from "../examples/cafe/src/tools.ts";
-import { mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
+import { mcpServer, uiTools, type McpServerOptions } from "../mcp/src/index.ts";
 import { createAgent, flowEvents, tool, type ToolContext } from "../src/index.ts";
 
 const servers: Server[] = [];
@@ -399,4 +399,29 @@ test("places sets which of the row's places show and in what order; nothing else
   assert.deepEqual((await appOf({ places: [] }).settings()).places, []);
   assert.throws(() => appOf({ places: ["terminal"] }), /places has terminal, which needs app\.cli/);
   assert.throws(() => appOf({ places: ["slack" as never] }), /app\.places are terminal, claude, chatgpt, cursor, vscode, not "slack"/);
+});
+
+// The web app's views (uiTools) are a group of the agent's limited to its channel "app", so its chat offers them
+// and no other channel does; an agent that already has a views group of its own keeps it.
+test("the web app's views join the agent as a group limited to app, unless it has its own", () => {
+  const saved = { url: process.env.FLOW_APP_SERVICE_URL, key: process.env.FLOW_KEY };
+  process.env.FLOW_APP_SERVICE_URL = "https://views.example";
+  process.env.FLOW_KEY = "test-key";
+  try {
+    const card = { name: "card", description: "One thing.", input: z.object({ title: z.string() }), template: "<b>{{title}}</b>" };
+    const model = { complete: () => Promise.reject(new Error("no model")) };
+    const agent = createAgent({ files: { "AGENTS.md": "Test." }, model, scheduleCheckMs: 0 });
+    mcpServer({ name: "cafe", version: "1", tools: [], agent, terminal: {}, app: { origins: [SITE], ui: [card] } });
+    const views = agent.group("views");
+    assert.deepEqual(views?.channels, ["app"]);
+    assert.deepEqual(views?.tools.map((t) => t.name), ["ui_card"]);
+    assert.ok(agent.channel("app"), "its chat's channel");
+    const own = uiTools([card]);
+    const keeps = createAgent({ files: { "AGENTS.md": "Test." }, model, scheduleCheckMs: 0, groups: [own] });
+    mcpServer({ name: "cafe", version: "1", tools: [], agent: keeps, terminal: {}, app: { origins: [SITE], ui: [card] } });
+    assert.equal(keeps.group("views"), own);
+  } finally {
+    if (saved.url === undefined) delete process.env.FLOW_APP_SERVICE_URL; else process.env.FLOW_APP_SERVICE_URL = saved.url;
+    if (saved.key === undefined) delete process.env.FLOW_KEY; else process.env.FLOW_KEY = saved.key;
+  }
 });

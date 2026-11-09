@@ -6,6 +6,17 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **Tool groups: tools offered only on their channels.** `createAgent({ tools, groups: [toolGroup({ name,
+  channels, tools })] })`: `tools` stays the default group, offered on every channel; a group with `channels`
+  is offered only on a turn that answers a message on one of them. A tool's name is unique across them all
+  (`agent.addGroup`, `agent.group(name)`). `uiTools(ui, pages, site)` returns the web app's views as a group,
+  `views` limited to `app`; mcpServer adds it to the agent unless the agent has a `views` group of its own.
+  **Fixed:** a channel's own tools were offered on every channel the person had used in the conversation;
+  now only on the channel of the turn's message.
+- **`flow test` plays group tools** like the agent's own (the cloud records and simulates them, and `calls` /
+  `never` work on them), and lists them in the session tagged with their group and channels. A cloud that
+  knows groups shows the agent's tool calls to the simulated person and the judge on a channel with
+  `showsTools`, and runs scenarios on a custom UI by name (`channels: [app]`).
 - **The web app: the agent in the brand's own site.** `mcpServer({ app })` serves a chat panel that
   a site embeds with `<script async src="<origin>/app/embed.js"></script>`. It docks at the side of
   the page (the page moves over), chats over `/app/chat` (channel `app`, traced as `web`), shows each
@@ -43,7 +54,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Migration notes
 
-None.
+- `Channel.tools` (and `tools` on `customUI` and `terminalServer`) is deprecated and will be removed: give
+  createAgent a group limited to that channel, `groups: [toolGroup({ name, channels: ["<channel>"], tools })]`.
+  Until then it works as that group, and Flow warns once.
+- `uiTools()` returns a `ToolGroup` (`{ name, channels, tools, answer }`), not `{ tools: () => Tool[], answer }`:
+  pass it in createAgent's `groups` (or `agent.addGroup`) instead of a channel's `tools`, and read its tools as
+  `views.tools`.
+- A channel's own tools are no longer offered on a turn answering another channel's message.
 
 ## 0.14.8 (2026-10-30)
 

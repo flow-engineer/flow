@@ -6,8 +6,8 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, type FlowEvent, type EventSink } from "../src/index.ts";
-import { scriptedModel, respond, say } from "./helpers.ts";
+import { createAgent, customUI, tool, toolGroup, z, type FlowEvent, type EventSink } from "../src/index.ts";
+import { call, scriptedModel, respond, say } from "./helpers.ts";
 import { runInCloud, SessionStopped, type AgentUnderTest } from "../testing/src/client.ts";
 import type { Command, Receipt } from "../testing/src/protocol.ts";
 
@@ -26,6 +26,7 @@ async function tunnel(handler: (path: string, body: string, res: ServerResponse)
   const closed = gate();
   let stream: ServerResponse | undefined;
   let capability: unknown;
+  let open: Record<string, unknown> = {};
   let finished = false;
   const latePosts: string[] = [];
   const posts: string[] = [];
@@ -35,7 +36,8 @@ async function tunnel(handler: (path: string, body: string, res: ServerResponse)
     req.on("data", (chunk) => { body += chunk; });
     req.on("end", () => {
       if (req.url === "/api/sessions") {
-        capability = JSON.parse(body).deliveryReceipts;
+        open = JSON.parse(body);
+        capability = open.deliveryReceipts;
         res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ sessionId: "s", token: "t", missing: [], dashboard: "d" }));
       } else if (req.url!.endsWith("/stream")) {
         stream = res;
@@ -61,6 +63,7 @@ async function tunnel(handler: (path: string, body: string, res: ServerResponse)
     cloud: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     connected: connected.promise, closed: closed.promise,
     capability: () => capability,
+    open: () => open,
     posts, latePosts,
     finish: () => stream!.write(frame({ type: "drain" })),
     close: () => { server.closeAllConnections(); server.close(); },
@@ -388,4 +391,43 @@ test("a send in the cloud resolves with the id the cloud's answer gives (for an 
     cloud.finish();
     assert.deepEqual(await running, { runs: [] });
   } finally { cloud.close(); }
+});
+
+// A group's tools (the web app's views) are played in the cloud like the agent's own, in place of their own code,
+// and the session's tool list carries them tagged with their group and channels; the open says the client does this.
+test("group tools are played by the cloud in place of their own, and listed tagged with group and channels", { timeout: 10_000 }, async () => {
+  const scripted = scriptedModel();
+  const ended = gate();
+  const called: unknown[] = [];
+  let ranOwn = 0;
+  const dir = mkdtempSync(join(tmpdir(), "flow-groups-"));
+  writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
+  const views = toolGroup({ name: "views", channels: ["app"], tools: [tool({ name: "ui_card", description: "A card.", input: z.object({ title: z.string() }), signIn: "none", run: () => (ranOwn++, {}) })] });
+  const cloud = await tunnel((path, body, res) => {
+    if (path.endsWith("/tool-calls")) {
+      called.push(JSON.parse(body));
+      return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true, output: { shown: true } }));
+    }
+    ok(res);
+  });
+  try {
+    const running = runInCloud({ cloud: cloud.cloud, name: "test", tools: [], files: [], log: () => {}, build: ({ events }) => createAgent({
+      dir, model: scripted.model, debounceMs: 0, scheduleCheckMs: 0, groups: [views],
+      channels: [customUI("app", { sendMessage: async () => {}, info: { showsTools: true } })],
+      events: [...events, (event) => { if (event.type === "turn.end") ended.resolve(); }],
+    }) });
+    (await cloud.connected).write(frame({ ...message("m1"), channelName: "app" } as Command));
+    const first = await scripted.nextCall(0);
+    assert.ok(first.request.tools.some((t) => t.name === "ui_card"));
+    first.answer(respond(call("ui_card", { title: "x" }), call("send_app", { text: "Here." })));
+    (await scripted.nextCall(1)).answer(respond());
+    await ended.promise;
+    cloud.finish();
+    await running;
+    assert.deepEqual(called.map((c) => (c as { tool: string }).tool), ["ui_card"]);
+    assert.equal(ranOwn, 0, "its own run never ran");
+    const open = cloud.open() as { groups?: boolean; agent: { tools: Array<{ name: string; group?: string; channels?: string[] }> } };
+    assert.equal(open.groups, true);
+    assert.deepEqual(open.agent.tools.filter((t) => t.group).map(({ name, group, channels }) => ({ name, group, channels })), [{ name: "ui_card", group: "views", channels: ["app"] }]);
+  } finally { cloud.close(); rmSync(dir, { recursive: true, force: true }); }
 });

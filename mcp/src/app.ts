@@ -14,7 +14,7 @@ import { commandLine, type CliConfig, type ToolInfo } from "../../cli/src/comman
 import { readFileSync } from "node:fs";
 import { stripTypeScriptTypes } from "node:module";
 import { serveScript, scriptFile, widgetFile } from "../../src/web-chat.ts";
-import { tool, type Tool } from "../../src/tools.ts";
+import { tool, toolGroup, type Tool, type ToolGroup } from "../../src/tools.ts";
 import type { z } from "zod";
 import type { McpIdentity } from "./server.ts";
 
@@ -35,10 +35,11 @@ export const UI_INSTRUCTIONS = [
 ].join("\n");
 
 /**
- * The brand's UIs as the agent's ui_ tools: calling one shows it (the panel draws it from the call). At most one
- * per answer: `answer` starts a person's answer afresh (the web app's chat calls it as each request starts).
+ * The brand's UIs as the agent's ui_ tools, a group offered only on the web app's channel ("app"; createAgent's
+ * `groups`): calling one shows it (the panel draws it from the call). At most one per answer: `answer` starts a
+ * person's answer afresh (the web app's chat calls it as each request starts).
  */
-export function uiTools(ui: AppUi[], pages?: string[], site?: string): { tools: () => Tool[]; answer: (person: string) => void } {
+export function uiTools(ui: AppUi[], pages?: string[], site?: string): ToolGroup & { answer: (person: string) => void } {
   const shown = new Map<string, number>();
   const tools = ui.map((u) => tool({
     name: `ui_${u.name}`, description: `${u.description} Your words beside it add only what it does not show; never repeat its contents.`, input: u.input, signIn: "none",
@@ -54,7 +55,7 @@ export function uiTools(ui: AppUi[], pages?: string[], site?: string): { tools: 
       return { shown: true, note: "Shown to them. If you sent your reply together with this view, your answer is complete: send nothing more. Only if you have not replied yet, send one message now that adds what the view does not show." };
     },
   }));
-  return { tools: () => tools, answer: (person) => void shown.delete(person) };
+  return { ...toolGroup({ name: "views", channels: ["app"], tools }), answer: (person) => void shown.delete(person) };
 }
 
 /** Every href in a view's input. */

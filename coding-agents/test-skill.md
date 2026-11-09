@@ -19,7 +19,7 @@ model acting as the person, with the agent's tools played by a model from `tests
 ```yaml
 id: latte-correction
 title: Orders a latte, corrects the milk mid-thought, confirms
-channels: [whatsapp, sms]   # runs once on each, with a result for each
+channels: [whatsapp, sms]   # runs once on each, with a result for each; a custom UI by its name (app); web is the first custom UI
 
 person:
   persona: Sam, in a hurry on the way to work; types in short bursts, no capitals.
@@ -73,7 +73,10 @@ expect:
   - `calls`: tools that must be called at least once (whatever the call returned); `never`: tools
     that must not be called. Checked by code from the recorded tool calls, not by a model. Each
     entry is a tool name, or `{ tool, args }`: the call matches when every field in `args` equals
-    the call's input (nested objects match in part; arrays and strings must be equal).
+    the call's input (nested objects match in part; arrays and strings must be equal). A tool group's
+    tools (the web app's `ui_*` views) are played and checked like the agent's own, on the channels of
+    their group. On a channel that shows tool calls (`showsTools`), the person and the judge see each
+    call (its name and input) in the transcript, so the person can answer a card as they would.
 - `timezone` (default UTC) and `now`: the test's clock. `now` is when each run starts,
   `YYYY-MM-DDTHH:MM[:SS]`, local to `timezone` unless it ends in `Z` or an offset (`-04:00`); left
   out, it is the real time. Placeholders are filled from it, and the simulated tools and the judge
