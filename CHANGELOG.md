@@ -58,6 +58,22 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - **`terminalServer`** takes `showsTools`, `instructions`, `traceChannel`, `tools` and `onRequest`, and
   `{ "reset": true }` starts a new chat (the agent stops seeing the earlier messages, which are kept).
   `commandLine` (`@flow-engineer/flow/cli`) gives the CLI line for a tool call.
+- **Versioned MCP contracts: a server changes its tools and every CLI already published keeps
+  working.** `mcpServer({ contracts: { current, supported, pick } })` keeps only the current tools;
+  each older contract is one adapter over them (`supported[n]`): a tool's old name, its old input
+  schema with `mapInput`, its old output schema with `mapOutput`, and `legacy` tools for one
+  removed (a stand-in calling its replacement, or a small implementation of its own). A request is
+  answered in the contract it names (`_meta["flow.engineer/contract"]`), else the one `pick` chooses
+  from its clientInfo (for CLIs published before they named one), else the current one, which is
+  what MCP hosts get. A contract no longer served is refused with how to update (`run \`acme
+  update\``). `tools/list` says the contract it answered in, and traces' tool events carry it.
+- **`defineCli({ contract })`:** the CLI names its contract on every request; a CLI too old for
+  its server prints one line, `This acme (0.1.4) is too old for <server>. Run \`acme update\` to
+  get the newest version.` (exit 1).
+- **`contractSnapshot` and `contractProblems`** (`@flow-engineer/flow/mcp`): save a contract's tools
+  and sample calls, and check in CI that a change still keeps it (additions pass).
+- **A coding-agent skill, `flow-framework-contracts`** (`coding-agents/contracts-skill.md`): when a
+  change is breaking, how to bump the contract, write its adapter and snapshot, and when to drop one.
 
 ### Migration notes
 

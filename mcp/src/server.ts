@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
 import {
+  CLIENT_INFO_META_KEY,
   createMcpHandler,
   hostHeaderValidationResponse,
   localhostAllowedHostnames,
@@ -36,6 +37,7 @@ import { FORMATTED, JSON_TEXT, jsonTextOf, render, toolContext, ToolError, type 
 import { terminalServer } from "./terminal.ts";
 import { appServer, appViewsOn, uiTools, UI_INSTRUCTIONS, type McpAppOptions } from "./app.ts";
 import { describe, FULL_CATALOG_META, IN_PROCESS, MCP_CLIENT_KINDS, scopesFor, signInOf, toolsProblems, type McpToolDescriptor, type Scopes } from "./describe.ts";
+import { adaptationOf, CONTRACT_META, contractOf, contractTools, type McpClientInfo, type McpContracts } from "./contracts.ts";
 
 export interface McpAuth {
   /** The authorization server(s) that issue tokens for this server, as hosts discover them. */
@@ -115,6 +117,11 @@ export interface McpServerOptions {
   /** Traces from FLOW_FRAMEWORK_TRACES_* (or legacy CHINWAG_TRACES_*) by default; false disables them. */
   traces?: TracesOptions | false;
   /**
+   * The contracts this server speaks, so clients built against an older one (a published CLI) keep
+   * working: the current tools, and an adapter per older contract. Without it, there is one contract.
+   */
+  contracts?: McpContracts;
+  /**
    * The built-in `feedback` tool (the CLI's `feedback` command): whoever calls the server tells the
    * team about the server itself ("tooling") or the product, and traces carry it to the dashboard.
    * Default on; false leaves it out. A tool of the team's own named `feedback` replaces it.
@@ -161,11 +168,16 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   const scopes = options.auth?.scopes;
   const deferred = new Set(options.deferred ?? tools.filter(t => t.mcp?.deferred).map(t => t.name));
   for (const name of deferred) if (!tools.some(t => t.name === name)) throw new Error(`@flow-engineer/flow/mcp: deferred tool ${name} does not exist`);
-  const sourceDescriptors = tools.map(t => {
+  const describeAll = (list: Tool[]) => list.map(t => {
     const generated = describe(t, scopes);
     if (t.name === "read_skill" && skills.length) (generated._meta ??= {})[SKILLS_META] = skills.map(({ name, description }) => ({ name, description }));
     return options.descriptor ? options.descriptor(t, generated) : generated;
   });
+  const contracts = options.contracts;
+  if (contracts) {
+    for (const n of [contracts.current, ...Object.keys(contracts.supported ?? {}).map(Number)]) if (!Number.isInteger(n) || n < 1) throw new Error("@flow-engineer/flow/mcp: contracts are positive whole numbers");
+    if (contracts.supported?.[contracts.current]) throw new Error("@flow-engineer/flow/mcp: the current contract needs no adapter");
+  }
   const path = options.path ?? "/mcp";
   const pluginPath = options.plugin === false ? undefined : options.plugin?.path ?? `${path}/plugin`;
   for (const endpoint of [path, pluginPath].filter((p): p is string => p !== undefined)) {
@@ -174,19 +186,30 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   if (pluginPath === path) throw new Error("@flow-engineer/flow/mcp: plugin and standalone paths must differ");
   // One catalog per kind of client a tool is kept to, and the default for every other client, so
   // a tool never reaches a client it is not for: not listed, not searchable, not callable.
-  const surfacesFor = (kind?: McpClientKind) => {
-    const visible = (list: Tool[]) => list.flatMap((t, i) => !t.mcp?.clients || (kind !== undefined && t.mcp.clients.includes(kind)) ? [{ tool: t, descriptor: sourceDescriptors[i]! }] : []);
-    const surface = (list: Tool[]) => { const shown = visible(list); return toolSurface(shown.map(s => s.tool), shown.map(s => s.descriptor), deferred, options.descriptor); };
+  // An older contract's clients get the tools its adapter makes of these (contracts.ts).
+  const surfacesFor = (kind: McpClientKind | undefined, contract: number | undefined) => {
+    const adapter = contract === undefined || contract === contracts!.current ? undefined : contracts!.supported![contract]!;
+    const surface = (source: Tool[]) => {
+      const list = adapter ? contractTools(source, adapter) : source;
+      const problems = adapter ? toolsProblems(list) : [];
+      if (problems.length) throw new Error(`@flow-engineer/flow/mcp: contract ${contract}'s tools cannot be served as declared:\n- ${problems.join("\n- ")}`);
+      const shown = list.filter(t => !t.mcp?.clients || (kind !== undefined && t.mcp.clients.includes(kind)));
+      const hidden = new Set(shown.filter(t => deferred.has((adaptationOf(t)?.tool ?? t).name) || (!adaptationOf(t) && !source.includes(t) && t.mcp?.deferred)).map(t => t.name));
+      return toolSurface(shown, describeAll(shown), hidden, options.descriptor);
+    };
     return { standalone: surface(tools), plugin: surface([...options.tools, ...(feedback ? [feedback] : [])]) };
   };
-  const audiences = new Map([[undefined as McpClientKind | undefined, surfacesFor()]]);
-  for (const kind of MCP_CLIENT_KINDS) if (kept.some(t => t.mcp!.clients!.includes(kind))) audiences.set(kind, surfacesFor(kind));
-  const surfaceOf = (plugin: boolean, authInfo: AuthInfo | undefined) => {
-    const surfaces = audiences.get(authInfo?.extra?.clientKind as McpClientKind | undefined) ?? audiences.get(undefined)!;
+  const contractsServed = contracts ? [contracts.current, ...Object.keys(contracts.supported ?? {}).map(Number)] : [undefined];
+  const kinds = [undefined, ...MCP_CLIENT_KINDS.filter(kind => kept.some(t => t.mcp!.clients!.includes(kind)))];
+  const audiences = new Map<string, ReturnType<typeof surfacesFor>>(contractsServed.flatMap(contract => kinds.map(kind => [`${contract}:${kind}`, surfacesFor(kind, contract)] as const)));
+  const surfaceOf = (plugin: boolean, authInfo: AuthInfo | undefined, contract?: number) => {
+    const surfaces = audiences.get(`${contract}:${authInfo?.extra?.clientKind}`) ?? audiences.get(`${contract}:undefined`)!;
     return plugin ? surfaces.plugin : surfaces.standalone;
   };
-  const descriptors = audiences.get(undefined)!.standalone.descriptors;
-  const pluginDescriptors = audiences.get(undefined)!.plugin.descriptors;
+  /** The contract a request speaks (undefined without contracts); throws for one not served. */
+  const contractFor = (meta: Record<string, unknown> | undefined, client: McpClientInfo | undefined) => contracts ? contractOf(contracts, meta?.[CONTRACT_META], client, options.name) : undefined;
+  const descriptors = surfaceOf(false, undefined, contracts?.current).descriptors;
+  const pluginDescriptors = surfaceOf(true, undefined, contracts?.current).descriptors;
   const traceOptions = options.traces === false ? undefined : options.traces ?? tracesFromEnv();
   const trace = traceOptions ? traces(traceOptions, { service: options.name, kindOf: () => undefined }) : undefined;
   const emit = emitter([...(options.events ?? []), ...(trace ? [trace.sink] : [])]);
@@ -198,18 +221,24 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   function serverFor(plugin: boolean, headers?: Headers): Server {
     const instructions = options.instructions ?? mcpInstructions(plugin ? [] : skills, Boolean(feedback)) ?? "";
     const server = new Server({ name: options.name, version: options.version }, { capabilities: { tools: {} }, ...(instructions ? { instructions } : {}) });
+    const clientOf = (): McpClientInfo | undefined => {
+      const session = headers?.get("mcp-session-id") ?? undefined;
+      return server.getClientVersion() ?? (session ? sessions.get(session)?.client : undefined);
+    };
     server.setRequestHandler("tools/list", async (_request, ctx) => {
-      const surface = surfaceOf(plugin, ctx.http?.authInfo);
-      return { tools: ctx.mcpReq._meta?.[FULL_CATALOG_META] === true ? surface.full : surface.descriptors };
+      const contract = contractFor(ctx.mcpReq._meta, clientOf());
+      const surface = surfaceOf(plugin, ctx.http?.authInfo, contract);
+      return { tools: ctx.mcpReq._meta?.[FULL_CATALOG_META] === true ? surface.full : surface.descriptors, ...(contract !== undefined ? { _meta: { [CONTRACT_META]: contract } } : {}) };
     });
     server.setRequestHandler("tools/call", async (request, ctx) => {
-      const { tool: t, input } = surfaceOf(plugin, ctx.http?.authInfo).resolve(request.params.name, request.params.arguments ?? {});
+      const contract = contractFor(ctx.mcpReq._meta, clientOf());
+      const { tool: t, input } = surfaceOf(plugin, ctx.http?.authInfo, contract).resolve(request.params.name, request.params.arguments ?? {});
       const identity = identityOf(ctx.http?.authInfo);
       const person = identity ? `key:${identity.key}` : "mcp:anonymous";
       const meta = ctx.mcpReq._meta ?? {};
       const sentKey = meta["chinwag/idempotency-key"];
       const session = headers?.get("mcp-session-id") ?? undefined;
-      const host = server.getClientVersion() ?? (session ? sessions.get(session)?.client : undefined);
+      const host = clientOf();
       const detail = {
         surface: meta["chinwag/surface"] === "cli" ? "cli" : plugin ? "mcp-plugin" : "mcp",
         client: host?.name,
@@ -217,6 +246,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
         session: ctx.sessionId ?? session,
         person,
         command: typeof meta["chinwag/command"] === "string" ? meta["chinwag/command"] : undefined,
+        ...(contract !== undefined ? { contract } : {}),
       };
       const context: ToolContext = toolContext({
         conversationId: `mcp:${person}`,
@@ -245,7 +275,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
   const pluginHandler = pluginPath ? endpointHandler(true) : undefined;
   const terminal = terminalOf(options);
   if (terminal && [path, pluginPath, ...(options.auth?.routes?.paths ?? [])].includes(terminal.path)) throw new Error(`@flow-engineer/flow/mcp: the terminal path ${terminal.path} is already served`);
-  const app = options.app ? appServer(options.app, { name: options.name, mcpPath: path, resource: options.auth?.resource, terminalPath: terminal?.path, tools: (audiences.get("cli") ?? audiences.get(undefined)!).standalone.full, chat: appChatOf(options, terminal), verify: options.auth && (async (token, request) => options.auth!.verify(token, request)) }) : undefined;
+  const app = options.app ? appServer(options.app, { name: options.name, mcpPath: path, resource: options.auth?.resource, terminalPath: terminal?.path, tools: (audiences.get(`${contracts?.current}:cli`) ?? audiences.get(`${contracts?.current}:undefined`)!).standalone.full, chat: appChatOf(options, terminal), verify: options.auth && (async (token, request) => options.auth!.verify(token, request)) }) : undefined;
 
   /** One request; `local` is the CLI in this process (IN_PROCESS): no sign-in or host checks, and the client kind "cli". */
   async function serve(request: Request, local = false): Promise<Response> {
@@ -294,9 +324,12 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
       }
       if (options.auth && !local) {
         for (const message of [parsedBody].flat()) {
-          const call = message as { method?: unknown; params?: { name?: unknown; arguments?: unknown } } | null;
+          const call = message as { method?: unknown; params?: { name?: unknown; arguments?: unknown; _meta?: Record<string, unknown> } } | null;
           if (!call || call.method !== "tools/call" || typeof call.params?.name !== "string") continue;
-          const t = surfaceOf(plugin, authInfo).target(call.params.name, call.params.arguments);
+          let contract: number | undefined;
+          // A contract not served is refused by the call itself, with how to upgrade.
+          try { contract = contractFor(call.params._meta, (call.params._meta?.[CLIENT_INFO_META_KEY] as McpClientInfo | undefined) ?? (session ? sessions.get(session)?.client : undefined)); } catch { continue; }
+          const t = surfaceOf(plugin, authInfo, contract).target(call.params.name, call.params.arguments);
           if (!t || signInOf(t) === "none") continue;
           const needed = scopesFor(t, scopes);
           if (!authInfo) {
@@ -542,7 +575,30 @@ function identityOf(authInfo: AuthInfo | undefined): McpIdentity | null {
   return typeof key === "string" ? { key, scopes: authInfo!.scopes } : null;
 }
 
+/** An older contract's tool runs the current one: its text is the current tool's, its data reshaped by the adapter. */
 async function callTool(t: Tool, input: unknown, context: ToolContext): Promise<{ result: CallToolResult; formatError?: string }> {
+  const adapted = adaptationOf(t);
+  if (!adapted) return presentTool(t, input, context);
+  const { tool: current, adapter } = adapted;
+  let given: unknown;
+  try { given = current.input.parse(adapter.mapInput ? adapter.mapInput(input) : input); }
+  catch (error) { return { result: { isError: true, content: [{ type: "text", text: `${t.name}: its input does not map to ${current.name}'s (${error instanceof Error ? error.message : String(error)})` }] } }; }
+  const { value: output, ...shown } = await presentTool(current, given, context);
+  if (shown.result.isError || !adapter.mapOutput) return shown;
+  let value: unknown;
+  try { value = adapter.mapOutput(output, input); }
+  catch (error) { return { result: { isError: true, content: [{ type: "text", text: `${t.name}: its result does not map to its contract's (${error instanceof Error ? error.message : String(error)})` }] } }; }
+  if (t.output && !t.output.safeParse(value).success) return { result: { isError: true, content: [{ type: "text", text: `${t.name} returned a result that does not match its contract's output schema.` }] } };
+  const formatted = shown.result._meta?.[FORMATTED] === true;
+  return { ...shown, result: {
+    content: formatted ? shown.result.content : [{ type: "text", text: render(value) }],
+    ...(t.output ? { structuredContent: value as CallToolResult["structuredContent"] } : {}),
+    ...(formatted ? { _meta: { [FORMATTED]: true } } : {}),
+  } };
+}
+
+/** Run a tool and make its result; `value` is its output as checked, for an adapter. */
+async function presentTool(t: Tool, input: unknown, context: ToolContext): Promise<{ result: CallToolResult; formatError?: string; value?: unknown }> {
   let output: unknown;
   try {
     output = await t.run(input, context);
@@ -557,19 +613,20 @@ async function callTool(t: Tool, input: unknown, context: ToolContext): Promise<
   // Output given with its JSON as text (jsonText) is sent as that text, byte for byte.
   const raw = jsonTextOf(output);
   const marked = raw === undefined ? {} : { _meta: { [JSON_TEXT]: true } };
-  if (!t.output) return { result: { content: [{ type: "text", text: render(output) }], ...marked } };
+  if (!t.output) return { result: { content: [{ type: "text", text: render(output) }], ...marked }, value: output };
   const checked = t.output.safeParse(output);
   if (!checked.success) return { result: { isError: true, content: [{ type: "text", text: `${t.name} returned a result that does not match its output schema.` }] } };
   const data = { content: [{ type: "text" as const, text: raw ?? render(checked.data) }], structuredContent: checked.data as CallToolResult["structuredContent"], ...marked };
-  if (!t.format) return { result: data };
+  const value = checked.data;
+  if (!t.format) return { result: data, value };
   // The tool has run: a formatter that fails sends the data as JSON, never an error.
   try {
     const text: unknown = t.format(checked.data, input);
-    if (typeof text !== "string") return { result: data, formatError: `format returned ${typeof text}, not text` };
+    if (typeof text !== "string") return { result: data, value, formatError: `format returned ${typeof text}, not text` };
     // A CLI prints the JSON text with --json, so it rides beside the tool's own text; hosts read the text.
-    return { result: { ...data, content: [{ type: "text", text }], _meta: { [FORMATTED]: true, ...(raw !== undefined && context.cli ? { [JSON_TEXT]: raw } : {}) } } };
+    return { result: { ...data, content: [{ type: "text", text }], _meta: { [FORMATTED]: true, ...(raw !== undefined && context.cli ? { [JSON_TEXT]: raw } : {}) } }, value };
   } catch (error) {
-    return { result: data, formatError: error instanceof Error ? error.message : String(error) };
+    return { result: data, value, formatError: error instanceof Error ? error.message : String(error) };
   }
 }
 
