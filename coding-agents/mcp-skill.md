@@ -410,6 +410,7 @@ export async function mcp(agent: Agent, host: { oauthStorage?: OAuthStorage }) {
   bridge's sets `allow` on its `McpAuth` itself.
 - **Each path is its own resource**: list every path's URL in the bridge's `resources`, and the brand's
   token functions get the resource a token is for, so one minted for `/mcp` is not valid at `/internal/mcp`.
+  Reached at more than one hostname: the bridge's `origins` (`oauth-bridge-skill.md`, "Deploy").
 - **The web app** (`webApp`, at `/app`; the options are mcpServer's `app`, with `agent`, `terminal` and
   `server`) uses the first mounted server, or `server`: the panel calls it, and it is the URL people add.
   It serves terminal chat (`/agent/terminal`) with `agent`. Give the servers no `path`, `agent` or `app`

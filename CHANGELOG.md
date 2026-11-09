@@ -18,6 +18,12 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   without a token, 403 `access_denied` signed in. `McpIdentity.email` carries the verified email for
   it; any `McpAuth` can set `allow` itself.
 - **`mcpServer({ tools })` takes tool groups** (`toolGroup`) beside plain tools.
+- **One agent at several hostnames: `oauthBridge({ origins })`.** Beside `issuer`, the other origins
+  the agent is reached at (an old hostname installed clients use). Each request is answered as its own
+  host's: the protected-resource metadata names that origin's resource and issuer (RFC 9728), the
+  authorization server on it is that origin's, and a token is issued for, and accepted on, only that
+  origin's resources. Any other Host gets `issuer`'s, never its own. List each origin's MCP URLs in
+  `resources`. `McpAuth.origins` carries this to `mcpServer`.
 
 ### Migration notes
 

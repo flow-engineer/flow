@@ -44,6 +44,12 @@ export interface McpAuth {
   issuer: string | string[];
   /** This server's public URL as hosts reach it, the resource tokens are for. Default: the request's own. */
   resource?: string;
+  /**
+   * More origins this server is reached at, each with the authorization server on it too (the OAuth
+   * bridge's `origins`): a request on one is answered as that origin's, its resource `<origin><path>` and
+   * its issuer `<origin>`. A request on any other host gets `resource` and `issuer`, never its own host.
+   */
+  origins?: string[];
   /** Scope names: reads need `read`, writes `write`. Without them, being signed in is enough. */
   scopes?: Scopes;
   /**
@@ -328,7 +334,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
       if (!options.auth) return new Response("Not found", { status: 404 });
       return Response.json({
         resource: resourceOf(url, servedPath, at),
-        authorization_servers: [options.auth.issuer].flat(),
+        authorization_servers: options.auth.origins?.includes(url.origin) ? [url.origin] : [options.auth.issuer].flat(),
         bearer_methods_supported: ["header"],
         ...(scopes && (scopes.read || scopes.write) ? { scopes_supported: [...new Set([scopes.read, scopes.write].filter(Boolean))] } : {}),
       });
@@ -403,6 +409,7 @@ export function mcpServer(options: McpServerOptions): McpServerHandle {
 
   /** The protected resource a path is: auth.resource for the endpoint, and its origin with the path for any other (the plugin's, or a path mount serves it at). */
   function resourceOf(url: URL, servedPath: string, at: string | undefined): string {
+    if (options.auth?.origins?.includes(url.origin)) return `${url.origin}${servedPath}`;
     const resource = options.auth?.resource ?? `${url.origin}${path}`;
     return at === undefined && servedPath === path ? resource : new URL(servedPath, resource).href;
   }
