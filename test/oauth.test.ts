@@ -313,6 +313,43 @@ async function keyOf(acme: ReturnType<typeof brand>, server: string, token: stri
   return (await acme.tokens.verify({ token, resource: server }))?.key;
 }
 
+// One agent reached at two hostnames (a new one, and the old one installed clients use): each host is
+// answered as its own, so a client's resource check (RFC 9728) passes on both, and tokens stay on theirs.
+test("one bridge on two origins answers each as its own, refuses a token from one on the other, and any other host gets the issuer's", async () => {
+  const acme = brand("customer-7");
+  const loginPage = await listen(acme.page);
+  let handle: RequestListener = (_q, s) => void s.writeHead(503).end();
+  const http = createServer((req, res) => handle(req, res));
+  servers.push(http);
+  await new Promise<void>((resolve) => http.listen(0, resolve));
+  const port = (http.address() as { port: number }).port;
+  const [primary, other] = [`http://127.0.0.1:${port}`, `http://localhost:${port}`];
+  const bridge = await oauthBridge({
+    issuer: primary, origins: [other], resources: [`${primary}/mcp`, `${other}/mcp`],
+    storage: await databaseStorage(sqlite(), primary), encryptionKey: randomBytes(32), cookieKeys: [randomBytes(32).toString("hex")],
+    jwks: { keys: [{ ...generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ format: "jwk" }), kid: "k1", use: "sig", alg: "RS256" } as never] },
+    login: { url: `${loginPage}/login`, ...acme.login }, tokens: acme.tokens, development: true,
+  });
+  const mcp = mcpServer({ name: "acme", version: "1", tools: [tool({ name: "whoami", description: "Who is signed in.", input: z.object({}), hints: { readOnly: true }, run: (_i, ctx) => ({ key: ctx.key }) })], auth: bridge.auth });
+  handle = (req, res) => void mcp.node(req, res);
+
+  for (const origin of [primary, other]) {
+    assert.deepEqual(await (await fetch(`${origin}/.well-known/oauth-protected-resource/mcp`)).json(), { resource: `${origin}/mcp`, authorization_servers: [origin], bearer_methods_supported: ["header"] });
+    assert.equal((await (await fetch(`${origin}/.well-known/oauth-authorization-server`)).json()).issuer, origin);
+  }
+  const unlisted = await (await mcp.fetch(new Request("http://evil.example/.well-known/oauth-protected-resource/mcp"))).json();
+  assert.deepEqual([unlisted.resource, unlisted.authorization_servers], [`${primary}/mcp`, [primary]], "an unlisted host is never reflected");
+
+  const { tokens } = await hostSignIn(`${other}/mcp`);
+  const call = async (origin: string) => {
+    const c = new Client({ name: "host", version: "1" });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tokens.access_token}` } } }));
+    try { return (await c.callTool({ name: "whoami", arguments: {} })).content; } finally { await c.close(); }
+  };
+  assert.match(JSON.stringify(await call(other)), /customer-7/);
+  await assert.rejects(call(primary), /401|invalid_token|Unauthorized/, "the token is for the other origin's resource");
+});
+
 // The browser keeps the bridge's session from the first sign-in; a second one as another account
 // replaces it instead of asking to confirm a logout on a page the bridge does not serve.
 test("signing in as another account in the same browser replaces the bridge's session", async () => {

@@ -263,7 +263,13 @@ beside `mcp` (`export { tools }`) so `flow check` checks them.
 The signing key, encryption key and cookie key go in as secrets (`npx @flow-engineer/flow deploy
 secrets`). Self-hosted, deploy with durable storage (`databaseStorage(postgres(pool), issuer)`).
 Either way, `issuer` is the agent's public https origin and `resources` its MCP URLs, and the
-brand's code route allows that origin for `return_to`. Repeat steps 2 to 6 against the deployed URL, then add the agent's MCP URL as a
+brand's code route allows that origin for `return_to`.
+
+**More than one hostname** (a new one, and the old one installed CLIs still use): give the others as
+`origins: ["https://old.example.com"]` and list each origin's MCP URLs in `resources`. A request on
+each is answered as that origin's (its issuer, its protected resource), so hosts' RFC 9728 check passes
+on both, and a token is only issued for, and valid on, the origin it was asked on. Any other Host gets
+`issuer`'s. The brand's code route allows every origin for `return_to`, and its tokens accept every resource. Repeat steps 2 to 6 against the deployed URL, then add the agent's MCP URL as a
 connector in Claude (Settings → Connectors) and sign in once: Claude registers itself and comes back
 through the brand's login page.
 

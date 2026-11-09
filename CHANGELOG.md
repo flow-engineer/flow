@@ -2,6 +2,35 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.19.0 (10 Nov 2026)
+
+### Changes
+
+- **The launcher's look:** `app.launcher` takes `background`, `color` and `radius` (a quiet grey, or a rounded
+  rectangle instead of a pill); default the brand accent, fully round.
+- **Several MCP servers in one deployment: `mount`.** `mount({ "/mcp": publicMcp, "/cli/mcp": cli,
+  "/internal/mcp": internal, "/app": webApp({ agent, ...app }) })` serves each `mcpServer` at its path
+  (one server may be at several), each path its own protected resource (`<origin><path>`), the OAuth
+  bridge's routes once for all of them, and the web app and terminal chat once. It returns `fetch`,
+  `node`, `paths`, `descriptors` and `flushTraces`, what Flow's hosting takes from the `mcp(agent, host)`
+  factory. `webApp(options)` is mcpServer's `app` with `agent`, `terminal` and `server` (the server the
+  panel calls; default the first mounted). List every path's URL in `oauthBridge`'s `resources`.
+- **`auth.only(allow)`: a server kept to some signed-in people.** The OAuth bridge's `auth` has
+  `only((who, request) => boolean)`; a server given it refuses everyone else, whatever the tool: 401
+  without a token, 403 `access_denied` signed in. `McpIdentity.email` carries the verified email for
+  it; any `McpAuth` can set `allow` itself.
+- **`mcpServer({ tools })` takes tool groups** (`toolGroup`) beside plain tools.
+- **One agent at several hostnames: `oauthBridge({ origins })`.** Beside `issuer`, the other origins
+  the agent is reached at (an old hostname installed clients use). Each request is answered as its own
+  host's: the protected-resource metadata names that origin's resource and issuer (RFC 9728), the
+  authorization server on it is that origin's, and a token is issued for, and accepted on, only that
+  origin's resources. Any other Host gets `issuer`'s, never its own. List each origin's MCP URLs in
+  `resources`. `McpAuth.origins` carries this to `mcpServer`.
+
+### Migration notes
+
+None: a single `mcpServer` works unchanged.
+
 ## 0.18.1 (10 Nov 2026)
 
 ### Changes

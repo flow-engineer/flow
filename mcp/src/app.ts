@@ -183,6 +183,11 @@ export interface McpAppOptions {
     position?: "right" | "left";
     /** "pill" (logo and label; default), "circle" (logo only) or "tab" (a slim tab on the page's edge). */
     shape?: "pill" | "circle" | "tab";
+    /** Its fill and text colors (default the brand accent and its readable text), e.g. a quiet grey. */
+    background?: string;
+    color?: string;
+    /** Corner radius in pixels (default fully round, a pill). */
+    radius?: number;
   };
   /** The panel's starting width in pixels, 340 to 720; people can drag it wider. Default 420. */
   width?: number;
@@ -288,6 +293,9 @@ export function appServer(options: McpAppOptions, server: { name: string; mcpPat
     logo: options.logo,
     accent: theme.accent ?? "#2457d6",
     accentText: theme.accentText,
+    ...(options.launcher?.background ? { background: options.launcher.background } : {}),
+    ...(options.launcher?.color ? { color: options.launcher.color } : {}),
+    ...(options.launcher?.radius !== undefined ? { launcherRadius: options.launcher.radius } : {}),
     radius: theme.radius ?? 14,
     font: theme.font,
     width,

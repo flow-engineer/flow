@@ -16,6 +16,7 @@ Read the relevant section:
 - [Defer less-used tools](#defer-less-used-mcp-tools)
 - [Build the CLI](#a-cli-for-the-organization)
 - [Package native plugins](#native-plugins-and-standalone-mcp)
+- [Several servers in one deployment](#several-mcp-servers-one-deployment)
 - [Exercise the CLI in a local playground](#local-playground-cli)
 - [Terminal conversations](#terminal-conversations)
 
@@ -379,6 +380,43 @@ Domains, and what never changes once people have the CLI:
   `cli.acme.com`. When the MCP server moves there, add its `https://mcp.acme.com/mcp` to the
   OAuth bridge's `resources` (`oauth-bridge-skill.md`), beside the ones already there.
 - Changing the sign-in issuer (the OAuth server's origin) signs everyone out, on every surface.
+
+### Several MCP servers, one deployment
+
+One deployment can serve several MCP servers, each its own object (name, tools, auth, contracts),
+with the web app and terminal chat, behind one sign-in. `mount` routes by path; each path is its own
+protected resource (`<origin><path>`), and one server can be at several paths. `tools` takes plain
+tools and tool groups (`toolGroup`; a group's channels are the chat agent's and do not apply here).
+
+```ts
+import { mcpServer, mount, webApp } from "@flow-engineer/flow/mcp";
+export async function mcp(agent: Agent, host: { oauthStorage?: OAuthStorage }) {   // Flow's hosting calls this
+  const bridge = await oauthBridge({ ...options, storage: host.oauthStorage,
+    resources: ["https://acme.com/mcp", "https://acme.com/cli/mcp", "https://acme.com/internal/mcp"] });   // every path; the first is the web app's
+  const signIn = bridge.auth;                                                        // one sign-in for every server
+  const staff = signIn.only((who) => who.email?.endsWith("@acme.com") ?? false);
+  const publicMcp = mcpServer({ name: "acme", version, tools: [orders, docs], auth: signIn });
+  const cli = mcpServer({ name: "acme-cli", version, tools: [orders, docs, cliOnly], auth: signIn, contracts });
+  const internal = mcpServer({ name: "acme-internal", version, tools: [orders, docs, cliOnly, admin], auth: staff });
+  return mount({ "/mcp": publicMcp, "/cli/mcp": cli, "/internal/mcp": internal, "/app": webApp({ agent, ...app }) });
+}
+// The CLI: defineCli({ name: "acme", server: "https://acme.com/cli/mcp" })
+```
+
+- **`auth.only(allow)`** keeps a server to some of the people the sign-in signs in: `allow(who, request)`
+  gets the verified identity (the brand's `verify` returns `email` beside `key` for this). Everyone
+  else is refused whatever they call: 401 without a token, even for a tool that needs no sign-in, and
+  403 `access_denied` when signed in. `only` on an `only` keeps both. A sign-in that is not the
+  bridge's sets `allow` on its `McpAuth` itself.
+- **Each path is its own resource**: list every path's URL in the bridge's `resources`, and the brand's
+  token functions get the resource a token is for, so one minted for `/mcp` is not valid at `/internal/mcp`.
+  Reached at more than one hostname: the bridge's `origins` (`oauth-bridge-skill.md`, "Deploy").
+- **The web app** (`webApp`, at `/app`; the options are mcpServer's `app`, with `agent`, `terminal` and
+  `server`) uses the first mounted server, or `server`: the panel calls it, and it is the URL people add.
+  It serves terminal chat (`/agent/terminal`) with `agent`. Give the servers no `path`, `agent` or `app`
+  of their own: mount sets their paths. A server's plugin endpoint is at `<path>/plugin` unless `plugin: false`.
+- `mount(...)` returns `fetch`, `node`, `paths`, `descriptors` and `flushTraces`, the shape Flow's
+  hosting takes from the `mcp(agent, host)` factory, so it deploys like one server.
 
 ### Native plugins and standalone MCP
 

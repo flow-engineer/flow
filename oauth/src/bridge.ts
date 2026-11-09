@@ -22,13 +22,18 @@ import { createHash, randomBytes } from "node:crypto";
 import { IncomingMessage, ServerResponse } from "node:http";
 import { Socket } from "node:net";
 import Provider, { errors, interactionPolicy, type ClientMetadata, type Configuration, type JWKS } from "oidc-provider";
-import type { McpAuth, McpIdentity } from "../../mcp/src/server.ts";
+import { signIn, type McpIdentity, type McpSignIn } from "../../mcp/src/server.ts";
 import { oauthStore, type OAuthStorage } from "./store.ts";
 
 export interface OAuthBridgeOptions {
   /** This server's public origin, the issuer clients see (https; http on loopback in development). */
   issuer: string;
-  /** The exact MCP URLs tokens are for: the agent's /mcp, and /mcp/plugin when it serves one. */
+  /**
+   * More origins the agent is reached at (another hostname kept for installed clients, say). A request on
+   * one is answered as that origin's: its own issuer, and tokens only for its resources. Any other host gets `issuer`'s.
+   */
+  origins?: string[];
+  /** The exact MCP URLs tokens are for: the agent's /mcp, and /mcp/plugin when it serves one; with mount, each path's; on each origin. An origin's first is its web app's. */
   resources: string[];
   /** Where clients, grants and sign-ins in progress are kept, hashed and sealed: databaseStorage(db, issuer) when self-hosted, Flow's store when hosted. Durable outside development. */
   storage: OAuthStorage;
@@ -73,8 +78,8 @@ export interface BrandTokens {
 }
 
 export interface OAuthBridge {
-  /** For mcpServer({ auth }): this issuer, each request's token checked by the brand, and the bridge's routes. */
-  auth: McpAuth;
+  /** For mcpServer({ auth }): this issuer, each request's token checked by the brand, and the bridge's routes. `auth.only(...)` keeps a server to some of the people it signs in. */
+  auth: McpSignIn;
 }
 
 const ROUTES = { authorization: "/auth", token: "/token", registration: "/reg", revocation: "/token/revocation", jwks: "/jwks" };
@@ -103,8 +108,17 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
   const issuerURL = secureURL(options.issuer, development);
   if (issuerURL.pathname !== "/" || issuerURL.search) throw new Error("@flow-engineer/flow/oauth: the issuer is an origin, with no path");
   const issuer = issuerURL.origin;
+  const issuers = [...new Set([issuer, ...(options.origins ?? []).map((value) => {
+    const url = secureURL(value, development);
+    if (url.pathname !== "/" || url.search) throw new Error("@flow-engineer/flow/oauth: origins are origins, with no path");
+    return url.origin;
+  })])];
   const resources = new Set(options.resources.map((value) => secureURL(value, development).href));
   if (!resources.size) throw new Error("@flow-engineer/flow/oauth: give the MCP URLs as resources");
+  for (const resource of resources) if (!issuers.includes(new URL(resource).origin)) throw new Error(`@flow-engineer/flow/oauth: ${resource} is on neither the issuer nor one of origins`);
+  for (const origin of issuers) if (![...resources].some((r) => new URL(r).origin === origin)) throw new Error(`@flow-engineer/flow/oauth: give ${origin}'s MCP URLs in resources`);
+  const allResources = resources;
+  const cliClients = new Set(issuers.map((origin) => `${origin}${CLI_CLIENT_PATH}`));
   if (!options.cookieKeys.length || options.cookieKeys.some((key) => key.length < 32)) throw new Error("@flow-engineer/flow/oauth: cookie keys must be at least 32 characters");
   if (!development && !options.storage.durable) throw new Error("@flow-engineer/flow/oauth: outside development the storage must be durable");
   secureURL(options.login.url, development);
@@ -115,69 +129,6 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
   const authorizations = store.adapter("BrandAuthorization");
   const tokenClients = store.adapter("BrandTokenClient");
   const appLogins = store.adapter("AppLogin");
-  const appClientId = `${issuer}${APP_CLIENT_PATH}`;
-  // A public client with loopback redirects on any port (RFC 8252), as the CLI signs in.
-  const cliClient: ClientMetadata = {
-    client_id: `${issuer}${CLI_CLIENT_PATH}`,
-    client_name: "CLI",
-    application_type: "native",
-    redirect_uris: ["http://127.0.0.1/callback"],
-    grant_types: ["authorization_code", "refresh_token"],
-    response_types: ["code"],
-    token_endpoint_auth_method: "none",
-  };
-  if (options.clients?.some((c) => c.client_id === cliClient.client_id)) throw new Error(`@flow-engineer/flow/oauth: ${cliClient.client_id} is the CLI's own client`);
-  const policy = interactionPolicy.base();
-  // A provider session says who the person is; only a fresh brand decision lets a token be issued.
-  policy.get("login")!.checks.add(new interactionPolicy.Check("brand_authorization", "Brand authorization is required", (ctx) => !ctx.oidc.result?.login));
-  let provider: Provider;
-  const configuration: Configuration = {
-    adapter: (name) => store.adapter(name),
-    jwks: options.jwks,
-    clients: [...(options.clients ?? []), cliClient],
-    clientDefaults: { grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" },
-    cookies: { keys: options.cookieKeys, long: { sameSite: "lax" }, short: { sameSite: "lax" } },
-    pkce: { required: () => true },
-    routes: ROUTES,
-    features: {
-      devInteractions: { enabled: false },
-      registration: { enabled: true },
-      revocation: { enabled: true },
-      userinfo: { enabled: false },
-      rpInitiatedLogout: { enabled: false },
-      resourceIndicators: {
-        enabled: true,
-        defaultResource: (_ctx, _client, oneOf) => (oneOf?.length === 1 ? oneOf[0] : [...resources][0]),
-        getResourceServerInfo: (_ctx, resource) => {
-          if (!resources.has(resource)) throw new errors.InvalidTarget();
-          return { scope: "account", audience: resource, accessTokenFormat: "opaque", accessTokenTTL: 900 };
-        },
-      },
-    },
-    scopes: ["openid", "account"],
-    // Refresh tokens are the brand's to mint and rotate.
-    issueRefreshToken: () => false,
-    // The interaction (and its cookies) lasts as long as the sign-in on the brand's pages may.
-    ttl: { AccessToken: 900, AuthorizationCode: 60, Interaction: pendingTtl, Grant: 30 * 86400, Session: SESSION_TTL },
-    interactions: { policy, url: (_ctx, interaction) => `/interaction/${interaction.uid}` },
-    findAccount: async (_ctx, key) => (await options.login.active(key) ? { accountId: key, claims: async () => ({ sub: key }) } : undefined),
-    // The brand's default is the account's normal access, with no separate permissions screen.
-    async loadExistingGrant(ctx) {
-      const key = ctx.oidc.result?.login?.accountId ?? ctx.oidc.session?.accountId;
-      if (!key || !(await options.login.active(key))) return undefined;
-      // Each connection gets a grant of its own, even when a browser session skips the login.
-      const old = ctx.oidc.result?.consent?.grantId;
-      const grant = (old ? await provider.Grant.find(old) : undefined) ?? new provider.Grant({ accountId: key, clientId: ctx.oidc.client!.clientId });
-      grant.addOIDCScope("openid account");
-      for (const resource of Object.keys(ctx.oidc.resourceServers ?? {})) if (resources.has(resource)) grant.addResourceScope(resource, "account");
-      await grant.save();
-      return grant;
-    },
-    renderError: (ctx, out) => { ctx.type = "application/json"; ctx.body = { error: out.error }; },
-    discovery: { flow_cli_client_id: cliClient.client_id },
-  };
-  provider = new Provider(issuer, configuration);
-  provider.proxy = !development;
   const checked = (value: BrandTokens) => {
     if (!value || typeof value.access_token !== "string" || !value.access_token || value.token_type !== "Bearer" || !Number.isFinite(value.expires_in) || value.expires_in <= 0 || (value.refresh_token !== undefined && typeof value.refresh_token !== "string")) {
       throw new errors.InvalidGrant("Brand credential exchange failed");
@@ -190,35 +141,6 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
     await tokenClients.upsert(tokens.access_token, { clientId, exp: Math.floor(Date.now() / 1000) + expiresIn }, expiresIn);
     return tokens;
   };
-  // oidc-provider still authenticates the client and checks parameters and resource first.
-  provider.registerGrantType("refresh_token", async (ctx) => {
-    const resource = ctx.oidc.params!.resource, refreshToken = ctx.oidc.params!.refresh_token;
-    if (typeof resource !== "string" || !resources.has(resource) || typeof refreshToken !== "string") throw new errors.InvalidGrant();
-    let tokens: ReturnType<typeof checked>;
-    try { tokens = checked(await options.tokens.refresh({ clientId: ctx.oidc.client!.clientId, resource, refreshToken })); }
-    catch { throw new errors.InvalidGrant(); }
-    ctx.body = await issued(tokens, ctx.oidc.client!.clientId);
-  }, ["refresh_token", "resource", "scope"]);
-  // The code exchange makes a short-lived internal token; the client gets the brand's token instead.
-  provider.use(async (ctx, next) => {
-    await next();
-    if (ctx.status !== 200) return;
-    if (ctx.path === ROUTES.token && ctx.oidc.params?.grant_type === "authorization_code") {
-      const response = ctx.body as { access_token?: string };
-      const temporary = response.access_token ? await provider.AccessToken.find(response.access_token) : undefined;
-      if (!temporary?.accountId || typeof temporary.aud !== "string" || !resources.has(temporary.aud)) throw new errors.InvalidGrant();
-      try {
-        const proof = await store.take("BrandAuthorization", temporary.grantId!);
-        if (typeof proof?.authorization !== "string") throw new errors.InvalidGrant();
-        ctx.body = await issued(checked(await options.tokens.issue({ key: temporary.accountId, clientId: temporary.clientId!, resource: temporary.aud, connection: temporary.grantId!, authorization: proof.authorization })), temporary.clientId!);
-      } finally { await temporary.destroy(); }
-    }
-    if (ctx.path === ROUTES.revocation && typeof ctx.oidc.params?.token === "string") {
-      await options.tokens.revoke({ clientId: ctx.oidc.client!.clientId, token: ctx.oidc.params.token });
-    }
-  });
-  const callback = provider.callback();
-
   // Which client each token went to, read once per token and process (a miss for a while: tokens from before this bridge noted them).
   const clientOfToken = new Map<string, { clientId?: string; until: number }>();
   async function clientOf(token: string): Promise<McpIdentity["client"]> {
@@ -233,7 +155,7 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
       if (clientOfToken.size > 10_000) clientOfToken.delete(clientOfToken.keys().next().value!);
     }
     if (!known.clientId) return undefined;
-    return { id: known.clientId, ...(known.clientId === cliClient.client_id ? { kind: "cli" as const } : {}) };
+    return { id: known.clientId, ...(cliClients.has(known.clientId) ? { kind: "cli" as const } : {}) };
   }
 
   async function verify(token: string, resource: string) {
@@ -245,129 +167,235 @@ export async function oauthBridge(options: OAuthBridgeOptions): Promise<OAuthBri
     return client ? { ...identity, client } : identity;
   }
 
+  /** The resource a request is for: its exact URL when listed, else its origin's first (for terminal chat and the app's routes), else the issuer's first. */
   function resourceOf(request: Request): string {
     const url = new URL(request.url);
     const exact = `${url.origin}${url.pathname}`;
-    return resources.has(exact) ? exact : [...resources][0]!;
+    if (resources.has(exact)) return exact;
+    const listed = [...resources];
+    return listed.find((r) => new URL(r).origin === url.origin) ?? listed[0]!;
   }
 
-  function requestedResource(params: Record<string, unknown>): string {
-    const resource = params.resource ?? [...resources][0];
-    if (typeof resource !== "string" || !resources.has(resource)) throw new errors.InvalidTarget();
-    return resource;
-  }
-
-  async function fullAccountGrant(key: string, params: Record<string, unknown>) {
-    const grant = new provider.Grant({ accountId: key, clientId: String(params.client_id) });
-    grant.addOIDCScope("openid account");
-    for (const resource of [params.resource ?? [...resources][0]].flat()) if (typeof resource === "string" && resources.has(resource)) grant.addResourceScope(resource, "account");
-    return grant.save();
-  }
-
-  // Only the app's own page calls this (same origin); a code alone is useless without its sign-in here.
-  async function appSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
-    if (req.headers.origin !== issuer) return json(res, 403, { error: "invalid_origin" });
-    const body = await readJson(req);
-    if (!body) return json(res, 400, { error: "invalid_request" });
-    const resource = [...resources][0]!;
-    if (body.step === "start") {
-      const uid = randomBytes(16).toString("base64url"), nonce = randomBytes(32).toString("base64url");
-      await appLogins.upsert(uid, { nonce }, APP_LOGIN_TTL);
-      return json(res, 200, { nonce, returnTo: `${issuer}/interaction/${uid}/callback`, clientId: appClientId, resource });
-    }
-    if (body.step === "finish") {
-      const { returnTo, code, state } = body;
-      const uid = typeof returnTo === "string" ? /^\/interaction\/([A-Za-z0-9_-]+)\/callback$/.exec(returnTo.slice(issuer.length))?.[1] : undefined;
-      if (!uid || returnTo !== `${issuer}/interaction/${uid}/callback` || typeof code !== "string" || code.length > 512) return json(res, 400, { error: "invalid_login_response" });
-      const saved = await store.take("AppLogin", uid);
-      if (typeof saved?.nonce !== "string" || state !== saved.nonce) return json(res, 400, { error: "invalid_login_response" });
-      const result = await options.login.exchange({ code, nonce: saved.nonce, redirectUri: returnTo, clientId: appClientId, resource });
-      if (!result.key || !result.authorization || !(await options.login.active(result.key))) return json(res, 401, { error: "account_unavailable" });
-      const tokens = checked(await options.tokens.issue({ key: result.key, clientId: appClientId, resource, connection: randomBytes(16).toString("base64url"), authorization: result.authorization }));
-      return json(res, 200, await issued(tokens, appClientId));
-    }
-    if (body.step === "refresh" && typeof body.refreshToken === "string") {
-      return json(res, 200, await issued(checked(await options.tokens.refresh({ clientId: appClientId, resource, refreshToken: body.refreshToken })), appClientId));
-    }
-    if (body.step === "revoke" && typeof body.token === "string") {
-      await options.tokens.revoke({ clientId: appClientId, token: body.token });
-      return json(res, 200, {});
-    }
-    return json(res, 400, { error: "invalid_request" });
-  }
-
-  async function node(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const url = new URL(req.url ?? "/", issuer);
-    res.setHeader("cache-control", "no-store");
-    res.setHeader("referrer-policy", "no-referrer");
-    if (req.headers.host !== issuerURL.host) return json(res, 400, { error: "invalid_host" });
-    try {
-      // MCP clients look for RFC 8414 metadata first; it is the same document.
-      if (url.pathname === "/.well-known/oauth-authorization-server") req.url = `/.well-known/openid-configuration${url.search}`;
-      // MCP clients often ask for no scope; that asks for the account's normal access.
-      if (url.pathname === ROUTES.authorization && !url.searchParams.has("scope")) {
-        url.searchParams.set("scope", "openid account");
-        req.url = `${url.pathname}${url.search}`;
+  /** One origin's authorization server: its own issuer, clients and resources, the rest shared. */
+  function onOrigin(issuer: string) {
+    const issuerURL = new URL(issuer);
+    // This origin's resources: a token is only ever issued for one on the origin it was asked on.
+    const resources = new Set([...allResources].filter((r) => new URL(r).origin === issuer));
+    const appClientId = `${issuer}${APP_CLIENT_PATH}`;
+    // A public client with loopback redirects on any port (RFC 8252), as the CLI signs in.
+    const cliClient: ClientMetadata = {
+      client_id: `${issuer}${CLI_CLIENT_PATH}`,
+      client_name: "CLI",
+      application_type: "native",
+      redirect_uris: ["http://127.0.0.1/callback"],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    };
+    if (options.clients?.some((c) => c.client_id === cliClient.client_id)) throw new Error(`@flow-engineer/flow/oauth: ${cliClient.client_id} is the CLI's own client`);
+    const policy = interactionPolicy.base();
+    // A provider session says who the person is; only a fresh brand decision lets a token be issued.
+    policy.get("login")!.checks.add(new interactionPolicy.Check("brand_authorization", "Brand authorization is required", (ctx) => !ctx.oidc.result?.login));
+    let provider: Provider;
+    const configuration: Configuration = {
+      adapter: (name) => store.adapter(name),
+      jwks: options.jwks,
+      clients: [...(options.clients ?? []), cliClient],
+      clientDefaults: { grant_types: ["authorization_code", "refresh_token"], response_types: ["code"], token_endpoint_auth_method: "none" },
+      cookies: { keys: options.cookieKeys, long: { sameSite: "lax" }, short: { sameSite: "lax" } },
+      pkce: { required: () => true },
+      routes: ROUTES,
+      features: {
+        devInteractions: { enabled: false },
+        registration: { enabled: true },
+        revocation: { enabled: true },
+        userinfo: { enabled: false },
+        rpInitiatedLogout: { enabled: false },
+        resourceIndicators: {
+          enabled: true,
+          defaultResource: (_ctx, _client, oneOf) => (oneOf?.length === 1 ? oneOf[0] : [...resources][0]),
+          getResourceServerInfo: (_ctx, resource) => {
+            if (!resources.has(resource)) throw new errors.InvalidTarget();
+            return { scope: "account", audience: resource, accessTokenFormat: "opaque", accessTokenTTL: 900 };
+          },
+        },
+      },
+      scopes: ["openid", "account"],
+      // Refresh tokens are the brand's to mint and rotate.
+      issueRefreshToken: () => false,
+      // The interaction (and its cookies) lasts as long as the sign-in on the brand's pages may.
+      ttl: { AccessToken: 900, AuthorizationCode: 60, Interaction: pendingTtl, Grant: 30 * 86400, Session: SESSION_TTL },
+      interactions: { policy, url: (_ctx, interaction) => `/interaction/${interaction.uid}` },
+      findAccount: async (_ctx, key) => (await options.login.active(key) ? { accountId: key, claims: async () => ({ sub: key }) } : undefined),
+      // The brand's default is the account's normal access, with no separate permissions screen.
+      async loadExistingGrant(ctx) {
+        const key = ctx.oidc.result?.login?.accountId ?? ctx.oidc.session?.accountId;
+        if (!key || !(await options.login.active(key))) return undefined;
+        // Each connection gets a grant of its own, even when a browser session skips the login.
+        const old = ctx.oidc.result?.consent?.grantId;
+        const grant = (old ? await provider.Grant.find(old) : undefined) ?? new provider.Grant({ accountId: key, clientId: ctx.oidc.client!.clientId });
+        grant.addOIDCScope("openid account");
+        for (const resource of Object.keys(ctx.oidc.resourceServers ?? {})) if (resources.has(resource)) grant.addResourceScope(resource, "account");
+        await grant.save();
+        return grant;
+      },
+      renderError: (ctx, out) => { ctx.type = "application/json"; ctx.body = { error: out.error }; },
+      discovery: { flow_cli_client_id: cliClient.client_id },
+    };
+    provider = new Provider(issuer, configuration);
+    provider.proxy = !development;
+    // oidc-provider still authenticates the client and checks parameters and resource first.
+    provider.registerGrantType("refresh_token", async (ctx) => {
+      const resource = ctx.oidc.params!.resource, refreshToken = ctx.oidc.params!.refresh_token;
+      if (typeof resource !== "string" || !resources.has(resource) || typeof refreshToken !== "string") throw new errors.InvalidGrant();
+      let tokens: ReturnType<typeof checked>;
+      try { tokens = checked(await options.tokens.refresh({ clientId: ctx.oidc.client!.clientId, resource, refreshToken })); }
+      catch { throw new errors.InvalidGrant(); }
+      ctx.body = await issued(tokens, ctx.oidc.client!.clientId);
+    }, ["refresh_token", "resource", "scope"]);
+    // The code exchange makes a short-lived internal token; the client gets the brand's token instead.
+    provider.use(async (ctx, next) => {
+      await next();
+      if (ctx.status !== 200) return;
+      if (ctx.path === ROUTES.token && ctx.oidc.params?.grant_type === "authorization_code") {
+        const response = ctx.body as { access_token?: string };
+        const temporary = response.access_token ? await provider.AccessToken.find(response.access_token) : undefined;
+        if (!temporary?.accountId || typeof temporary.aud !== "string" || !resources.has(temporary.aud)) throw new errors.InvalidGrant();
+        try {
+          const proof = await store.take("BrandAuthorization", temporary.grantId!);
+          if (typeof proof?.authorization !== "string") throw new errors.InvalidGrant();
+          ctx.body = await issued(checked(await options.tokens.issue({ key: temporary.accountId, clientId: temporary.clientId!, resource: temporary.aud, connection: temporary.grantId!, authorization: proof.authorization })), temporary.clientId!);
+        } finally { await temporary.destroy(); }
       }
-      if (options.app && url.pathname === APP_SESSION_PATH) return await appSession(req, res);
-      if (url.pathname === CLI_CLIENT_PATH) {
-        if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
-        return json(res, 200, cliClient);
+      if (ctx.path === ROUTES.revocation && typeof ctx.oidc.params?.token === "string") {
+        await options.tokens.revoke({ clientId: ctx.oidc.client!.clientId, token: ctx.oidc.params.token });
       }
-      const interactionPath = /^\/interaction\/([A-Za-z0-9_-]+)(\/callback)?$/.exec(url.pathname);
-      if (!interactionPath) return void callback(req, res);
-      if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
-      const interaction = await provider.interactionDetails(req, res);
-      if (interaction.uid !== interactionPath[1]) return json(res, 400, { error: "invalid_interaction" });
-      if (!interactionPath[2]) {
-        if (interaction.prompt.name === "consent" && interaction.session?.accountId && (await options.login.active(interaction.session.accountId))) {
-          const grantId = await fullAccountGrant(interaction.session.accountId, interaction.params);
-          return void (await provider.interactionFinished(req, res, { consent: { grantId } }, { mergeWithLastSubmission: true }));
+    });
+    const callback = provider.callback();
+
+    function requestedResource(params: Record<string, unknown>): string {
+      const resource = params.resource ?? [...resources][0];
+      if (typeof resource !== "string" || !resources.has(resource)) throw new errors.InvalidTarget();
+      return resource;
+    }
+
+    async function fullAccountGrant(key: string, params: Record<string, unknown>) {
+      const grant = new provider.Grant({ accountId: key, clientId: String(params.client_id) });
+      grant.addOIDCScope("openid account");
+      for (const resource of [params.resource ?? [...resources][0]].flat()) if (typeof resource === "string" && resources.has(resource)) grant.addResourceScope(resource, "account");
+      return grant.save();
+    }
+
+    // Only the app's own page calls this (same origin); a code alone is useless without its sign-in here.
+    async function appSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
+      if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
+      if (req.headers.origin !== issuer) return json(res, 403, { error: "invalid_origin" });
+      const body = await readJson(req);
+      if (!body) return json(res, 400, { error: "invalid_request" });
+      const resource = [...resources][0]!;
+      if (body.step === "start") {
+        const uid = randomBytes(16).toString("base64url"), nonce = randomBytes(32).toString("base64url");
+        await appLogins.upsert(uid, { nonce }, APP_LOGIN_TTL);
+        return json(res, 200, { nonce, returnTo: `${issuer}/interaction/${uid}/callback`, clientId: appClientId, resource });
+      }
+      if (body.step === "finish") {
+        const { returnTo, code, state } = body;
+        const uid = typeof returnTo === "string" ? /^\/interaction\/([A-Za-z0-9_-]+)\/callback$/.exec(returnTo.slice(issuer.length))?.[1] : undefined;
+        if (!uid || returnTo !== `${issuer}/interaction/${uid}/callback` || typeof code !== "string" || code.length > 512) return json(res, 400, { error: "invalid_login_response" });
+        const saved = await store.take("AppLogin", uid);
+        if (typeof saved?.nonce !== "string" || state !== saved.nonce) return json(res, 400, { error: "invalid_login_response" });
+        const result = await options.login.exchange({ code, nonce: saved.nonce, redirectUri: returnTo, clientId: appClientId, resource });
+        if (!result.key || !result.authorization || !(await options.login.active(result.key))) return json(res, 401, { error: "account_unavailable" });
+        const tokens = checked(await options.tokens.issue({ key: result.key, clientId: appClientId, resource, connection: randomBytes(16).toString("base64url"), authorization: result.authorization }));
+        return json(res, 200, await issued(tokens, appClientId));
+      }
+      if (body.step === "refresh" && typeof body.refreshToken === "string") {
+        return json(res, 200, await issued(checked(await options.tokens.refresh({ clientId: appClientId, resource, refreshToken: body.refreshToken })), appClientId));
+      }
+      if (body.step === "revoke" && typeof body.token === "string") {
+        await options.tokens.revoke({ clientId: appClientId, token: body.token });
+        return json(res, 200, {});
+      }
+      return json(res, 400, { error: "invalid_request" });
+    }
+
+    async function node(req: IncomingMessage, res: ServerResponse): Promise<void> {
+      const url = new URL(req.url ?? "/", issuer);
+      res.setHeader("cache-control", "no-store");
+      res.setHeader("referrer-policy", "no-referrer");
+      if (req.headers.host !== issuerURL.host) return json(res, 400, { error: "invalid_host" });
+      try {
+        // MCP clients look for RFC 8414 metadata first; it is the same document.
+        if (url.pathname === "/.well-known/oauth-authorization-server") req.url = `/.well-known/openid-configuration${url.search}`;
+        // MCP clients often ask for no scope; that asks for the account's normal access.
+        if (url.pathname === ROUTES.authorization && !url.searchParams.has("scope")) {
+          url.searchParams.set("scope", "openid account");
+          req.url = `${url.pathname}${url.search}`;
         }
-        const nonce = randomBytes(32).toString("base64url");
-        await pending.upsert(interaction.uid, { nonce }, pendingTtl);
-        const login = new URL(options.login.url);
-        login.searchParams.set("nonce", nonce);
-        login.searchParams.set("return_to", `${issuer}/interaction/${interaction.uid}/callback`);
-        login.searchParams.set("client", String(interaction.params.client_id ?? ""));
-        login.searchParams.set("resource", requestedResource(interaction.params));
-        return void res.writeHead(303, { location: login.href }).end();
+        if (options.app && url.pathname === APP_SESSION_PATH) return await appSession(req, res);
+        if (url.pathname === CLI_CLIENT_PATH) {
+          if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
+          return json(res, 200, cliClient);
+        }
+        const interactionPath = /^\/interaction\/([A-Za-z0-9_-]+)(\/callback)?$/.exec(url.pathname);
+        if (!interactionPath) return void callback(req, res);
+        if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
+        const interaction = await provider.interactionDetails(req, res);
+        if (interaction.uid !== interactionPath[1]) return json(res, 400, { error: "invalid_interaction" });
+        if (!interactionPath[2]) {
+          if (interaction.prompt.name === "consent" && interaction.session?.accountId && (await options.login.active(interaction.session.accountId))) {
+            const grantId = await fullAccountGrant(interaction.session.accountId, interaction.params);
+            return void (await provider.interactionFinished(req, res, { consent: { grantId } }, { mergeWithLastSubmission: true }));
+          }
+          const nonce = randomBytes(32).toString("base64url");
+          await pending.upsert(interaction.uid, { nonce }, pendingTtl);
+          const login = new URL(options.login.url);
+          login.searchParams.set("nonce", nonce);
+          login.searchParams.set("return_to", `${issuer}/interaction/${interaction.uid}/callback`);
+          login.searchParams.set("client", String(interaction.params.client_id ?? ""));
+          login.searchParams.set("resource", requestedResource(interaction.params));
+          return void res.writeHead(303, { location: login.href }).end();
+        }
+        const saved = await pending.find(interaction.uid);
+        const code = url.searchParams.get("code"), nonce = url.searchParams.get("state");
+        if (!saved?.nonce || !code || code.length > 512 || nonce !== saved.nonce) return json(res, 400, { error: "invalid_login_response" });
+        const redirectUri = `${issuer}/interaction/${interaction.uid}/callback`;
+        const result = await options.login.exchange({ code, nonce, redirectUri, clientId: String(interaction.params.client_id), resource: requestedResource(interaction.params) });
+        if (!result.key || !result.authorization || !(await options.login.active(result.key))) return json(res, 401, { error: "account_unavailable" });
+        await pending.destroy(interaction.uid);
+        const grantId = await fullAccountGrant(result.key, interaction.params);
+        await authorizations.upsert(grantId, { authorization: result.authorization }, 600);
+        // Someone else signed in on the brand's page than this browser's provider session knows (an
+        // account switch): the new login replaces that session, where oidc-provider would otherwise
+        // ask to confirm a logout on a page the bridge does not serve.
+        const current = await provider.Session.get(provider.createContext(req, res) as never);
+        if (current.accountId && current.accountId !== result.key) await current.destroy();
+        if (interaction.session && interaction.session.accountId !== result.key) {
+          await (await provider.Session.findByUid(interaction.session.uid!))?.destroy();
+          delete interaction.session;
+          await interaction.save(interaction.exp - Math.floor(Date.now() / 1000));
+        }
+        await provider.interactionFinished(req, res, { login: { accountId: result.key, amr: ["brand-login"], remember: true }, consent: { grantId } }, { mergeWithLastSubmission: false });
+      } catch {
+        // Errors from the brand's functions may carry tokens or personal data: keep them out of answers.
+        if (!res.headersSent) json(res, 400, { error: "authorization_failed" });
+        else res.end();
       }
-      const saved = await pending.find(interaction.uid);
-      const code = url.searchParams.get("code"), nonce = url.searchParams.get("state");
-      if (!saved?.nonce || !code || code.length > 512 || nonce !== saved.nonce) return json(res, 400, { error: "invalid_login_response" });
-      const redirectUri = `${issuer}/interaction/${interaction.uid}/callback`;
-      const result = await options.login.exchange({ code, nonce, redirectUri, clientId: String(interaction.params.client_id), resource: requestedResource(interaction.params) });
-      if (!result.key || !result.authorization || !(await options.login.active(result.key))) return json(res, 401, { error: "account_unavailable" });
-      await pending.destroy(interaction.uid);
-      const grantId = await fullAccountGrant(result.key, interaction.params);
-      await authorizations.upsert(grantId, { authorization: result.authorization }, 600);
-      // Someone else signed in on the brand's page than this browser's provider session knows (an
-      // account switch): the new login replaces that session, where oidc-provider would otherwise
-      // ask to confirm a logout on a page the bridge does not serve.
-      const current = await provider.Session.get(provider.createContext(req, res) as never);
-      if (current.accountId && current.accountId !== result.key) await current.destroy();
-      if (interaction.session && interaction.session.accountId !== result.key) {
-        await (await provider.Session.findByUid(interaction.session.uid!))?.destroy();
-        delete interaction.session;
-        await interaction.save(interaction.exp - Math.floor(Date.now() / 1000));
-      }
-      await provider.interactionFinished(req, res, { login: { accountId: result.key, amr: ["brand-login"], remember: true }, consent: { grantId } }, { mergeWithLastSubmission: false });
-    } catch {
-      // Errors from the brand's functions may carry tokens or personal data: keep them out of answers.
-      if (!res.headersSent) json(res, 400, { error: "authorization_failed" });
-      else res.end();
     }
+
+    return { node };
   }
 
+  const byHost = new Map(issuers.map((origin) => [new URL(origin).host, onOrigin(origin)]));
   return {
-    auth: {
+    auth: signIn({
       issuer,
       resource: [...resources][0]!,
+      ...(issuers.length > 1 ? { origins: issuers.slice(1) } : {}),
       verify: (token, request) => verify(token, resourceOf(request)),
-      routes: { paths: options.app ? [...PATHS, APP_SESSION_PATH] : PATHS, fetch: (request) => served(node, request) },
-    },
+      // Each origin's own authorization server answers its requests; any other host gets the issuer's, which refuses it.
+      routes: { paths: options.app ? [...PATHS, APP_SESSION_PATH] : PATHS, fetch: (request) => served((byHost.get(request.headers.get("host") ?? new URL(request.url).host) ?? byHost.get(issuerURL.host)!).node, request) },
+    }),
   };
 }
 
