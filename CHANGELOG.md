@@ -16,6 +16,11 @@ Set `FLOW_FRAMEWORK_TRACES_CONTENT=0` to keep traces metadata only.
 - **No more "traces are metadata only" warning at start.** An agent that sets `=0` chose it.
 - **`flow setup` no longer writes `FLOW_FRAMEWORK_TRACES_CONTENT=1`** under a test traces key: the
   default does it. A line already in `.env` (`0` or `1`) is left as it is.
+- **`flow test` names itself to the test cloud.** The session's open now says `protocol: 1` (Flow's test
+  protocol version) and `client: { name: "@flow-engineer/flow", version }`, so the cloud can tell which client
+  and version played a session. Nothing else changes: a cloud that does not know these fields ignores them,
+  and the test cloud treats an open without them as version 1. `PROTOCOL_VERSION` is exported from the
+  testing protocol module beside `OpenSession`, which gains the optional `protocol` and `client` fields.
 
 ### Migration notes
 

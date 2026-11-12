@@ -4,16 +4,18 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
-import { basename, relative, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import { toSpec, type Agent, type Incoming, type EventSink, type Outbound, type SendReceipt, type FlowEvent, type Tool } from "../../src/index.ts";
 import { PROFILE_TOOL, profileTool } from "../../src/conversation.ts";
 import { PLAY_GROUPS, STAND_IN, type ToolGroup } from "../../src/tools.ts";
-import { outboundReceipt, type Command, type Opened, type WireIncoming, type OpenSession, type Receipt, type SessionToolSpec, type RunKey, type RunSummary, type SessionLimits, type SessionSummary, type ToolCallRequest, type ToolCallResult } from "./protocol.ts";
+import { outboundReceipt, PROTOCOL_VERSION, type Command, type Opened, type WireIncoming, type OpenSession, type Receipt, type SessionToolSpec, type RunKey, type RunSummary, type SessionLimits, type SessionSummary, type ToolCallRequest, type ToolCallResult } from "./protocol.ts";
 import { mimeOf, parseScenario, parseToolFile, suiteHash, type SuiteFile } from "./suite.ts";
 import { businessRuns, type BusinessAgent, type BusinessBuild } from "./business.ts";
+import { packageRoot } from "./new.ts";
 
 export interface ConnectOptions {
   /** The cloud's address, such as http://127.0.0.1:8900. */
@@ -263,6 +265,16 @@ export function gitDefaultBranch(dir = process.cwd()): string | undefined {
   return ref?.startsWith("refs/remotes/origin/") ? headerValue(ref.slice("refs/remotes/origin/".length)) : undefined;
 }
 
+/** What this client tells the cloud it is, on every open: Flow Framework's package name and version. */
+export function clientIdentity(): { name: string; version: string } {
+  let version = "unknown";
+  try {
+    const read = (JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")) as { version?: unknown }).version;
+    if (typeof read === "string" && /^[\x20-\x7e]{1,100}$/.test(read)) version = read;
+  } catch { /* no package.json to read: the cloud still gets the name */ }
+  return { name: "@flow-engineer/flow", version };
+}
+
 /** Where the session is played: Opened.tunnel when the cloud answers one, else the open's own address. */
 export function tunnelBase(cloud: string, opened: Pick<Opened, "tunnel">): string {
   if (!opened.tunnel) return cloud.replace(/\/$/, "");
@@ -483,6 +495,8 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   const canBusiness = typeof (agent as Partial<BusinessAgent>).reach === "function" && typeof (agent as Partial<BusinessAgent>).fetch === "function";
 
   const open: OpenSession = {
+    protocol: PROTOCOL_VERSION,
+    client: clientIdentity(),
     agent: {
       name: options.name, title: options.title, channels: agent.channels(),
       tools: [
