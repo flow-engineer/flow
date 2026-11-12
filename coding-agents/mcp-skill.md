@@ -455,7 +455,7 @@ sets its client version (default `"1"`). Neither CLI arguments nor trace credent
 `mcpServer` uses `FLOW_FRAMEWORK_TRACES_*`, like chat agents, or explicit `traces` options;
 `traces: false` disables export without disabling your event sinks. `await handle.flushTraces()`
 flushes its bounded background queue. Each tool call is a root trace without a conversation;
-arguments and results require `FLOW_FRAMEWORK_TRACES_CONTENT=1`. Legacy clients' initialization
+arguments and results are sent unless `FLOW_FRAMEWORK_TRACES_CONTENT=0`. Legacy clients' initialization
 metadata is retained for up to 24 hours in at most 4,096 sessions; bearer tokens are never cached.
 
 ### Local playground CLI

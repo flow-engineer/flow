@@ -234,18 +234,17 @@ test("the endpoint refusing traces never touches the conversation, is logged onc
   assert.doesNotMatch(warnings.join(""), /do-not-log-me/);
 });
 
-test("from the environment: a trace key goes to flow.engineer/observe unless a URL is set, content only with FLOW_FRAMEWORK_TRACES_CONTENT=1 or under flow test (unless 0), never under node --test; the CHINWAG_ names still work", () => {
+test("from the environment: a trace key goes to flow.engineer/observe unless a URL is set, content unless FLOW_FRAMEWORK_TRACES_CONTENT=0, never under node --test; the CHINWAG_ names still work", () => {
   assert.equal(tracesFromEnv({}), undefined);
-  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY }), { key: KEY, url: "https://flow.engineer/observe", content: false });
-  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "  " }), { key: KEY, url: "https://flow.engineer/observe", content: false });
-  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "https://example.test/traces" }), { key: KEY, url: "https://example.test/traces", content: false });
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY }), { key: KEY, url: "https://flow.engineer/observe", content: true });
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "  " }), { key: KEY, url: "https://flow.engineer/observe", content: true });
   assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_URL: "https://example.test/traces", FLOW_FRAMEWORK_TRACES_CONTENT: "1" }), { key: KEY, url: "https://example.test/traces", content: true });
   assert.equal(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, NODE_TEST_CONTEXT: "child-v8" }), undefined);
-  assert.equal(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_RUN_KIND: "test" })?.content, true, "flow test's files are synthetic");
+  assert.equal(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_RUN_KIND: "production" })?.content, true, "production too");
+  assert.equal(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_TRACES_CONTENT: "0" })?.content, false, "0 keeps metadata only");
   assert.equal(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_RUN_KIND: "test", FLOW_FRAMEWORK_TRACES_CONTENT: "0" })?.content, false);
-  assert.equal(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, FLOW_FRAMEWORK_RUN_KIND: "production" })?.content, false);
-  assert.deepEqual(tracesFromEnv({ CHINWAG_TRACES_KEY: KEY, CHINWAG_TRACES_URL: "https://example.test/traces", CHINWAG_TRACES_CONTENT: "1" }), { key: KEY, url: "https://example.test/traces", content: true });
-  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, CHINWAG_TRACES_KEY: "old", CHINWAG_TRACES_URL: "https://example.test/old" }), { key: KEY, url: "https://example.test/old", content: false });
+  assert.deepEqual(tracesFromEnv({ CHINWAG_TRACES_KEY: KEY, CHINWAG_TRACES_URL: "https://example.test/traces", CHINWAG_TRACES_CONTENT: "0" }), { key: KEY, url: "https://example.test/traces", content: false });
+  assert.deepEqual(tracesFromEnv({ FLOW_FRAMEWORK_TRACES_KEY: KEY, CHINWAG_TRACES_KEY: "old", CHINWAG_TRACES_URL: "https://example.test/old" }), { key: KEY, url: "https://example.test/old", content: true });
 });
 
 // Turn trace tests never exercise standalone calls, which have no conversation to attach to.

@@ -133,15 +133,13 @@ names another; the trace key is made on that same site (never print it):
 ```sh
 FLOW_FRAMEWORK_TRACES_KEY=...
 FLOW_FRAMEWORK_TRACES_URL=https://flow.engineer/observe  # the default; set it only to send them elsewhere
-FLOW_FRAMEWORK_TRACES_CONTENT=1                          # send what was written; without it, metadata only
 ```
 
-Without `FLOW_FRAMEWORK_TRACES_CONTENT=1` the dashboard
-gets ids, timing, model calls and tool names but no messages, so nothing to show or grade. `setup`
-writes it (with a comment saying so) when the traces key it adds is a test key (`otk_test_`, the
-Staging dashboard) and `.env` does not set it already; set it to 0 for metadata only. Under `flow test`
-content is on unless it is 0, since `--synthetic` says the test files hold no real data. Or in
-code: `createAgent({ ..., traces: { url, key, content: true, version: "v3" } })`. Traces are sent in the
+Traces carry what was written (messages, tool arguments and results) by default, everywhere,
+production included (0.20.0 on). `FLOW_FRAMEWORK_TRACES_CONTENT=0` sends metadata only: the dashboard
+then gets ids, timing, model calls and tool names but no messages, so nothing to show or grade.
+`setup` never writes or changes that line. Or in code:
+`createAgent({ ..., traces: { url, key, content: false, version: "v3" } })`. Traces are sent in the
 background after each turn and a failed send is dropped (logged once), so a dashboard outage never
 touches a chat; call `await agent.flushTraces()` before the process exits. Tests run under
 `node --test` never send from the environment. Under `flow test` the traces say they are a test's

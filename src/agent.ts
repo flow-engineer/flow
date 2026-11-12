@@ -280,7 +280,7 @@ export interface AgentOptions {
   templates?: TemplateDefinition[];
   /**
    * Send every turn to a traces endpoint as a trace. Default: from the environment, on when
-   * FLOW_FRAMEWORK_TRACES_KEY is set (address FLOW_FRAMEWORK_TRACES_URL, else https://flow.engineer/observe; FLOW_FRAMEWORK_TRACES_CONTENT=1 for content),
+   * FLOW_FRAMEWORK_TRACES_KEY is set (address FLOW_FRAMEWORK_TRACES_URL, else https://flow.engineer/observe; message text and tool calls unless FLOW_FRAMEWORK_TRACES_CONTENT=0),
    * never under `node --test`.
    */
   traces?: TracesOptions;

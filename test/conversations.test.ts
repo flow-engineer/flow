@@ -321,7 +321,7 @@ test("show prints each tool call's time, outcome, input and output, each reply's
     assert.equal(shown.code, 0, shown.stderr);
     assert.equal(shown.stdout.split("\n").slice(5).join("\n"), [
       "2026-10-29 09:00:00Z  person: (text not sent to Flow)",
-      "                                its trace carried no text: the agent traced metadata only (FLOW_FRAMEWORK_TRACES_CONTENT off), or the message had none (a photo, video or voice note without a caption); never graded",
+      "                                its trace carried no text: the agent traced metadata only (FLOW_FRAMEWORK_TRACES_CONTENT=0, or Flow Framework before 0.20.0), or the message had none (a photo, video or voice note without a caption); never graded",
       "2026-10-29 09:00:04Z  agent: Booked for 6pm.",
       "                             tool find_slot 120 ms ok",
       '                               input: {"day":"today"}',

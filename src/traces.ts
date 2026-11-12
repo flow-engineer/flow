@@ -7,10 +7,9 @@
 // it is full) and sent in the background, every turn finished meanwhile in the same request; a
 // failed request is dropped, logged once per kind of failure, and never names the key.
 //
-// Content (what the person and the agent wrote, tool inputs and results) is sent only with
-// `content: true` (FLOW_FRAMEWORK_TRACES_CONTENT=1); without it the spans hold ids, names, timing and counts,
-// and the endpoint has no messages to show or grade. Under `flow test` content is on unless
-// FLOW_FRAMEWORK_TRACES_CONTENT=0: its --synthetic already says the test files hold no real data.
+// Content (what the person and the agent wrote, tool inputs and results) is sent by default.
+// `content: false` (FLOW_FRAMEWORK_TRACES_CONTENT=0) sends metadata only: the spans hold ids, names,
+// timing and counts, and the endpoint has no messages to show or grade.
 // The one exception is the MCP server's built-in feedback tool: what a caller writes there is meant
 // for the team, so its call's span carries it (`flow.feedback.about`, `.message`, `.tool`) either way.
 //
@@ -71,7 +70,7 @@ export interface TracesOptions {
   url: string;
   /** The agent's key for the traces endpoint. */
   key: string;
-  /** Send what was written (messages, tool inputs and results). Default false: metadata only. */
+  /** Send what was written (messages, tool inputs and results). Default true; false sends metadata only. */
   content?: boolean;
   /** This agent's version, sent as `service.version`. Default: {@link agentVersion}'s. */
   version?: string;
@@ -98,14 +97,12 @@ export { setting };
 /**
  * The traces options from the environment: on when FLOW_FRAMEWORK_TRACES_KEY is set, except under
  * `node --test` (NODE_TEST_CONTEXT), so an agent's own tests never send their turns. The address
- * is FLOW_FRAMEWORK_TRACES_URL, else {@link OBSERVE_URL}. Content with FLOW_FRAMEWORK_TRACES_CONTENT=1,
- * and under `flow test` (FLOW_FRAMEWORK_RUN_KIND=test) unless it is 0.
+ * is FLOW_FRAMEWORK_TRACES_URL, else {@link OBSERVE_URL}. Content unless FLOW_FRAMEWORK_TRACES_CONTENT=0.
  */
 export function tracesFromEnv(env: NodeJS.ProcessEnv = process.env): TracesOptions | undefined {
   const key = setting("TRACES_KEY", env)?.trim() ?? "";
   if (!key || env.NODE_TEST_CONTEXT) return undefined;
-  const asked = setting("TRACES_CONTENT", env);
-  return { key, url: setting("TRACES_URL", env)?.trim() || OBSERVE_URL, content: asked === "1" || (setting("RUN_KIND", env) === "test" && asked !== "0") };
+  return { key, url: setting("TRACES_URL", env)?.trim() || OBSERVE_URL, content: setting("TRACES_CONTENT", env)?.trim() !== "0" };
 }
 
 /** The endpoint's channel names: Flow Framework's custom UIs are web or app chats. */
@@ -185,8 +182,6 @@ export interface Traces {
   spanOf(conversationId: string, toolCallId?: string): { traceId: string; spanId: string } | undefined;
 }
 
-let warnedMetadataOnly = false;
-
 /**
  * What traces ask the agent: a channel's platform (for a channel the agent does not define, such
  * as the test cloud's, the platform the conversation's messages came with), and how the person on a
@@ -208,11 +203,7 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
   if (!base) throw new Error("flow: traces need your traces endpoint's URL");
   if (!allowedUrl(base)) throw new Error("flow: traces go over https (http only to this machine)");
   const endpoint = `${base}/v1/traces`;
-  const content = options.content === true;
-  if (!content && !warnedMetadataOnly) {
-    warnedMetadataOnly = true;
-    log("WARNING", "flow: traces are metadata only. Set FLOW_FRAMEWORK_TRACES_CONTENT=1 to send what was written.");
-  }
+  const content = options.content !== false;
   const open = new Map<string, Turn>();
   const calls = new Map<string, { at: number; input?: unknown }>();
   /** Tools moved to the background, by conversation and call: their span, which code they run may still queue messages from. */

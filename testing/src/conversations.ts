@@ -145,7 +145,7 @@ const TEXT_STATES: Record<string, string> = {
   none: "(no text recorded)",
 };
 /** The line under a message whose text was never sent (observe's messages.no_text). */
-const NOT_SENT_WHY = "its trace carried no text: the agent traced metadata only (FLOW_FRAMEWORK_TRACES_CONTENT off), or the message had none (a photo, video or voice note without a caption); never graded";
+const NOT_SENT_WHY = "its trace carried no text: the agent traced metadata only (FLOW_FRAMEWORK_TRACES_CONTENT=0, or Flow Framework before 0.20.0), or the message had none (a photo, video or voice note without a caption); never graded";
 /** check and note are null when the account's data keeps the words back. */
 interface Feedback {
   id?: string; kind?: string; reason?: string; todo?: string | null; note?: string | null; at?: string;
