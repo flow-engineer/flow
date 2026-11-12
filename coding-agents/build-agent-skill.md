@@ -453,8 +453,8 @@ do not offer them to the owner as ways to test.
 link and code at once (with `--json` the first line is `{"status":"pending","verification_uri":...,
 "user_code":...,"next":...}`), waits at most 120 s (`--timeout <s>`), then exits 4 with the code
 kept: give the owner the link and code, and run `link` again (it polls the same code). Then it runs
-`setup`, which writes the test cloud, traces and Flow Messaging keys into `.env` (with a test traces
-key, also `FLOW_FRAMEWORK_TRACES_CONTENT=1`, so the Staging dashboard shows the chats), prints names and
+`setup`, which writes the test cloud, traces and Flow Messaging keys into `.env` (traces carry the
+chats' text by default, so the dashboard shows them; `FLOW_FRAMEWORK_TRACES_CONTENT=0` turns it off), prints names and
 last 4 characters only, keeps values already there (`--replace` takes the new ones), and is safe to
 run again. `--channel telegram|whatsapp|imessage` picks the channel; a channel flow.engineer cannot
 open yet exits 3 with its `next`. When only observe's part of setup fails (traces and the test cloud),
@@ -516,7 +516,7 @@ npx @flow-engineer/flow templates --declare                     # the approved W
 printf '%s' "$VALUE" | npx @flow-engineer/flow deploy secret NAME --env production   # one secret by hand, from stdin
 ```
 
-Hosting's traces carry message text by default; `deploy status` says so per environment
+Traces carry message text by default, hosted or not; `deploy status` says so per environment
 (`trace text: on (Flow's default)`, or `off (set by you)`). When the owner wants it off in
 production: `echo 0 | npx @flow-engineer/flow deploy secret FLOW_FRAMEWORK_TRACES_CONTENT --env production`,
 then `npx @flow-engineer/flow deploy promote` (`echo 1` turns it back on). Going back to Flow's default

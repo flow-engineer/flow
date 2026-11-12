@@ -102,12 +102,9 @@ before you hand it back; run them yourself, and do not offer them to the owner a
   and `init`, `setup`, `link` and `status` say so too, with the way to get one first in `next`.
   Each folder's `setup` makes its own `FLOW_KEY` (the credit is the account's);
   `setup --rotate key` replaces a leaked one (the old one works 24 h more; `--now` ends it at once).
-- With a test traces key (`otk_test_`, the Staging dashboard), `setup` also writes
-  `FLOW_FRAMEWORK_TRACES_CONTENT=1` below it, under a comment saying it sends message text there
-  and that 0 sends metadata only, so playground and phone chats can be read and graded. It never
-  does for a live key, or when `.env` already has the line (any value, also as
-  `CHINWAG_TRACES_CONTENT`), and only in the run that writes the key: a later run that keeps the key
-  does not put back a line the owner deleted (to keep content off across `--rotate traces`, set it to 0).
+- Traces carry message text, tool arguments and results by default (0.20.0 on), so chats can be read
+  and graded on the dashboard. `FLOW_FRAMEWORK_TRACES_CONTENT=0` in `.env` sends metadata only.
+  `setup` never writes or changes that line.
 - `setup --workspace <name|acc_id>` (and `link --workspace`) puts the agent, its cloud and traces keys in
   that observe workspace of yours and keeps its `acc_` id in `.env` as `FLOW_FRAMEWORK_WORKSPACE`, which later
   runs send; another workspace makes those two keys again (403 `not_a_member`, 409 `workspace_ambiguous`: pass the id).
@@ -518,7 +515,7 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
   each deploy's `built with:` line (the framework its build used, `deploy.framework`), and `traces:` per environment, whether Flow's dashboard takes its traces: `ok`
   (with when it last took one), `quiet` (none yet), or `REFUSED (<status> <code>)` with the reason
   and hint (`environments.<env>.traces`).
-- Trace text is on by default in hosting. To switch it off in production, set the secret, then
+- Trace text is on by default, hosted or not. To switch it off in production, set the secret, then
   promote: `echo 0 | npx @flow-engineer/flow deploy secret FLOW_FRAMEWORK_TRACES_CONTENT --env production`,
   then `npx @flow-engineer/flow deploy promote` (`echo 1` switches it back on). Deleting that secret
   on the dashboard (the agent's secrets) goes back to Flow's default at the next deploy.
@@ -549,7 +546,7 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
   tool calls (`tool <name> <ms> ms ok`, or `FAILED: <code>: <message>`, then its `input:` and
   `output:` when Flow keeps them, masked and cut at 2 KB, `(cut by Flow)`) and its delivery
   (`queued`, `sent`, `delivered`, `read`, or `FAILED <channel code> (<type>)`); a message whose
-  text was not sent to Flow says why (metadata-only traces, `FLOW_FRAMEWORK_TRACES_CONTENT` off, or
+  text was not sent to Flow says why (metadata-only traces: `FLOW_FRAMEWORK_TRACES_CONTENT=0` or a framework before 0.20.0, or
   a photo, video or voice note with no caption). `--json` passes `tools` and `delivery` through. `issues` lists the problems the grades add up to, each with
   a suggested fix (`--status open` by default), then the team's feedback of the last 30 days
   (Framework 0.14.4 on): `check out of date <scenario> (<channel>), check <n>: <check>` (update that

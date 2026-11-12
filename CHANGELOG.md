@@ -2,6 +2,30 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.20.0 (unreleased)
+
+**Agents that upgrade start sending message text, tool arguments and results to the dashboard.**
+Set `FLOW_FRAMEWORK_TRACES_CONTENT=0` to keep traces metadata only.
+
+### Changes
+
+- **Traces carry what was written by default, everywhere, production included.** Messages, replies,
+  tool arguments and results go with each trace unless `FLOW_FRAMEWORK_TRACES_CONTENT=0` (or
+  `traces: { ..., content: false }` in code; `TracesOptions.content` now defaults to true). Before,
+  only `=1` or `flow test` sent them. Agents on Flow's hosting already had it on; nothing changes for them.
+- **No more "traces are metadata only" warning at start.** An agent that sets `=0` chose it.
+- **`flow setup` no longer writes `FLOW_FRAMEWORK_TRACES_CONTENT=1`** under a test traces key: the
+  default does it. A line already in `.env` (`0` or `1`) is left as it is.
+
+### Migration notes
+
+- **Trace content is on by default.** An agent with a traces key and no `FLOW_FRAMEWORK_TRACES_CONTENT`
+  line now sends message text, tool arguments and results. To keep metadata only: add
+  `FLOW_FRAMEWORK_TRACES_CONTENT=0` to `.env` (on Flow's hosting: `echo 0 | npx @flow-engineer/flow deploy
+  secret FLOW_FRAMEWORK_TRACES_CONTENT --env production`, then `deploy promote`), or pass
+  `content: false` in `createAgent({ traces })` / `mcpServer({ traces })`.
+- A `FLOW_FRAMEWORK_TRACES_CONTENT=1` line `setup` wrote earlier now changes nothing; keep or delete it.
+
 ## 0.19.0 (10 Nov 2026)
 
 ### Changes
