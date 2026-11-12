@@ -49,6 +49,12 @@
 //
 // The open goes to the cloud's front door; every later call goes to Opened.tunnel (else the same
 // address) and carries `authorization: Bearer <token>` from Opened.
+//
+// This is Flow's test protocol, a contract any client may speak, on any framework and in any language
+// (flow-mono observe/docs/test-protocol.md). The open names its version (`protocol`, PROTOCOL_VERSION)
+// and the client (`client`); a cloud refuses a version it does not speak (400 unsupported_protocol,
+// naming the ones it does), and an open with no version is version 1. A version changes only when a
+// change would break a client; everything added without breaking one is a flag both sides say, as above.
 
 import type { Attachment, ChannelInfo, ChannelSummary, Incoming, Outbound, SendReceipt, Template, ToolSpec } from "../../src/index.ts";
 
@@ -80,7 +86,14 @@ export interface Usage {
 /** A tool of the agent under test: one of a tool group's (createAgent's `groups`) says which, and its channels (absent: every channel). */
 export type SessionToolSpec = ToolSpec & { group?: string; channels?: string[] };
 
+/** The test protocol's version this client speaks. */
+export const PROTOCOL_VERSION = 1;
+
 export interface OpenSession {
+  /** The test protocol's version the client speaks (PROTOCOL_VERSION). Absent: 1, as every client before it. */
+  protocol?: number;
+  /** What the client is: Flow Framework's own sends its package name and version. Free-form, 1 to 100 printable ASCII characters each; the cloud keeps it with the session. */
+  client?: { name: string; version: string };
   /** name: a stable key (the package name) that keeps the agent's history together; title: for people. */
   agent: { name: string; title?: string; tools: SessionToolSpec[]; channels?: ChannelSummary[] };
   /** Every file in the local suite; only these tests run. */
@@ -122,6 +135,8 @@ export interface Receipt {
 }
 
 export interface Opened {
+  /** The test protocol's version the session is played in. Absent on an older cloud (it speaks 1). */
+  protocol?: number;
   sessionId: string;
   token: string;
   /** Hashes the cloud does not have yet; upload these. */

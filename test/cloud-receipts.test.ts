@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -133,6 +133,30 @@ test("receipts bypass a blocked event upload; intercepted waits for all outbound
     assert.ok(cloud.posts.at(-1)!.endsWith("/drained"));
     await cloud.closed; // finished does not leave the SSE socket open
   } finally { cloud.close(); }
+});
+
+// The open names the test protocol's version and the client, so the cloud can refuse a version it does not speak
+// and keep who connected; an older cloud ignores both.
+test("the open says protocol 1 and names Flow Framework, at its package version, as the client", { timeout: 10_000 }, async () => {
+  let open: { protocol?: unknown; client?: unknown } = {};
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      if (req.url === "/api/sessions") {
+        open = JSON.parse(body);
+        return void res.end(JSON.stringify({ sessionId: "s", token: "t", missing: [], dashboard: "d" }));
+      }
+      if (req.url!.endsWith("/stream")) return void res.writeHead(200, { "content-type": "text/event-stream" }).end(frame({ type: "finished", summary: { runs: [] } }));
+      ok(res);
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  try {
+    await runInCloud({ cloud: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, name: "test", tools: [], files: [], log: () => {}, build: () => ({ channels: () => [], receive: () => null, reacted: () => {} }) });
+    const version = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
+    assert.deepEqual([open.protocol, open.client], [1, { name: "@flow-engineer/flow", version }]);
+  } finally { server.closeAllConnections(); server.close(); }
 });
 
 test("drained authentication failure rejects explicitly and cleans up the stream", { timeout: 10_000 }, async () => {
