@@ -28,6 +28,8 @@ import {
   BUILT_IN,
   commandEntries,
   feedbackUsage,
+  hasChat,
+  hasSignIn,
   commandTable,
   flagKind,
   flagName,
@@ -39,6 +41,7 @@ import {
   OWN_FLAGS,
   serverEnvOf,
   signInCommand,
+  signInOwn,
   signInWords,
   skillFile,
   tokenEnvOf,
@@ -273,6 +276,12 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     io.write(welcomeScreen(config, { server, signedIn, tokenEnv: tokenEnvOf(config) }, io));
     return EXIT.ok;
   }
+  // A command the server cannot serve, named anyway: one line, not the endpoint's or the registration's error.
+  if (rest[0] === "chat" && !config.commands?.chat && !hasChat(config)) { io.writeError(`${NO_CHAT}\n`); return EXIT.usage; }
+  if (!hasSignIn(config)) {
+    const words = Object.values(signInWords(config));
+    if (words.some((w) => !config.commands?.[w] && w.split(" ").every((p, i) => rest[i] === p))) { io.writeError(`${NO_SIGN_IN}\n`); return EXIT.usage; }
+  }
   if (rest[0] === "chat" && !config.commands?.[rest[0]]) return runTerminal(config, named, token, rest, io);
   const table = commandTable(config, []);
   const found = findCommand(table, withDefaults(config, table, rest));
@@ -426,7 +435,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
 /** The words of the command line that name a group or command, for the help hint. */
 function wordsKnown(words: string[], config: CliConfig, tools: ToolInfo[]): string[] {
   const commands = commandTable(config, tools).map((c) => c.words.join(" "));
-  const paths = [...commands, ...BUILT_IN, ...Object.values(signInWords(config)), ...oldAuth(config, commands)];
+  const paths = [...commands, ...BUILT_IN, ...signInOwn(config), ...oldAuth(config, commands)];
   const known: string[] = [];
   for (const w of words) {
     const next = [...known, w].join(" ");
@@ -607,6 +616,8 @@ async function signInHere(config: CliConfig, server: string, io: CliIO): Promise
   try {
     await signIn(config, server, io.signal, (text) => io.writeError(text));
   } catch (error) {
+    // The server answers MCP but has no OAuth: registering a client found nothing there.
+    if (error instanceof Error && /Dynamic Client Registration rejected \(HTTP 404\)/.test(error.message)) throw new CliExit(EXIT.usage, NO_SIGN_IN);
     throw error instanceof CliExit ? error : explain(config, server, error);
   }
 }
@@ -686,7 +697,7 @@ function routes(config: CliConfig, server: string | undefined, named: string | u
   const table = commandTable(config, tools);
   for (const c of table) place(c.words, { command: c.config && isCustom(c.config) ? c.config.command : toolCommand(config, c, prepare, call, io, feedback) });
   const signing = signInRoutes(config, named, io);
-  for (const [key, words] of Object.entries(signInWords(config)) as Array<["login" | "logout", string]>) {
+  for (const [key, words] of (hasSignIn(config) ? Object.entries(signInWords(config)) : []) as Array<["login" | "logout", string]>) {
     const at = place(words.split(" "), {});
     if (at.command || at.children.size) throw new Error(`${config.name}: "${words}" is the CLI's ${key} command (signIn.${key}); name yours something else, or move ${key} with signIn.${key}.`);
     Object.assign(at, { command: signing[key], own: true });
@@ -722,9 +733,9 @@ function routes(config: CliConfig, server: string | undefined, named: string | u
   // chat and help are the CLI's, unless the CLI file has its own.
   const own: Record<string, Target> = { tools: toolsCommand(tools, io), skill: skillCommand(config, tools, call, io, server ? refresh : undefined), ...signInTop };
   if (updatesItself(config)) own.update = updateCommand(config, io);
-  const signInLeaves = Object.fromEntries(Object.entries(signInWords(config)).map(([key, words]) => [words, signing[key as "login" | "logout"]]));
+  const signInLeaves = Object.fromEntries((hasSignIn(config) ? Object.entries(signInWords(config)) : []).map(([key, words]) => [words, signing[key as "login" | "logout"]]));
   if (!top.help) own.help = helpCommand(config, tools, top, { ...own, ...signInLeaves }, io);
-  const everything = { chat: top.chat ?? buildCommand({ docs: { brief: CHAT_BRIEF }, parameters: {}, func() {} }), ...top, ...own };
+  const everything = { ...(top.chat || !hasChat(config) ? {} : { chat: buildCommand({ docs: { brief: CHAT_BRIEF }, parameters: {}, func() {} }) }), ...top, ...own };
   const theirs = Object.keys(top).filter((word) => word !== "chat" && !hidden(root.children.get(word)!));
   return buildRouteMap({
     routes: everything,
@@ -739,6 +750,8 @@ function defaultArgs(config: CliConfig, words: string): string {
   return args.length ? args.map((a) => ` <${a}>`).join("") : " ...";
 }
 
+const NO_CHAT = "This server has no chat agent.";
+const NO_SIGN_IN = "This server has no sign-in.";
 const CHAT_BRIEF = "Ask for anything in plain words, and the agent gets it done";
 
 /** The top-level help: the description, chat first, the team's commands (in its sections), then the CLI's own. */
@@ -755,7 +768,7 @@ function overview(config: CliConfig, all: Record<string, Target>, theirs: string
   if (rest.length) blocks.push([placed.size ? "OTHER" : "COMMANDS", rest.map(line)]);
   blocks.push(["THIS CLI", own.filter((word) => !placed.has(word)).map((word) => (word === "help" ? [`help <words>`, all.help!.brief] : line(word)))]);
   // chat's lines are long; the sections share their own column.
-  const chat: Array<[string, string]> = all.chat!.brief === CHAT_BRIEF
+  const chat: Array<[string, string]> = !all.chat ? [] : all.chat.brief === CHAT_BRIEF
     ? [[`${config.name} chat "<request>"`, CHAT_BRIEF], [`${config.name} chat`, "A conversation, until /exit (chat --help)"]]
     : [["chat", all.chat!.brief]];
   const rows = (list: Array<[string, string]>, name: (text: string) => string) => {
@@ -766,7 +779,7 @@ function overview(config: CliConfig, all: Record<string, Target>, theirs: string
   const pad = (list: Array<[string, string]>) => list.map(([n, brief]): [string, string] => [n.padEnd(width), brief]);
   return [
     config.description ?? config.name,
-    [paint(["bold", "accent"], "ASK ANYTHING"), ...rows(chat, (n) => paint(["bold", "accent"], n))].join("\n"),
+    ...(chat.length ? [[paint(["bold", "accent"], "ASK ANYTHING"), ...rows(chat, (n) => paint(["bold", "accent"], n))].join("\n")] : []),
     ...blocks.map(([heading, list]) => [paint("bold", heading), ...rows(pad(list), (n) => paint("accent", n))].join("\n")),
   ].join("\n\n");
 }
@@ -787,7 +800,7 @@ function helpCommand(config: CliConfig, tools: ToolInfo[], top: Record<string, T
         const text = [c.words.join(" "), summary, c.tool?.description ?? "", group].join(" ").toLowerCase();
         if (wanted.every((w) => text.includes(w))) rows.push([c.words.join(" "), summary]);
       }
-      for (const [word, target] of Object.entries({ ...own, ...(top.chat ? {} : { chat: { brief: CHAT_BRIEF } }) })) {
+      for (const [word, target] of Object.entries({ ...own, ...(top.chat || !hasChat(config) ? {} : { chat: { brief: CHAT_BRIEF } }) })) {
         if (wanted.every((w) => `${word} ${target.brief}`.toLowerCase().includes(w))) rows.push([word, target.brief]);
       }
       if (!rows.length) return void io.write(`No command matches "${words.join(" ")}". ${config.name} --help lists them all.\n`);
@@ -1135,7 +1148,7 @@ const RENEW = (config: CliConfig) => `Some commands need a new sign-in: run \`${
 
 /** Whether the words run a sign-in command (or its old auth words), which needs no tools. */
 function signingIn(config: CliConfig, words: string[]): boolean {
-  const paths = [...Object.values(signInWords(config)), ...oldAuth(config, commandEntries(config).map(([w]) => w))];
+  const paths = [...signInOwn(config), ...oldAuth(config, commandEntries(config).map(([w]) => w))];
   return paths.some((p) => p.split(" ").every((w, i) => words[i] === w));
 }
 
@@ -1155,8 +1168,9 @@ function signInRoutes(config: CliConfig, server: string | undefined, io: CliIO) 
     let warned = false;
     const signedIn = isSignedIn(config, s);
     const warn = (error: unknown) => { warned = true; io.writeError(`${painter(colorsAt(config, io))("warning", error instanceof Error ? error.message : String(error))}\n`); };
-    if (config.signIn?.beforeLogout && signedIn) {
-      try { await config.signIn.beforeLogout({ server: s, token: await storedAccessToken(config, s, false, io.signal) }); }
+    const beforeLogout = config.signIn ? config.signIn.beforeLogout : undefined;
+    if (beforeLogout && signedIn) {
+      try { await beforeLogout({ server: s, token: await storedAccessToken(config, s, false, io.signal) }); }
       catch (error) { warn(error); }
     }
     // The server's own session ends too, where its authorization server takes revocations (the OAuth bridge does).
