@@ -116,8 +116,12 @@ export interface CliConfig {
    * `accent` a six-digit hex color.
    */
   brand?: Brand;
-  /** Human chat inherits the terminal's colors. `accent` is the older name for brand.accent. */
-  chat?: { accent?: string };
+  /**
+   * Human chat inherits the terminal's colors. `accent` is the older name for brand.accent. false
+   * for a server with no terminal chat agent (an MCP-only server): the `chat` command and its help
+   * block are left out, and `chat` says "This server has no chat agent." A `chat` command of your own stays.
+   */
+  chat?: false | { accent?: string };
   /** The variable a token is read from for CI and agents (default <NAME>_TOKEN). */
   tokenEnv?: string;
   /** Override the local credential/conversation/discovery directory, e.g. for an isolated embedded session. */
@@ -171,8 +175,10 @@ export interface CliConfig {
    * "auth login" puts one in a group. Every message that says how to sign in uses them.
    * `beforeLogout` runs the team's own step before this computer's sign-in is forgotten (revoking
    * the server's session); if it throws, the person is still signed out here and told why.
+   * false for a server with no OAuth sign-in (people use a token): `login` and `logout` are left
+   * out, and running them says "This server has no sign-in." Commands of your own named so stay.
    */
-  signIn?: { login?: string; logout?: string; beforeLogout?: (signedIn: { server: string; token?: string }) => void | Promise<void> };
+  signIn?: false | { login?: string; logout?: string; beforeLogout?: (signedIn: { server: string; token?: string }) => void | Promise<void> };
   /**
    * The CLI's colors at a terminal: the help, the welcome, the chat and the Markdown tools and the
    * agent write. Each part takes a color's name ("green", "gray"), a six-digit hex color, or false
@@ -235,7 +241,7 @@ export interface SignInPage {
 
 /** The brand with its defaults: the command's name, and chat.accent when brand.accent is unset. */
 export function brandOf(config: CliConfig): Brand & { name: string } {
-  const accent = config.brand?.accent ?? config.chat?.accent;
+  const accent = config.brand?.accent ?? (config.chat || undefined)?.accent;
   return { ...config.brand, name: config.brand?.name ?? config.name, ...(accent ? { accent } : {}) };
 }
 
@@ -411,7 +417,19 @@ const joined = (text: string) => text.trim().split(/\s+/).join(" ");
 
 /** The sign-in commands' words: signIn's, else `login` and `logout`. */
 export function signInWords(config: CliConfig): { login: string; logout: string } {
-  return { login: joined(config.signIn?.login ?? "login"), logout: joined(config.signIn?.logout ?? "logout") };
+  const own = config.signIn || undefined;
+  return { login: joined(own?.login ?? "login"), logout: joined(own?.logout ?? "logout") };
+}
+
+/** Whether the CLI has the sign-in commands (signIn: false leaves them out). */
+export const hasSignIn = (config: CliConfig): boolean => config.signIn !== false;
+
+/** Whether the CLI has the built-in chat command (chat: false leaves it out). */
+export const hasChat = (config: CliConfig): boolean => config.chat !== false;
+
+/** The sign-in commands' words that are the CLI's own: none when signIn is false. */
+export function signInOwn(config: CliConfig): string[] {
+  return hasSignIn(config) ? Object.values(signInWords(config)) : [];
 }
 
 /** How to sign in, as every message says it: "acme login". */
@@ -424,6 +442,7 @@ export const OLD_AUTH = ["auth login", "auth logout", "auth status"];
 
 /** The old auth words still kept: those no command, group or sign-in command of the CLI's uses. */
 export function oldAuth(config: CliConfig, paths: string[]): string[] {
+  if (!hasSignIn(config)) return [];
   const taken = [...paths.map(joined), ...Object.values(signInWords(config))];
   return OLD_AUTH.filter((w) => !taken.some((p) => p === w || p === "auth" || p.startsWith(`${w} `)));
 }
@@ -431,6 +450,7 @@ export function oldAuth(config: CliConfig, paths: string[]): string[] {
 /** What is wrong with the sign-in commands' words, alone and against the commands' words, one sentence each. */
 export function signInProblems(config: CliConfig, commands: string[]): string[] {
   const errors: string[] = [];
+  if (!hasSignIn(config)) return errors;
   const own = signInWords(config);
   for (const [key, w] of Object.entries(own)) {
     const setting = `signIn.${key}`;
@@ -707,7 +727,7 @@ export function cliProblems(config: CliConfig, tools: ToolInfo[], listed = true)
     if (![...words.keys()].some((w) => w.startsWith(`${key} `))) errors.push(`defaultCommands: "${key}" is not a group`);
     else if (/\s/.test(sub.trim()) || !words.has(`${key} ${sub.trim()}`)) errors.push(`defaultCommands: "${key} ${sub}" is not a command of the group "${key}"`);
   }
-  const tops = new Set([...words.keys(), ...Object.values(signInWords(config))].map((key) => key.split(" ")[0]!));
+  const tops = new Set([...words.keys(), ...signInOwn(config)].map((key) => key.split(" ")[0]!));
   const placed = new Map<string, string>();
   for (const [heading, entries] of Object.entries(config.sections ?? {})) {
     for (const entry of entries) {
@@ -745,7 +765,7 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     "",
     `Run \`${name} <command> --json\` and read the JSON; never parse the human output. \`--fields a,b\` keeps only those fields.`,
     "Commands that change things accept `--dry-run` (shows the call, sends nothing) and, when they may delete or overwrite, need `--yes` without a terminal.",
-    `Sign in once with \`${signInCommand(config)}\`, or set ${tokenEnvOf(config)} in CI.`,
+    hasSignIn(config) ? `Sign in once with \`${signInCommand(config)}\`, or set ${tokenEnvOf(config)} in CI.` : `This server has no sign-in; set ${tokenEnvOf(config)} where a command needs a token.`,
     "Tool definitions may be cached; add `--refresh-tools` to fetch current commands and schemas.",
     `List workflow summaries with \`${name} skill list\`; read selected instructions with \`${name} skill get <name> [name...]\` before doing what they cover.`,
     `Find a command by what it does with \`${name} help <words>\` (every word must match its name or description).`,
@@ -753,11 +773,11 @@ export function skillFile(config: CliConfig, tools: ToolInfo[]): string {
     "Exit codes: 0 done, 1 the tool failed (its message on stderr), 2 wrong command or arguments, 3 sign-in needed, 4 needs --yes, 5 the server could not be reached.",
     "",
     ...(feedback ? ["## Sharing feedback", "", FEEDBACK_NUDGE(`\`${feedback}\``), ""] : []),
-    "## Talking to the agent",
+    ...(!hasChat(config) ? [] : ["## Talking to the agent",
     "",
     `\`${name} chat "<message>"\` sends one message to the agent and prints its reply as written (\`--json\` for the full response); always pass the message. \`${name} chat\` alone is for a person at a terminal. Chat needs sign-in unless the agent lets guests chat.`,
     "The CLI keeps its conversation reference in chat.json in its config folder; --new forgets that reference and preserves shared person history. chat without a message needs a terminal (otherwise exits 2).",
-    "",
+    ""]),
     "## Commands",
   ];
   for (const c of commandTable(config, tools)) {

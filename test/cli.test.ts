@@ -1542,7 +1542,7 @@ test("chat says a running server has no chat, falls back to line chat without pi
   const env = { TERM: "xterm", NO_COLOR: "1" };
   const single = io();
   assert.equal(await runCli(cli, ["chat", "hi"], single.channel), 5);
-  assert.equal(single.err, `This server does not serve terminal chat (${base}/agent/terminal).\n`);
+  assert.equal(single.err, "This server has no chat agent.\n");
   const missing = io(true);
   let lines = 0;
   Object.assign(missing.channel, { env, chat: async () => { throw Object.assign(new Error("Cannot find package"), { code: "ERR_MODULE_NOT_FOUND" }); }, lines: async function* () { lines++; yield "/exit"; } });
@@ -1552,7 +1552,7 @@ test("chat says a running server has no chat, falls back to line chat without pi
   const failed = io(true);
   Object.assign(failed.channel, { env, chat: async (session: { send(text: string, update: () => void, signal?: AbortSignal): Promise<void> }) => { await session.send("hi", () => {}).catch(() => {}); return 0; } });
   assert.equal(await runCli(cli, ["chat"], failed.channel), 5);
-  assert.match(failed.err, /This server does not serve terminal chat/);
+  assert.match(failed.err, /This server has no chat agent/);
   const stopped = io(true);
   Object.assign(stopped.channel, { env, chat: async (session: { send(text: string, update: () => void, signal?: AbortSignal): Promise<void> }) => { await session.send("hi", () => {}, AbortSignal.abort()).catch(() => {}); return 0; } });
   assert.equal(await runCli(cli, ["chat"], stopped.channel), 0, "stopping a wait is not a failure");
@@ -1886,4 +1886,39 @@ test("chat shades sent messages using the reported terminal background without r
     assert.equal(view.editor.getText(), "", "terminal responses never enter the draft");
   }
   tui.stop();
+});
+
+test("a CLI for an MCP-only server leaves out chat, login and logout when told to, and says why when they are run anyway", async () => {
+  const server = await serve({ tools: [listOrders] });
+  const full = acme(server);
+  const mcpOnly = defineCli({ ...full, chat: false, signIn: false });
+  const helpOf = async (cli: CliConfig) => { const h = io(); assert.equal(await runCli(cli, ["--help"], h.channel), 0); return h.out; };
+  const defaults = await helpOf(full);
+  assert.match(defaults, /ASK ANYTHING/);
+  assert.match(defaults, /\n {2}login /);
+  assert.match(defaults, /\n {2}logout /);
+  const hidden = await helpOf(mcpOnly);
+  assert.doesNotMatch(hidden, /ASK ANYTHING|acme chat|\n {2}(login|logout) /);
+  assert.match(hidden, /\n {2}tools /, "the rest of the CLI's own commands stay");
+  const found = io();
+  assert.equal(await runCli(mcpOnly, ["help", "chat"], found.channel), 0);
+  assert.match(found.out, /No command matches "chat"/);
+  const welcome = io(true);
+  assert.equal(await runCli(mcpOnly, [], { ...welcome.channel, env: {} }), 0);
+  assert.doesNotMatch(welcome.out, /acme chat/);
+  assert.match(await (async () => { const s = io(); await runCli(mcpOnly, ["skill", "get", "acme-cli"], s.channel); return s.out; })(), /^(?![\s\S]*Talking to the agent)/);
+
+  for (const [argv, line] of [[["chat", "hi"], "This server has no chat agent."], [["login"], "This server has no sign-in."], [["logout"], "This server has no sign-in."]] as const) {
+    const run = io();
+    assert.equal(await runCli(mcpOnly, [...argv], run.channel), 2);
+    assert.equal(run.err, `${line}\n`);
+  }
+  const own = io();
+  assert.equal(await runCli(defineCli({ ...mcpOnly, commands: { ...mcpOnly.commands, login: { command: buildCommand({ docs: { brief: "Our login" }, parameters: {}, func() { this.process.stdout.write("ours\n"); } }) } } }), ["login"], own.channel), 0, own.err);
+});
+
+test("login against a server with no OAuth says there is no sign-in, not the registration's 404", async () => {
+  const run = io();
+  assert.equal(await runCli(acme(await serve({ tools: [listOrders] })), ["login"], run.channel), 2);
+  assert.equal(run.err, "This server has no sign-in.\n");
 });
