@@ -239,6 +239,11 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
   says which), and freed when moved. `signIn.beforeLogout: async ({ server, token }) => { ... }` runs
   the team's own step first, such as revoking the server's session with the stored token; if it
   throws, its message is shown and the person is still signed out on this computer.
+  `signIn: false` is for a server with no OAuth (people use a token): `login` and `logout` are left out of
+  help, and running them says "This server has no sign-in." Likewise `chat: false` is for a server with no
+  terminal chat agent: the `chat` command, its help block, the welcome's chat tips and the skill's chat
+  section are left out, and `chat` says "This server has no chat agent." A command of the team's own named
+  `login`, `logout` or `chat` stays. Without the opt-outs nothing changes; the CLI does not guess from the server.
   `tools` and `skill` stay the CLI's. The words before 0.14 (`auth login`, `auth logout`, `auth
   status`) still work for a release, hidden from help, each saying what replaces it, unless the
   team's own commands use them.

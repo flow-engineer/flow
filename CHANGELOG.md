@@ -2,6 +2,19 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **`defineCli({ chat: false, signIn: false })` for MCP-only servers.** Each leaves out its commands and
+  help entries (`chat`; `login` and `logout`). Running one anyway says "This server has no chat agent." or
+  "This server has no sign-in." instead of the endpoint's or the registration's error; the same lines
+  replace the "does not serve terminal chat" and Dynamic Client Registration 404 messages.
+
+### Migration notes
+
+None: servers with chat and sign-in keep working unchanged.
+
 ## 0.19.0 (10 Nov 2026)
 
 ### Changes

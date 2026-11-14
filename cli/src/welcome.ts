@@ -5,7 +5,7 @@
 
 import { emitKeypressEvents } from "node:readline";
 import { colorsAt, painter, type Paint } from "./colors.ts";
-import { brandOf, OLD_AUTH, serverEnvOf, signInCommand, signInWords, updatesItself, type CliConfig } from "./commands.ts";
+import { brandOf, hasChat, hasSignIn, OLD_AUTH, serverEnvOf, signInCommand, tokenEnvOf, signInOwn, updatesItself, type CliConfig } from "./commands.ts";
 import type { CliIO } from "./run.ts";
 
 /** Claude Code, Cursor and Codex mark their commands' environment; their terminal is not a person's. */
@@ -80,6 +80,7 @@ function signInLine(config: CliConfig, state: WelcomeState, paint: Paint): strin
   if (state.signedIn === "local") return `  ${paint("success", "●")} Using ${state.server}`;
   if (state.signedIn === "env") return `  ${paint("success", "●")} Signed in with ${state.tokenEnv}`;
   if (state.signedIn === "login") return `  ${paint("success", "●")} Signed in to ${state.server}`;
+  if (!hasSignIn(config)) return `  ${paint("warning", "○")} Not signed in. ${paint("muted", `Set ${tokenEnvOf(config)}.`)}`;
   return `  ${paint("warning", "○")} Not signed in. ${paint("muted", `Run ${signInCommand(config)} to sign in.`)}`;
 }
 
@@ -87,7 +88,7 @@ function signInLine(config: CliConfig, state: WelcomeState, paint: Paint): strin
 export function tips(config: CliConfig, paint: Paint = (_f, t) => t): string {
   const own = (config.welcome || {}).tips;
   if (own) return own.map((line) => `  ${line}`).join("\n");
-  const rows: Array<[string, string]> = config.commands?.chat
+  const rows: Array<[string, string]> = config.commands?.chat || !hasChat(config)
     ? [[`${config.name} --help`, "See every command"]]
     : [[`${config.name} chat "<request>"`, "Ask for anything in plain words"], [`${config.name} chat`, "Start a conversation"], [`${config.name} --help`, "See every command"]];
   const width = Math.max(...rows.map(([c]) => c.length));
@@ -100,7 +101,7 @@ export function waitsForSignIn(config: CliConfig, words: string[]): boolean {
   if (words.includes("--help") || words.includes("-h")) return false;
   const first = words.filter((w) => !w.startsWith("-"));
   const except = typeof config.signInFirst === "object" ? (config.signInFirst.except ?? []) : [];
-  return ![...Object.values(signInWords(config)), ...OLD_AUTH, "help", ...(updatesItself(config) ? ["update"] : []), ...except].some((e) => {
+  return ![...signInOwn(config), ...(hasSignIn(config) ? OLD_AUTH : []), "help", ...(updatesItself(config) ? ["update"] : []), ...except].some((e) => {
     const parts = e.trim().split(/\s+/);
     return parts.every((p, i) => first[i] === p);
   });
