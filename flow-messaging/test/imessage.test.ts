@@ -15,7 +15,7 @@ const IM = { id: "conv_im", channel: "imessage", sender: "snd_IM", contact: "ct_
 const post = (path: string) => (r: Recorded) => r.method === "POST" && r.path === path;
 
 /** An agent on Flow's iMessage line (its sender from FLOW_MESSAGING_IMESSAGE_SENDER) and Telegram, its webhook served. */
-async function imessageAgent(flow: { url: string }, options: { database?: Database } = {}) {
+async function imessageAgent(flow: { url: string }, options: { database?: Database; resolve?: (who: { channel: string; address: string; phone?: string }) => string | null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "flow-fm-im-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
@@ -23,10 +23,10 @@ async function imessageAgent(flow: { url: string }, options: { database?: Databa
   const saved = process.env.FLOW_MESSAGING_IMESSAGE_SENDER;
   process.env.FLOW_MESSAGING_IMESSAGE_SENDER = IM.sender;
   const fm = flowMessaging({ apiKey: "fk_test_key", webhookSecret: SECRET, baseUrl: flow.url });
-  const channels = [fm.telegram({ sender: "snd_TG" }), fm.imessage()];
+  const channels = [fm.telegram({ sender: "snd_TG" }), fm.imessage(), fm.whatsapp({ sender: "snd_WA" })];
   if (saved === undefined) delete process.env.FLOW_MESSAGING_IMESSAGE_SENDER;
   else process.env.FLOW_MESSAGING_IMESSAGE_SENDER = saved;
-  const agent = createAgent({ dir, model: scripted.model, channels, database: options.database, debounceMs: 0, deadlineMs: 50, scheduleCheckMs: 0, events: [(e) => events.push(e)] });
+  const agent = createAgent({ dir, model: scripted.model, channels, database: options.database, resolve: options.resolve, debounceMs: 0, deadlineMs: 50, scheduleCheckMs: 0, events: [(e) => events.push(e)] });
   if (options.database) await agent.resume();
   const server = createServer(fm.webhook(agent));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -249,4 +249,24 @@ test("an iMessage group conversation is passed over, with one warning: nothing r
   assert.equal(live.events.length, 0);
   assert.equal(flow.requests.length, 0, "no contact lookup, typing or read receipt");
   assert.deepEqual(warn.mock.calls.map((c) => c.arguments[0]), ["@flow-engineer/flow/flow-messaging: group conversations are not handled; their events are passed over"]);
+});
+
+test("resolve gets an iMessage handle that is an E.164 number as the verified phone, an email handle as its address only, and WhatsApp's number as a phone as before", async (t) => {
+  const flow = await fakeFlow();
+  const seen: Array<{ channel: string; address: string; phone?: string }> = [];
+  const live = await imessageAgent(flow, { resolve: (who) => (seen.push(who), null) });
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_im = { id: "ct_im", channel: "imessage", address: { phone: "+15550100100", handle: "+15550100100" } };
+  flow.contacts.ct_mail = { id: "ct_mail", channel: "imessage", address: { handle: "sam@example.com" } };
+  flow.contacts.ct_wa = { id: "ct_wa", channel: "whatsapp", address: { phone: "+15550100200" } };
+  const as = (id: string, conversation: object) => ({ ...received(id, "hi"), conversation });
+
+  assert.equal(await live.deliver(as("msg_1", IM)), 200);
+  assert.equal(await live.deliver(as("msg_2", { ...IM, id: "conv_mail", contact: "ct_mail" })), 200);
+  assert.equal(await live.deliver(as("msg_3", { id: "conv_wa", channel: "whatsapp", sender: "snd_WA", contact: "ct_wa" })), 200);
+  assert.deepEqual(seen, [
+    { channel: "imessage", address: "+15550100100", phone: "+15550100100" },
+    { channel: "imessage", address: "sam@example.com" },
+    { channel: "whatsapp", address: "+15550100200", phone: "+15550100200" },
+  ]);
 });

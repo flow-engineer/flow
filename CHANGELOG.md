@@ -2,6 +2,20 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **An iMessage number reaches `resolve` as a verified `phone`.** Flow Messaging's iMessage channel now
+  gives `resolve` (and `agent.message`) `{ channel: "imessage", address, phone }` when the sender's
+  handle is an E.164 number (`+15551234567`), as WhatsApp does, so a phone-login agent knows an iMessage
+  user. A handle that is an email address stays `{ channel, address }`. Fixes #259.
+
+### Migration notes
+
+None for most agents. A `resolve` that treated every iMessage sender as signed out because `phone` was
+missing now gets the number: sign those people in as on WhatsApp.
+
 ## 0.21.0 (18 Nov 2026)
 
 ### New
