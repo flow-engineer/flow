@@ -4,6 +4,7 @@
 // text with the same key (flowTranscribe), and describeVideoWith has a video model describe a video
 // for one that can't watch it, through the same key.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import OpenAI from "openai";
 import { setting } from "./names.ts";
@@ -33,6 +34,15 @@ export interface OpenAICompatibleOptions {
   maxTokens?: number;
   /** How hard a reasoning model thinks before it answers (OpenRouter's reasoning effort). Unset, the model's default. */
   reasoning?: "minimal" | "low" | "medium" | "high";
+  /**
+   * Mark the instructions and tool definitions (and the end of the conversation so far) as cacheable,
+   * so the provider reads them from its prompt cache instead of processing them on every call. Default
+   * on for Anthropic's Claude models (ids that start with `anthropic/`, on OpenRouter or Flow), the
+   * only ones that need a marker; others cache by themselves. A cache write costs 25% more than plain
+   * input and a read 90% less, and an entry lives 5 minutes, so turn it off (`false`) for an agent
+   * whose calls are rarely less than 5 minutes apart. `true` marks for a model id that does not start with `anthropic/`.
+   */
+  promptCaching?: boolean;
 }
 
 /** Flow's OpenAI-compatible model API, reached with FLOW_KEY. */
@@ -98,47 +108,153 @@ export function openAICompatible(options: OpenAICompatibleOptions = {}): Model {
   if (!apiKey && options.baseURL === undefined) {
     throw Object.assign(new Error(`${NO_MODEL_KEY.message}\n${NO_MODEL_KEY.nextLine}`), { code: NO_MODEL_KEY.code, next: NO_MODEL_KEY.next });
   }
+  const timings = new AsyncLocalStorage<Attempts>();
   const client = new OpenAI({
     apiKey: apiKey || "none",
     baseURL,
     maxRetries: 1,
+    fetch: async (url, init) => {
+      // Each attempt of a call (the SDK retries once) is noted for its timing, and Flow's own queue time read from its answer.
+      const attempts = timings.getStore();
+      const started = Date.now();
+      attempts?.starts.push(started);
+      const response = await fetch(url, init);
+      if (attempts) attempts.flowQueueMs = serverTimingMs(response.headers.get("server-timing"), FLOW_QUEUE);
+      return response;
+    },
   });
   const model = options.model?.trim() || fromEnv?.model || KEYS[0].model;
   // Flow reads PDFs for every model it offers, as OpenRouter (behind it) does.
   const readsPdfs = baseURL.startsWith("https://openrouter.ai/") || baseURL === flowModelURL(process.env);
+  // Both stream reliably, which is how a call's time is split into the wait, the first token and the rest.
+  const streams = readsPdfs;
+  const caches = options.promptCaching ?? model.startsWith("anthropic/");
   return {
     reads: { images: options.images ?? true, pdfs: options.pdfs ?? readsPdfs, videos: options.videos ?? false },
     ...(options.contextTokens ? { contextTokens: options.contextTokens } : {}),
     async complete(request: ModelRequest): Promise<ModelResponse> {
-      let completion: OpenAI.Chat.ChatCompletion;
+      const params = {
+        model,
+        temperature: options.temperature,
+        ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
+        ...(options.reasoning ? ({ reasoning: { effort: options.reasoning } } as Record<string, unknown>) : {}),
+        messages: caches ? withCacheMarkers(request.system, request.stableSystem, request.messages.map(toWire)) : [{ role: "system" as const, content: request.system }, ...request.messages.map(toWire)],
+        ...(request.tools.length
+          ? { tools: request.tools.map((t) => ({ type: "function" as const, function: t })) }
+          : {}),
+      };
+      const attempts: Attempts = { starts: [], flowQueueMs: 0 };
+      const began = Date.now();
       try {
-        completion = await client.chat.completions.create(
-          {
-            model,
-            temperature: options.temperature,
-            ...(options.maxTokens ? { max_tokens: options.maxTokens } : {}),
-            ...(options.reasoning ? ({ reasoning: { effort: options.reasoning } } as Record<string, unknown>) : {}),
-            messages: [{ role: "system", content: request.system }, ...request.messages.map(toWire)],
-            ...(request.tools.length
-              ? { tools: request.tools.map((t) => ({ type: "function" as const, function: t })) }
-              : {}),
-          },
-          { signal: request.signal, headers: testSessionHeader(baseURL) },
-        );
+        if (!streams) {
+          const completion = await client.chat.completions.create(params, { signal: request.signal, headers: testSessionHeader(baseURL) });
+          return responseOf(completion);
+        }
+        return await timings.run(attempts, async () => {
+          const stream = await client.chat.completions.create({ ...params, stream: true, stream_options: { include_usage: true } }, { signal: request.signal, headers: testSessionHeader(baseURL) });
+          return await collect(stream, began, attempts);
+        });
       } catch (error) {
         throw flowError(error) ?? error;
       }
-      const message = completion.choices[0]?.message;
-      return {
-        text: message?.content?.trim() || null,
-        toolCalls: (message?.tool_calls ?? [])
-          .filter((call) => call.type === "function")
-          .map((call) => ({ id: call.id, name: call.function.name, arguments: call.function.arguments || "{}" })),
-        usage: completion.usage ? { inputTokens: completion.usage.prompt_tokens, outputTokens: completion.usage.completion_tokens, ...costOf(completion.usage) } : undefined,
-        model: completion.model,
-      };
     },
   };
+}
+
+/** One call's attempts: when each began, and the time Flow's answer to the last one said it waited. */
+interface Attempts {
+  starts: number[];
+  flowQueueMs: number;
+}
+
+/** Flow's answer says in Server-Timing how long the call waited in Flow before it went to the provider. */
+const FLOW_QUEUE = "flow-queue";
+
+/** The `dur` (ms) of one named metric in a Server-Timing header; 0 when it is not there. */
+function serverTimingMs(header: string | null, name: string): number {
+  for (const part of (header ?? "").split(",")) {
+    const [metric, ...params] = part.trim().split(";");
+    if (metric?.trim() !== name) continue;
+    const dur = params.map((p) => p.trim()).find((p) => p.startsWith("dur="));
+    const ms = dur ? Number(dur.slice(4)) : NaN;
+    if (Number.isFinite(ms) && ms >= 0) return Math.round(ms);
+  }
+  return 0;
+}
+
+function responseOf(completion: OpenAI.Chat.ChatCompletion): ModelResponse {
+  const message = completion.choices[0]?.message;
+  return {
+    text: message?.content?.trim() || null,
+    toolCalls: (message?.tool_calls ?? [])
+      .filter((call) => call.type === "function")
+      .map((call) => ({ id: call.id, name: call.function.name, arguments: call.function.arguments || "{}" })),
+    usage: completion.usage ? { inputTokens: completion.usage.prompt_tokens, outputTokens: completion.usage.completion_tokens, ...costOf(completion.usage), ...cacheOf(completion.usage) } : undefined,
+    model: completion.model,
+  };
+}
+
+/** A streamed answer put together, with its time split: queued before the provider began, to the first token, and the rest. */
+async function collect(stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>, began: number, attempts: Attempts): Promise<ModelResponse> {
+  let text = "";
+  let model: string | undefined;
+  let usage: OpenAI.CompletionUsage | undefined;
+  const calls: Array<{ id: string; name: string; arguments: string }> = [];
+  let first = 0;
+  let last = 0;
+  let chunks = 0;
+  for await (const chunk of stream) {
+    chunks++;
+    const at = Date.now();
+    if (chunk.model) model = chunk.model;
+    if (chunk.usage) usage = chunk.usage;
+    const delta = chunk.choices?.[0]?.delta as (OpenAI.Chat.ChatCompletionChunk.Choice.Delta & { reasoning?: unknown }) | undefined;
+    if (!delta) continue;
+    if (delta.content) text += delta.content;
+    for (const call of delta.tool_calls ?? []) {
+      const slot = (calls[call.index] ??= { id: "", name: "", arguments: "" });
+      if (call.id) slot.id = call.id;
+      if (call.function?.name) slot.name += call.function.name;
+      if (call.function?.arguments) slot.arguments += call.function.arguments;
+    }
+    if (delta.content || delta.tool_calls?.length || (typeof delta.reasoning === "string" && delta.reasoning)) {
+      first ||= at;
+      last = at;
+    }
+  }
+  if (!chunks) throw new Error("The model's server answered a streamed request with no stream.");
+  const end = Date.now();
+  const sent = attempts.starts.at(-1) ?? began;
+  const queuedMs = Math.max(0, sent - began) + attempts.flowQueueMs;
+  const firstAt = first || end;
+  return {
+    text: text.trim() || null,
+    toolCalls: calls.filter(Boolean).map((call) => ({ id: call.id, name: call.name, arguments: call.arguments || "{}" })),
+    usage: usage ? { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens, ...costOf(usage), ...cacheOf(usage) } : undefined,
+    model,
+    timing: { queuedMs, ttftMs: Math.max(0, firstAt - sent - attempts.flowQueueMs), generationMs: Math.max(0, (last || end) - firstAt) },
+  };
+}
+
+/**
+ * The messages as sent when the prompt is cached: the system message in two blocks when the stable
+ * part is known (a cache entry ends after it, so the clock after it cannot spoil the entry), and the
+ * conversation's last message marked, so the next call of a turn reads everything up to it. The
+ * text is the same; only `cache_control: ephemeral` is added. Tools come before the system message
+ * in the provider's cache order, so the first mark covers them too.
+ */
+function withCacheMarkers(system: string, stable: string | undefined, messages: OpenAI.Chat.ChatCompletionMessageParam[]): OpenAI.Chat.ChatCompletionMessageParam[] {
+  const ephemeral = { cache_control: { type: "ephemeral" } };
+  const head = stable && system.startsWith(stable) ? stable + (system.startsWith("\n\n", stable.length) ? "\n\n" : "") : system;
+  const blocks = [{ type: "text", text: head, ...(head ? ephemeral : {}) }, ...(system.length > head.length ? [{ type: "text", text: system.slice(head.length) }] : [])];
+  const out = [{ role: "system", content: system ? blocks : system } as unknown as OpenAI.Chat.ChatCompletionMessageParam, ...messages];
+  const last = out.at(-1) as { role: string; content?: unknown };
+  if (out.length > 1 && last.role !== "assistant") {
+    const content = last.content;
+    if (typeof content === "string" && content) last.content = [{ type: "text", text: content, ...ephemeral }];
+    else if (Array.isArray(content) && (content.at(-1) as { type?: string; text?: string } | undefined)?.type === "text" && (content.at(-1) as { text?: string }).text) Object.assign(content.at(-1) as object, ephemeral);
+  }
+  return out;
 }
 
 /**
@@ -356,6 +472,17 @@ function geminiWatcher(model: string, apiKey: string): Watch {
     const body = (await response.json().catch(() => undefined)) as { candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }>; error?: { message?: unknown } } | undefined;
     if (!response.ok) throw new Error(`Gemini could not watch the video (HTTP ${response.status})${typeof body?.error?.message === "string" ? `: ${body.error.message}` : "."}`);
     return (body?.candidates?.[0]?.content?.parts ?? []).map((p) => (typeof p.text === "string" ? p.text : "")).join("").trim();
+  };
+}
+
+/** The input tokens the provider read from and wrote to its prompt cache, when it says (OpenRouter does for every model). */
+function cacheOf(usage: object): { cacheReadTokens?: number; cacheWriteTokens?: number } {
+  const details = (usage as { prompt_tokens_details?: { cached_tokens?: unknown; cache_write_tokens?: unknown } | null }).prompt_tokens_details;
+  const read = details?.cached_tokens;
+  const write = details?.cache_write_tokens;
+  return {
+    ...(typeof read === "number" ? { cacheReadTokens: read } : {}),
+    ...(typeof write === "number" ? { cacheWriteTokens: write } : {}),
   };
 }
 
