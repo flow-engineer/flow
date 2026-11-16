@@ -273,3 +273,37 @@ test("a streamed request answered with no stream is an error, not an empty reply
   const { base } = await recording(t, (res) => { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); });
   await withEnv({ FLOW_KEY: FAKE, FLOW_MODEL_URL: `${base}/llm/framework/v1` }, () => assert.rejects(flowModel().complete(ASK), /no stream/));
 });
+
+test("model calls started together are all sent at once, none waits for another's answer", async (t) => {
+  // Node 26's built-in fetch sends HTTP/2 requests with a body one at a time per connection, so calls made together queued behind each other.
+  const open: ServerResponse[] = [];
+  let allArrived!: () => void;
+  const all = new Promise<void>((resolve) => { allArrived = resolve; });
+  const { base } = await recording(t, (res) => {
+    open.push(res);
+    if (open.length === 3) allArrived();
+  });
+  const model = openAICompatible({ model: "m", apiKey: "k", baseURL: base });
+  const calls = [1, 2, 3].map(() => model.complete(ASK));
+  await all; // all three reached the server while none has been answered
+  for (const res of open) {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ id: "c", object: "chat.completion", created: 0, model: "m", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] }));
+  }
+  assert.deepEqual((await Promise.all(calls)).map((c) => c.text), ["ok", "ok", "ok"]);
+});
+
+test("an abort while a streamed answer is arriving ends the call with an error instead of waiting for the rest", async (t) => {
+  let started!: () => void;
+  const begun = new Promise<void>((resolve) => { started = resolve; });
+  const { base } = await recording(t, (res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(": started\n\n");
+    started();
+  });
+  const controller = new AbortController();
+  const call = openAICompatible({ model: "m", apiKey: "k", baseURL: base }).complete({ ...ASK, signal: controller.signal });
+  await begun;
+  controller.abort();
+  await assert.rejects(call);
+});
