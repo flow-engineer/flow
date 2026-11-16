@@ -1,0 +1,23 @@
+id: abandons
+title: Abandons midway
+about: The person stops after a few details; nothing is published.
+theme: Collecting
+channels: [whatsapp]
+person:
+  persona: Sam, changes his mind.
+  goal: Start listing a printer, then say never mind.
+  knows:
+    - A printer, fair condition. After the second question says "never mind, forget it".
+opening:
+  - say: "hi, selling a printer"
+tools: { real: [update_listing, publish_listing] }
+world: Nothing special. The listing tools work.
+max_turns: 5
+expect:
+  never:
+    - publish_listing
+  judge:
+    - The agent accepts that Sam is stopping, without asking him to reconsider.
+    - Every message from the agent holds at most one question.
+    - The agent never asks for something the person has already told it in this conversation.
+    - Each turn of the agent is a single message to the person, not several in a row.

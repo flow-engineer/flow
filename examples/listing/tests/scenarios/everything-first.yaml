@@ -1,0 +1,25 @@
+id: everything-first
+title: Everything in the first message
+about: The person gives every detail in one message, then confirms the summary.
+theme: Collecting
+channels: [whatsapp]
+person:
+  persona: Sam, brisk, writes lowercase, wants it done in a minute.
+  goal: List a road bike. You are done once you have said yes to a summary.
+  knows:
+    - Nothing was wrong with the bike, and Sam is selling because of a move.
+opening:
+  - say: "want to sell my trek road bike. like new, bought it a month ago, asking 35k. postcode SW1A 1AA, anyone can collect weekday evenings"
+tools: { real: [update_listing, publish_listing] }
+world: Nothing special. The listing tools work.
+max_turns: 8
+expect:
+  calls:
+    - { tool: publish_listing }
+  judge:
+    - The summary the person says yes to lists for a Trek road bike in like new condition, priced at 35000, bought about {{now - 30d | date}}, postcode SW1A 1AA, pickup weekday evenings.
+    - The agent shows a summary of the listing and Sam says yes before it is published.
+    - The agent asks at most one question before the summary (about faults), and none about details Sam already gave.
+    - Every message from the agent holds at most one question.
+    - The agent never asks for something the person has already told it in this conversation.
+    - Each turn of the agent is a single message to the person, not several in a row.

@@ -1,0 +1,24 @@
+id: send-later
+title: I'll send that later
+about: The person cannot give the postcode now; nothing is published and the agent does not nag.
+theme: Collecting
+channels: [whatsapp]
+person:
+  persona: Priya, busy, on a train.
+  goal: Start a listing for a kettle, say she will send the postcode later, and once the agent has accepted that, say thanks and goodbye; you are done then.
+  knows:
+    - A kettle, new, 20, bought last month, collect Mondays. She does not have the postcode to hand and says she will send it later.
+opening:
+  - say: "selling a kettle, brand new, 20, bought last month, mondays. i'll send the postcode later"
+tools: { real: [update_listing, publish_listing] }
+world: Nothing special. The listing tools work.
+max_turns: 5
+expect:
+  never:
+    - publish_listing
+  judge:
+    - The agent accepts that the postcode comes later and does not ask for it more than once.
+    - The agent does not claim the listing is published.
+    - Every message from the agent holds at most one question.
+    - The agent never asks for something the person has already told it in this conversation.
+    - Each turn of the agent is a single message to the person, not several in a row.

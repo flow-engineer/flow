@@ -1,0 +1,29 @@
+id: scattered-double-texts
+title: Scattered double texts
+about: Facts arrive in pieces, out of order, over double texts.
+theme: Collecting
+channels: [whatsapp]
+person:
+  persona: Sam, texts in bursts of two or three short messages, out of order, never in a list.
+  goal: List a standing desk. You are done once you have said yes to a summary.
+  knows:
+    - It is a standing desk, fair condition, 120, bought 2 years ago, postcode EH1 1YZ, collect any evening after 6.
+    - No faults.
+opening:
+  - say: "standing desk"
+  - say: "120"
+    after_ms: 800
+  - say: "ok condition, 2 yrs old"
+    after_ms: 1500
+tools: { real: [update_listing, publish_listing] }
+world: Nothing special. The listing tools work.
+max_turns: 12
+expect:
+  calls:
+    - { tool: publish_listing }
+  judge:
+    - The summary Sam or Priya says yes to lists a standing desk in fair condition, price 120, bought about two years ago (around {{now - 730d | date}}), postcode EH1 1YZ, pickup evenings after 6.
+    - The agent does not ask for the price or the age after Sam gave them in the opening.
+    - Every message from the agent holds at most one question.
+    - The agent never asks for something the person has already told it in this conversation.
+    - Each turn of the agent is a single message to the person, not several in a row.

@@ -62,7 +62,7 @@ across these surfaces. A project can start with any one of them.
   and operations (`build-agent-skill.md`) or MCP, CLI and plugins (`mcp-skill.md`) for the task. It also
   teaches agents to write tools and their test files (`tools-skill.md`), design a CLI's short forms
   (`cli-design-skill.md`), change tools without breaking published CLIs (`contracts-skill.md`),
-  write tests (`test-skill.md`), build the
+  write tests (`test-skill.md`), collect several facts from a person in chat (`collecting-information-skill.md`), build the
   context pack from an organization's codebase (`context-skill.md`), set up sign-in
   (`auth-skill.md`) and connect a brand's existing login to Flow's OAuth bridge (`oauth-bridge-skill.md`). A change to an API, a file format or a convention they describe updates them
   in the same change.
