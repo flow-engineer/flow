@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadSuite, parseScenario, parseToolFile } from "../testing/src/suite.ts";
-import { finishedOutcome, passRate, type Verdict } from "../testing/src/report.ts";
+import { addSplits, finishedOutcome, passRate, timeLines, timeSplit, type Verdict } from "../testing/src/report.ts";
 
 const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
 const run = {
@@ -329,7 +329,7 @@ test("with --json, every exit prints one report on stdout and every other line o
     ],
     invalid: [],
     sessionInvalid: null,
-    limits: null,
+    limits: null, mode: "thorough", modeAsked: "thorough", timing: null,
   });
   // A cloud that sends no limits gets no limits line.
   assert.doesNotMatch(result.stderr, /at once/);
@@ -662,8 +662,8 @@ test("a finished session's results are kept, and --failed runs again only what d
     assert.match(result.out, /^Results: \.flow\/last-session\.json/m);
   } finally { full.close(); }
   const last = lastSession(dir);
-  assert.deepEqual({ ...last, endedAt: undefined, suiteHash: undefined }, {
-    sessionId: "s1", dashboard: "http://dash/s1", ended: "finished", only: null, endedAt: undefined, suiteHash: undefined,
+  assert.deepEqual({ ...last, endedAt: undefined, suiteHash: undefined, changes: undefined }, {
+    sessionId: "s1", dashboard: "http://dash/s1", ended: "finished", only: null, mode: "thorough", endedAt: undefined, suiteHash: undefined, changes: undefined,
     runs: [
       { scenario: "b", id: "bee", channel: "sms", run: 1, runId: "r2", verdict: "failed", outcome: "failed", failedChecks: [{ kind: "judge", text: "Asks to confirm.", reason: "It never asked." }] },
       { scenario: "c", id: "c", channel: "sms", run: 1, runId: "r3", verdict: "errored", outcome: "infra", failedChecks: [] },
@@ -915,4 +915,96 @@ test("flow show prints a run's record from the cloud with the CI key: checks wit
     assert.equal(missing.code, 1);
     assert.match(missing.stderr, /^The cloud answered 404 not_found: No such run\. No run trn_9 for this agent\.$/m);
   } finally { server.closeAllConnections(); server.close(); }
+});
+
+/** A finished session of these passed runs, as a cloud sends it. */
+const finishedOf = (runs: Array<Record<string, unknown>>) => ({ type: "finished", summary: { sessionId: "s", suiteHash: "h", testModel: "m", runs, dashboard: "http://dash/s" } });
+
+test("--quick sends the quick session's open fields and the label, and the summary and results say what the cloud kept: quick, or thorough when it knows no modes; --thorough is the default", { timeout: 30_000 }, async () => {
+  const dir = agentDir();
+  const frames = [finishedOf([runOf({ passed: true })])];
+  const known = await cloud(false, frames, "s", { mode: "quick" });
+  try {
+    const result = await cliStreams(["test", "--cloud", known.url, "--quick", "--json"], dir);
+    assert.equal(result.code, 0, result.out);
+    const open = known.opens[0] as unknown as Record<string, unknown>;
+    assert.deepEqual([open.mode, open.flaky, open.latency, open.failFastRun], ["quick", false, 0, true]);
+    assert.match(result.stderr, /^Quick session \(no re-plays, scripted latency 0, the fast tool model, a run stops once it has failed\): it never counts toward the dashboard's test health or the CI gate\.$/m);
+    assert.match(result.stderr, /^Mode: quick \(.*not a full pass/m);
+    const report = JSON.parse(result.stdout);
+    assert.deepEqual([report.mode, report.modeAsked], ["quick", "quick"]);
+    assert.equal(lastSession(dir).mode, "quick");
+  } finally { known.close(); }
+  const old = await cloud(false, frames);
+  try {
+    const result = await cliStreams(["test", "--cloud", old.url, "--quick"], dir);
+    assert.match(result.out, /does not know quick mode: it plays a session the thorough way and counts it as a full one/);
+    assert.match(result.out, /^Mode: thorough \(this test cloud did not take quick mode\)\.$/m);
+    assert.equal(lastSession(dir).mode, "thorough");
+  } finally { old.close(); }
+  const plain = await cloud(false, frames);
+  try {
+    const result = await cliStreams(["test", "--cloud", plain.url], dir);
+    const open = plain.opens[0] as unknown as Record<string, unknown>;
+    assert.deepEqual([open.mode, "latency" in open, "failFastRun" in open, open.flaky], ["thorough", false, false, true]);
+    assert.match(result.out, /^Mode: thorough\.$/m);
+    assert.doesNotMatch(result.out, /Quick session/);
+  } finally { plain.close(); }
+  assert.match((await cliOutput(["test", "--cloud", "http://127.0.0.1:9", "--quick", "--thorough"], dir)).out, /--quick and --thorough are opposites/);
+});
+
+test("--changed runs the scenarios whose files changed when the agent and the tool files did not, and everything, with why, when they did or there is nothing to compare; it says what changed", { timeout: 60_000 }, async () => {
+  const dir = agentDir({ bye: scenarioYaml("bye", "sms") });
+  const passes = [finishedOf([runOf({ passed: true }), runOf({ passed: true, scenario: "bye", runId: "r2" })])];
+  const play = async (args: string[], frames = passes) => {
+    const local = await cloud(false, frames);
+    try {
+      const result = await cliOutput(["test", "--cloud", local.url, ...args], dir);
+      return { ...result, files: local.opens[0]?.files.map((f) => f.path) };
+    } finally { local.close(); }
+  };
+  const first = await play(["--changed"]);
+  assert.match(first.out, /^Running every scenario: there is no last session to compare with\.$/m);
+  assert.deepEqual(first.files, ["scenarios/bye.yaml", "scenarios/hello.yaml"]);
+  // Nothing changed: no session at all.
+  const same = await play(["--changed"]);
+  assert.match(same.out, /agent code and prompt: unchanged/);
+  assert.match(same.out, /^Nothing changed since then: no scenario to run\./m);
+  assert.equal(same.files, undefined);
+  // One scenario file changed: only it plays, and the other keeps its record.
+  writeFileSync(join(dir, "tests", "scenarios", "bye.yaml"), scenarioYaml("bye", "sms").replace("say: hi", "say: hello there"));
+  const one = await play(["--changed"], [finishedOf([runOf({ passed: true, scenario: "bye", runId: "r2" })])]);
+  assert.match(one.out, /scenarios: changed bye$/m);
+  assert.match(one.out, /^Running 1 changed scenario: bye\.$/m);
+  assert.deepEqual(one.files, ["scenarios/bye.yaml"]);
+  assert.equal((await play(["--changed"])).files, undefined);
+  // A tool file changed: every scenario may call it.
+  mkdirSync(join(dir, "tests", "tools"));
+  writeFileSync(join(dir, "tests", "tools", "t.yaml"), "name: t\nresponses:\n  - when: always\n    output: {}\n");
+  const tool = await play(["--changed"]);
+  assert.match(tool.out, /^Running every scenario: a tool file changed, and any scenario may call it\.$/m);
+  // The agent's code changed: every scenario, and the file is named.
+  writeFileSync(join(dir, "src", "agent.ts"), `${readFileSync(join(dir, "src", "agent.ts"), "utf8")}// changed\n`);
+  const code = await play(["--changed"]);
+  assert.match(code.out, /agent code and prompt: changed \(src\/agent\.ts\)/);
+  assert.match(code.out, /^Running every scenario: the agent's code or prompt changed/m);
+  assert.match((await cliOutput(["test", "--changed", "--only", "hello", "--cloud", "http://127.0.0.1:9"], dir)).out, /does not go with --only or --failed/);
+});
+
+test("a run's time is split by fixed rules into the agent's model, tools (scripted and simulator), its own code, the person, the judge and the rest, adding up to the wall time", () => {
+  const record = {
+    startedAt: 1_000, finishedAt: 61_000,
+    turnTiming: [{ modelMs: 20_000, toolsMs: 10_000, ownMs: 1_000 }, { modelMs: 5_000, toolsMs: 0, ownMs: 500 }],
+    toolCalls: [{ latencyMs: 4_000 }, { latencyMs: 2_000 }],
+    transcript: [{ kind: "in", at: 3_000 }, { kind: "out", at: 30_000 }, { kind: "in", at: 38_000 }],
+    events: [{ at: 50_000 }, { at: 55_000 }],
+  };
+  const split = timeSplit(record)!;
+  assert.deepEqual(split, { wallMs: 60_000, modelMs: 25_000, toolScriptedMs: 6_000, toolSimulatorMs: 4_000, ownMs: 1_500, personMs: 10_000, judgeMs: 6_000, otherMs: 7_500 });
+  assert.equal(Object.values(split).slice(1).reduce((a, b) => a + b, 0), split.wallMs);
+  assert.equal(timeSplit({ startedAt: 1 }), null);
+  assert.deepEqual(timeLines(addSplits([split, split]), 2, 90_000), [
+    "Time: 1m 30s for the session; 2m 00s of run time over 2 runs.",
+    "  the agent's model 50s (42%) · tools, scripted latency 12s (10%) · tools, simulator 8s (7%) · the agent's own code 3s (3%) · the person 20s (17%) · the judge 12s (10%) · waits and other 15s (13%)",
+  ]);
 });

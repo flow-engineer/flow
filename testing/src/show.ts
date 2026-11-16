@@ -52,6 +52,11 @@ export interface LastSession {
     /** The scenario file the cloud could not play and what is wrong in it (error scenario_invalid). */
     invalid?: { path: string; reason: string };
   }>;
+  /** `quick` or `thorough` (absent in a file from an older client: thorough): the mode the session ran in, as the cloud kept it. */
+  mode?: "quick" | "thorough";
+  /** What `flow test --changed` compares with (suite.ts changedScenarios): the agent's files and tool files as they were
+   * when each scenario last played, kept forward from earlier sessions. */
+  changes?: import("./suite.ts").ChangeRecord;
   /** The cloud ended the whole session scenario_invalid: its reason, whether the cloud looks older
    * than the client, and the scenario files sent. */
   sessionInvalid?: SessionInvalid;

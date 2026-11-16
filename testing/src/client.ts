@@ -56,6 +56,10 @@ export interface ConnectOptions {
   openRetryCapMs?: number;
   /** Also log slow event uploads. */
   verbose?: boolean;
+  /** More fields for the open (`mode`, and the options a flag sets: OpenSession); each is optional on the wire, and these win over the client's own. */
+  openExtras?: Partial<OpenSession>;
+  /** Called once the open's answer is in, before any run plays. */
+  onOpened?: (opened: Opened) => void;
 }
 
 /** The open's answer; a hosted cloud also names its id for the agent the CI key belongs to. */
@@ -500,9 +504,11 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     ...(canBusiness ? { business: true } : {}),
     ...(typeof agent.seedHistory === "function" ? { history: true } : {}),
     flaky: true,
+    ...(options.openExtras ?? {}),
     ...(only ? { only } : {}),
   };
   const opened = await openOnce(`${base}/api/sessions`, open, options.openHeaders, controller.signal, postTimeoutMs, openRetryCapMs, log);
+  options.onOpened?.(opened);
   idempotent = opened.idempotency === true;
   openedId = opened.sessionId;
   reopenable = opened.reopen === true;

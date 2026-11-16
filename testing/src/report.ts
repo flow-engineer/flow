@@ -95,6 +95,12 @@ export interface JsonReport {
   sessionInvalid: SessionInvalid | null;
   /** The cloud's limits for the workspace (runs and sessions at once, the daily test budget); null when it sent none. */
   limits: SessionLimits | null;
+  /** The mode the session ran in as the cloud kept it (quick or thorough; thorough when the cloud knows no modes). A quick session never counts toward the dashboard's test health or the CI gate. */
+  mode: "quick" | "thorough";
+  /** The mode the command asked for (--quick, else thorough); differs from `mode` against a cloud that does not know quick. */
+  modeAsked: "quick" | "thorough";
+  /** Where the runs' time went, added up over the runs whose records could be read, in ms; null when none could (see TimeSplit). */
+  timing: TimeSplit | null;
 }
 
 /** Error codes that mean a model or the workspace's test budget was out of credit. */
@@ -296,4 +302,94 @@ export function loadEnv(file: string | undefined): string | undefined {
     return `--dotenv ${file} could not be read: ${(error as NodeJS.ErrnoException).code ?? "unreadable"}.`;
   }
   return undefined;
+}
+
+// ---- Where a run's time went (flow test's summary; the data is a run record's turnTiming, toolCalls, transcript and events) ----
+
+/** One run's wall time split by fixed rules, in ms. The parts add up to `wallMs`. */
+export interface TimeSplit {
+  wallMs: number;
+  /** The agent's own model calls. */
+  modelMs: number;
+  /** Tool time the test's scripted latency (the tool file's latency_ms, scaled by --latency) accounts for. */
+  toolScriptedMs: number;
+  /** The rest of the tool time: the tool simulator's own model call. */
+  toolSimulatorMs: number;
+  /** The agent's turns beyond its model and tools: its own code. */
+  ownMs: number;
+  /** The simulated person: from the agent's last message (or the start) to each next message of theirs. */
+  personMs: number;
+  /** From the last event of the run to its finish: the judge. */
+  judgeMs: number;
+  /** What is left: waits and the cloud's own work. */
+  otherMs: number;
+}
+
+export const TIME_PARTS: Array<[keyof Omit<TimeSplit, "wallMs">, string]> = [
+  ["modelMs", "the agent's model"],
+  ["toolScriptedMs", "tools, scripted latency"],
+  ["toolSimulatorMs", "tools, simulator"],
+  ["ownMs", "the agent's own code"],
+  ["personMs", "the person"],
+  ["judgeMs", "the judge"],
+  ["otherMs", "waits and other"],
+];
+
+const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+
+/** A run record's time split, or null when it has no start, finish and turns to split (an older cloud, a run never played). */
+export function timeSplit(record: unknown): TimeSplit | null {
+  const r = record as { startedAt?: unknown; finishedAt?: unknown; turnTiming?: unknown; toolCalls?: unknown; transcript?: unknown; events?: unknown } | null;
+  if (!r || typeof r.startedAt !== "number" || typeof r.finishedAt !== "number" || !Array.isArray(r.turnTiming)) return null;
+  const wallMs = Math.max(0, r.finishedAt - r.startedAt);
+  const rows = r.turnTiming as Array<Record<string, unknown>>;
+  const sumOf = (key: string) => rows.reduce((n, row) => n + num(row[key]), 0);
+  const modelMs = sumOf("modelMs");
+  const toolsMs = sumOf("toolsMs");
+  const ownMs = sumOf("ownMs");
+  const scripted = Math.min(toolsMs, (Array.isArray(r.toolCalls) ? (r.toolCalls as Array<Record<string, unknown>>) : []).reduce((n, c) => n + num(c.latencyMs), 0));
+  const lines = (Array.isArray(r.transcript) ? (r.transcript as Array<{ kind?: unknown; at?: unknown }>) : []).filter((l) => typeof l.at === "number").sort((a, b) => (a.at as number) - (b.at as number));
+  let personMs = 0;
+  let before = r.startedAt;
+  for (const l of lines) {
+    if (l.kind === "in") personMs += Math.max(0, (l.at as number) - before);
+    before = l.at as number;
+  }
+  const lastEvent = Math.max(0, ...(Array.isArray(r.events) ? (r.events as Array<{ at?: unknown }>) : []).map((e) => num(e.at)));
+  const judgeMs = lastEvent > 0 ? Math.max(0, r.finishedAt - lastEvent) : 0;
+  const split = { wallMs, modelMs, toolScriptedMs: scripted, toolSimulatorMs: toolsMs - scripted, ownMs, personMs, judgeMs, otherMs: 0 };
+  split.otherMs = Math.max(0, wallMs - modelMs - toolsMs - ownMs - personMs - judgeMs);
+  return split;
+}
+
+/** The splits added up (wallMs is the run time, summed over runs that played side by side). */
+export function addSplits(splits: TimeSplit[]): TimeSplit {
+  const total = { wallMs: 0, modelMs: 0, toolScriptedMs: 0, toolSimulatorMs: 0, ownMs: 0, personMs: 0, judgeMs: 0, otherMs: 0 };
+  for (const s of splits) for (const k of Object.keys(total) as Array<keyof TimeSplit>) total[k] += s[k];
+  return total;
+}
+
+/** "45s", "3m 12s", "2h 14m". */
+export function duration(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m ${String(s % 60).padStart(2, "0")}s` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+
+/** The two summary lines: the session's wall time and the run time it added up to, then each part's share. */
+export function timeLines(total: TimeSplit, runs: number, sessionMs: number | null): string[] {
+  const share = (ms: number) => (total.wallMs ? `${Math.round((ms / total.wallMs) * 100)}%` : "0%");
+  const parts = TIME_PARTS.filter(([k]) => total[k] > 0).map(([k, label]) => `${label} ${duration(total[k])} (${share(total[k])})`);
+  return [
+    `Time: ${sessionMs === null ? "" : `${duration(sessionMs)} for the session; `}${duration(total.wallMs)} of run time over ${runs} ${runs === 1 ? "run" : "runs"}.`,
+    `  ${parts.join(" · ")}`,
+  ];
+}
+
+/** `--timing`: one row per run (scenario, channel, run number, wall time, then each part in seconds). */
+export function timeTable(rows: Array<{ label: string; split: TimeSplit }>): string[] {
+  const secs = (ms: number) => (ms / 1000).toFixed(1).padStart(6);
+  const head = `${"run".padEnd(44)}${"wall".padStart(7)}${TIME_PARTS.map(([, label]) => label.replace(/^the /, "").replace("tools, ", "tool ").slice(0, 12).padStart(14)).join("")}`;
+  return [head, ...rows.map(({ label, split }) => `${label.slice(0, 43).padEnd(44)}${secs(split.wallMs).padStart(7)}${TIME_PARTS.map(([k]) => secs(split[k]).padStart(14)).join("")}`)];
 }

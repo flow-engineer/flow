@@ -99,6 +99,9 @@ export interface OpenSession {
   groups?: boolean;
   /** The client plays business runs (open, event, nudge, advance, close). */
   business?: boolean;
+  /** `quick` or `thorough` (absent: thorough): what the person asked for with `flow test --quick`. A cloud that knows it keeps it
+   * with the session and says it back in `Opened.mode`; the dashboard and the CI gate never count a quick session as a full one. */
+  mode?: "quick" | "thorough";
   /** The client reports flaky runs: when a run fails, the cloud plays it once more and labels it. */
   flaky?: boolean;
   /** The client seeds a run's earlier conversation (`history` on a run's first message or open). */
@@ -144,6 +147,8 @@ export interface Opened {
   flaky?: boolean;
   /** This cloud sends a scenario's `history`; the client sent `history`. Absent on an older cloud. */
   history?: boolean;
+  /** The mode this cloud keeps the session in (`OpenSession.mode`). Absent on a cloud that does not know modes: it played everything as thorough. */
+  mode?: "quick" | "thorough";
   /** What this workspace may do, printed when the session opens. Absent on an older cloud. */
   limits?: SessionLimits;
 }

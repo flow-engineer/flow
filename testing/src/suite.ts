@@ -487,3 +487,107 @@ function nodeAt(root: unknown, path: PropertyKey[]): unknown {
   }
   return node;
 }
+
+// ---- flow test --changed: which scenarios a change touches, by hashes and fixed rules ----
+
+/** What a session kept for `--changed`: the agent's files and tool files, and each scenario's hashes when it last played. */
+export interface ChangeRecord {
+  /** The agent's code and prompt as they were (path to hash): src/, agent/, package.json, package-lock.json, and the installed Flow Framework version. */
+  agentFiles: Record<string, string>;
+  /** The tool files as they were (path to hash). */
+  toolFiles: Record<string, string>;
+  /** By scenario file path: the scenario's hash, and the hash of all tool files and of the agent, when it last played. */
+  played: Record<string, { hash: string; tools: string; agent: string }>;
+}
+
+const AGENT_DIRS = ["src", "agent"];
+const AGENT_FILES = ["package.json", "package-lock.json"];
+const SKIP_DIRS = new Set(["node_modules", "dist", ".git", ".flow", ".chinwag"]);
+
+/** The files that make up the agent (not its tests): their hashes by relative path, and one hash over them. */
+export function agentFingerprint(dir: string): { hash: string; files: Record<string, string> } {
+  const files: Record<string, string> = {};
+  const walk = (rel: string) => {
+    for (const entry of readdirSync(join(dir, rel), { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name)) walk(`${rel}/${entry.name}`);
+      } else if (entry.isFile()) {
+        files[`${rel}/${entry.name}`] = hashOf(readFileSync(join(dir, rel, entry.name), "utf8"));
+      }
+    }
+  };
+  for (const d of AGENT_DIRS) if (existsSync(join(dir, d))) walk(d);
+  for (const f of AGENT_FILES) if (existsSync(join(dir, f))) files[f] = hashOf(readFileSync(join(dir, f), "utf8"));
+  // The framework itself is part of the agent: a new version can change every answer.
+  const installed = join(dir, "node_modules/@flow-engineer/flow/package.json");
+  if (existsSync(installed)) files["node_modules/@flow-engineer/flow/package.json"] = hashOf(readFileSync(installed, "utf8"));
+  return { hash: hashOf(Object.entries(files).sort().map(([p, h]) => `${p}:${h}`).join("\n")), files };
+}
+
+const toolFilesOf = (files: Array<{ path: string; hash: string }>) => files.filter((f) => f.path.startsWith("tools/"));
+
+/** One hash over every tool file. */
+export const toolsHash = (files: Array<{ path: string; hash: string }>) => suiteHash(toolFilesOf(files));
+
+/** The record to keep after a session: the earlier one carried forward, each scenario that played now at its present hashes. */
+export function nextChangeRecord(before: ChangeRecord | undefined, files: SuiteFile[], agent: ReturnType<typeof agentFingerprint>, playedPaths: string[]): ChangeRecord {
+  const tools = toolsHash(files);
+  const played: ChangeRecord["played"] = {};
+  for (const [path, entry] of Object.entries(before?.played ?? {})) if (files.some((f) => f.path === path)) played[path] = entry; // a deleted scenario is dropped
+  for (const path of playedPaths) {
+    const file = files.find((f) => f.path === path);
+    if (file) played[path] = { hash: file.hash, tools, agent: agent.hash };
+  }
+  return { agentFiles: agent.files, toolFiles: Object.fromEntries(toolFilesOf(files).map((f) => [f.path, f.hash])), played };
+}
+
+export interface ChangedPlan {
+  /** Scenario file paths to run (scenarios/x.yaml); null: every scenario. */
+  run: string[] | null;
+  /** Why everything runs, when it does. */
+  why: string | null;
+  /** What changed since the last session, in short lines (none without a last session to compare with). */
+  lines: string[];
+}
+
+const named = (paths: string[], strip: string) => paths.map((p) => p.slice(strip.length).replace(/\.yaml$/, "")).join(", ");
+const some = (list: string[]) => (list.length > 6 ? `${list.slice(0, 6).join(", ")} and ${list.length - 6} more` : list.join(", "));
+
+/**
+ * The scenarios a change touches, by rule (never a model): every scenario when the agent's files changed, when a tool file
+ * changed (any scenario may call it), or when the last session left no record to compare with; else the scenarios whose files
+ * are new or changed since they last played.
+ */
+export function changedScenarios(files: SuiteFile[], agent: ReturnType<typeof agentFingerprint>, last: { sessionId: string; agentVersion?: string; changes?: ChangeRecord } | undefined, version?: string): ChangedPlan {
+  const scenarios = files.filter((f) => f.path.startsWith("scenarios/"));
+  const record = last?.changes;
+  if (!last || !record) {
+    return { run: null, why: last ? `the last session (${last.sessionId}) kept no record of the files it played (an earlier client wrote it)` : "there is no last session to compare with", lines: [] };
+  }
+  const diff = (now: Record<string, string>, then: Record<string, string>) => [
+    ...Object.keys(now).filter((p) => then[p] !== now[p]),
+    ...Object.keys(then).filter((p) => !(p in now)),
+  ].sort();
+  const agentChanged = diff(agent.files, record.agentFiles);
+  const toolChanged = diff(Object.fromEntries(toolFilesOf(files).map((f) => [f.path, f.hash])), record.toolFiles);
+  const changed = scenarios.filter((s) => record.played[s.path] && record.played[s.path]!.hash !== s.hash).map((s) => s.path);
+  const added = scenarios.filter((s) => !record.played[s.path]).map((s) => s.path);
+  const removed = Object.keys(record.played).filter((p) => !scenarios.some((s) => s.path === p));
+  const was = last.agentVersion;
+  const label = was && version && was !== version ? `agent version ${was} to ${version}` : version || was ? `agent version ${version ?? was}` : "";
+  const lines = [
+    `Since session ${last.sessionId}${label ? ` (${label})` : ""}:`,
+    `  agent code and prompt: ${agentChanged.length ? `changed (${some(agentChanged)})` : "unchanged"}`,
+    `  tool files: ${toolChanged.length ? `changed (${named(toolChanged, "tools/")})` : "unchanged"}`,
+    `  scenarios: ${changed.length ? `changed ${named(changed, "scenarios/")}` : "none changed"}${added.length ? `; new ${named(added, "scenarios/")}` : ""}${removed.length ? `; removed ${named(removed, "scenarios/")}` : ""}`,
+  ];
+  // A scenario that last played against other hashes of the agent or the tools is behind, however it got there.
+  const behind = scenarios.filter((s) => record.played[s.path]);
+  if (agentChanged.length || behind.some((s) => record.played[s.path]!.agent !== agent.hash)) {
+    return { run: null, why: "the agent's code or prompt changed, so any scenario may answer differently", lines };
+  }
+  if (toolChanged.length || behind.some((s) => record.played[s.path]!.tools !== toolsHash(files))) {
+    return { run: null, why: "a tool file changed, and any scenario may call it", lines };
+  }
+  return { run: [...changed, ...added], why: null, lines };
+}

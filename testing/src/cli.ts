@@ -60,10 +60,11 @@ import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
-import { DEFAULT_MIN_PASS, EXIT, finishedOutcome, minPassTenths, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
+import { addSplits, DEFAULT_MIN_PASS, EXIT, timeLines, timeSplit, timeTable, type TimeSplit, finishedOutcome, minPassTenths, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
-import { deprecatedInSuite, FAKE_COMMAND_REMOVED, FRESH_IGNORED, loadSuite, parseScenario, parseToolFile, suiteHash } from "./suite.ts";
-import type { RunOutcome, RunSummary } from "./protocol.ts";
+import { agentFingerprint, changedScenarios, deprecatedInSuite, FAKE_COMMAND_REMOVED, FRESH_IGNORED, loadSuite, nextChangeRecord, parseScenario, parseToolFile, suiteHash, type ChangeRecord } from "./suite.ts";
+import { cloudCall, NetworkError } from "./cloud-call.ts";
+import type { OpenSession, Opened, RunOutcome, RunSummary } from "./protocol.ts";
 
 const NEW_LINE = `  flow new <name> [--display-name <name>]
                             Make ./<name>/, a new agent started from the café example
@@ -105,6 +106,18 @@ const TEST_OPTIONS = `Options for test:
   --failed                 Only the scenarios that failed, were flaky, errored or never played in
                            the last session (.flow/last-session.json), on every channel each plays.
                            Goes with --runs, not with --only
+  --quick                  The inner loop: no re-plays of failed runs, scripted tool latency 0, the
+                           fast tool model, a run stops once it has failed. The summary says
+                           "quick", and a quick session never counts toward the dashboard's test
+                           health or the CI gate. Pass-fail still sets the exit status
+  --thorough               Today's behaviour, and the default: realistic latency, re-plays, the
+                           whole run played. Run this one before you merge
+  --changed                Only the scenarios whose files changed since the last session, when
+                           the agent's code and prompt and the tool files did not; else every
+                           scenario, and it says why. Prints what changed since that session.
+                           Goes with --runs, not with --only or --failed
+  --timing                 Also print where each run's time went (the agent's model, tools, the
+                           person, the judge, waits), one row per run
   --strict                 Count a flaky run (failed, then passed when the cloud played it again)
                            as failed, also in the pass rate
   --min-pass <percent>     The pass rate the session needs, 0 to 100 with at most one decimal
@@ -259,6 +272,13 @@ if (process.argv[2] === "test" && process.argv[3] === "pull") await exitFlushed(
 if (process.argv[2] === "test" && process.argv[3] === "fake") await exitFlushed(failed(process.argv.includes("--json"), new Failed(FAKE_COMMAND_REMOVED, "removed")));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) await exitFlushed(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
+/** The open's fields a quick session sets: each is the same field its own flag sets (--no-replay, --latency, --fail-fast-run, --tools-model),
+ * so a flag given with --quick wins; the fast tool model is the cloud's own choice for a quick session. */
+const QUICK_OPEN: Record<string, unknown> = { flaky: false, latency: 0, failFastRun: true };
+
+/** What a quick session is, in one phrase. */
+const QUICK_WORDS = "no re-plays, scripted latency 0, the fast tool model, a run stops once it has failed";
+
 const TEST_FLAGS = {
   cloud: { type: "string" },
   runs: { type: "string", default: "1" },
@@ -266,6 +286,14 @@ const TEST_FLAGS = {
   only: { type: "string" },
   /** Only the scenarios that did not pass in .flow/last-session.json. */
   failed: { type: "boolean", default: false },
+  /** The inner loop: the options of a quick session (QUICK_OPEN) and the label `quick`. */
+  quick: { type: "boolean", default: false },
+  /** Today's behaviour, the default; the label `thorough`. */
+  thorough: { type: "boolean", default: false },
+  /** Only the scenarios whose files changed since the last session. */
+  changed: { type: "boolean", default: false },
+  /** One row per run of where its time went. */
+  timing: { type: "boolean", default: false },
   /** A flaky run counts as failed. */
   strict: { type: "boolean", default: false },
   /** The pass rate the session needs, in percent; else FLOW_TEST_MIN_PASS, else 98. */
@@ -373,6 +401,17 @@ let agentId = "";
 /** The agent's version the session keeps. */
 let version: string | undefined;
 const seen: RunSummary[] = [];
+/** `quick` when --quick was given; what the cloud says back (Opened.mode) decides what the summary claims. */
+const asked: "quick" | "thorough" = values.quick ? "quick" : "thorough";
+/** The mode the cloud kept the session in; undefined: the cloud did not say (it knows no modes). */
+let kept: "quick" | "thorough" | undefined;
+/** When the command started, for the summary's session time. */
+const startedAt = Date.now();
+/** The change record of the last session (flow test --changed) and the one this session keeps. */
+let previousLast: LastSession | undefined;
+let agentNow: ReturnType<typeof agentFingerprint> | undefined;
+/** Where the session's time went, once it is known (the summary, --json). */
+let timeTotal: TimeSplit | null = null;
 /** Set when the cloud ended the whole session scenario_invalid. */
 let endedInvalid: SessionInvalid | null = null;
 /** Conversations whose messages did not all go through the agent's send (client.ts sendPathCheck). */
@@ -385,6 +424,8 @@ if (command !== undefined && (command !== "test" || rest.length)) invalid(`flow:
 const envProblem = loadEnv(values.dotenv);
 if (envProblem) invalid(envProblem);
 
+if (values.quick && values.thorough) invalid("--quick and --thorough are opposites: give one (thorough is the default).");
+if (values.changed && (values.only || values.failed)) invalid("--changed picks its scenarios from what changed and does not go with --only or --failed: run one of them.");
 const runs = checkRuns(values.runs);
 minPass = checkMinPass();
 const cloud = values.cloud || setting("CLOUD") || OBSERVE_URL;
@@ -481,7 +522,12 @@ function only(files: ReturnType<typeof loadSuite>, ids: Set<string> | undefined)
 const usd = (n: number) => `$${n.toFixed(4)}`;
 const printRun = runPrinter(say);
 const suite = loadSuite(join(dir, "tests"));
-picked = values.failed ? failedLastTime(suite) : values.only ? new Set(values.only.split(",").map((s) => s.trim())) : undefined;
+agentNow = agentUrl ? undefined : agentFingerprint(dir);
+try {
+  const earlier = lastSessionIn(dir);
+  if (existsSync(earlier)) previousLast = JSON.parse(readFileSync(earlier, "utf8")) as LastSession;
+} catch { /* unreadable: nothing to carry forward */ }
+picked = values.failed ? failedLastTime(suite) : values.changed ? changedLastTime(suite) : values.only ? new Set(values.only.split(",").map((s) => s.trim())) : undefined;
 const chosen = only(suite, picked);
 checkSuite(chosen);
 // What 0.16.1 stopped playing still parses and is dropped; each is named once, as flow check names it.
@@ -520,6 +566,8 @@ try {
     verbose: values.verbose,
     onRun: (run) => { seen.push(run); printRun(run); },
     onLimits: (sent) => { limits = sent; },
+    openExtras: { mode: asked, ...(values.quick ? QUICK_OPEN : {}) },
+    onOpened: (opened) => { kept = opened.mode; for (const line of modeLines(opened)) say(line); },
     onDashboard: (url, id, cloudAgent) => { dashboard = url; sessionId = id; agentId = cloudAgent ?? agentId; process.env.FLOW_FRAMEWORK_TEST_SESSION = id; },
   });
 } catch (error) {
@@ -586,6 +634,8 @@ if (flaky.length) {
 for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m) => ({ scenario: m.scenario, invalid: m.summary?.invalid }))))) say(line);
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
 say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
+say(`Mode: ${modeWord()}.`);
+timeTotal = await printTime(summary);
 if (mergedRuns(summary.runs).some((m) => m.verdict === "not_played")) endedEarly(summary.runs, "the cloud finished the session without playing every run", say);
 sendPath = summary.sendPath ?? [];
 if (sendPath.length) {
@@ -705,6 +755,8 @@ function saveSession(ended: Ended, received: RunSummary[], link: string, print: 
     endedAt: new Date().toISOString(),
     ended,
     only: picked ? [...picked] : null,
+    mode: kept ?? "thorough",
+    ...(agentNow ? { changes: nextChangeRecord(previousLast?.changes, suite, agentNow, mergedRuns(received).filter((m) => m.verdict !== "not_played").map((m) => m.path)) } : {}),
     runs: mergedRuns(received).map((m) => ({
       scenario: m.scenario,
       id: m.id,
@@ -779,6 +831,9 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       invalid: invalidScenarios(runs),
       sessionInvalid: endedInvalid,
       limits,
+      mode: kept ?? "thorough",
+      modeAsked: asked,
+      timing: timeTotal,
     };
     writeAll(`${JSON.stringify(report)}\n`);
   }
@@ -914,4 +969,74 @@ function checkNode(version: string): void {
   if (major > 22 || (major === 22 && minor >= 18)) return;
   console.error(`Flow Framework needs Node 22.18 or newer (you have ${version}).`);
   process.exit(1);
+}
+
+/** The lines after the open: what mode the cloud took, and a warning when it did not take the one asked for. */
+function modeLines(opened: Opened): string[] {
+  if (asked === "quick" && opened.mode !== "quick") {
+    return ["This test cloud does not know quick mode: it plays a session the thorough way and counts it as a full one. Update the cloud, or drop --quick."];
+  }
+  return asked === "quick" ? [`Quick session (${QUICK_WORDS}): it never counts toward the dashboard's test health or the CI gate.`] : [];
+}
+
+/** The summary's mode line: what ran, so a quick pass is never taken for a thorough one. */
+function modeWord(): string {
+  if (kept === "quick") return `quick (${QUICK_WORDS}); not a full pass, and not counted by the dashboard's test health or the CI gate. flow test --thorough is the full one`;
+  return asked === "quick" ? "thorough (this test cloud did not take quick mode)" : "thorough";
+}
+
+/** `--changed`: the scenarios whose files changed since the last session, said with why; exits 0 when nothing changed. */
+function changedLastTime(suite: ReturnType<typeof loadSuite>): Set<string> | undefined {
+  if (agentUrl) {
+    say("--changed: the agent runs elsewhere (--agent-url), so its changes cannot be seen from here: running every scenario.");
+    return undefined;
+  }
+  const plan = changedScenarios(suite, agentNow!, previousLast, version);
+  for (const line of plan.lines) say(line);
+  if (plan.run === null) {
+    say(`Running every scenario: ${plan.why}.`);
+    return undefined;
+  }
+  if (!plan.run.length) {
+    say("Nothing changed since then: no scenario to run. flow test runs the whole suite.");
+    end("passed");
+  }
+  const skipped = (previousLast?.runs ?? []).filter((r) => r.verdict !== "passed" && !plan.run!.includes(`scenarios/${r.scenario}.yaml`)).length;
+  say(`Running ${plan.run.length} changed ${plan.run.length === 1 ? "scenario" : "scenarios"}: ${plan.run.map((p) => p.slice("scenarios/".length, -".yaml".length)).join(", ")}.${skipped ? ` ${skipped} run${skipped === 1 ? "" : "s"} did not pass last time and are not run again: flow test --failed.` : ""}`);
+  return new Set(plan.run.map((p) => p.slice("scenarios/".length, -".yaml".length)));
+}
+
+/** Where the session's time went, from each run's record on the cloud: a few lines, and with --timing a row per run. Never fails the session: without the records it says so. */
+async function printTime(summary: { runs: RunSummary[] }): Promise<TimeSplit | null> {
+  const key = ciKey;
+  const ids = summary.runs.map((r) => ({ id: r.runId, label: `${r.scenario} ${r.channel} #${r.run}${r.rerunOf ? " (again)" : ""}` })).filter((r) => r.id);
+  if (!agentId || !ids.length || (!key && !/^https?:\/\/(localhost|127\.|\[::1\])/.test(cloud))) return null;
+  const rows: Array<{ label: string; split: TimeSplit }> = [];
+  const deadline = Date.now() + 30_000;
+  let next = 0;
+  let broke = false;
+  const worker = async () => {
+    while (next < ids.length && Date.now() < deadline && !broke) {
+      const run = ids[next++]!;
+      try {
+        const { status, text } = await cloudCall(`${cloud.replace(/\/+$/, "")}/v1/agents/${agentId}/tests/runs/${run.id}`, { headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), accept: "application/json" }, timeoutMs: 15_000 }, { note: () => {} });
+        if (status === 401 || status === 403) broke = true;
+        if (status !== 200) continue;
+        const split = timeSplit(JSON.parse(text));
+        if (split) rows.push({ label: run.label, split });
+      } catch (error) {
+        if (error instanceof NetworkError) broke = true;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 8 }, worker));
+  if (!rows.length) {
+    say("Time: the runs' records were not available, so there is no breakdown (flow show <run> has each run's turnTiming).");
+    return null;
+  }
+  const total = addSplits(rows.map((r) => r.split));
+  for (const line of timeLines(total, rows.length, Date.now() - startedAt)) say(line);
+  if (rows.length < ids.length) say(`  (${rows.length} of ${ids.length} runs read; the rest were not available)`);
+  if (values.timing) for (const line of timeTable(rows)) say(line);
+  return total;
 }
