@@ -18,7 +18,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   not say, so 0 means none was cached), and `ModelResponse.timing` has `queuedMs` (before the provider began: Flow's
   queue and any retry), `ttftMs` (to the first token) and `generationMs`. `model.call` events carry `timing`, and
   traces carry `gen_ai.usage.cache_read.input_tokens`. To measure the split, calls to OpenRouter and Flow now
-  stream the answer; the reply the agent gets is the same.
+  stream the answer; the reply the agent gets is the same. A model call's `ms` is the wall time the agent waited on
+  the call as seen in its own process, so it includes the network and any retry, which is why this split exists.
 - **`flow test --quick`, `--changed` and a time breakdown.** `--quick` is the inner loop: it sends
   `mode: "quick"` in the open with no re-plays, scripted latency 0 and a run that stops once it has failed (and the
   cloud's fast tool model); the summary, `--json` (`mode`, `modeAsked`) and `.flow/last-session.json` (`mode`) say
