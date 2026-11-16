@@ -332,3 +332,40 @@ function selfSignedCert(): { key: string; cert: string } {
   const der = tlv(0x30, tbs, ecdsaSha256, tlv(0x03, Buffer.from([0]), sign("sha256", tbs, privateKey)));
   return { key: privateKey.export({ type: "pkcs8", format: "pem" }) as string, cert: new X509Certificate(der).toString() };
 }
+
+test("--shards, --fail-fast-run and --no-replay go in the open only when asked, and an older cloud that ignores them is said so", async () => {
+  const run = async (options: { shards?: number; failFastRun?: boolean; replay?: boolean }, opened: Record<string, unknown>) => {
+    let body: Record<string, unknown> = {};
+    const lines: string[] = [];
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        if (req.url === "/api/sessions") {
+          body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ sessionId: "s", token: "t", missing: [], dashboard: "d", ...opened }));
+        }
+        if (req.url!.endsWith("/stream")) {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          return void res.end(`data: ${JSON.stringify({ type: "finished", summary: { runs: [] } })}\n\n`);
+        }
+        res.writeHead(200, { "content-type": "application/json" }).end("{}");
+      });
+    });
+    await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+    try {
+      await runInCloud({ cloud: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, name: "cafe", tools: [], build: () => ({ channels: () => [] }) as unknown as Agent, files: [{ path: "scenarios/a.yaml", hash: "h1", content: "" }], log: (l) => lines.push(l), ...options });
+    } finally {
+      server.close();
+    }
+    return { body, lines };
+  };
+  const plain = await run({}, {});
+  assert.deepEqual([plain.body.flaky, plain.body.shards, plain.body.failFastRun], [true, undefined, undefined], "today's open: replays on, nothing else");
+  const fast = await run({ shards: 3, failFastRun: true, replay: false }, { shards: 2, failFastRun: true });
+  assert.deepEqual([fast.body.flaky, fast.body.shards, fast.body.failFastRun], [undefined, 3, true]);
+  assert.ok(fast.lines.some((l) => l.includes("--shards 3") && l.includes("2 free session slots")), fast.lines.join("\n"));
+  const old = await run({ shards: 3, failFastRun: true }, {});
+  assert.ok(old.lines.some((l) => l.includes("does not end runs early")));
+  assert.ok(old.lines.some((l) => l.includes("does not take --shards")));
+});

@@ -31,6 +31,12 @@ export interface ConnectOptions {
   /** The tests folder: files a scenario attaches are read from here; they never leave this machine. */
   testsDir?: string;
   runs?: number;
+  /** Runs at once, as shares of the workspace's session limit (OpenSession.shards). Default: not asked, one. */
+  shards?: number;
+  /** End a run once a check that cannot change has failed (OpenSession.failFastRun). Default: off. */
+  failFastRun?: boolean;
+  /** Ask the cloud to play a failed run once more and label it flaky or failing. Default: true; false asks for none. */
+  replay?: boolean;
   log?: (line: string) => void;
   /** Headers for the open only (cloudHeaders: the CI key and the attestation); never sent to the tunnel. */
   openHeaders?: Record<string, string>;
@@ -499,7 +505,9 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     groups: true,
     ...(canBusiness ? { business: true } : {}),
     ...(typeof agent.seedHistory === "function" ? { history: true } : {}),
-    flaky: true,
+    ...(options.replay === false ? {} : { flaky: true }),
+    ...(options.shards !== undefined && options.shards > 1 ? { shards: options.shards } : {}),
+    ...(options.failFastRun ? { failFastRun: true } : {}),
     ...(only ? { only } : {}),
   };
   const opened = await openOnce(`${base}/api/sessions`, open, options.openHeaders, controller.signal, postTimeoutMs, openRetryCapMs, log);
@@ -519,6 +527,10 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     });
   }
   log(`Session ${opened.sessionId}: suite ${suiteHash(options.files).slice(0, 12)}, ${options.files.length} files (${uploads.length === options.files.length ? "all new to the cloud" : uploads.length ? `${uploads.length} new to the cloud, the rest it already had` : "the cloud already had them all"}).`);
+  // An option an older cloud does not know is ignored by it; say so instead of leaving the owner to wonder.
+  if (options.failFastRun && opened.failFastRun !== true) log("This cloud does not end runs early (--fail-fast-run): every run plays to its end.");
+  if (options.shards !== undefined && options.shards > 1 && opened.shards === undefined) log(`This cloud does not take --shards: it plays its own number of runs at once.`);
+  else if (opened.shards !== undefined && options.shards !== undefined && opened.shards < options.shards) log(`--shards ${options.shards}: the workspace had ${opened.shards} free session slot${opened.shards === 1 ? "" : "s"} (each shard takes one of the sessions it may run at once), so ${opened.shards} ${opened.shards === 1 ? "is" : "are"} used.`);
   const limits = sessionLimits(opened.limits);
   if (limits) {
     const line = limitsLine(limits);

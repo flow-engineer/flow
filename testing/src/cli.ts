@@ -107,6 +107,14 @@ const TEST_OPTIONS = `Options for test:
                            Goes with --runs, not with --only
   --strict                 Count a flaky run (failed, then passed when the cloud played it again)
                            as failed, also in the pass rate
+  --shards <n>             Play up to n times as many runs at once, from 1 to 20 (default: 1). Each
+                           shard takes one of the sessions the workspace may run at once, so the
+                           session gets the free ones; it stays one session, one report. Helps only
+                           if the agent's model and the cloud's models answer as fast under the load
+  --fail-fast-run          End a run as soon as a check that no later turn can change has failed
+                           (never, not_sent), without the remaining turns or the judge; the run fails
+                           on that check, as the full run's would
+  --no-replay              Do not play a failed run once more: no run is labelled flaky or failing
   --min-pass <percent>     The pass rate the session needs, 0 to 100 with at most one decimal
                            (default: FLOW_TEST_MIN_PASS, else 98); 100 fails on any failed run
   --synthetic              Attest the test files hold no real customer data (a hosted cloud needs it)
@@ -270,6 +278,12 @@ const TEST_FLAGS = {
   strict: { type: "boolean", default: false },
   /** The pass rate the session needs, in percent; else FLOW_TEST_MIN_PASS, else 98. */
   "min-pass": { type: "string" },
+  /** Runs at once: this many shares of the workspace's session limit (default 1). */
+  shards: { type: "string" },
+  /** End a run as soon as a check that cannot change has failed. */
+  "fail-fast-run": { type: "boolean", default: false },
+  /** The cloud does not play a failed run once more. */
+  "no-replay": { type: "boolean", default: false },
   /** Deprecated in 0.16.1: still taken, does nothing, and says so (FRESH_IGNORED). */
   fresh: { type: "boolean", default: false },
   synthetic: { type: "boolean", default: false },
@@ -386,6 +400,7 @@ const envProblem = loadEnv(values.dotenv);
 if (envProblem) invalid(envProblem);
 
 const runs = checkRuns(values.runs);
+const shards = values.shards === undefined ? undefined : checkShards(values.shards);
 minPass = checkMinPass();
 const cloud = values.cloud || setting("CLOUD") || OBSERVE_URL;
 const ciKey = setting("CLOUD_KEY") || undefined;
@@ -515,6 +530,9 @@ try {
     files,
     testsDir: join(dir, "tests"),
     runs: perScenario,
+    ...(shards !== undefined ? { shards } : {}),
+    ...(values["fail-fast-run"] ? { failFastRun: true } : {}),
+    ...(values["no-replay"] ? { replay: false } : {}),
     openHeaders,
     log: say,
     verbose: values.verbose,
@@ -561,7 +579,8 @@ const failedLine = failedRuns ? ` ${failedRuns} failed${checkFails && checkFails
 const creditLine = credit.length ? ` ${credit.length} stopped for credit (not the agent's fault, not counted as failed).` : "";
 const infraLine = infra ? ` ${infra} hit an infrastructure error (the cloud could not play or judge ${infra === 1 ? "it" : "them"}; not counted as failed).` : "";
 const tokens = (n: number) => n.toLocaleString("en-US");
-say(`\n${passed} of ${played.length} runs passed.${flakyLine}${failedLine}${creditLine}${infraLine} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
+const notReplayed = values["no-replay"] && failedRuns ? " Failed runs were not played again (--no-replay), so none is told apart as flaky or failing: a failure here may be noise." : "";
+say(`\n${passed} of ${played.length} runs passed.${flakyLine}${failedLine}${creditLine}${infraLine}${notReplayed} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
 const rate = passRate(mergedRuns(summary.runs), values.strict);
 if (rate.tenths !== null) say(rateSummary(rate));
 if (credit.length) say(`Credit: ${creditReason(credit[0]!)}`);
@@ -874,6 +893,12 @@ function checkMinPass(): number {
 function checkRuns(runs: string): number {
   if (/^[1-9]\d*$/.test(runs)) return Number(runs);
   invalid(`--runs must be a whole number above 0, such as 3 (got "${runs}").`);
+}
+
+/** --shards as a whole number from 1 to 20, or exits 1. */
+function checkShards(shards: string): number {
+  if (/^[1-9]\d?$/.test(shards) && Number(shards) <= 20) return Number(shards);
+  invalid(`--shards must be a whole number from 1 to 20, such as 2 (got "${shards}").`);
 }
 
 /** Every scenario and tool file read as the cloud reads it, before anything is sent; exits 1 with each problem at its line. */
