@@ -1558,7 +1558,9 @@ export class Conversation {
       const several = views.length > 1;
       this.sendTools = new Map(views.map((v) => [sendToolName(v.name), v.name]));
       const page = this.pageNow();
-      const system = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, wakeUps, elsewhere, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), page ? pageLine(page) : "", context].filter(Boolean).join("\n\n");
+      // What stays the same from call to call comes first, so a model that caches prompts caches up to the clock.
+      const stableSystem = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, wakeUps, elsewhere].filter(Boolean).join("\n\n");
+      const system = [stableSystem, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), page ? pageLine(page) : "", context].filter(Boolean).join("\n\n");
       const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
       // The groups for the channel of the message this turn answers, never another channel the person used;
       // read this step (a UI's catalog can grow), and never one named like the agent's own or a built-in.
@@ -1571,7 +1573,7 @@ export class Conversation {
       const callStarted = Date.now();
       let response;
       try {
-        response = await this.settings.model.complete({ system, messages: this.window(system, specs), tools: specs, signal: abort.signal });
+        response = await this.settings.model.complete({ system, stableSystem, messages: this.window(system, specs), tools: specs, signal: abort.signal });
       } catch (error) {
         if (!abort.signal.aborted) throw error;
       } finally {
@@ -1588,6 +1590,7 @@ export class Conversation {
         ms: Date.now() - callStarted,
         toolCalls: response.toolCalls.map((c) => c.name),
         usage: response.usage,
+        ...(response.timing ? { timing: response.timing } : {}),
         ...(response.model ? { model: response.model } : {}),
       });
       if (response.text) this.settings.emit(this.id, "text.hidden", { text: response.text });

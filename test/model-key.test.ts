@@ -8,7 +8,7 @@
 // /audio/transcriptions with the same key and address, and reports Flow's errors the same way.
 // Under `flow test`, calls to Flow's address (and only there) carry the test cloud's session id.
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { describeVideoWith, flowModel, flowTranscribe, modelFromKeys, openAICompatible } from "../src/model.ts";
@@ -130,13 +130,24 @@ test("flowTranscribe posts the audio and language as multipart with FLOW_KEY, re
 /** A test cloud session's id in its shape (tse_ and 26 Crockford base32), made up. */
 const SESSION = "tse_01JFAKE0SESS10N00000000000";
 
+/** A streamed answer ("ok", then usage), as OpenRouter and Flow send it. */
+function answerStream(res: ServerResponse, headers: Record<string, string> = {}): void {
+  res.writeHead(200, { "content-type": "text/event-stream", ...headers });
+  res.write(`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: "m", choices: [{ index: 0, delta: { role: "assistant", content: "ok" } }] })}\n\n`);
+  res.write(`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: "m", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 1 } })}\n\n`);
+  res.end("data: [DONE]\n\n");
+}
+
 /** A local model server that answers every call and records each path with its Flow-Test-Session header. */
 async function gateway(t: { after: (fn: () => void) => void }) {
   const seen: Array<[string, string | undefined]> = [];
   const server = createServer((req, res) => {
-    req.resume();
+    let body = "";
+    req.on("data", (c) => { body += c; });
     req.on("end", () => {
+      const streamed = body.startsWith("{") && JSON.parse(body).stream === true;
       seen.push([req.url!.replace(/^.*\/v1/, ""), req.headers["flow-test-session"] as string | undefined]);
+      if (req.url!.endsWith("/chat/completions") && streamed) return answerStream(res);
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(req.url!.endsWith("/audio/transcriptions")
         ? { text: "hi" }
@@ -180,4 +191,85 @@ test("under flow test flowTranscribe and describeVideoWith (describing and askin
     assert.equal(await describe.ask!({ mime: "video/mp4", data: new Uint8Array([1]) }, "What colour is it?"), "ok");
   });
   assert.deepEqual(seen, [["/audio/transcriptions", SESSION], ["/chat/completions", SESSION], ["/chat/completions", SESSION]]);
+});
+
+// ---------- prompt caching and where a call's time goes ----------
+
+/** A model server that records each chat request's body and answers with `answer`. */
+async function recording(t: { after: (fn: () => void) => void }, answer: (res: ServerResponse, body: { stream?: boolean }, call: number) => void) {
+  const bodies: Array<Record<string, any>> = [];
+  const server = createServer((req, res) => {
+    let text = "";
+    req.on("data", (c) => { text += c; });
+    req.on("end", () => {
+      const body = JSON.parse(text);
+      bodies.push(body);
+      answer(res, body, bodies.length);
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  t.after(() => server.close());
+  return { base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, bodies };
+}
+
+const ASK = { system: "Be brief.\n\nRules.\n\n[Flow] It is now 14:02.", stableSystem: "Be brief.\n\nRules.", messages: [{ role: "user" as const, content: "hi" }], tools: [], signal: new AbortController().signal };
+
+test("a Claude model's stable system text and last message carry cache_control, the text is unchanged, and the cache numbers the provider reports come back", async (t) => {
+  const { base, bodies } = await recording(t, (res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ id: "c", object: "chat.completion", created: 0, model: "m", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 80, cache_write_tokens: 15 } } }));
+  });
+  const claude = openAICompatible({ apiKey: "k", baseURL: base, model: "anthropic/claude-haiku-5.5" });
+  const answer = await claude.complete({ ...ASK, messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "", toolCalls: [{ id: "t1", name: "look", arguments: "{}" }] }, { role: "tool", toolCallId: "t1", content: "found" }] });
+  assert.deepEqual(answer.usage, { inputTokens: 100, outputTokens: 2, cacheReadTokens: 80, cacheWriteTokens: 15 });
+  const [system, user, assistant, tool] = bodies[0].messages;
+  assert.deepEqual(system.content, [{ type: "text", text: "Be brief.\n\nRules.\n\n", cache_control: { type: "ephemeral" } }, { type: "text", text: "[Flow] It is now 14:02." }]);
+  assert.equal(system.content.map((b: { text: string }) => b.text).join(""), ASK.system, "the system text, whole");
+  assert.equal(user.content, "hi");
+  assert.equal(assistant.content, "");
+  assert.deepEqual(tool, { role: "tool", tool_call_id: "t1", content: [{ type: "text", text: "found", cache_control: { type: "ephemeral" } }] });
+});
+
+test("a model that needs no marker, or with promptCaching off, gets the plain messages; a provider that reports no cache numbers leaves them out", async (t) => {
+  const { base, bodies } = await recording(t, (res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ id: "c", object: "chat.completion", created: 0, model: "m", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 2 } }));
+  });
+  const plain = { apiKey: "k", baseURL: base };
+  assert.deepEqual((await openAICompatible({ ...plain, model: "openai/gpt-6-luna" }).complete(ASK)).usage, { inputTokens: 100, outputTokens: 2 });
+  await openAICompatible({ ...plain, model: "anthropic/claude-haiku-5.5", promptCaching: false }).complete(ASK);
+  await openAICompatible({ ...plain, model: "my-claude", promptCaching: true }).complete(ASK);
+  assert.deepEqual(bodies[0].messages, [{ role: "system", content: ASK.system }, { role: "user", content: "hi" }]);
+  assert.deepEqual(bodies[1].messages, bodies[0].messages);
+  assert.equal(bodies[2].messages[0].content[0].cache_control.type, "ephemeral");
+});
+
+test("through Flow a call is streamed and its time split: the wait (a retry and Flow's queue), the first token, the rest; tool calls and usage are put together", async (t) => {
+  const { base, bodies } = await recording(t, (res, body, call) => {
+    if (call === 1) {
+      res.writeHead(429, { "content-type": "application/json", "retry-after-ms": "60" });
+      return void res.end(JSON.stringify({ error: { message: "busy", type: "rate_limit_error", code: "rate_limit_exceeded" } }));
+    }
+    res.writeHead(200, { "content-type": "text/event-stream", "server-timing": "flow-queue;dur=25" });
+    const chunk = (delta: object, extra: object = {}) => res.write(`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: "anthropic/claude-haiku-5.5", choices: [{ index: 0, delta, ...extra }] })}\n\n`);
+    chunk({ role: "assistant", content: "" });
+    chunk({ tool_calls: [{ index: 0, id: "t1", type: "function", function: { name: "look", arguments: '{"q"' } }] });
+    chunk({ tool_calls: [{ index: 0, function: { arguments: ':"x"}' } }, { index: 1, id: "t2", type: "function", function: { name: "other", arguments: "" } }] });
+    res.write(`data: ${JSON.stringify({ id: "c", object: "chat.completion.chunk", created: 0, model: "anthropic/claude-haiku-5.5", choices: [], usage: { prompt_tokens: 50, completion_tokens: 7, cost: 0.001, prompt_tokens_details: { cached_tokens: 0 } } })}\n\n`);
+    res.end("data: [DONE]\n\n");
+  });
+  await withEnv({ FLOW_KEY: FAKE, FLOW_MODEL_URL: `${base}/llm/framework/v1` }, async () => {
+    const answer = await flowModel().complete(ASK);
+    assert.equal(bodies[1].stream, true);
+    assert.deepEqual(answer.toolCalls, [{ id: "t1", name: "look", arguments: '{"q":"x"}' }, { id: "t2", name: "other", arguments: "{}" }]);
+    assert.deepEqual(answer.usage, { inputTokens: 50, outputTokens: 7, costUsd: 0.001, cacheReadTokens: 0 }, "reported and none cached: 0, not left out");
+    const { queuedMs, ttftMs, generationMs } = answer.timing!;
+    assert.ok(queuedMs >= 60 + 25, `the retry's wait and Flow's queue are queued: ${queuedMs}`);
+    assert.ok(Number.isInteger(ttftMs) && ttftMs >= 0 && Number.isInteger(generationMs) && generationMs >= 0);
+  });
+});
+
+test("a streamed request answered with no stream is an error, not an empty reply", async (t) => {
+  const { base } = await recording(t, (res) => { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); });
+  await withEnv({ FLOW_KEY: FAKE, FLOW_MODEL_URL: `${base}/llm/framework/v1` }, () => assert.rejects(flowModel().complete(ASK), /no stream/));
 });
