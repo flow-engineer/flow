@@ -439,7 +439,7 @@ test("every next step and hint the account commands print names the package, nev
     await run(["login", "--help"], { url: flow.url, config, cwd: temp() }),
   ].map((r) => r.out + r.err).join("\n");
   assert.doesNotMatch(printed, /npx flow\b/);
-  for (const command of ["login", "login --wait", "setup", "link", "test --synthetic"]) assert.ok(printed.includes(`npx @flow-engineer/flow ${command}`), command);
+  for (const command of ["login", "login --wait", "setup", "link", "test --no-customer-data"]) assert.ok(printed.includes(`npx @flow-engineer/flow ${command}`), command);
 });
 
 test("a sign-in under ~/.config/chinwag is read and deleted while ~/.config/flow-framework has none; a new one goes to flow-framework", () => {

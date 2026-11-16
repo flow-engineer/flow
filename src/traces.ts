@@ -10,7 +10,7 @@
 // Content (what the person and the agent wrote, tool inputs and results) is sent only with
 // `content: true` (FLOW_FRAMEWORK_TRACES_CONTENT=1); without it the spans hold ids, names, timing and counts,
 // and the endpoint has no messages to show or grade. Under `flow test` content is on unless
-// FLOW_FRAMEWORK_TRACES_CONTENT=0: its --synthetic already says the test files hold no real data.
+// FLOW_FRAMEWORK_TRACES_CONTENT=0: its --no-customer-data already says the test files hold no real data.
 // The one exception is the MCP server's built-in feedback tool: what a caller writes there is meant
 // for the team, so its call's span carries it (`flow.feedback.about`, `.message`, `.tool`) either way.
 //

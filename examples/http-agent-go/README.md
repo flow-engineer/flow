@@ -36,7 +36,7 @@ node ../../testing/src/cli.ts check-endpoint http://localhost:3000/flow         
 From this folder, with the agent running on a real model:
 
 ```bash
-npx @flow-engineer/flow test --agent-url http://localhost:3000/flow --synthetic
+npx @flow-engineer/flow test --agent-url http://localhost:3000/flow --no-customer-data
 ```
 
 A hosted test cloud takes its key in `FLOW_FRAMEWORK_CLOUD_KEY`. The agent's tools run here, for real, so the café's `tests/tools/*.yaml` simulators are not used, and what must be true is written as `judge` items in [`tests/scenarios/latte-correction.yaml`](tests/scenarios/latte-correction.yaml).
