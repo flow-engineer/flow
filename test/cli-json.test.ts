@@ -146,17 +146,23 @@ test("every --json failure prints exactly one JSON document on stdout, { ok: fal
   } finally { fake.close(); }
 });
 
-test("flow test --json reports an agent that does not load as its one document, and takes --env", { timeout: 30_000 }, async () => {
+test("flow test --json reports an agent that does not load as its one document, and takes --environment (and --env)", { timeout: 30_000 }, async () => {
   const fake = await cloud();
   try {
     const dir = agentFolder([`FLOW_FRAMEWORK_CLOUD_KEY=${CI_KEY}`, `FLOW_FRAMEWORK_CLOUD=${fake.url}`]);
     writeFileSync(join(dir, "src", "agent.ts"), "export const = broken;\n");
-    const run = await flow(["test", "--synthetic", "--env", "staging", "--json"], dir);
+    const run = await flow(["test", "--no-customer-data", "--environment", "staging", "--json"], dir);
     assert.equal(run.code, 1, run.stderr);
     assert.equal(run.stdout.trim().split("\n").length, 1);
     const report = JSON.parse(run.stdout);
     assert.equal(report.outcome, "invalid");
     assert.match(report.error.message, /^src\/agent\.ts could not be loaded: /);
+    // --synthetic and --env are the earlier names of --no-customer-data and --environment: same answer.
+    const old = await flow(["test", "--synthetic", "--env", "staging", "--json"], dir);
+    assert.equal(old.code, run.code);
+    assert.equal(old.stdout, run.stdout);
+    const bare = await flow(["test", "--env", "staging", "--json"], dir);
+    assert.match(JSON.parse(bare.stdout).error.message, /--no-customer-data/);
   } finally { fake.close(); }
 });
 

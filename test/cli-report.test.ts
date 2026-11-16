@@ -431,7 +431,7 @@ test("a run the cloud names an error for is errored, whatever it ended as: ERROR
   } finally { mixed.close(); }
 });
 
-test("a run that failed and passed when the cloud played it again is flaky: on the summary line, counted as passed on its channel as in the pass rate, its own section, its second play never counted, exit 0 unless --strict; the open asks for flaky runs", { timeout: 20_000 }, async () => {
+test("a run that failed and passed when the cloud played it again is flaky: on the summary line, counted as passed on its channel as in the pass rate, its own section, its second play never counted, exit 0 unless --fail-on-flaky; the open asks for flaky runs", { timeout: 20_000 }, async () => {
   const dir = agentDir({ b: scenarioYaml("bee", "sms") });
   // The second play has its original's scenario, channel and number; the cloud may send it first.
   const second = runOf({ runId: "trn_3", passed: true, rerunOf: "trn_1", watch: "http://watch/trn_3" });
@@ -456,13 +456,16 @@ test("a run that failed and passed when the cloud played it again is flaky: on t
     assert.deepEqual(report.runs.map((r: { runId: string; verdict: string; label: string | null; rerun: { runId: string } | null }) => `${r.runId} ${r.verdict} ${r.label} ${r.rerun?.runId ?? null}`), ["trn_2 passed null null", "trn_1 flaky flaky trn_3"]);
     assert.deepEqual(lastSession(dir).runs.map((r: { runId: string; verdict: string }) => `${r.runId} ${r.verdict}`), ["trn_2 passed", "trn_1 flaky"]);
 
-    const strict = await cliStreams(["test", "--cloud", local.url, "--json", "--strict"], dir);
+    const strict = await cliStreams(["test", "--cloud", local.url, "--json", "--fail-on-flaky"], dir);
     assert.equal(strict.code, 1, strict.out);
     assert.match(strict.stderr, /^ {2}sms: 1 of 2 counted runs passed \(1 flaky\)$/m);
     const strictReport = JSON.parse(strict.stdout);
+    // --strict is --fail-on-flaky's earlier name and behaves the same.
+    const old = await cliStreams(["test", "--cloud", local.url, "--json", "--strict"], dir);
+    assert.deepEqual([old.code, old.stderr.replace(/\(node:\d+\)/g, ""), JSON.parse(old.stdout).counts], [strict.code, strict.stderr.replace(/\(node:\d+\)/g, ""), strictReport.counts]);
     assert.deepEqual([strictReport.outcome, strictReport.strict, strictReport.counts.failed, strictReport.counts.flaky], ["failed", true, 1, 1]);
     // Every open asks for flaky runs.
-    assert.deepEqual(local.opens.map((o) => o.flaky), [true, true]);
+    assert.deepEqual(local.opens.map((o) => o.flaky), [true, true, true]);
   } finally { local.close(); }
 });
 
@@ -475,7 +478,7 @@ test("a finished session fails only when its pass rate is under --min-pass, comp
   assert.equal(finishedOutcome(verdicts({ passed: 979, failed: 21 }), false, 980), "failed");
   // --min-pass 100 is the old rule: one failed run fails the session.
   assert.equal(finishedOutcome(verdicts({ passed: 99, failed: 1 }), false, 1000), "failed");
-  // A flaky run counts as passed, and as failed with --strict, in the rate too.
+  // A flaky run counts as passed, and as failed with --fail-on-flaky, in the rate too.
   assert.equal(finishedOutcome(verdicts({ passed: 48, flaky: 2 }), false, 980), "passed");
   assert.equal(finishedOutcome(verdicts({ passed: 48, flaky: 2 }), true, 980), "failed");
   // Errored and unplayed runs are left out of the rate (49 of 50, not of 56), and still make it errored (exit 2).

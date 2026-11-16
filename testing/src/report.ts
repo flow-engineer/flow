@@ -8,7 +8,7 @@ import type { RunOutcome, ScenarioSummary, SessionLimits } from "./protocol.ts";
 /** How a `flow test` ended, one per exit status (0 passed; 1 failed, invalid; 2 errored, transport; 3 refused; 130 interrupted). */
 export type Outcome = "passed" | "failed" | "errored" | "transport" | "refused" | "interrupted" | "invalid";
 
-/** flaky: the run failed, and the cloud played it once more and it passed (it counts as failed only with --strict). */
+/** flaky: the run failed, and the cloud played it once more and it passed (it counts as failed only with --fail-on-flaky). */
 export type Verdict = "passed" | "failed" | "flaky" | "errored" | "not_played";
 
 export interface ReportError {
@@ -72,16 +72,16 @@ export interface JsonReport {
   suiteHash: string | null;
   error: ReportError | null;
   /** runs: the suite's runs (a cloud's second play of a failed run is not one of its own). failed: the runs
-   * that failed, and with --strict the flaky ones too; flaky: the runs that failed once and passed when played again. */
+   * that failed, and with --fail-on-flaky the flaky ones too; flaky: the runs that failed once and passed when played again. */
   counts: { runs: number; passed: number; failed: number; flaky: number; errored: number; notPlayed: number; credit: number; infra: number };
   /** Each scenario's pass rate per channel, over its --runs times (credit and infra runs not counted). */
   scenarios: ScenarioSummary[];
   /** Messages that reached the cloud by another way than the agent's send, or that the agent said it sent and never did (testing/src/client.ts). */
   sendPath: SendPathProblem[];
-  /** --strict: a flaky run counts as failed, also in passRate. */
+  /** --fail-on-flaky: a flaky run counts as failed, also in passRate. */
   strict: boolean;
   /** The pass rate in percent, cut (never rounded up) to one decimal: passed and flaky runs (flaky as failed with
-   * --strict) over the runs that passed, failed or were flaky; null when none did. */
+   * --fail-on-flaky) over the runs that passed, failed or were flaky; null when none did. */
   passRate: number | null;
   /** The dashboard's word for passRate: 100 excellent, 98 or more good, 95 fair, 90 needs_work, else poor; null with it. */
   level: Level | null;

@@ -20,12 +20,12 @@ import { parseScenario } from "../testing/src/suite.ts";
 import type { Agent, Incoming } from "../src/index.ts";
 import { unavailableRecords } from "../src/records.ts";
 
-test("a hosted cloud needs the CI key and --synthetic; a local one needs neither", () => {
+test("a hosted cloud needs the CI key and --no-customer-data; a local one needs neither", () => {
   const hosted = "https://tests.example.com";
   assert.deepEqual(cloudHeaders({ cloud: "http://127.0.0.1:8900", synthetic: false }), {});
   assert.throws(() => cloudHeaders({ cloud: hosted, synthetic: true }), /FLOW_FRAMEWORK_CLOUD_KEY/);
-  assert.throws(() => cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: false }), /--synthetic/);
-  assert.throws(() => cloudHeaders({ cloud: "http://localhost:8900", ciKey: "oci_x", synthetic: false }), /--synthetic/);
+  assert.throws(() => cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: false }), /--no-customer-data/);
+  assert.throws(() => cloudHeaders({ cloud: "http://localhost:8900", ciKey: "oci_x", synthetic: false }), /--no-customer-data/);
   assert.throws(() => cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: true, environment: "dev" }), /staging or production/);
   assert.throws(() => cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: true, ref: "x".repeat(101) }), /--ref/);
   assert.deepEqual(cloudHeaders({ cloud: hosted, ciKey: "oci_x", synthetic: true, agentVersion: "a1f9c2e", ref: "feature/x", defaultBranch: "main", environment: "staging" }), {

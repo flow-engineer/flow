@@ -2,6 +2,20 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **Clearer names for three `flow test` flags.** `--fail-on-flaky` (was `--strict`: count a flaky run as
+  failed), `--no-customer-data` (was `--synthetic`: the attestation that the test files hold no real customer
+  data) and `--environment` (was `--env`). The help, the messages (the hosted cloud's refusal now says
+  `--no-customer-data`), the coding-agent skills and the starter files use the new names. The old names are
+  undocumented aliases that behave the same, so CI scripts keep working. `--json`'s `strict` field is unchanged.
+
+### Migration notes
+
+None: `--strict`, `--synthetic` and `--env` still work.
+
 ## 0.19.0 (10 Nov 2026)
 
 ### Changes

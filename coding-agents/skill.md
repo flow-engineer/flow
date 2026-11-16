@@ -140,7 +140,7 @@ Without `FLOW_FRAMEWORK_TRACES_CONTENT=1` the dashboard
 gets ids, timing, model calls and tool names but no messages, so nothing to show or grade. `setup`
 writes it (with a comment saying so) when the traces key it adds is a test key (`otk_test_`, the
 Staging dashboard) and `.env` does not set it already; set it to 0 for metadata only. Under `flow test`
-content is on unless it is 0, since `--synthetic` says the test files hold no real data. Or in
+content is on unless it is 0, since `--no-customer-data` says the test files hold no real data. Or in
 code: `createAgent({ ..., traces: { url, key, content: true, version: "v3" } })`. Traces are sent in the
 background after each turn and a failed send is dropped (logged once), so a dashboard outage never
 touches a chat; call `await agent.flushTraces()` before the process exits. Tests run under

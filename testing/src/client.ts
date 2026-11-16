@@ -214,7 +214,7 @@ export function cloudHeaders(access: CloudAccess): Record<string, string> {
   const local = isLoopback(access.cloud);
   if (!local && !access.ciKey) throw new Error("A hosted cloud needs the agent's CI key: set FLOW_FRAMEWORK_CLOUD_KEY.");
   if ((!local || access.ciKey) && !access.synthetic) {
-    throw new Error("A hosted cloud runs synthetic tests only: pass --synthetic to attest that your test files hold no real customer or member data.");
+    throw new Error("A hosted cloud runs synthetic tests only: pass --no-customer-data to attest that your test files hold no real customer or member data.");
   }
   if (access.environment && access.environment !== "staging" && access.environment !== "production") {
     throw new Error("--environment must be staging or production.");

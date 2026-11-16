@@ -955,7 +955,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
       `CI never signs in. It runs the tests with the agent's test cloud key, ${SETUP_ENV.cloud_key}, as a secret.`,
       `Run ${NEXT.setup} on your machine first, then copy the key from .env into your CI without printing it, for GitHub:`,
       `  grep '^${SETUP_ENV.cloud_key}=' .env | cut -d= -f2- | gh secret set ${SETUP_ENV.cloud_key}`,
-      `and in the workflow: ${RUN} test --synthetic --json`,
+      `and in the workflow: ${RUN} test --no-customer-data --json`,
     ];
     if (json) out({ ci: { secret: SETUP_ENV.cloud_key, steps } });
     for (const line of steps) say(line);
@@ -1065,7 +1065,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
     ? flowKey.previous_expires_at ? `The old ${FLOW_KEY} works until ${flowKey.previous_expires_at}.` : rotateNow ? `The old ${FLOW_KEY} stopped working now.` : undefined
     : undefined;
   // A first run's order: a model key if there is none, the playground (npm start), then the phone.
-  // chat and test --synthetic are the coding agent's own checks, not the owner's way to test.
+  // chat and test --no-customer-data are the coding agent's own checks, not the owner's way to test.
   const next = [...(model.next ? [model.next] : []), "npm start", ...(answer.next?.length ? answer.next : [NEXT.link])];
   const plans = plansNext(trial);
   if (json) {
