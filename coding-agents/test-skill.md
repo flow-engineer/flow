@@ -295,6 +295,12 @@ connects out to the cloud, which plays the person and the tools and judges.
    that did not pass in the last session (flaky ones too), on every channel each plays; it goes with `--runs`, never
    with `--only`. It prints `Nothing failed in the last session (<id>).` and exits 0 when there is
    nothing to run again, and exits 1 when there is no last session.
+   `--changed` runs only the scenarios whose files changed since the last session, and every scenario (saying
+   why) when the agent's code, prompt or a tool file changed; it prints what changed. `--quick` is the inner
+   loop (no re-plays, scripted latency 0, the fast tool model, a run stops once it has failed): the summary,
+   `--json` (`mode`) and `.flow/last-session.json` say `quick`, and a quick session never counts toward test
+   health or CI, so it is never the final run: finish on a plain (`--thorough`) one. The summary ends with
+   where the time went (`--timing`: per run; `--json`: `timing`).
 
 Work in this loop, and never finish on a partial run:
 

@@ -2,6 +2,24 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **`flow test --quick`, `--thorough`, `--changed` and a time breakdown.** `--quick` is the inner loop: it sends
+  `mode: "quick"` in the open with no re-plays, scripted latency 0 and a run that stops once it has failed (and the
+  cloud's fast tool model); the summary, `--json` (`mode`, `modeAsked`) and `.flow/last-session.json` (`mode`) say
+  which mode ran, and a quick session never counts toward test health or the CI view. `--thorough` is today's
+  behaviour and the default. `--changed` runs only the scenarios whose files changed since the last session, by file
+  hashes, and everything (with the reason) when the agent's code or prompt, a tool file, or the record to compare
+  with changed or is missing. The summary ends with where the runs' time went (the agent's model, tools, the person,
+  the judge, waits); `--timing` prints a row per run and `--json` has `timing`.
+
+### Migration notes
+
+None: every flag is new, and a session without them plays as before. Against a test cloud that does not know
+`mode`, `--quick` says so and the session counts as a full one.
+
 ## 0.19.0 (10 Nov 2026)
 
 ### Changes
