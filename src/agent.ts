@@ -1847,15 +1847,15 @@ function keywordIn(keywords: Keywords | undefined, message: string | Incoming): 
   return keywordOf(keywords, typeof message === "string" ? message : message.text);
 }
 
+/** A phone number in E.164 ("+919876543210"). */
+export const E164 = /^\+[1-9]\d{6,14}$/;
+
 /**
  * A phone number as one string however the channel gave it, in E.164: formatting dropped, a 00
  * prefix read as +, and digits with no + taken as international (WhatsApp gives "15550100100" for
  * "+1 555 010 0100"), or, given a `countryCode`, as that country's national number. "" when there
  * are no digits (not a phone number).
  */
-/** A phone number in E.164 ("+919876543210"). */
-export const E164 = /^\+[1-9]\d{6,14}$/;
-
 export function normalizePhone(address: string, countryCode?: string): string {
   const trimmed = address.trim();
   const digits = trimmed.replace(/^00/, "").replace(/\D/g, "");

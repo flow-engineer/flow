@@ -32,8 +32,8 @@ UI whose `info` declares them), worded for what it has.
 ## One person on several channels
 
 Who a person is comes from what a channel verified, never from what they or the model say. Their
-identities with the same key are one person in **one conversation**: the same number on WhatsApp,
-SMS and iMessage (`phone:+919876543210`), or the key your `resolve` gives (`key:<your id>`), and a
+identities with the same key are one person in **one conversation**: the same number on WhatsApp
+and SMS (`phone:+919876543210`), or the key your `resolve` gives (`key:<your id>`), and a
 signed-in web chat visitor's `sub`.
 
 A person can also have **several conversations under different keys** that share a verified phone
