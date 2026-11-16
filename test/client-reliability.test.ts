@@ -119,6 +119,57 @@ test("a tool call waits out the simulator's latency, then the POST budget, and a
   } finally { cloud.close(); }
 });
 
+test("a tool call lost on a reused socket is logged with that, and sent again on a new connection, not on another pooled one", { timeout: 10_000 }, async () => {
+  // The cloud answers a socket's first tool call and goes silent on any later one: a kept-alive connection the other end dropped without a word.
+  const served = new WeakMap<object, number>();
+  const toolCalls: number[] = [];
+  let finishStream: (() => void) | undefined;
+  const server = createServer((req, res) => {
+    const before = served.get(req.socket) ?? 0;
+    if (req.url!.endsWith("/tool-calls")) served.set(req.socket, before + 1);
+    req.resume();
+    req.on("end", () => {
+      if (req.url === "/api/sessions") return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ sessionId: "s", token: "t", missing: [], dashboard: "d", idempotency: true }));
+      if (req.url!.endsWith("/stream")) {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(frame(message("m1")));
+        finishStream = () => res.end(frame({ type: "finished", summary: { sessionId: "s", suiteHash: "h", testModel: "fake", runs: [], dashboard: "d" } }));
+        return;
+      }
+      if (req.url!.endsWith("/tool-calls")) {
+        toolCalls.push(before);
+        if (before > 0) return; // dropped: never answered
+        return void res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true,"output":1}');
+      }
+      res.writeHead(200, { "content-type": "application/json" }).end("{}");
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const logs: string[] = [];
+  const outputs: unknown[] = [];
+  try {
+    await runInCloud({
+      cloud: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, name: "test", log: (line) => logs.push(line), postTimeoutMs: 150,
+      tools: [{ name: "lookup", description: "look", input: z.object({}), run: async () => null }],
+      files: [{ path: "tools/lookup.yaml", hash: "h", content: "tool: lookup\nresponses:\n  - { when: ok, latency_ms: 0 }\n" }],
+      build: ({ tools }: { tools: Tool[] }) => ({
+        channels: () => [], reacted: () => {},
+        receive: () => {
+          const call = (id: string) => tools[0]!.run({}, { conversationId: "c", person: "p", key: null, channel: "sms", callId: id, idempotencyKey: id, signal: new AbortController().signal, records: unavailableRecords("a test") });
+          // Two calls together leave two sockets in the pool, then a third finds both of them dead.
+          void Promise.all([call("a"), call("b")]).then(() => call("c")).then((out) => { outputs.push(out); finishStream?.(); });
+          return "m";
+        },
+      }),
+    });
+  } finally { server.closeAllConnections(); server.close(); }
+  assert.deepEqual(outputs, [1]);
+  assert.deepEqual(toolCalls, [0, 0, 1, 0], "the try after the timeout was on a connection no tool call had used, not the other dead one in the pool");
+  const timedOut = logs.filter((line) => line.startsWith("tool call timed out"));
+  assert.equal(timedOut.length, 1);
+  assert.match(timedOut[0]!, /^tool call timed out after \d+ ms \(try 1, kept-alive socket reused, no byte received\) in c$/);
+});
+
 test("a tool call the cloud failed, which the agent started and never awaited, is that run's error and the session plays on", { timeout: 10_000 }, async () => {
   // An intercept that hands off with `void tool.run(...)` and answers at once: the cloud's
   // simulator_failed for that call used to crash the CLI as an unhandled rejection.

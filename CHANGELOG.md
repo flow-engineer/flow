@@ -2,6 +2,32 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.20.1 (17 Nov 2026)
+
+### Changes
+
+- **Model calls made together no longer queue behind each other on Node 26.** Since Node 26, its built-in `fetch`
+  speaks HTTP/2 to the model's host and sends a request with a body only after the ones before it on the
+  connection have finished, so an agent making several model calls at once waited for them one by one inside its
+  own process. Measured with 8 runs of `flow test` at once, a call's time before the first token rose from 1.1 s to
+  about 10 s (the model's own time per call was unchanged), and an agent's model time per run grew with the number of
+  runs at once. `openAICompatible` (and so `flowModel`) now sends its calls over HTTP/1.1 keep-alive connections,
+  one request per connection, so they run side by side again; a call is sent, streamed, retried and aborted as
+  before, and no redirect is followed. Affected: agents on Node 26 that make model calls in parallel, tests and
+  live traffic alike (several conversations at once, `flow test --concurrency`). An agent with one conversation at a time sees no difference. Other requests (traces, transcription) are unchanged. In a
+  `flow test` of examples/cafe with 8 runs at once the agent's model time per run fell from 16 to 116 s to 10 to
+  38 s and the session from 3 m 48 s to 2 m 29 s.
+- **A test-cloud request that times out says why.** When the test client's POST to the cloud (a tool call, an
+  event, a receipt) times out, it logs one line: whether it went out on a kept-alive socket another call had
+  used, when the first byte came if it did, the try's number and the elapsed ms, with the conversation it
+  belongs to. A try that failed on a reused socket is sent again on a new connection instead of on another
+  pooled one, and kept-alive POST sockets idle for 15 s are closed, so a call is not written to a connection a
+  load balancer dropped without a word.
+
+### Migration notes
+
+None.
+
 ## 0.20.0 (16 Nov 2026)
 
 ### Changes

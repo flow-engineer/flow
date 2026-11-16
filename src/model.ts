@@ -6,6 +6,9 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
+import * as http from "node:http";
+import * as https from "node:https";
+import { Readable } from "node:stream";
 import OpenAI from "openai";
 import { setting } from "./names.ts";
 import type { ChatMessage, DescribeVideo, Model, ModelRequest, ModelResponse } from "./types.ts";
@@ -118,7 +121,7 @@ export function openAICompatible(options: OpenAICompatibleOptions = {}): Model {
       const attempts = timings.getStore();
       const started = Date.now();
       attempts?.starts.push(started);
-      const response = await fetch(url, init);
+      const response = await http1Fetch(url, init);
       if (attempts) attempts.flowQueueMs = serverTimingMs(response.headers.get("server-timing"), FLOW_QUEUE);
       return response;
     },
@@ -159,6 +162,47 @@ export function openAICompatible(options: OpenAICompatibleOptions = {}): Model {
       }
     },
   };
+}
+
+/**
+ * Model calls go over HTTP/1.1 on keep-alive connections, one request per connection, never Node's
+ * built-in fetch. Since Node 26 (undici 8) that fetch speaks HTTP/2 to the model's host (Flow's, OpenRouter's) and,
+ * because it hands undici every request body as a stream, sends a request only after the ones before it on
+ * the connection have finished. An agent playing several conversations at once then sees its model calls
+ * queue behind each other: measured with 8 runs of `flow test` at once, a call's time before the first token
+ * rose from 1.1 s to 10 s although the model's own time per call stayed the same (src/model.ts's `timing`
+ * showed it as queued). Over HTTP/1.1 each call in flight has its own connection and they run side by side.
+ * Takes what the OpenAI client sends (a string or bytes body); anything else, or a URL that is not
+ * http(s), goes to fetch. No redirect is followed: a key goes only to the address it was given.
+ */
+const http1Agents = { "https:": new https.Agent({ keepAlive: true }), "http:": new http.Agent({ keepAlive: true }) };
+
+function http1Fetch(input: Parameters<typeof fetch>[0], init: RequestInit = {}): Promise<Response> {
+  const body = init.body;
+  const target = typeof input === "string" || input instanceof URL ? URL.parse(String(input)) : null;
+  const agent = target ? http1Agents[target.protocol as keyof typeof http1Agents] : undefined;
+  if (!target || !agent || (body != null && typeof body !== "string" && !(body instanceof Uint8Array))) return fetch(input, init);
+  return new Promise<Response>((resolve, reject) => {
+    const signal = init.signal ?? undefined;
+    if (signal?.aborted) return reject(signal.reason);
+    const headers: Record<string, string> = {};
+    new Headers(init.headers).forEach((value, name) => { headers[name] = value; });
+    headers["accept-encoding"] = "identity";
+    if (body != null) headers["content-length"] = String(Buffer.byteLength(body));
+    const request = (target.protocol === "https:" ? https : http).request(target, { method: init.method ?? "GET", headers, agent }, (res) => {
+      signal?.removeEventListener("abort", onAbort);
+      // A body-less status carries no body; a streamed one is read as it arrives, an abort later ends the stream with the signal's reason.
+      const answer = new Response([101, 103, 204, 205, 304].includes(res.statusCode ?? 0) ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>), {
+        status: res.statusCode, statusText: res.statusMessage, headers: Object.entries(res.headers).flatMap(([name, value]) => (value === undefined ? [] : [[name, Array.isArray(value) ? value.join(", ") : value] as [string, string]])),
+      });
+      if (signal) signal.addEventListener("abort", () => res.destroy(signal.reason as Error), { once: true });
+      resolve(answer);
+    });
+    const onAbort = () => request.destroy(signal!.reason as Error);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    request.on("error", reject);
+    request.end(body);
+  });
 }
 
 /** One call's attempts: when each began, and the time Flow's answer to the last one said it waited. */
