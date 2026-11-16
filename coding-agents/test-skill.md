@@ -232,7 +232,7 @@ connects out to the cloud, which plays the person and the tools and judges.
 1. Have a test cloud: the hosted one at https://flow.engineer/observe, the default (see "Get a test
    cloud" below), or another with `--cloud <url>` or `FLOW_FRAMEWORK_CLOUD`.
 2. From the agent's folder (it must export `buildAgent` and `tools` from `src/agent.ts`), which reads
-   the agent's `.env` itself: `npx @flow-engineer/flow test --synthetic [--runs 3]` (`npm test -- --synthetic`
+   the agent's `.env` itself: `npx @flow-engineer/flow test --no-customer-data [--runs 3]` (`npm test -- --no-customer-data`
    in an agent `flow new` made).
 3. It first reads every test file as the cloud does; a mistake stops it with
    `tests/scenarios/<file>.yaml:<line>: <field>: <what is wrong>`, one line each, and nothing is sent.
@@ -265,7 +265,7 @@ connects out to the cloud, which plays the person and the tools and judges.
    reads `FLAKY` with `played again: passed <watch>`, and the summary lists it in its own section with
    both watch links); `label` is `flaky` or `failing` (failed twice) and `rerun` is the second play
    (`runId`, `passed`, `watch`), never a run of its own. A flaky run counts as passed unless
-   `--strict`; `counts.flaky` counts them, and `counts.failed` leaves them out unless `--strict`. Read
+   `--fail-on-flaky`; `counts.flaky` counts them, and `counts.failed` leaves them out unless `--fail-on-flaky`. Read
    a flaky run like a failure that is not certain: look at it with `flow show`, and fix the agent or
    the test when the failed play shows a real problem.
    Each run's `outcome` is `passed`, `failed`, `credit` (the workspace's test budget, `spend_cap`, or the
@@ -277,7 +277,7 @@ connects out to the cloud, which plays the person and the tools and judges.
    failed); a flaky scenario is a real problem that shows only sometimes. `sendPath` names a
    conversation whose messages did not all go through the agent's send (a channel wrapper or the app's
    own code sent one the agent never did): the session fails; send every message through the agent.
-   Pass rate: the runs that passed (flaky ones too, unless `--strict`) over those that passed, failed
+   Pass rate: the runs that passed (flaky ones too, unless `--fail-on-flaky`) over those that passed, failed
    or were flaky, as the dashboard counts it; errored and unplayed runs are left out. The summary
    prints it with the dashboard's word (`Pass rate 99.2% · Good: 141 of 142 counted runs passed.
    Passes at 98% or more (--min-pass).`), and `--json` has `passRate` (cut to one decimal, never
@@ -298,14 +298,14 @@ connects out to the cloud, which plays the person and the tools and judges.
 
 Work in this loop, and never finish on a partial run:
 
-1. `npx @flow-engineer/flow test --synthetic`: the whole suite.
+1. `npx @flow-engineer/flow test --no-customer-data`: the whole suite.
 2. Fix what failed (the agent, or a test that asks for the wrong thing; say which).
-3. `npx @flow-engineer/flow test --synthetic --failed`, again until every run in it passes (exit 0).
-4. `npx @flow-engineer/flow test --synthetic`: the whole suite once more, since a fix can break another scenario.
+3. `npx @flow-engineer/flow test --no-customer-data --failed`, again until every run in it passes (exit 0).
+4. `npx @flow-engineer/flow test --no-customer-data`: the whole suite once more, since a fix can break another scenario.
 
 ### When a run fails
 
-1. `npx @flow-engineer/flow test --synthetic --json > report.json`, and read the runs whose `verdict` is not
+1. `npx @flow-engineer/flow test --no-customer-data --json > report.json`, and read the runs whose `verdict` is not
    `passed` (`jq '.runs[] | select(.verdict != "passed")' report.json`).
 2. `npx @flow-engineer/flow show last` (the first run that did not pass; it names the others),
    `npx @flow-engineer/flow show last --scenario <id>` (that scenario's run; its id or file name) or
@@ -319,7 +319,7 @@ Work in this loop, and never finish on a partial run:
    - the simulator: a tool output that could not happen (a `response:` that does not fit the call is
      a sign), or a person who left the scenario; fix `tests/tools/*.yaml`, or the scenario's
      `world` and `person`.
-4. `npx @flow-engineer/flow test --synthetic --failed` until it passes with nothing flaky. With the
+4. `npx @flow-engineer/flow test --no-customer-data --failed` until it passes with nothing flaky. With the
    cloud's second plays, `--runs 3 --only <scenario>` is rarely needed.
 5. The whole suite once more.
 
@@ -331,9 +331,9 @@ The owner does these; never ask for the key in chat or print it:
 2. Workspace → New agent.
 3. On the agent's Developers page, "Make a CI key". It starts with `oci_` and is shown once.
 4. Put it in the agent's `.env` as `FLOW_FRAMEWORK_CLOUD_KEY` (never on the command line).
-5. `npx @flow-engineer/flow test --cloud https://flow.engineer/observe --synthetic` from the agent's folder (`--cloud` is that address by default).
+5. `npx @flow-engineer/flow test --cloud https://flow.engineer/observe --no-customer-data` from the agent's folder (`--cloud` is that address by default).
 
-Your agent runs on your machine with your own model key. When it reaches Flow's model gateway (FLOW_KEY), each model and transcription call carries the session's id, and on a Pro workspace Flow counts those calls as free test spend whatever the key's mode (test or live), once the test cloud confirms the session; an unconfirmed session is charged normally. An `--agent-url` agent makes its calls in its own process, without the id, so they are charged as usual. The cloud's person simulator, tool simulator and judge are free within the workspace's limits: runs at once per session, sessions at once and a daily test budget. They depend on the workspace; `flow test` prints them on one line when a session opens (`--json` reports them as `limits`); test data only (`--synthetic`), and records are deleted after 30 days. `--synthetic` is the promise that the test files hold no real customer or member data;
+Your agent runs on your machine with your own model key. When it reaches Flow's model gateway (FLOW_KEY), each model and transcription call carries the session's id, and on a Pro workspace Flow counts those calls as free test spend whatever the key's mode (test or live), once the test cloud confirms the session; an unconfirmed session is charged normally. An `--agent-url` agent makes its calls in its own process, without the id, so they are charged as usual. The cloud's person simulator, tool simulator and judge are free within the workspace's limits: runs at once per session, sessions at once and a daily test budget. They depend on the workspace; `flow test` prints them on one line when a session opens (`--json` reports them as `limits`); test data only (`--no-customer-data`), and records are deleted after 30 days. `--no-customer-data` is the promise that the test files hold no real customer or member data;
 the CLI refuses a hosted cloud without it and the key. `--environment staging` or `production` is
 kept with the session.
 
@@ -345,7 +345,7 @@ branch; the repository's default branch goes beside it) are kept with the sessio
 in `--json` and `.flow/last-session.json` as `agentVersion`. A CI step (GitHub Actions shown):
 
 ```yaml
-- run: npx @flow-engineer/flow test --cloud https://flow.engineer/observe --synthetic --environment staging
+- run: npx @flow-engineer/flow test --cloud https://flow.engineer/observe --no-customer-data --environment staging
   env:
     FLOW_FRAMEWORK_CLOUD_KEY: ${{ secrets.FLOW_FRAMEWORK_CLOUD_KEY }}
     OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

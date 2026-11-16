@@ -64,7 +64,7 @@ FLOW_KEY=
 # Optional. The model id for that provider; empty is that provider's default.
 # MODEL=
 
-# The test cloud (npx @flow-engineer/flow test --synthetic) and traces. npx @flow-engineer/flow setup
+# The test cloud (npx @flow-engineer/flow test --no-customer-data) and traces. npx @flow-engineer/flow setup
 # writes both keys; or sign in at https://flow.engineer/dashboard, open the agent, and on its
 # Developers page make a CI key (oci_..., shown once); the trace key is from the same page. The two
 # addresses below are the cloud's API, not pages to open.
@@ -107,7 +107,7 @@ MCP server and a CLI. It starts as the café example; replace the café with the
 - When the owner asks how to test it, recommend first the playground (\`npm start\`, then open the link
   it prints: the test people and the channels side by side), then their phone (the \`link\`).
 - Your own checks, not the owner's way to test: \`npx @flow-engineer/flow chat\` talks to it in the
-  terminal, \`npm run typecheck\` checks the types, \`npm test -- --synthetic\` runs the tests in the
+  terminal, \`npm run typecheck\` checks the types, \`npm test -- --no-customer-data\` runs the tests in the
   test cloud at https://flow.engineer/observe with the owner's \`FLOW_FRAMEWORK_CLOUD_KEY\`
   (\`npx @flow-engineer/flow --help\`).
 - The guide for coding agents, with exit codes and next steps: https://github.com/flow-engineer/flow/blob/main/docs/agents.md

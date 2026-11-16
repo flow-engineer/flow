@@ -86,7 +86,7 @@ For a messaging agent, recommend these, in this order:
    each with `Join <displayName> (ref <code>)` filled in (`join_message`). `page` is the same on
    flow.engineer, for a computer without that app.
 
-`flow chat` and `npm test -- --synthetic` (the test cloud) are for you, to check your own work
+`flow chat` and `npm test -- --no-customer-data` (the test cloud) are for you, to check your own work
 before you hand it back; run them yourself, and do not offer them to the owner as ways to test.
 
 - The model key: a provider key is optional. `setup` (which `link` runs; alone it needs `login`

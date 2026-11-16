@@ -440,13 +440,13 @@ npx @flow-engineer/flow link --channel telegram --json   # or whatsapp, imessage
 npm start                                    # after link: its playground link, and the owner texts it while it runs (PORT, else 8788 or the next free port)
 npx @flow-engineer/flow status --json        # what the folder has and lacks, at any time
 printf 'hi\nA latte please\n' | npx @flow-engineer/flow chat   # your own check: one message per line, replies printed
-npx @flow-engineer/flow test --synthetic     # your own check: the tests, on the key setup wrote
+npx @flow-engineer/flow test --no-customer-data     # your own check: the tests, on the key setup wrote
 npx @flow-engineer/flow deploy --json        # when the owner wants it hosted: staging on Flow's cloud (see "Deploy it")
 ```
 
 When the owner asks how to test it, recommend first the playground (`npm start`, then open the
 link it prints: the test people and the channels side by side, with Debug), then their phone (the
-`link`, while `npm start` runs). `chat` and `test --synthetic` are for you to check your own work;
+`link`, while `npm start` runs). `chat` and `test --no-customer-data` are for you to check your own work;
 do not offer them to the owner as ways to test.
 
 `link` runs `login` first when not signed in: it opens the owner's browser itself and prints the
@@ -582,7 +582,7 @@ printf 'Authorization: Bearer %s\n' "$FLOW_KEY" | curl --fail-with-body -sS --re
 ```
 
 `staging` in both places for a staging deploy. `FLOW_KEY` is the project's Flow key, from the CI's
-secrets. To compare two versions offline, check out each commit and run `flow test --synthetic --json > <commit>.json`
+secrets. To compare two versions offline, check out each commit and run `flow test --no-customer-data --json > <commit>.json`
 (the session keeps that commit as `agentVersion`; `.flow/last-session.json` is overwritten by the next run, so
 copy it aside), then compare the runs; a running agent says its version in `agent.status().version` and in
 its start log line, `flow: agent version <v> (from <where>)`.

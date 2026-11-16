@@ -4,9 +4,9 @@
 // agent in this folder from the terminal (testing/src/chat.ts), and `flow records export` prints
 // its records (testing/src/records.ts). `flow test`, or `flow` with flags, runs an agent's tests in the cloud,
 // from the agent's folder:
-//   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--strict] [--min-pass 98] [--json]
+//   flow test [--cloud https://flow.engineer/observe] [--runs 3] [--only late-order,refund | --failed] [--fail-on-flaky] [--min-pass 98] [--json]
 // A hosted cloud (any --cloud off this machine, the default included) needs the
-// agent's CI key in FLOW_FRAMEWORK_CLOUD_KEY and --synthetic, the attestation that the test files hold no real
+// agent's CI key in FLOW_FRAMEWORK_CLOUD_KEY and --no-customer-data, the attestation that the test files hold no real
 // customer or member data. --agent-version (else the agent's version, as its traces carry it:
 // src/traces.ts agentVersion), --ref (else the CI's branch, else the folder's git branch; with the
 // repository's default branch beside it) and --environment (staging or production) are kept with
@@ -105,7 +105,7 @@ const TEST_OPTIONS = `Options for test:
   --failed                 Only the scenarios that failed, were flaky, errored or never played in
                            the last session (.flow/last-session.json), on every channel each plays.
                            Goes with --runs, not with --only
-  --strict                 Count a flaky run (failed, then passed when the cloud played it again)
+  --fail-on-flaky          Count a flaky run (failed, then passed when the cloud played it again)
                            as failed, also in the pass rate
   --concurrency <runs>     Play this many runs at once, 1 to 160 (default: 8). The cloud plays fewer
                            when the workspace has fewer test sessions free, and says so
@@ -115,7 +115,7 @@ const TEST_OPTIONS = `Options for test:
   --no-retry               Do not play a failed run once more: no run is labelled flaky or failing
   --min-pass <percent>     The pass rate the session needs, 0 to 100 with at most one decimal
                            (default: FLOW_TEST_MIN_PASS, else 98); 100 fails on any failed run
-  --synthetic              Attest the test files hold no real customer data (a hosted cloud needs it)
+  --no-customer-data       Attest the test files hold no real customer data (a hosted cloud needs it)
   --json                   Print one JSON report on stdout when it ends, whatever the exit; every
                            other line goes to stderr
   --dotenv <path>          Read the environment from this file instead of the folder's .env
@@ -125,7 +125,7 @@ const TEST_OPTIONS = `Options for test:
                            commit, or package.json's version)
   --ref <ref>              Kept with the session (default: the CI's branch, else the folder's git
                            branch), with the repository's default branch when git knows it
-  --env <name>             staging or production, kept with the session; --environment works too
+  --environment <name>     staging or production, kept with the session
   --agent-url <url>        Test an agent you already have, on any framework, through its HTTP
                            endpoint (it may be http://localhost): each message is a POST to it from
                            this machine, and no src/agent.ts is loaded
@@ -143,7 +143,7 @@ A suite with more runs than that plays them in turn, so its time grows with the 
 
 Flaky runs: the cloud plays a run that failed once more. When the second play passes, the run is
 flaky ("FLAKY" on its line, and its own section in the summary with both watch links); when it fails
-too, the run failed. A flaky run counts as passed unless --strict.
+too, the run failed. A flaky run counts as passed unless --fail-on-flaky.
 
 Outcomes: each run passed, failed, stopped for credit (the workspace's daily test budget, or the
 agent's model refused for credit: CREDIT on its line) or hit an infrastructure error (the cloud
@@ -151,7 +151,7 @@ could not play or judge it: ERROR). Credit and infrastructure runs are counted a
 failures, and are left out of the pass rate. A message that reached the cloud without the agent's
 send (or one the agent says it sent that never arrived) is a second send path: the session fails.
 
-Pass rate: the runs that passed (flaky ones too, unless --strict) over those that passed, failed or
+Pass rate: the runs that passed (flaky ones too, unless --fail-on-flaky) over those that passed, failed or
 were flaky, as the dashboard counts it; errored and unplayed runs are left out. Cut to one decimal,
 never rounded up, it has the dashboard's word: 100% Excellent, 98% Good, 95% Fair, 90% Needs work,
 else Poor.
@@ -273,6 +273,8 @@ const TEST_FLAGS = {
   /** Only the scenarios that did not pass in .flow/last-session.json. */
   failed: { type: "boolean", default: false },
   /** A flaky run counts as failed. */
+  "fail-on-flaky": { type: "boolean", default: false },
+  /** --fail-on-flaky's earlier name, still taken (CI scripts use it); not in the help. */
   strict: { type: "boolean", default: false },
   /** The pass rate the session needs, in percent; else FLOW_TEST_MIN_PASS, else 98. */
   "min-pass": { type: "string" },
@@ -284,6 +286,8 @@ const TEST_FLAGS = {
   "no-retry": { type: "boolean", default: false },
   /** Deprecated in 0.16.1: still taken, does nothing, and says so (FRESH_IGNORED). */
   fresh: { type: "boolean", default: false },
+  "no-customer-data": { type: "boolean", default: false },
+  /** --no-customer-data's earlier name, still taken; not in the help. */
   synthetic: { type: "boolean", default: false },
   json: { type: "boolean", default: false },
   dotenv: { type: "string" },
@@ -291,7 +295,7 @@ const TEST_FLAGS = {
   "agent-version": { type: "string" },
   ref: { type: "string" },
   environment: { type: "string" },
-  /** --environment's other spelling, as the other cloud commands take it. */
+  /** --environment's other spelling (earlier documented name), as the other cloud commands take it; not in the help. */
   env: { type: "string" },
   "agent-url": { type: "string" },
   channel: { type: "string" },
@@ -307,6 +311,9 @@ if (values.env !== undefined && values.environment !== undefined && values.env !
   await exitFlushed(1);
 }
 values.environment ??= values.env;
+// The earlier names of two flags are the same flags; every later line reads the new ones.
+values["fail-on-flaky"] ||= values.strict;
+values["no-customer-data"] ||= values.synthetic;
 
 if (values.version) {
   console.log(JSON.parse(readFileSync(join(packageRoot(), "package.json"), "utf8")).version);
@@ -412,7 +419,7 @@ try {
   openHeaders = cloudHeaders({
     cloud,
     ciKey,
-    synthetic: values.synthetic!,
+    synthetic: values["no-customer-data"]!,
     agentVersion: version,
     ref: values.ref || gitBranch(),
     defaultBranch: gitDefaultBranch(),
@@ -579,13 +586,13 @@ const infraLine = infra ? ` ${infra} hit an infrastructure error (the cloud coul
 const tokens = (n: number) => n.toLocaleString("en-US");
 const notReplayed = values["no-retry"] && failedRuns ? " Failed runs were not played again (--no-retry), so none is told apart as flaky or failing: a failure here may be noise." : "";
 say(`\n${passed} of ${played.length} runs passed.${flakyLine}${failedLine}${creditLine}${infraLine}${notReplayed} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
-const rate = passRate(mergedRuns(summary.runs), values.strict);
+const rate = passRate(mergedRuns(summary.runs), values["fail-on-flaky"]);
 if (rate.tenths !== null) say(rateSummary(rate));
 if (credit.length) say(`Credit: ${creditReason(credit[0]!)}`);
-// Each channel counted as the pass rate is: flaky runs as passed (as failed with --strict), credit and infrastructure runs apart.
+// Each channel counted as the pass rate is: flaky runs as passed (as failed with --fail-on-flaky), credit and infrastructure runs apart.
 for (const channel of [...new Set(played.map((r) => r.channel))]) {
   const runs = mergedRuns(summary.runs).filter((m) => m.channel === channel);
-  const r = passRate(runs, values.strict);
+  const r = passRate(runs, values["fail-on-flaky"]);
   const apart = runs.filter((m) => m.verdict !== "passed" && m.verdict !== "failed" && m.verdict !== "flaky").length;
   say(`  ${channel}: ${r.passed} of ${r.counted} counted runs passed${r.flaky ? ` (${r.flaky} flaky)` : ""}${apart ? `; ${apart} not counted` : ""}`);
 }
@@ -597,7 +604,7 @@ if (perScenario > 1 || rates.some((r) => r.label === "flaky")) {
 }
 const flaky = played.filter((r) => runVerdict(r) === "flaky");
 if (flaky.length) {
-  say(`${flaky.length} flaky (failed once, passed when played again)${values.strict ? ", counted as failed (--strict)" : ""}:`);
+  say(`${flaky.length} flaky (failed once, passed when played again)${values["fail-on-flaky"] ? ", counted as failed (--fail-on-flaky)" : ""}:`);
   for (const r of flaky) say(`  ${r.scenario} #${r.run} (${r.channel}): ${r.watch}${r.rerun ? ` then ${r.rerun.watch}` : ""}`);
 }
 for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m) => ({ scenario: m.scenario, invalid: m.summary?.invalid }))))) say(line);
@@ -617,7 +624,7 @@ for (const line of await templateWarnings(declaredTemplates, cloud, templateKey)
 sessionId = summary.sessionId || sessionId;
 dashboard = summary.dashboard || dashboard;
 saveSession("finished", summary.runs, dashboard, say);
-end(sendPath.length ? "failed" : finishedOutcome(mergedRuns(summary.runs), values.strict, minPass), { received: summary.runs });
+end(sendPath.length ? "failed" : finishedOutcome(mergedRuns(summary.runs), values["fail-on-flaky"], minPass), { received: summary.runs });
 
 /** A percent in tenths as it is printed: 98, 99.2. */
 function percent(tenths: number): number {
@@ -627,7 +634,7 @@ function percent(tenths: number): number {
 /** "Pass rate 99.2% · Good: 141 of 142 counted runs passed. Passes at 98% or more (--min-pass)." */
 function rateSummary(rate: ReturnType<typeof passRate>): string {
   const words = { excellent: "Excellent", good: "Good", fair: "Fair", needs_work: "Needs work", poor: "Poor" };
-  const flaky = rate.flaky ? ` (${rate.flaky} flaky counted as ${values.strict ? "failed: --strict" : "passed"})` : "";
+  const flaky = rate.flaky ? ` (${rate.flaky} flaky counted as ${values["fail-on-flaky"] ? "failed: --fail-on-flaky" : "passed"})` : "";
   const under = rate.passed * 1000 < minPass * rate.counted;
   const rule = under ? `Under ${percent(minPass)}% (--min-pass): the session failed.` : `Passes at ${percent(minPass)}% or more (--min-pass).`;
   return `Pass rate ${percent(rate.tenths!)}% · ${words[rate.level!]}: ${rate.passed} of ${rate.counted} counted runs passed${flaky}. ${rule}`;
@@ -769,7 +776,7 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       label: m.summary?.label ?? null,
     })) : [];
     const count = (verdict: Verdict) => runs.filter((r) => r.verdict === verdict).length;
-    const rate = passRate(runs, values.strict);
+    const rate = passRate(runs, values["fail-on-flaky"]);
     const cost = (pick: (r: RunSummary) => number) => received.reduce((n, r) => n + pick(r), 0);
     const report: JsonReport = {
       version: 1,
@@ -782,12 +789,12 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       suiteHash: files.length ? suiteHash(files) : null,
       error: options.error ?? null,
       counts: {
-        runs: runs.length, passed: count("passed"), failed: count("failed") + (values.strict ? count("flaky") : 0), flaky: count("flaky"), errored: count("errored"), notPlayed: count("not_played"),
+        runs: runs.length, passed: count("passed"), failed: count("failed") + (values["fail-on-flaky"] ? count("flaky") : 0), flaky: count("flaky"), errored: count("errored"), notPlayed: count("not_played"),
         credit: runs.filter((r) => r.outcome === "credit").length, infra: runs.filter((r) => r.outcome === "infra").length,
       },
       scenarios: sessionId ? scenarioRates(mergedRuns(received).map((m) => ({ ...m, scenario: m.id }))) : [],
       sendPath,
-      strict: values.strict,
+      strict: values["fail-on-flaky"],
       passRate: rate.tenths === null ? null : percent(rate.tenths),
       level: rate.level,
       minPass: percent(minPass),

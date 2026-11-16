@@ -40,7 +40,7 @@ node ../../testing/src/cli.ts check-endpoint http://localhost:3000/flow         
 From this folder:
 
 ```bash
-npx @flow-engineer/flow test --agent-url http://localhost:3000/flow --synthetic
+npx @flow-engineer/flow test --agent-url http://localhost:3000/flow --no-customer-data
 ```
 
 A hosted test cloud needs its key in `FLOW_FRAMEWORK_CLOUD_KEY`. The agent's tools run here for real, so
