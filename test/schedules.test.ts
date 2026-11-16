@@ -153,6 +153,8 @@ test("a repeat ends after its number of runs, or at its until date", async () =>
 test("the agent is told the time each turn: theirs once the business sets their zone, else the business's, saying theirs is unknown", async () => {
   const h = await withSam();
   assert.match(h.calls[0].request.system, /It is now Mon 12 Oct 2026 12:00 \(New York time\), the business's time\. Their time zone is not known/);
+  const { system, stableSystem } = h.calls[0].request;
+  assert.ok(stableSystem && system.startsWith(stableSystem) && !stableSystem.includes("It is now"), "the clock comes after the part a model may cache");
   assert.deepEqual(await h.agent.setTimeZone({ to: { channel: "sms", address: SAM }, timeZone: "Asia/Kolkata" }), { status: "set" });
   assert.deepEqual(await h.agent.setTimeZone({ to: { channel: "sms", address: "+15550100999" }, timeZone: "Asia/Kolkata" }), { status: "refused", reason: "unknown_person" });
   await assert.rejects(h.agent.setTimeZone({ to: { channel: "sms", address: SAM }, timeZone: "Mars/Olympus" }), /not a time zone/);

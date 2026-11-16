@@ -59,6 +59,11 @@ export interface ToolSpec {
 
 export interface ModelRequest {
   system: string;
+  /**
+   * The leading part of `system` that stays the same from call to call (the instructions and rules,
+   * not the clock). A model that caches prompts caches up to its end; `system` always starts with it.
+   */
+  stableSystem?: string;
   messages: ChatMessage[];
   tools: ToolSpec[];
   /** Aborted when the step is no longer wanted (the person sent another message). */
@@ -69,8 +74,18 @@ export interface ModelResponse {
   /** Text outside any tool call. Never shown to the person; kept in history as the agent's note. */
   text: string | null;
   toolCalls: ToolCall[];
-  /** costUsd when the provider reports it (OpenRouter does). */
-  usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
+  /**
+   * costUsd when the provider reports it (OpenRouter does). cacheReadTokens and cacheWriteTokens are
+   * the input tokens read from and written to the provider's prompt cache (inputTokens counts both);
+   * left out when the provider does not report them, so 0 means "reported, none was cached".
+   */
+  usage?: { inputTokens: number; outputTokens: number; costUsd?: number; cacheReadTokens?: number; cacheWriteTokens?: number };
+  /**
+   * Where the call's time went, in ms, when the model can tell: `queuedMs` before the provider began
+   * (Flow's queue and any retry), `ttftMs` from then to the first token, `generationMs` from the
+   * first token to the last. Left out by a model that does not stream.
+   */
+  timing?: { queuedMs: number; ttftMs: number; generationMs: number };
   /** The model that answered, as the provider names it. */
   model?: string;
 }
