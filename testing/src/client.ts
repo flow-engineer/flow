@@ -31,6 +31,12 @@ export interface ConnectOptions {
   /** The tests folder: files a scenario attaches are read from here; they never leave this machine. */
   testsDir?: string;
   runs?: number;
+  /** Runs to play at once, 1 to 160 (OpenSession.concurrency). Default: not asked, the cloud's own 8. */
+  concurrency?: number;
+  /** End a run once a check that cannot change has failed (OpenSession.failFastRun). Default: off. */
+  failFastRun?: boolean;
+  /** Ask the cloud to play a failed run once more and label it flaky or failing. Default: true; false asks for none. */
+  replay?: boolean;
   log?: (line: string) => void;
   /** Headers for the open only (cloudHeaders: the CI key and the attestation); never sent to the tunnel. */
   openHeaders?: Record<string, string>;
@@ -499,7 +505,9 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     groups: true,
     ...(canBusiness ? { business: true } : {}),
     ...(typeof agent.seedHistory === "function" ? { history: true } : {}),
-    flaky: true,
+    ...(options.replay === false ? {} : { flaky: true }),
+    ...(options.concurrency !== undefined ? { concurrency: options.concurrency } : {}),
+    ...(options.failFastRun ? { failFastRun: true } : {}),
     ...(only ? { only } : {}),
   };
   const opened = await openOnce(`${base}/api/sessions`, open, options.openHeaders, controller.signal, postTimeoutMs, openRetryCapMs, log);
@@ -519,6 +527,13 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     });
   }
   log(`Session ${opened.sessionId}: suite ${suiteHash(options.files).slice(0, 12)}, ${options.files.length} files (${uploads.length === options.files.length ? "all new to the cloud" : uploads.length ? `${uploads.length} new to the cloud, the rest it already had` : "the cloud already had them all"}).`);
+  // An option an older cloud does not know is ignored by it; say so instead of leaving the owner to wonder.
+  if (options.failFastRun && opened.failFastRun !== true) log("This cloud does not end runs early (--stop-failed-runs): every run plays to its end.");
+  if (options.concurrency !== undefined && opened.concurrency === undefined) log("This cloud does not take --concurrency: it plays its own number of runs at once.");
+  else if (options.concurrency !== undefined && opened.concurrency !== undefined && opened.concurrency < options.concurrency) {
+    const free = Math.ceil(opened.concurrency / 8);
+    log(`Playing ${opened.concurrency} runs at once, not ${options.concurrency}: this workspace has ${free} test session${free === 1 ? "" : "s"} free.`);
+  }
   const limits = sessionLimits(opened.limits);
   if (limits) {
     const line = limitsLine(limits);

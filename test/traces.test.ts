@@ -325,6 +325,54 @@ test("a traces endpoint that cannot be reached is logged once, saying how many t
   assert.match(warnings[0], /traces could not reach the traces endpoint \(\w+\); 1 turn's traces were not sent, the agent's replies do not wait on traces; later failures of this kind are not logged/);
 });
 
+test("an endpoint that never answers holds up no turn: replies are sent and the conversation goes idle while its request is still open", async () => {
+  // The request is held open by a gate (no sleeps): the turns below all finish before it is released.
+  const release = gate();
+  const seen: string[] = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url ?? "");
+    req.resume();
+    void release.promise.then(() => res.writeHead(200, { "content-type": "application/json" }).end("{}"));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const h = agentFor(url, true);
+  try {
+    for (const offset of [0, 2, 4]) {
+      const sent = await h.agent.message({ channel: "sms", from: "+15550100123", message: "Can I move my check-in to Thursday?", messageId: `SM-${offset}` });
+      (await h.nextCall(offset)).answer(respond(call("send_sms", { text: "One sec" }), call("lookup", { day: "thursday" })));
+      (await h.nextCall(offset + 1)).answer(respond(call("send_sms", { text: "Done: Thursday at 10:00." })));
+      await h.agent.conversation(sent!.conversationId)!.whenIdle();
+    }
+    assert.equal(h.sent.length, 6, "every reply went out while the traces request was still open");
+    assert.ok(seen.length >= 1, "the traces were sent, and are still waiting for an answer");
+  } finally {
+    release.open();
+    await h.agent.flushTraces();
+    server.close();
+  }
+});
+
+test("a refused traces request says why in the endpoint's own words, once, and never shows the key", async (t) => {
+  const warnings: string[] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => void warnings.push(args.map(String).join(" ")));
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => res.writeHead(401, { "content-type": "application/json" }).end(JSON.stringify({ code: 16, message: "the key is unknown or revoked. A key is known only to the dashboard that made it" })));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const h = agentFor(`http://127.0.0.1:${(server.address() as { port: number }).port}`, true);
+  try {
+    await playTurn(h, "+15550100123");
+    await h.agent.flushTraces();
+    await playTurn(h, "+15550100123", 2);
+    await h.agent.flushTraces();
+  } finally { server.close(); }
+  assert.equal(warnings.length, 1, warnings.join("\n"));
+  assert.match(warnings[0], /refused traces \(HTTP 401: the key is unknown or revoked\. A key is known only to the dashboard that made it\)/);
+  assert.doesNotMatch(warnings[0], new RegExp(KEY));
+});
+
 test("a channel the agent does not define (the test cloud's, through receive()) is traced as the platform its messages came with, not other", async () => {
   const endpoint = await fakeEndpoint();
   try {

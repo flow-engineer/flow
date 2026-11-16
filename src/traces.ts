@@ -365,7 +365,13 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
       const answer = await response.text();
-      if (!response.ok) return warnOnce(`http ${response.status}`, `the traces endpoint refused traces (HTTP ${response.status})`);
+      if (!response.ok) {
+        // The endpoint says why in its answer's message ("the key is unknown or revoked", "this FLOW_KEY's agent is not set up"):
+        // shown, so a refusal that lasts a whole session names what to fix. It is Flow's own text, never the key.
+        const why = parseJson(answer)?.message;
+        const said = typeof why === "string" && why.trim() ? `: ${why.trim().slice(0, 300)}` : "";
+        return warnOnce(`http ${response.status}`, `the traces endpoint refused traces (HTTP ${response.status}${said})`);
+      }
       const rejected = Number(parseJson(answer)?.partialSuccess?.rejectedSpans ?? 0);
       if (rejected > 0) warnOnce("partial", `the traces endpoint rejected ${rejected} span(s) of a trace`);
     } catch (error) {
@@ -438,12 +444,13 @@ export function traces(options: TracesOptions, agent: TracedAgent): Traces {
       case "model.call": {
         if (!turn) return;
         const ms = Number(e.ms ?? 0);
-        const usage = e.usage as { inputTokens?: number; outputTokens?: number } | undefined;
+        const usage = e.usage as { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number } | undefined;
         const model = typeof e.model === "string" ? e.model : undefined;
         const attributes = [attr("gen_ai.operation.name", "chat")];
         if (model) attributes.push(attr("gen_ai.response.model", model));
         if (usage?.inputTokens !== undefined) attributes.push(attr("gen_ai.usage.input_tokens", usage.inputTokens));
         if (usage?.outputTokens !== undefined) attributes.push(attr("gen_ai.usage.output_tokens", usage.outputTokens));
+        if (usage?.cacheReadTokens !== undefined) attributes.push(attr("gen_ai.usage.cache_read.input_tokens", usage.cacheReadTokens));
         turn.spans.push(child(turn, model ? `chat ${model}` : "chat", e.at - ms, e.at, attributes));
         return;
       }
