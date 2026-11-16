@@ -2,28 +2,57 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## Unreleased
+## 0.20.0 (16 Nov 2026)
 
 ### Changes
 
+- **Prompt caching, on by default for Claude models.** `openAICompatible` (and so `flowModel`) marks the
+  instructions, tool definitions and the end of the conversation so far as cacheable for a model whose id
+  starts with `anthropic/` (on OpenRouter or Flow), the only ones that need a marker; other models cache by
+  themselves. The system prompt now puts what stays the same from call to call first and the clock after it, so the
+  cache entry is not spoiled by the time (`ModelRequest.stableSystem`, optional, for a custom `Model` that
+  caches too; the text sent is unchanged). `promptCaching: false` turns it off, `true` marks for a model id that
+  does not start with `anthropic/`.
+- **Cache tokens and the time split of each model call.** `ModelResponse.usage` has `cacheReadTokens` and
+  `cacheWriteTokens` (input tokens read from and written to the provider's cache; left out when the provider does
+  not say, so 0 means none was cached), and `ModelResponse.timing` has `queuedMs` (before the provider began: Flow's
+  queue and any retry), `ttftMs` (to the first token) and `generationMs`. `model.call` events carry `timing`, and
+  traces carry `gen_ai.usage.cache_read.input_tokens`. To measure the split, calls to OpenRouter and Flow now
+  stream the answer; the reply the agent gets is the same.
+- **`flow test --quick`, `--changed` and a time breakdown.** `--quick` is the inner loop: it sends
+  `mode: "quick"` in the open with no re-plays, scripted latency 0 and a run that stops once it has failed (and the
+  cloud's fast tool model); the summary, `--json` (`mode`, `modeAsked`) and `.flow/last-session.json` (`mode`) say
+  which mode ran, and a quick session never counts toward test health or the CI view. Without it a session is
+  the full ("thorough") behaviour it was. `--changed` runs only the scenarios whose files changed since the last
+  session, by file hashes, and everything (with the reason) when the agent's code or prompt, a tool file, or the
+  record to compare with changed or is missing. The summary ends with where the runs' time went (the agent's
+  model, tools, the person, the judge, waits); `--timing` prints a row per run and `--json` has `timing`.
+- **`flow test --concurrency <runs>`, `--stop-failed-runs` and `--no-retry`.** `--concurrency` plays 1 to 160
+  runs at once (default 8; the cloud plays fewer when the workspace has fewer test sessions free, and says so).
+  `--stop-failed-runs` ends a run as soon as a check that no later turn can change has failed (`never`,
+  `not_sent`), skipping the remaining turns and the judge. `--no-retry` does not play a failed run once more, so no
+  run is labelled flaky or failing. A cloud that does not know one of them says so.
 - **Clearer names for three `flow test` flags.** `--fail-on-flaky` (was `--strict`: count a flaky run as
   failed), `--no-customer-data` (was `--synthetic`: the attestation that the test files hold no real customer
   data) and `--environment` (was `--env`). The help, the messages (the hosted cloud's refusal now says
   `--no-customer-data`), the coding-agent skills and the starter files use the new names. The old names are
   undocumented aliases that behave the same, so CI scripts keep working. `--json`'s `strict` field is unchanged.
-- **`flow test --quick`, `--changed` and a time breakdown.** `--quick` is the inner loop: it sends
-  `mode: "quick"` in the open with no re-plays, scripted latency 0 and a run that stops once it has failed (and the
-  cloud's fast tool model); the summary, `--json` (`mode`, `modeAsked`) and `.flow/last-session.json` (`mode`) say
-  which mode ran, and a quick session never counts toward test health or the CI view. Without it a session is today's
-  full ("thorough") behaviour. `--changed` runs only the scenarios whose files changed since the last session, by file
-  hashes, and everything (with the reason) when the agent's code or prompt, a tool file, or the record to compare
-  with changed or is missing. The summary ends with where the runs' time went (the agent's model, tools, the person,
-  the judge, waits); `--timing` prints a row per run and `--json` has `timing`.
+- **Traces say why an endpoint refused them.** When the traces endpoint answers with an error, the warning now
+  includes the reason from its answer ("the key is unknown or revoked", "this FLOW_KEY's agent is not set up"),
+  not only the HTTP status. A traces endpoint that never answers still holds up no turn.
 
 ### Migration notes
 
-None: `--strict`, `--synthetic` and `--env` still work, every other flag is new, and a session without them plays as before. Against a test cloud that does not know
-`mode`, `--quick` says so and the session counts as a full one.
+- **Prompt caching is now on for `anthropic/` models.** Agents on `anthropic/...` model ids (the default
+  `anthropic/claude-haiku-5.5` included) now send cache markers with every call. Answers are the same, but the
+  cost per call changes: a cache write costs 25% more than plain input, a cache read 90% less, and an entry lasts
+  5 minutes. An agent that talks often (calls less than 5 minutes apart) pays less; one whose calls are mostly
+  further apart pays more, since each call writes and none reads. To move: for such an agent, pass
+  `promptCaching: false` to `openAICompatible` / `flowModel` to keep the earlier cost. Models that do not start
+  with `anthropic/` are unchanged.
+- Nothing else breaks: `--strict`, `--synthetic` and `--env` still work, every other flag is new, and a session
+  without them plays as before. Against a test cloud that does not know `mode`, `--quick` says so and the session
+  counts as a full one.
 
 ## 0.19.0 (10 Nov 2026)
 

@@ -276,8 +276,8 @@ if (process.argv[2] === "test" && process.argv[3] === "pull") await exitFlushed(
 if (process.argv[2] === "test" && process.argv[3] === "fake") await exitFlushed(failed(process.argv.includes("--json"), new Failed(FAKE_COMMAND_REMOVED, "removed")));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) await exitFlushed(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
-/** The open's fields a quick session sets: each is the same field its own flag sets (--no-retry, --tool-latency, --stop-failed-runs, --tool-model),
- * so a flag given with --quick wins; the fast tool model is the cloud's own choice for a quick session. */
+/** The open's fields a quick session sets: `flaky` and `failFastRun` are what --no-retry and --stop-failed-runs set, `latency: 0` is scripted tool latency off
+ * (it has no flag of its own); the fast tool model is the cloud's own choice for a quick session. */
 const QUICK_OPEN: Record<string, unknown> = { flaky: false, latency: 0, failFastRun: true };
 
 /** What a quick session is, in one phrase. */
