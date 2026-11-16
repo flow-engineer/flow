@@ -107,16 +107,12 @@ const TEST_OPTIONS = `Options for test:
                            Goes with --runs, not with --only
   --strict                 Count a flaky run (failed, then passed when the cloud played it again)
                            as failed, also in the pass rate
-  --concurrency <runs>     Play this many runs at once, a whole number from 1 to 160 (default: 8).
-                           Every 8 runs, rounded up, take one of the sessions the workspace may run
-                           together, so 12 takes two and plays 12; if fewer are free the cloud plays
-                           what they allow and says so. Still one session, one report. More helps
-                           only if the agent's model and the cloud's models answer as fast under the
-                           load; fewer eases a slow agent
-  --fail-fast-run          End a run as soon as a check that no later turn can change has failed
+  --concurrency <runs>     Play this many runs at once, 1 to 160 (default: 8). The cloud plays fewer
+                           when the workspace has fewer test sessions free, and says so
+  --stop-failed-runs       End a run as soon as a check that no later turn can change has failed
                            (never, not_sent), without the remaining turns or the judge; the run fails
                            on that check, as the full run's would
-  --no-replay              Do not play a failed run once more: no run is labelled flaky or failing
+  --no-retry               Do not play a failed run once more: no run is labelled flaky or failing
   --min-pass <percent>     The pass rate the session needs, 0 to 100 with at most one decimal
                            (default: FLOW_TEST_MIN_PASS, else 98); 100 fails on any failed run
   --synthetic              Attest the test files hold no real customer data (a hosted cloud needs it)
@@ -283,9 +279,9 @@ const TEST_FLAGS = {
   /** Runs at once: this many shares of the workspace's session limit (default 1). */
   concurrency: { type: "string" },
   /** End a run as soon as a check that cannot change has failed. */
-  "fail-fast-run": { type: "boolean", default: false },
+  "stop-failed-runs": { type: "boolean", default: false },
   /** The cloud does not play a failed run once more. */
-  "no-replay": { type: "boolean", default: false },
+  "no-retry": { type: "boolean", default: false },
   /** Deprecated in 0.16.1: still taken, does nothing, and says so (FRESH_IGNORED). */
   fresh: { type: "boolean", default: false },
   synthetic: { type: "boolean", default: false },
@@ -533,8 +529,8 @@ try {
     testsDir: join(dir, "tests"),
     runs: perScenario,
     ...(concurrency !== undefined ? { concurrency } : {}),
-    ...(values["fail-fast-run"] ? { failFastRun: true } : {}),
-    ...(values["no-replay"] ? { replay: false } : {}),
+    ...(values["stop-failed-runs"] ? { failFastRun: true } : {}),
+    ...(values["no-retry"] ? { replay: false } : {}),
     openHeaders,
     log: say,
     verbose: values.verbose,
@@ -581,7 +577,7 @@ const failedLine = failedRuns ? ` ${failedRuns} failed${checkFails && checkFails
 const creditLine = credit.length ? ` ${credit.length} stopped for credit (not the agent's fault, not counted as failed).` : "";
 const infraLine = infra ? ` ${infra} hit an infrastructure error (the cloud could not play or judge ${infra === 1 ? "it" : "them"}; not counted as failed).` : "";
 const tokens = (n: number) => n.toLocaleString("en-US");
-const notReplayed = values["no-replay"] && failedRuns ? " Failed runs were not played again (--no-replay), so none is told apart as flaky or failing: a failure here may be noise." : "";
+const notReplayed = values["no-retry"] && failedRuns ? " Failed runs were not played again (--no-retry), so none is told apart as flaky or failing: a failure here may be noise." : "";
 say(`\n${passed} of ${played.length} runs passed.${flakyLine}${failedLine}${creditLine}${infraLine}${notReplayed} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
 const rate = passRate(mergedRuns(summary.runs), values.strict);
 if (rate.tenths !== null) say(rateSummary(rate));

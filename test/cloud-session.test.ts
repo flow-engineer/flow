@@ -333,7 +333,7 @@ function selfSignedCert(): { key: string; cert: string } {
   return { key: privateKey.export({ type: "pkcs8", format: "pem" }) as string, cert: new X509Certificate(der).toString() };
 }
 
-test("--concurrency, --fail-fast-run and --no-replay go in the open only when asked, and an older cloud that ignores them is said so", async () => {
+test("--concurrency, --stop-failed-runs and --no-retry go in the open only when asked, and an older cloud that ignores them is said so", async () => {
   const run = async (options: { concurrency?: number; failFastRun?: boolean; replay?: boolean }, opened: Record<string, unknown>) => {
     let body: Record<string, unknown> = {};
     const lines: string[] = [];
