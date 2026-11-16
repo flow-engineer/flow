@@ -107,10 +107,12 @@ const TEST_OPTIONS = `Options for test:
                            Goes with --runs, not with --only
   --strict                 Count a flaky run (failed, then passed when the cloud played it again)
                            as failed, also in the pass rate
-  --shards <n>             Play up to n times as many runs at once, from 1 to 20 (default: 1). Each
-                           shard takes one of the sessions the workspace may run at once, so the
-                           session gets the free ones; it stays one session, one report. Helps only
-                           if the agent's model and the cloud's models answer as fast under the load
+  --concurrency <runs>     Play this many runs at once, a whole number from 1 to 160 (default: 8).
+                           Every 8 runs, rounded up, take one of the sessions the workspace may run
+                           together, so 12 takes two and plays 12; if fewer are free the cloud plays
+                           what they allow and says so. Still one session, one report. More helps
+                           only if the agent's model and the cloud's models answer as fast under the
+                           load; fewer eases a slow agent
   --fail-fast-run          End a run as soon as a check that no later turn can change has failed
                            (never, not_sent), without the remaining turns or the judge; the run fails
                            on that check, as the full run's would
@@ -279,7 +281,7 @@ const TEST_FLAGS = {
   /** The pass rate the session needs, in percent; else FLOW_TEST_MIN_PASS, else 98. */
   "min-pass": { type: "string" },
   /** Runs at once: this many shares of the workspace's session limit (default 1). */
-  shards: { type: "string" },
+  concurrency: { type: "string" },
   /** End a run as soon as a check that cannot change has failed. */
   "fail-fast-run": { type: "boolean", default: false },
   /** The cloud does not play a failed run once more. */
@@ -400,7 +402,7 @@ const envProblem = loadEnv(values.dotenv);
 if (envProblem) invalid(envProblem);
 
 const runs = checkRuns(values.runs);
-const shards = values.shards === undefined ? undefined : checkShards(values.shards);
+const concurrency = values.concurrency === undefined ? undefined : checkConcurrency(values.concurrency);
 minPass = checkMinPass();
 const cloud = values.cloud || setting("CLOUD") || OBSERVE_URL;
 const ciKey = setting("CLOUD_KEY") || undefined;
@@ -530,7 +532,7 @@ try {
     files,
     testsDir: join(dir, "tests"),
     runs: perScenario,
-    ...(shards !== undefined ? { shards } : {}),
+    ...(concurrency !== undefined ? { concurrency } : {}),
     ...(values["fail-fast-run"] ? { failFastRun: true } : {}),
     ...(values["no-replay"] ? { replay: false } : {}),
     openHeaders,
@@ -895,10 +897,10 @@ function checkRuns(runs: string): number {
   invalid(`--runs must be a whole number above 0, such as 3 (got "${runs}").`);
 }
 
-/** --shards as a whole number from 1 to 20, or exits 1. */
-function checkShards(shards: string): number {
-  if (/^[1-9]\d?$/.test(shards) && Number(shards) <= 20) return Number(shards);
-  invalid(`--shards must be a whole number from 1 to 20, such as 2 (got "${shards}").`);
+/** --concurrency as a whole number of runs from 1 to 160, or exits 1. */
+function checkConcurrency(runs: string): number {
+  if (/^[1-9]\d{0,2}$/.test(runs) && Number(runs) <= 160) return Number(runs);
+  invalid(`--concurrency must be a whole number of runs from 1 to 160, such as 12 (got "${runs}").`);
 }
 
 /** Every scenario and tool file read as the cloud reads it, before anything is sent; exits 1 with each problem at its line. */

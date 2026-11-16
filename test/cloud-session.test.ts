@@ -333,8 +333,8 @@ function selfSignedCert(): { key: string; cert: string } {
   return { key: privateKey.export({ type: "pkcs8", format: "pem" }) as string, cert: new X509Certificate(der).toString() };
 }
 
-test("--shards, --fail-fast-run and --no-replay go in the open only when asked, and an older cloud that ignores them is said so", async () => {
-  const run = async (options: { shards?: number; failFastRun?: boolean; replay?: boolean }, opened: Record<string, unknown>) => {
+test("--concurrency, --fail-fast-run and --no-replay go in the open only when asked, and an older cloud that ignores them is said so", async () => {
+  const run = async (options: { concurrency?: number; failFastRun?: boolean; replay?: boolean }, opened: Record<string, unknown>) => {
     let body: Record<string, unknown> = {};
     const lines: string[] = [];
     const server = createServer((req, res) => {
@@ -361,11 +361,18 @@ test("--shards, --fail-fast-run and --no-replay go in the open only when asked, 
     return { body, lines };
   };
   const plain = await run({}, {});
-  assert.deepEqual([plain.body.flaky, plain.body.shards, plain.body.failFastRun], [true, undefined, undefined], "today's open: replays on, nothing else");
-  const fast = await run({ shards: 3, failFastRun: true, replay: false }, { shards: 2, failFastRun: true });
-  assert.deepEqual([fast.body.flaky, fast.body.shards, fast.body.failFastRun], [undefined, 3, true]);
-  assert.ok(fast.lines.some((l) => l.includes("--shards 3") && l.includes("2 free session slots")), fast.lines.join("\n"));
-  const old = await run({ shards: 3, failFastRun: true }, {});
+  assert.deepEqual([plain.body.flaky, plain.body.concurrency, plain.body.failFastRun], [true, undefined, undefined], "today's open: replays on, nothing else");
+  const fast = await run({ concurrency: 24, failFastRun: true, replay: false }, { concurrency: 16, failFastRun: true });
+  assert.deepEqual([fast.body.flaky, fast.body.concurrency, fast.body.failFastRun], [undefined, 24, true]);
+  assert.ok(fast.lines.includes("Playing 16 runs at once, not 24: this workspace has 2 test sessions free."), fast.lines.join("\n"));
+  const odd = await run({ concurrency: 12 }, { concurrency: 12 });
+  assert.equal(odd.body.concurrency, 12, "not a multiple of 8: sent as asked");
+  assert.ok(!odd.lines.some((l) => l.includes("at once")), "granted in full: nothing to say");
+  const few = await run({ concurrency: 3 }, { concurrency: 3 });
+  assert.equal(few.body.concurrency, 3, "below 8 is sent too");
+  const one = await run({ concurrency: 20 }, { concurrency: 8 });
+  assert.ok(one.lines.includes("Playing 8 runs at once, not 20: this workspace has 1 test session free."), one.lines.join("\n"));
+  const old = await run({ concurrency: 3, failFastRun: true }, {});
   assert.ok(old.lines.some((l) => l.includes("does not end runs early")));
-  assert.ok(old.lines.some((l) => l.includes("does not take --shards")));
+  assert.ok(old.lines.some((l) => l.includes("does not take --concurrency")));
 });

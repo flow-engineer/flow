@@ -31,8 +31,8 @@ export interface ConnectOptions {
   /** The tests folder: files a scenario attaches are read from here; they never leave this machine. */
   testsDir?: string;
   runs?: number;
-  /** Runs at once, as shares of the workspace's session limit (OpenSession.shards). Default: not asked, one. */
-  shards?: number;
+  /** Runs to play at once, 1 to 160 (OpenSession.concurrency). Default: not asked, the cloud's own 8. */
+  concurrency?: number;
   /** End a run once a check that cannot change has failed (OpenSession.failFastRun). Default: off. */
   failFastRun?: boolean;
   /** Ask the cloud to play a failed run once more and label it flaky or failing. Default: true; false asks for none. */
@@ -506,7 +506,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     ...(canBusiness ? { business: true } : {}),
     ...(typeof agent.seedHistory === "function" ? { history: true } : {}),
     ...(options.replay === false ? {} : { flaky: true }),
-    ...(options.shards !== undefined && options.shards > 1 ? { shards: options.shards } : {}),
+    ...(options.concurrency !== undefined ? { concurrency: options.concurrency } : {}),
     ...(options.failFastRun ? { failFastRun: true } : {}),
     ...(only ? { only } : {}),
   };
@@ -529,8 +529,11 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   log(`Session ${opened.sessionId}: suite ${suiteHash(options.files).slice(0, 12)}, ${options.files.length} files (${uploads.length === options.files.length ? "all new to the cloud" : uploads.length ? `${uploads.length} new to the cloud, the rest it already had` : "the cloud already had them all"}).`);
   // An option an older cloud does not know is ignored by it; say so instead of leaving the owner to wonder.
   if (options.failFastRun && opened.failFastRun !== true) log("This cloud does not end runs early (--fail-fast-run): every run plays to its end.");
-  if (options.shards !== undefined && options.shards > 1 && opened.shards === undefined) log(`This cloud does not take --shards: it plays its own number of runs at once.`);
-  else if (opened.shards !== undefined && options.shards !== undefined && opened.shards < options.shards) log(`--shards ${options.shards}: the workspace had ${opened.shards} free session slot${opened.shards === 1 ? "" : "s"} (each shard takes one of the sessions it may run at once), so ${opened.shards} ${opened.shards === 1 ? "is" : "are"} used.`);
+  if (options.concurrency !== undefined && opened.concurrency === undefined) log("This cloud does not take --concurrency: it plays its own number of runs at once.");
+  else if (options.concurrency !== undefined && opened.concurrency !== undefined && opened.concurrency < options.concurrency) {
+    const free = Math.ceil(opened.concurrency / 8);
+    log(`Playing ${opened.concurrency} runs at once, not ${options.concurrency}: this workspace has ${free} test session${free === 1 ? "" : "s"} free.`);
+  }
   const limits = sessionLimits(opened.limits);
   if (limits) {
     const line = limitsLine(limits);
