@@ -328,9 +328,11 @@ test("a traces endpoint that cannot be reached is logged once, saying how many t
 test("an endpoint that never answers holds up no turn: replies are sent and the conversation goes idle while its request is still open", async () => {
   // The request is held open by a gate (no sleeps): the turns below all finish before it is released.
   const release = gate();
+  const arrived = gate();
   const seen: string[] = [];
   const server = createServer((req, res) => {
     seen.push(req.url ?? "");
+    arrived.open();
     req.resume();
     void release.promise.then(() => res.writeHead(200, { "content-type": "application/json" }).end("{}"));
   });
@@ -345,6 +347,7 @@ test("an endpoint that never answers holds up no turn: replies are sent and the 
       await h.agent.conversation(sent!.conversationId)!.whenIdle();
     }
     assert.equal(h.sent.length, 6, "every reply went out while the traces request was still open");
+    await arrived.promise;
     assert.ok(seen.length >= 1, "the traces were sent, and are still waiting for an answer");
   } finally {
     release.open();
