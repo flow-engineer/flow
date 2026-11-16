@@ -33,8 +33,9 @@ only one half gets one of the two failures above.
 
 1. **One tool takes everything the message holds.** Every field is optional. It merges into a draft stored in
    `context.records` (key it by `context.person`), a later statement replaces an earlier one, one answer may fill
-   several fields, and `clear` forgets one. The tool's description says: only what they actually said, never a
-   guess for a field they did not speak to (a model asked for "usage" will invent it).
+   several fields, and `clear` forgets one. The tool's description says to split a reply into every field it holds ("good, 2 yrs old" is the condition and
+   the age; a model otherwise files the whole phrase under the field it just asked about) and to pass only what they
+   actually said, never a guess for a field they did not speak to.
 2. **Their own words go to code.** The model passes "35k", "a month ago", "SW1A 1AA" as written; code converts
    them (an amount, a date against the clock and the person's time zone) and the draft marks derived values
    (`35000, from "35k"`). The model never does date or money arithmetic. Code that cannot read a value returns a
@@ -71,7 +72,7 @@ hashOf(draft);                     // changes with any value
 // tools.ts
 tool({
   name: "update_listing",
-  description: "Save every fact the person's last message holds, in their own words, in every field it covers, also ones not asked yet. Only what they said, never a guess. Returns the draft, what is missing, the ONE thing to ask, and problems.",
+  description: "Save every fact the person's last message holds, in their own words, split across every field it covers (\"good, 2 yrs old\" is two fields), also ones not asked yet. Only what they said, never a guess. Returns the draft, what is missing, the ONE thing to ask, and problems.",
   input: z.object({ fields: z.record(z.string(), z.string()), clear: z.array(z.string()).optional() }),
   run: async ({ fields, clear }, { records, person }) => {
     const draft = (await records.get<Draft>("drafts", person)) ?? emptyDraft();
@@ -82,7 +83,8 @@ tool({
     draft.summarised = confirm;                                                // a change clears it
     await records.put("drafts", person, { ...draft, person });
     return { draft: show(draft), missing: missing(draft), ask: ask?.ask ?? null, problems: applied.problems,
-             unknown_fields: applied.unknown, ready_for_summary: confirm !== null, confirm_token: confirm };
+             unknown_fields: applied.unknown, ready_for_summary: confirm !== null,
+             next: confirm ? { step: "Show the summary; publish only after a yes to it", confirm_token: confirm } : "Ask only `ask`, one plain question" };
   },
 });
 tool({

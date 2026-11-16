@@ -5,7 +5,7 @@ theme: Collecting
 channels: [whatsapp]
 person:
   persona: Priya, busy, on a train.
-  goal: Start a listing for a kettle, say she will send the postcode later, and once the agent has accepted that, say thanks and goodbye; you are done then.
+  goal: Start a listing for a kettle, say she will send the postcode later. You are done once the agent has accepted that.
   knows:
     - A kettle, new, 20, bought last month, collect Mondays. She does not have the postcode to hand and says she will send it later.
 opening:

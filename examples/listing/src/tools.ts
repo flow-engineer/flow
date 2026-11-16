@@ -10,7 +10,7 @@ export const tools = [
   tool({
     name: "update_listing",
     description:
-      "Save every fact the person's last message holds about their listing, in their own words (\"35k\", \"a month ago\"): one call, as many fields as it covers, also ones not asked yet. Only what they actually said: never fill a field they did not speak to, never a guess. " +
+      "Save every fact the person's last message holds about their listing, in their own words (\"35k\", \"a month ago\"): one call, as many fields as it covers, also ones not asked yet. Split a reply into every field it holds: \"good, 2 yrs old\" is condition \"good\" AND bought_on \"2 yrs old\", never one field. Only what they actually said: never fill a field they did not speak to, never a guess. " +
       "Returns the draft, what is missing, the ONE thing to ask next, and problems.",
     input: z.object({
       fields: z.record(field, z.string()).describe("name -> what they said, as they said it; a new value replaces the old one"),

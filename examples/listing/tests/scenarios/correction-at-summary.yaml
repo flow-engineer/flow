@@ -5,7 +5,7 @@ theme: Collecting
 channels: [whatsapp]
 person:
   persona: Sam, decisive, changes his mind once.
-  goal: List a laptop, then lower the price to 30k when the summary is shown, then say yes to the new summary and, once the agent confirms it is published, say thanks and goodbye. Never ask for proof.
+  goal: List a laptop, then lower the price to 30k when the summary is shown, then say yes to the new summary. You are done once you have said yes to a summary.
   knows:
     - A laptop, good condition, first asked 35k, bought a year ago, postcode N1 9GU, collect weekday evenings.
     - After seeing the summary, says the price should be 30k instead.

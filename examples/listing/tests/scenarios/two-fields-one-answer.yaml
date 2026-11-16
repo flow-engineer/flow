@@ -8,7 +8,7 @@ person:
   goal: List a camera for sale. You are done once you have said yes to a summary.
   knows:
     - The camera is a Fuji X-T30, asking 480, postcode M1 4BT, anyone can collect on Saturdays.
-    - If asked when it was bought, it was last year; condition is good, used twice, but this only comes out when asked about condition.
+    - 'When asked about the condition, answers in one message: "good, used it twice, bought it last year".'
     - No faults.
 opening:
   - say: "hi, selling a fuji xt30 camera"
