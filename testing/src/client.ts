@@ -136,11 +136,20 @@ export function sendPathCheck() {
 
 /** A POST that sat until its own deadline. It fails that one call. Only a cloud that stores keys sends it again. The session abort is not one of these. */
 export class TimeoutError extends Error {
-  constructor() {
+  /** What the request knew when it gave up: whether it went out on a kept-alive socket another call had used, and when the answer began. */
+  readonly detail: TimeoutDetail | undefined;
+  constructor(detail?: TimeoutDetail) {
     super("timed out");
     this.name = "TimeoutError";
+    this.detail = detail;
   }
 }
+
+export interface TimeoutDetail { reusedSocket: boolean; elapsedMs: number; firstByteMs?: number }
+
+/** Whether a failed request had gone out on a kept-alive socket (set by requestOnce). */
+const SOCKET_REUSED = Symbol("socketReused");
+const reusedOf = (error: unknown): boolean => (error as { [SOCKET_REUSED]?: boolean } | null)?.[SOCKET_REUSED] === true;
 
 /** The cloud answered a tool call `ok: false`. Its message is the cloud's code: a tool file's own error,
  * or one of {@link CLOUD_TOOL_ERRORS} when the cloud could not play the call. */
@@ -400,7 +409,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
         const request: ToolCallRequest = { conversationId: context.conversationId, tool: t.name, input };
         const wait = toolWait.get(t.name) ?? toolTimeoutMs(options.files, t.name, toolBudget);
         const result = await tunnelPost<ToolCallResult>(`${session}/tool-calls`, request, wait, {
-          mode: idempotent ? "idempotent" : "never", key: `tool:${randomUUID()}`, budgetMs: retryBudgetMs, what: "tool call",
+          mode: idempotent ? "idempotent" : "never", key: `tool:${randomUUID()}`, budgetMs: retryBudgetMs, what: "tool call", where: context.conversationId,
         });
         if (!result.ok) throw new ToolFailed(result.error);
         return result.output;
@@ -963,7 +972,7 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 type RetryMode = "never" | "outbound" | "idempotent";
-type PostOptions = { mode: RetryMode; key: string; budgetMs: number; what: string; serialized?: string };
+type PostOptions = { mode: RetryMode; key: string; budgetMs: number; what: string; where?: string; serialized?: string };
 
 /** Whether this failure may be sent again. A JSON refusal never is. An older cloud retries an
  * outbound only when the body cannot have arrived. A cloud that stores keys also retries a
@@ -1000,11 +1009,18 @@ function retryWaitMs(attempt: number, error: unknown): number {
 async function postRetry<T>(url: string, body: unknown, headers: Record<string, string>, signal: AbortSignal | undefined, log: (line: string) => void, timeoutMs: number, options: PostOptions): Promise<T> {
   let firstFailure: number | undefined;
   let attempt = 0;
+  // A try that failed on a kept-alive socket is sent again on a new connection: the socket may be one the other end dropped without a word.
+  let fresh = false;
   const headersWithKey = { ...headers, "idempotency-key": options.key };
   for (;;) {
     try {
-      return await post<T>(url, body, headersWithKey, signal, options.serialized, timeoutMs);
+      return await post<T>(url, body, headersWithKey, signal, options.serialized, timeoutMs, fresh);
     } catch (error) {
+      if (error instanceof TimeoutError && error.detail) {
+        const d = error.detail;
+        log(`${options.what} timed out after ${d.elapsedMs} ms (try ${attempt + 1}, kept-alive socket ${d.reusedSocket ? "reused" : "new"}, ${d.firstByteMs === undefined ? "no byte received" : `first byte at ${d.firstByteMs} ms`})${options.where ? ` in ${options.where}` : ""}`);
+      }
+      fresh = reusedOf(error);
       const again = retryable(error, options.mode);
       firstFailure ??= Date.now();
       const elapsed = Date.now() - firstFailure;
@@ -1024,16 +1040,23 @@ async function postRetry<T>(url: string, body: unknown, headers: Record<string, 
 /** POSTs share a keep-alive agent and speak HTTP/1.1, so each request still in flight has its own
  * socket. A tool call the cloud has not answered cannot hold the later ones, and a finished
  * connection is reused. The stream stays on a connection of its own (openStream). */
-const httpPosts = new HttpAgent({ keepAlive: true });
-const httpsPosts = new HttpsAgent({ keepAlive: true });
+/** A kept-alive socket idle this long is closed, so a call is not written to one that a load balancer or NAT dropped without telling us. */
+const IDLE_SOCKET_MS = 15_000;
+const httpPosts = new HttpAgent({ keepAlive: true, timeout: IDLE_SOCKET_MS });
+const httpsPosts = new HttpsAgent({ keepAlive: true, timeout: IDLE_SOCKET_MS });
+/** Connections used once, for a try after one that failed on a reused socket. */
+const httpFresh = new HttpAgent({ keepAlive: false });
+const httpsFresh = new HttpsAgent({ keepAlive: false });
 
-function requestOnce(url: string, payload: string, headers: Record<string, string>, signal: AbortSignal | undefined, timeoutMs: number): Promise<{ status: number; text: string; headers: Record<string, string> }> {
+function requestOnce(url: string, payload: string, headers: Record<string, string>, signal: AbortSignal | undefined, timeoutMs: number, fresh = false): Promise<{ status: number; text: string; headers: Record<string, string> }> {
   const secure = url.startsWith("https:");
   const request = secure ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let onAbort: (() => void) | undefined;
+    const began = Date.now();
+    let firstByteMs: number | undefined;
     const finish = (error?: Error, result?: { status: number; text: string; headers: Record<string, string> }) => {
       if (settled) return;
       settled = true;
@@ -1045,20 +1068,21 @@ function requestOnce(url: string, payload: string, headers: Record<string, strin
     const req = request(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...headers, "content-length": Buffer.byteLength(payload) },
-      agent: secure ? httpsPosts : httpPosts,
+      agent: secure ? (fresh ? httpsFresh : httpsPosts) : (fresh ? httpFresh : httpPosts),
     }, (response) => {
+      firstByteMs = Date.now() - began;
       const chunks: Buffer[] = [];
       response.on("error", finish);
       response.on("aborted", () => finish(new Error("The request was aborted")));
       response.on("data", (chunk: Buffer) => chunks.push(chunk));
       response.on("end", () => finish(undefined, { status: response.statusCode ?? 0, text: Buffer.concat(chunks).toString("utf8"), headers: flatHeaders(response.headers) }));
     });
-    timer = setTimeout(() => { finish(new TimeoutError()); req.destroy(); }, timeoutMs);
+    timer = setTimeout(() => { finish(Object.assign(new TimeoutError({ reusedSocket: req.reusedSocket, elapsedMs: Date.now() - began, ...(firstByteMs === undefined ? {} : { firstByteMs }) }), { [SOCKET_REUSED]: req.reusedSocket })); req.destroy(); }, timeoutMs);
     if (signal) {
       onAbort = () => { finish(abortError(signal)); req.destroy(); };
       signal.addEventListener("abort", onAbort, { once: true });
     }
-    req.on("error", (error) => finish(signal?.aborted ? abortError(signal) : error));
+    req.on("error", (error) => finish(signal?.aborted ? abortError(signal) : Object.assign(error, { [SOCKET_REUSED]: req.reusedSocket })));
     req.end(payload);
   });
 }
@@ -1087,9 +1111,9 @@ function retryAfterOf(headers: Record<string, string>): number | undefined {
   return Math.max(0, date - Date.now());
 }
 
-async function post<T = unknown>(url: string, body: unknown, headers: Record<string, string> = {}, signal?: AbortSignal, serialized?: string, timeoutMs = POST_TIMEOUT_MS): Promise<T> {
+async function post<T = unknown>(url: string, body: unknown, headers: Record<string, string> = {}, signal?: AbortSignal, serialized?: string, timeoutMs = POST_TIMEOUT_MS, fresh = false): Promise<T> {
   const payload = serialized ?? JSON.stringify(body ?? {});
-  const { status, text, headers: responseHeaders } = await requestOnce(url, payload, headers, signal, postBudgetMs(timeoutMs, Buffer.byteLength(payload)));
+  const { status, text, headers: responseHeaders } = await requestOnce(url, payload, headers, signal, postBudgetMs(timeoutMs, Buffer.byteLength(payload)), fresh);
   if (status < 200 || status >= 300) {
     throw new PostError(url, status, text, retryAfterOf(responseHeaders));
   }
