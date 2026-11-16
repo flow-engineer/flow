@@ -110,8 +110,6 @@ const TEST_OPTIONS = `Options for test:
                            fast tool model, a run stops once it has failed. The summary says
                            "quick", and a quick session never counts toward the dashboard's test
                            health or the CI gate. Pass-fail still sets the exit status
-  --thorough               Today's behaviour, and the default: realistic latency, re-plays, the
-                           whole run played. Run this one before you merge
   --changed                Only the scenarios whose files changed since the last session, when
                            the agent's code and prompt and the tool files did not; else every
                            scenario, and it says why. Prints what changed since that session.
@@ -272,7 +270,7 @@ if (process.argv[2] === "test" && process.argv[3] === "pull") await exitFlushed(
 if (process.argv[2] === "test" && process.argv[3] === "fake") await exitFlushed(failed(process.argv.includes("--json"), new Failed(FAKE_COMMAND_REMOVED, "removed")));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) await exitFlushed(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
-/** The open's fields a quick session sets: each is the same field its own flag sets (--no-replay, --latency, --fail-fast-run, --tools-model),
+/** The open's fields a quick session sets: each is the same field its own flag sets (--no-retry, --tool-latency, --stop-failed-runs, --tool-model),
  * so a flag given with --quick wins; the fast tool model is the cloud's own choice for a quick session. */
 const QUICK_OPEN: Record<string, unknown> = { flaky: false, latency: 0, failFastRun: true };
 
@@ -288,8 +286,6 @@ const TEST_FLAGS = {
   failed: { type: "boolean", default: false },
   /** The inner loop: the options of a quick session (QUICK_OPEN) and the label `quick`. */
   quick: { type: "boolean", default: false },
-  /** Today's behaviour, the default; the label `thorough`. */
-  thorough: { type: "boolean", default: false },
   /** Only the scenarios whose files changed since the last session. */
   changed: { type: "boolean", default: false },
   /** One row per run of where its time went. */
@@ -424,7 +420,6 @@ if (command !== undefined && (command !== "test" || rest.length)) invalid(`flow:
 const envProblem = loadEnv(values.dotenv);
 if (envProblem) invalid(envProblem);
 
-if (values.quick && values.thorough) invalid("--quick and --thorough are opposites: give one (thorough is the default).");
 if (values.changed && (values.only || values.failed)) invalid("--changed picks its scenarios from what changed and does not go with --only or --failed: run one of them.");
 const runs = checkRuns(values.runs);
 minPass = checkMinPass();
@@ -981,7 +976,7 @@ function modeLines(opened: Opened): string[] {
 
 /** The summary's mode line: what ran, so a quick pass is never taken for a thorough one. */
 function modeWord(): string {
-  if (kept === "quick") return `quick (${QUICK_WORDS}); not a full pass, and not counted by the dashboard's test health or the CI gate. flow test --thorough is the full one`;
+  if (kept === "quick") return `quick (${QUICK_WORDS}); not a full pass, and not counted by the dashboard's test health or the CI gate. flow test without --quick is the full one`;
   return asked === "quick" ? "thorough (this test cloud did not take quick mode)" : "thorough";
 }
 

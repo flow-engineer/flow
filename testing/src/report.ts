@@ -311,7 +311,7 @@ export interface TimeSplit {
   wallMs: number;
   /** The agent's own model calls. */
   modelMs: number;
-  /** Tool time the test's scripted latency (the tool file's latency_ms, scaled by --latency) accounts for. */
+  /** Tool time the test's scripted latency (the tool file's latency_ms, scaled by --tool-latency) accounts for. */
   toolScriptedMs: number;
   /** The rest of the tool time: the tool simulator's own model call. */
   toolSimulatorMs: number;

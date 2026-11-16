@@ -920,7 +920,7 @@ test("flow show prints a run's record from the cloud with the CI key: checks wit
 /** A finished session of these passed runs, as a cloud sends it. */
 const finishedOf = (runs: Array<Record<string, unknown>>) => ({ type: "finished", summary: { sessionId: "s", suiteHash: "h", testModel: "m", runs, dashboard: "http://dash/s" } });
 
-test("--quick sends the quick session's open fields and the label, and the summary and results say what the cloud kept: quick, or thorough when it knows no modes; --thorough is the default", { timeout: 30_000 }, async () => {
+test("--quick sends the quick session's open fields and the label, and the summary and results say what the cloud kept: quick, or thorough when it knows no modes; without --quick is the default", { timeout: 30_000 }, async () => {
   const dir = agentDir();
   const frames = [finishedOf([runOf({ passed: true })])];
   const known = await cloud(false, frames, "s", { mode: "quick" });
@@ -950,7 +950,6 @@ test("--quick sends the quick session's open fields and the label, and the summa
     assert.match(result.out, /^Mode: thorough\.$/m);
     assert.doesNotMatch(result.out, /Quick session/);
   } finally { plain.close(); }
-  assert.match((await cliOutput(["test", "--cloud", "http://127.0.0.1:9", "--quick", "--thorough"], dir)).out, /--quick and --thorough are opposites/);
 });
 
 test("--changed runs the scenarios whose files changed when the agent and the tool files did not, and everything, with why, when they did or there is nothing to compare; it says what changed", { timeout: 60_000 }, async () => {
