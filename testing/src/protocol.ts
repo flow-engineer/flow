@@ -101,6 +101,11 @@ export interface OpenSession {
   business?: boolean;
   /** The client reports flaky runs: when a run fails, the cloud plays it once more and labels it. */
   flaky?: boolean;
+  /** Runs to play at once, a whole number from 1 to 160. Every 8, rounded up, take one of the workspace's sessions at once;
+   * the cloud grants what the free ones allow and says how many in Opened.concurrency. Absent: the cloud's own 8. */
+  concurrency?: number;
+  /** A run ends as soon as a check that no later turn can change has failed (never, not_sent), unjudged. Absent: off. */
+  failFastRun?: boolean;
   /** The client seeds a run's earlier conversation (`history` on a run's first message or open). */
   history?: boolean;
   /** Play only these runs, numbered as given: a re-open after session_gone. Sent only to a cloud whose Opened said reopen,
@@ -142,6 +147,10 @@ export interface Opened {
   business?: boolean;
   /** This cloud plays a failed run once more and labels it; the client sent `flaky`. Absent on an older cloud. */
   flaky?: boolean;
+  /** The runs this session plays at once, as granted (at most what the client asked in `concurrency`). Absent on an older cloud. */
+  concurrency?: number;
+  /** This cloud ends a run early when a check that cannot change has failed; the client sent `failFastRun`. Absent on an older cloud. */
+  failFastRun?: boolean;
   /** This cloud sends a scenario's `history`; the client sent `history`. Absent on an older cloud. */
   history?: boolean;
   /** What this workspace may do, printed when the session opens. Absent on an older cloud. */

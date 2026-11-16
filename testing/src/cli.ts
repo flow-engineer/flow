@@ -107,6 +107,12 @@ const TEST_OPTIONS = `Options for test:
                            Goes with --runs, not with --only
   --strict                 Count a flaky run (failed, then passed when the cloud played it again)
                            as failed, also in the pass rate
+  --concurrency <runs>     Play this many runs at once, 1 to 160 (default: 8). The cloud plays fewer
+                           when the workspace has fewer test sessions free, and says so
+  --stop-failed-runs       End a run as soon as a check that no later turn can change has failed
+                           (never, not_sent), without the remaining turns or the judge; the run fails
+                           on that check, as the full run's would
+  --no-retry               Do not play a failed run once more: no run is labelled flaky or failing
   --min-pass <percent>     The pass rate the session needs, 0 to 100 with at most one decimal
                            (default: FLOW_TEST_MIN_PASS, else 98); 100 fails on any failed run
   --synthetic              Attest the test files hold no real customer data (a hosted cloud needs it)
@@ -270,6 +276,12 @@ const TEST_FLAGS = {
   strict: { type: "boolean", default: false },
   /** The pass rate the session needs, in percent; else FLOW_TEST_MIN_PASS, else 98. */
   "min-pass": { type: "string" },
+  /** Runs at once: this many shares of the workspace's session limit (default 1). */
+  concurrency: { type: "string" },
+  /** End a run as soon as a check that cannot change has failed. */
+  "stop-failed-runs": { type: "boolean", default: false },
+  /** The cloud does not play a failed run once more. */
+  "no-retry": { type: "boolean", default: false },
   /** Deprecated in 0.16.1: still taken, does nothing, and says so (FRESH_IGNORED). */
   fresh: { type: "boolean", default: false },
   synthetic: { type: "boolean", default: false },
@@ -386,6 +398,7 @@ const envProblem = loadEnv(values.dotenv);
 if (envProblem) invalid(envProblem);
 
 const runs = checkRuns(values.runs);
+const concurrency = values.concurrency === undefined ? undefined : checkConcurrency(values.concurrency);
 minPass = checkMinPass();
 const cloud = values.cloud || setting("CLOUD") || OBSERVE_URL;
 const ciKey = setting("CLOUD_KEY") || undefined;
@@ -515,6 +528,9 @@ try {
     files,
     testsDir: join(dir, "tests"),
     runs: perScenario,
+    ...(concurrency !== undefined ? { concurrency } : {}),
+    ...(values["stop-failed-runs"] ? { failFastRun: true } : {}),
+    ...(values["no-retry"] ? { replay: false } : {}),
     openHeaders,
     log: say,
     verbose: values.verbose,
@@ -561,7 +577,8 @@ const failedLine = failedRuns ? ` ${failedRuns} failed${checkFails && checkFails
 const creditLine = credit.length ? ` ${credit.length} stopped for credit (not the agent's fault, not counted as failed).` : "";
 const infraLine = infra ? ` ${infra} hit an infrastructure error (the cloud could not play or judge ${infra === 1 ? "it" : "them"}; not counted as failed).` : "";
 const tokens = (n: number) => n.toLocaleString("en-US");
-say(`\n${passed} of ${played.length} runs passed.${flakyLine}${failedLine}${creditLine}${infraLine} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
+const notReplayed = values["no-retry"] && failedRuns ? " Failed runs were not played again (--no-retry), so none is told apart as flaky or failing: a failure here may be noise." : "";
+say(`\n${passed} of ${played.length} runs passed.${flakyLine}${failedLine}${creditLine}${infraLine}${notReplayed} ${modelCalls} Agent: ${agentModels}; person, tools and judge: ${summary.testModel}.`);
 const rate = passRate(mergedRuns(summary.runs), values.strict);
 if (rate.tenths !== null) say(rateSummary(rate));
 if (credit.length) say(`Credit: ${creditReason(credit[0]!)}`);
@@ -874,6 +891,12 @@ function checkMinPass(): number {
 function checkRuns(runs: string): number {
   if (/^[1-9]\d*$/.test(runs)) return Number(runs);
   invalid(`--runs must be a whole number above 0, such as 3 (got "${runs}").`);
+}
+
+/** --concurrency as a whole number of runs from 1 to 160, or exits 1. */
+function checkConcurrency(runs: string): number {
+  if (/^[1-9]\d{0,2}$/.test(runs) && Number(runs) <= 160) return Number(runs);
+  invalid(`--concurrency must be a whole number of runs from 1 to 160, such as 12 (got "${runs}").`);
 }
 
 /** Every scenario and tool file read as the cloud reads it, before anything is sent; exits 1 with each problem at its line. */
