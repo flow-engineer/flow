@@ -7,7 +7,7 @@
 //   POST /cli/revoke (bearer) {}              ends this token
 //   GET  /cli/whoami (bearer)                 -> {account, email, token}
 //   POST /cli/setup (bearer) {name, hostname, channels, have, workspace?, rotate?, rotate_now?}
-//        -> {agent_id, workspace_id?, workspace_name?, cloud_key?, traces_key?, messaging_key?, flow_key?, model_credit?, join_code, account, app_id,
+//        -> {agent_id, workspace_id?, workspace_name?, cloud_key?, traces_key?, traces_url?, messaging_key?, flow_key?, model_credit?, join_code, account, app_id,
 //            dashboard_url, try_url, <channel>_sender?, <channel>_link? (telegram, whatsapp, imessage: each only while
 //            that shared sender is open), try_urls?, trial?, minted, next}; a 502 carries every field that worked too;
 //        flow_key is the agent's one Flow key, {env: "FLOW_KEY", value: "flow_test_...", kid, mode, scopes, agent_id,
@@ -208,6 +208,8 @@ export interface SetupAnswer {
   /** Only the keys minted in this call come back (those the request did not say it has). */
   cloud_key?: string;
   traces_key?: string;
+  /** Where this workspace's keys work, only for a workspace in another region (absent: the default address). */
+  traces_url?: string;
   messaging_key?: string;
   /** Each channel's shared sender and phone link, only while Flow has that channel open. */
   telegram_sender?: string;
@@ -382,7 +384,7 @@ export async function whoami(url: string, token: string): Promise<Account> {
   return answer.body as unknown as Account;
 }
 
-export async function setup(url: string, token: string, request: { name: string; hostname: string; channels: string[]; have: string[]; workspace?: string; rotate?: true | string[]; rotate_now?: true }): Promise<SetupAnswer> {
+export async function setup(url: string, token: string, request: { name: string; hostname: string; channels: string[]; have: string[]; traces_url?: string; workspace?: string; rotate?: true | string[]; rotate_now?: true }): Promise<SetupAnswer> {
   const answer = await call(url, "/cli/setup", { token, body: request });
   // A 200 is returned whole even without a join code: the keys it minted are shown only now.
   if (answer.status !== 200) throw refused("/cli/setup", answer, url);
@@ -532,6 +534,7 @@ export async function modelCredit(baseURL: string, key: string): Promise<ModelCr
 export const SETUP_ENV = {
   cloud_key: "FLOW_FRAMEWORK_CLOUD_KEY",
   traces_key: "FLOW_FRAMEWORK_TRACES_KEY",
+  traces_url: "FLOW_FRAMEWORK_TRACES_URL",
   messaging_key: "FLOW_MESSAGING_KEY",
   telegram_sender: "FLOW_MESSAGING_TELEGRAM_SENDER",
   whatsapp_sender: "FLOW_MESSAGING_WHATSAPP_SENDER",
