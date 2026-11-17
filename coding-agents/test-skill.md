@@ -357,7 +357,7 @@ What is sent: every file except `node_modules`, `.git`, `.flow` and every `.env*
 (put the tests' non-secret settings there and commit it). Secrets and the agent's model key come from the agent's
 hosted secrets; with none, a Flow key made for the run pays for the model. Limits: 50 MB of files, 60 minutes a run, 12
 runner-hours a day per workspace; the message at a limit says so, and Flow support raises it on request. A
-workspace in the India cell runs its tests in Flow's US cloud.
+workspace hosted in another region still has its tests played by the one test cloud, in the US.
 
 ### When a run fails
 
