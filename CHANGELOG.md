@@ -6,6 +6,14 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **`flow test --run-in-cloud` runs the tests on Flow's cloud, detached from your machine.** The run id is printed
+  first and kept in `.flow/runs/`; only the files Flow's cloud does not already hold are uploaded; the output is
+  followed and the exit status is the run's, with the result in `.flow/last-session.json` (so `--failed` and
+  `--changed` work). Ctrl-C stops following only (exit 130); `flow test attach [<run-id>]` follows it again,
+  `flow test stop [<run-id>]` ends it, `--no-follow` returns once it has started, and a terminated process with no
+  terminal stops the run. Not with `--agent-url`. Limits: 50 MB of files, 60 minutes a run, 12 runner-hours a day
+  per workspace. Needs Flow's test-run service; `FLOW_TEST_RUN_IN_CLOUD=1` turns it on for every `flow test`.
+
 - **`flow test compare`: the same scenarios on two or more variants of your agent, one table.** From the agent's
   folder, `flow test compare --model a --model b`, `--instructions agent/AGENTS.alt.md`, `--code-ref <git ref>` or
   `--variants variants.yaml` plays each variant (the agent as it stands is always the first, the baseline) in a
@@ -63,6 +71,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 On WhatsApp through Flow Messaging the default wait is 750 ms: a reply starts up to 450 ms later than before
 when a message has no follow-up. Other channels keep 300 ms. To keep 300 ms on WhatsApp too, set
 `debounceMs: 300` in `createAgent`.
+
+None for `--run-in-cloud`: it is new and changes nothing that exists.
 
 ## 0.20.1 (17 Nov 2026)
 

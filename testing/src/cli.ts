@@ -56,7 +56,8 @@ import { TEMPLATES_LINE, templatesCli, templateWarnings } from "./templates.ts";
 import { KEYS_HELP } from "./cloud-call.ts";
 import { PULL_LINE, pullCli } from "./pull.ts";
 import type { TemplateDefinition } from "../../src/types.ts";
-import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
+import { CLI_RELEASE_LINE, cliReleaseCli, cloudOf, DEPLOY_LINE, deployCli, logsCli } from "./deploy.ts";
+import { cloudArgs, RUN_LINES, RUN_OPTIONS, runCli, runDetached } from "./run-in-cloud.ts";
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
@@ -81,6 +82,7 @@ const NEW_LINE = `  flow new <name> [--display-name <name>]
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
                             the tests are in tests/scenarios and tests/tools)
+${RUN_LINES}
 ${PULL_LINE}
 ${COMPARE_LINE}`;
 const CHECK_LINE = `  flow check-endpoint <url> [--token-env NAME] [--json]
@@ -146,7 +148,11 @@ const TEST_OPTIONS = `Options for test:
   --channel <name>         With --agent-url: the channel every message names (default: the
                            platform each run plays, such as whatsapp or sms)
   --agent-timeout <s>      With --agent-url: how long one message waits for its answer (default: 60)
+  --run-in-cloud           Run the whole session on Flow's cloud, detached from this machine
+  --no-follow              With --run-in-cloud: return once the run has started (below)
   -h, --help               Show this help
+
+${RUN_OPTIONS}
 
 Limits: a hosted cloud plays a set number of runs at once per session, allows a number of
 sessions at once per workspace, and has a daily test budget (the last 24 hours of test and
@@ -277,6 +283,10 @@ if (process.argv[2] === "insights") await exitFlushed(await insightsCli(process.
 if (process.argv[2] === "templates") await exitFlushed(await templatesCli(process.argv.slice(3)));
 if (process.argv[2] === "test" && process.argv[3] === "compare") await exitFlushed(await compareCli(process.argv.slice(4)));
 if (process.argv[2] === "test" && process.argv[3] === "pull") await exitFlushed(await pullCli(process.argv.slice(4)));
+if (process.argv[2] === "test" && (process.argv[3] === "attach" || process.argv[3] === "stop")) {
+  loadEnv(undefined);
+  await exitFlushed(await runCli(process.argv[3], process.argv.slice(4)));
+}
 if (process.argv[2] === "test" && process.argv[3] === "fake") await exitFlushed(failed(process.argv.includes("--json"), new Failed(FAKE_COMMAND_REMOVED, "removed")));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) await exitFlushed(await accountCli(process.argv[2]!, process.argv.slice(3)));
 
@@ -326,6 +336,8 @@ const TEST_FLAGS = {
   /** --environment's other spelling (earlier documented name), as the other cloud commands take it; not in the help. */
   env: { type: "string" },
   "agent-url": { type: "string" },
+  "run-in-cloud": { type: "boolean", default: false },
+  "no-follow": { type: "boolean", default: false },
   channel: { type: "string" },
   "agent-timeout": { type: "string", default: "60" },
   help: { type: "boolean", short: "h", default: false },
@@ -480,6 +492,9 @@ const dir = process.cwd();
 const testsDir = variant?.testsDir ?? join(dir, "tests");
 const entry = join(dir, variant?.entry ?? "src/agent.ts");
 const agentUrl = values["agent-url"];
+const inCloud = values["run-in-cloud"] || /^(1|true)$/i.test(process.env.FLOW_TEST_RUN_IN_CLOUD ?? "");
+if (inCloud && agentUrl) invalid("--run-in-cloud runs your agent on Flow's cloud, which cannot reach an agent you serve yourself: use --agent-url from your machine, or --run-in-cloud for an agent built with src/agent.ts, not both.");
+if (values["no-follow"] && !inCloud) invalid("--no-follow goes with --run-in-cloud.");
 if (!agentUrl && values.channel) invalid("--channel goes with --agent-url.");
 // The package name keeps the agent's history together; an agent tested by its URL may have none.
 const packageJson = join(dir, "package.json");
@@ -565,6 +580,11 @@ for (const line of deprecatedInSuite(testsDir)) console.warn(line);
 if (values.fresh) console.warn(FRESH_IGNORED);
 files = forUrl(chosen);
 if (agentUrl) await checkAgentReachable(agentUrl);
+if (inCloud) {
+  // The cloud has no .flow/last-session.json to read, so --failed and --changed are worked out here and sent as --only.
+  const { api } = cloudOf(dir, process.env, cloud);
+  await exitFlushed(await runDetached({ dir, cloud, api, args: cloudArgs(values, picked, values["min-pass"] ?? (process.env.FLOW_TEST_MIN_PASS?.trim() || undefined)), json: Boolean(values.json), follow: !values["no-follow"] }));
+}
 perScenario = runs;
 
 function reportStop(done: RunSummary[], reason: string, link: string, ended: Ended) {
