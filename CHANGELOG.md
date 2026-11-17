@@ -41,10 +41,28 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   join code says Messaging is not set up there. Needs flow.engineer's matching change (live since 17 Nov 2026); against an
   older server nothing changes.
 
+- **Messages that arrive out of order are read in the order they were sent.** `Incoming` has a new `sentAt`
+  (ms; the channel's own clock, whole seconds on WhatsApp), which `@flow-engineer/flow/flow-messaging` fills from
+  the event's `message.sent_at`. The agent sorts the person's waiting messages by it when a turn starts and
+  when one arrives mid-turn (the model call is run again, as for any double text); a message with no sent
+  time keeps its arrival place. A message sent earlier than one the agent has already replied to becomes the next
+  turn, marked `[Chinwag] The message above was sent earlier than one you already answered.`; the history is
+  not reordered. `start()` of the Flow Messaging channel sets the app's `inbound_ordering` to `consumer`
+  (read first, changed only when different; a failure is logged once and ignored), so Flow Messaging stops holding
+  each message for 2 s to order it. Against a Flow Messaging that lacks the setting, nothing changes.
+- **WhatsApp through Flow Messaging waits 750 ms before it replies (was 300); every other channel stays at 300.**
+  The wait after a message before the reply starts, now that the agent, not Flow Messaging, puts quick bursts in
+  order. A channel can set its own default with `ChannelInfo.debounceMs`; `debounceMs` in `createAgent` still wins
+  on every channel.
+
 ### Migration notes
 
 - Update the CLI and rerun `npx @flow-engineer/flow setup` in the agent folder, then restart the agent.
 - `flow test compare` is new and changes nothing that exists: `flow test` behaves as before, and no `--json` field or wire field is added.
+
+On WhatsApp through Flow Messaging the default wait is 750 ms: a reply starts up to 450 ms later than before
+when a message has no follow-up. Other channels keep 300 ms. To keep 300 ms on WhatsApp too, set
+`debounceMs: 300` in `createAgent`.
 
 ## 0.20.1 (17 Nov 2026)
 

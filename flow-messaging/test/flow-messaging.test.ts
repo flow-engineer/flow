@@ -197,6 +197,8 @@ test("a video the model watched and no longer sees is fetched again from Flow by
 test("taps come as choices, with the button's id (info.buttonIds says so), and reactions to the agent's messages as reactions", async (t) => {
   const fm = flowMessaging({ apiKey: "fk_test_key" });
   assert.equal(fm.whatsapp({ sender: "snd_wa" }).info.buttonIds, true);
+  assert.equal(fm.whatsapp({ sender: "snd_wa" }).info.debounceMs, 750, "WhatsApp waits longer for a burst");
+  assert.equal(fm.telegram({ sender: "snd_tg" }).info.debounceMs, undefined, "other channels keep the agent default");
   assert.equal(fm.telegram({ sender: "snd_tg" }).info.buttonIds, true);
   assert.equal(fm.whatsapp({ sender: "snd_wa2", disable: ["buttons"] }).info.buttonIds, undefined, "no buttons, no claim about their ids");
   const flow = await fakeFlow();
@@ -606,4 +608,16 @@ test("a 422 unsupported_content reaches the agent saying what the channel does n
   assert.equal(flow.requests.length, before);
   await channel.send("+15550100199", { type: "message", text: "Book here", link: { label: "Book", url: "https://example.com/book" }, preview: false });
   assert.deepEqual((await flow.request((r) => post("/v0/messages")(r) && r.body.to.phone === "+15550100199")).body, { sender: "snd_WA", to: { phone: "+15550100199" }, kind: "basic", text: "Book here\nhttps://example.com/book", link_preview: false });
+});
+
+test("a message's sent_at reaches the agent, which reads two that arrived swapped in the order they were sent", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_tg = { address: { telegram_user_id: "777" } };
+  await live.deliver(received(TG, "msg_2", { kind: "basic", text: "second" }, { sent_at: "2026-11-17T10:00:05Z" }));
+  await live.nextCall(0);
+  await live.deliver(received(TG, "msg_1", { kind: "basic", text: "first" }, { sent_at: "2026-11-17T10:00:03Z" }));
+  const again = await live.nextCall(1);
+  assert.deepEqual(users(again.request.messages), ["[telegram · msg_1] first", "[telegram · msg_2] second"]);
 });

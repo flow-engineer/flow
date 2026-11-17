@@ -243,7 +243,7 @@ export function wirePayload(p: Platform, m: WireMessage, person: { name: string;
       const content = !a ? { kind: "basic", text: m.text }
         : a.kind === "audio" ? { kind: "voice", file_id: file, url: `https://api.flow.engineer/v0/files/${file}` }
           : { kind: "basic", media: { type: a.kind, file_id: file, url: `https://api.flow.engineer/v0/files/${file}`, mime_type: a.mime, ...(a.name ? { filename: a.name } : {}) }, ...(m.text ? { text: m.text } : {}) };
-      return { api: "POST your webhook · Flow Messaging event (iMessage has no public API)", body: { id: `evt_${hex(`${m.at}`, 24)}`, type: "message.received", conversation: { id: conversation, channel: "imessage", sender: "snd_…", contact: `ct_${hex(phone, 24)}` }, data: { message: { id: `msg_${hex(`${m.id}`, 24)}`, conversation, direction: "in", content, ...(quoted ? { reply_to: `msg_${hex(`${quoted.id}`, 24)}` } : {}) } } } };
+      return { api: "POST your webhook · Flow Messaging event (iMessage has no public API)", body: { id: `evt_${hex(`${m.at}`, 24)}`, type: "message.received", conversation: { id: conversation, channel: "imessage", sender: "snd_…", contact: `ct_${hex(phone, 24)}` }, data: { message: { id: `msg_${hex(`${m.id}`, 24)}`, conversation, direction: "in", content, sent_at: new Date(m.at).toISOString(), ...(quoted ? { reply_to: `msg_${hex(`${quoted.id}`, 24)}` } : {}) } } } };
     }
     const body = m.image ? { media: { type: "image", ...("url" in m.image ? { url: m.image.url } : { file_id: m.image.fileId }) }, ...(m.text ? { text: m.text } : {}) } : { text: m.text };
     return { api: `POST https://api.flow.engineer/v0/conversations/${conversation}/basic · Flow Messaging`, body: { ...body, ...(m.replyTo ? { reply_to: `msg_${hex(m.replyTo, 24)}` } : {}) } };
