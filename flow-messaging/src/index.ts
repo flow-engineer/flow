@@ -226,6 +226,8 @@ interface FlowMessage {
   /** A kind object (`kind`), or, for an app on Flow's bridge to the older API, its `type` content. */
   content: Record<string, unknown>;
   reply_to?: string;
+  /** When the person sent it (RFC 3339), from the channel's clock; absent when the channel gives none. */
+  sent_at?: string;
   error?: FlowError;
 }
 interface FlowEvent {
@@ -784,6 +786,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     } else if (c.kind === "location") base = { text: `[location: ${[c.name, c.address].filter(Boolean).join(", ")} (${c.lat}, ${c.lng})]` };
     else if (c.kind === "contact_card") base = { text: `[contact: ${String(c.name ?? "")}]` };
     else return null; // reactions arrive as reaction.added
+    const sentAt = m.sent_at === undefined ? NaN : Date.parse(m.sent_at);
+    if (Number.isFinite(sentAt)) base.sentAt = sentAt;
     if (m.reply_to) {
       const replyTo = await quoted(m.reply_to);
       if (replyTo) base.replyTo = replyTo;
@@ -1088,10 +1092,26 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
   }
 
   /**
+   * The agent puts the person's messages in the order they were sent, so Flow Messaging need not hold
+   * them back to order them: set the app to deliver each at once (`inbound_ordering: "consumer"`), only
+   * when it is not already. A Flow Messaging that lacks the setting still orders them itself, so a
+   * failure is logged once and the agent goes on.
+   */
+  async function orderingItself(): Promise<void> {
+    try {
+      const app = await client.get<{ inbound_ordering?: string }>("/v0/app");
+      if (app.inbound_ordering !== "consumer") await client.patch("/v0/app", { inbound_ordering: "consumer" });
+    } catch (error) {
+      log("WARNING", `@flow-engineer/flow/flow-messaging: could not set inbound_ordering to consumer (${error instanceof Error ? error.message : String(error)}); Flow Messaging goes on ordering messages itself, which holds each about 2 s.`);
+    }
+  }
+
+  /**
    * Starts receiving events: the webhook on `port` (default PORT, else 8080) when a webhook secret is
    * set, which means Flow posts to a public URL; otherwise the stream, which needs no URL.
    */
   function start(agent: WebhookAgent, o: StreamOptions & { port?: number } = {}): StreamHandle & { mode: "webhook" | "stream" } {
+    void orderingItself();
     if (!secrets.length) return { mode: "stream", ...stream(agent, o) };
     const server = createServer(webhook(agent)).listen(o.port ?? Number(process.env.PORT ?? 8080));
     return { mode: "webhook", stopped: new Promise<StreamStop>(() => {}), close: () => new Promise<void>((resolve) => server.close(() => resolve())) };

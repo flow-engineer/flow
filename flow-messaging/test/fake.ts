@@ -37,9 +37,12 @@ export async function fakeFlow() {
   const templates: unknown[] = [];
   const files: Record<string, Buffer> = {};
   let sent = 0;
+  const app: { inbound_ordering?: string } = { inbound_ordering: "flow" };
 
   function defaults(r: Recorded): { status: number; body: unknown } {
     const id = r.path.split("/")[3]?.split("?")[0];
+    if (r.path === "/v0/app" && r.method === "GET") return { status: 200, body: { id: "app_test", ...app } };
+    if (r.path === "/v0/app" && r.method === "PATCH") return { status: 200, body: { id: "app_test", ...Object.assign(app, r.body) } };
     if (r.method === "GET" && r.path.startsWith("/v0/contacts/")) return contacts[id] ? { status: 200, body: contacts[id] } : notFound();
     if (r.method === "GET" && r.path.startsWith("/v0/messages/")) return messages[id] ? { status: 200, body: messages[id] } : notFound();
     if (r.method === "GET" && r.path.startsWith("/v0/templates")) return { status: 200, body: { data: templates, has_more: false } };
@@ -119,7 +122,7 @@ export async function fakeFlow() {
   /** Every send into a conversation (any kind's endpoint), in order. */
   const into = (conversation: string) => requests.filter((r) => r.method === "POST" && r.path.startsWith(`/v0/conversations/${conversation}/`) && !/\/(typing|read)$/.test(r.path));
 
-  return { url, requests, queued, contacts, messages, templates, files, request, sends, into, streams, stream, close: () => server.close() };
+  return { url, app, requests, queued, contacts, messages, templates, files, request, sends, into, streams, stream, close: () => server.close() };
 }
 
 /** One client on the fake /v0/stream. */

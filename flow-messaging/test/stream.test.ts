@@ -277,3 +277,33 @@ for (const [code, type] of [[4401, "authentication"], [4403, "permission"], [440
     assert.equal(s.sockets.length, 1);
   });
 }
+
+test("start() sets the app to consumer ordering once, and an older Flow Messaging that has no such setting only gets one warning", async (t) => {
+  const warnings: string[] = [];
+  t.mock.method(console, "warn", (line: string) => void warnings.push(line));
+  const flow = await fakeFlow();
+  t.after(() => flow.close());
+  const patches = () => flow.requests.filter((r) => r.method === "PATCH" && r.path === "/v0/app");
+  const reads = () => flow.requests.filter((r) => r.method === "GET" && r.path === "/v0/app").length;
+
+  const first = streamAgent(flow);
+  t.after(() => first.handle.close());
+  assert.deepEqual((await flow.request((r) => r.method === "PATCH" && r.path === "/v0/app")).body, { inbound_ordering: "consumer" });
+
+  // Already consumer: a second start reads it and changes nothing.
+  const second = streamAgent(flow);
+  t.after(() => second.handle.close());
+  await flow.request(() => reads() >= 2);
+  await fetch(`${flow.url}/v0/app`); // a round trip after the read: a change would have been sent by now
+  assert.equal(patches().length, 1);
+
+  // An older Flow Messaging answers 404: warned once, and the agent still takes events.
+  flow.queued.push({ match: (r) => r.path === "/v0/app", status: 404, body: { error: { type: "not_found", message: "No such object.", hint: "", doc_url: "" } } });
+  flow.contacts.ct_tg = { address: { telegram_user_id: "777" } };
+  const third = streamAgent(flow);
+  t.after(() => third.handle.close());
+  const open = await flow.stream(2);
+  open.send({ type: "event", event: received(TG, "msg_1", { kind: "basic", text: "hi" }) });
+  assert.equal(lastUser((await third.nextCall(0)).request.messages), "[msg_1] hi");
+  assert.equal(warnings.filter((w) => w.includes("inbound_ordering")).length, 1);
+});

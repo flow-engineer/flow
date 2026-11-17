@@ -1,4 +1,4 @@
-// covers: src/conversation.ts src/events.ts
+// covers: src/conversation.ts src/events.ts src/types.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { z } from "zod";
 import { createAgent, tool, type EventSink } from "../src/index.ts";
-import { call, gate, harness, last, respond, say, scriptedModel, users } from "./helpers.ts";
+import { call, gate, harness, last, respond, say, scriptedModel, users, WEB } from "./helpers.ts";
 
 test("a double text folds into the reply being written", async () => {
   const h = harness();
@@ -114,4 +114,45 @@ test("a message sent while tools run is read at once: the tool moves to the back
   third.answer(respond(say("And your plan is fine.")));
   await h.agent.conversation("c8")!.whenIdle();
   assert.equal(h.sent().length, 3);
+});
+
+/** A message the channel timestamps (seconds), delivered out of order by the test. */
+function sentAt(h: ReturnType<typeof harness>, text: string, seconds: number) {
+  h.agent.receive("c8", { text, sentAt: seconds * 1000 }, () => undefined, { channel: WEB });
+}
+
+test("two messages that arrive swapped inside the debounce window are read in the order they were sent, in one turn", async () => {
+  const h = harness();
+  sentAt(h, "second", 20);
+  sentAt(h, "first", 10);
+  const call0 = await h.nextCall(0);
+  assert.deepEqual(users(call0.request.messages), ["[m2] first\n[m1] second"]);
+  call0.answer(respond(say("ok")));
+  await h.agent.conversation("c8")!.whenIdle();
+  assert.equal(h.calls.length, 1);
+});
+
+test("a message sent earlier that arrives while the model is working is read in its place, costing one more model call", async () => {
+  const h = harness();
+  sentAt(h, "second", 20);
+  await h.nextCall(0);
+  sentAt(h, "first", 10);
+  const again = await h.nextCall(1);
+  assert.deepEqual(users(again.request.messages), ["[m2] first", "[m1] second"]);
+  again.answer(respond(say("ok")));
+  await h.agent.conversation("c8")!.whenIdle();
+  assert.equal(h.calls.length, 2);
+});
+
+test("a message sent earlier that arrives after the reply to a later one is the next turn, marked, with the history unchanged", async () => {
+  const h = harness();
+  sentAt(h, "second", 20);
+  (await h.nextCall(0)).answer(respond(say("answer to second")));
+  await h.agent.conversation("c8")!.whenIdle();
+  sentAt(h, "first", 10);
+  const next = await h.nextCall(1);
+  const roles = next.request.messages.map((m) => m.role);
+  assert.deepEqual(roles, ["user", "assistant", "tool", "user"]);
+  assert.equal(users(next.request.messages)[0], "[m1] second");
+  assert.match(users(next.request.messages)[1], /^\[m2] first\n\[Chinwag] The message above was sent earlier than one you already answered\.$/);
 });

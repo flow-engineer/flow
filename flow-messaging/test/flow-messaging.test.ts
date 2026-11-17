@@ -607,3 +607,15 @@ test("a 422 unsupported_content reaches the agent saying what the channel does n
   await channel.send("+15550100199", { type: "message", text: "Book here", link: { label: "Book", url: "https://example.com/book" }, preview: false });
   assert.deepEqual((await flow.request((r) => post("/v0/messages")(r) && r.body.to.phone === "+15550100199")).body, { sender: "snd_WA", to: { phone: "+15550100199" }, kind: "basic", text: "Book here\nhttps://example.com/book", link_preview: false });
 });
+
+test("a message's sent_at reaches the agent, which reads two that arrived swapped in the order they were sent", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow);
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_tg = { address: { telegram_user_id: "777" } };
+  await live.deliver(received(TG, "msg_2", { kind: "basic", text: "second" }, { sent_at: "2026-11-17T10:00:05Z" }));
+  await live.nextCall(0);
+  await live.deliver(received(TG, "msg_1", { kind: "basic", text: "first" }, { sent_at: "2026-11-17T10:00:03Z" }));
+  const again = await live.nextCall(1);
+  assert.deepEqual(users(again.request.messages), ["[telegram · msg_1] first", "[telegram · msg_2] second"]);
+});

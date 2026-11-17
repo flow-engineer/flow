@@ -175,6 +175,7 @@ const APOLOGY = "Sorry, something went wrong on my side. Could you send that aga
 export const LEASE_MS = 15_000;
 const RENEW_MS = 5_000;
 let leaseWarned = false;
+const SENT_EARLIER = "[Chinwag] The message above was sent earlier than one you already answered.";
 const EARLIER = "[Chinwag] Older messages of this conversation are no longer shown to you.";
 const RESET = "[Chinwag] The conversation starts again here: earlier messages are no longer shown to you.";
 
@@ -276,6 +277,8 @@ interface Pending {
   video?: { mime: string; ref: string };
   /** The page of the business's site it was written from (the web chat). */
   page?: PageContext;
+  /** When they sent it, from the channel's clock (ms); the agent reads messages in this order. */
+  sentAt?: number;
   inbox?: number;
   /** Answered with no model call: the agent reads it with what was sent back, and it starts no turn. */
   answer?: Answer;
@@ -728,7 +731,7 @@ export class Conversation {
   /** The message is ready for the agent: it joins the reply in progress, or starts one. */
   private arrive(incoming: Incoming, id: string, channel: string, ownId: boolean, files: Files): void {
     const at = this.settings.now();
-    const item: Pending = { id, text: describe(incoming, files), shown: shownText(incoming, files), ...choiceOf(incoming), channel, ...(files.media.length ? { media: files.media } : {}), ...(files.video ? { video: files.video } : {}), ...(incoming.page ? { page: incoming.page } : {}) };
+    const item: Pending = { id, text: describe(incoming, files), shown: shownText(incoming, files), ...choiceOf(incoming), channel, ...(files.media.length ? { media: files.media } : {}), ...(files.video ? { video: files.video } : {}), ...(incoming.page ? { page: incoming.page } : {}), ...(sentTime(incoming.sentAt) ? { sentAt: incoming.sentAt } : {}) };
     this.pending.push(item);
     if (item.page) this.page = { channel, page: item.page };
     this.recentChannels = [...this.recentChannels, channel].slice(-5);
@@ -736,7 +739,7 @@ export class Conversation {
     if (link) link.lastMessageAt = at;
     const fields = { messageCount: this.messageCount, recentChannels: this.recentChannels };
     this.persist(async () => {
-      const payload = { id, text: item.text, shown: item.shown, ...(item.choice ? { choice: true } : {}), ...(item.choiceId ? { choiceId: item.choiceId } : {}), channel, ...(item.media ? { media: item.media.map(stored) } : {}), ...(item.video ? { video: item.video } : {}), ...(item.page ? { page: item.page } : {}) };
+      const payload = { id, text: item.text, shown: item.shown, ...(item.choice ? { choice: true } : {}), ...(item.choiceId ? { choiceId: item.choiceId } : {}), channel, ...(item.media ? { media: item.media.map(stored) } : {}), ...(item.video ? { video: item.video } : {}), ...(item.page ? { page: item.page } : {}), ...(item.sentAt !== undefined ? { sentAt: item.sentAt } : {}) };
       const inbox = await this.settings.store.addMessage(this.id, payload, ownId ? { channel, messageId: id } : undefined);
       if (inbox === null) {
         // Another runner took this provider id first (a retry reached both): the message is theirs.
@@ -920,7 +923,7 @@ export class Conversation {
     const p = row.payload as Record<string, any>;
     if (row.kind === "message") {
       // Its photos and PDFs are named, not shown: their bytes were never stored.
-      this.pending.push({ id: p.id, text: p.text, shown: p.shown ?? p.text, ...(p.choice ? { choice: true } : {}), ...(typeof p.choiceId === "string" ? { choiceId: p.choiceId } : {}), channel: p.channel, inbox: row.id, ...(Array.isArray(p.media) ? { media: p.media } : {}), ...(p.video ? { video: p.video } : {}), ...(p.answer ? { answer: p.answer } : {}), ...(p.page ? { page: p.page } : {}) });
+      this.pending.push({ id: p.id, text: p.text, shown: p.shown ?? p.text, ...(p.choice ? { choice: true } : {}), ...(typeof p.choiceId === "string" ? { choiceId: p.choiceId } : {}), channel: p.channel, inbox: row.id, ...(Array.isArray(p.media) ? { media: p.media } : {}), ...(p.video ? { video: p.video } : {}), ...(p.answer ? { answer: p.answer } : {}), ...(p.page ? { page: p.page } : {}), ...(sentTime(p.sentAt) ? { sentAt: p.sentAt } : {}) });
       if (p.page) this.page = { channel: p.channel, page: p.page };
       this.messageIds.set(p.id, p.channel);
       if (!p.answer) {
@@ -1399,11 +1402,14 @@ export class Conversation {
       if (note.owed) this.owed.push(note.owed);
       items.push(note);
     }
-    const messages = this.pending.splice(0);
+    const messages = inSentOrder(this.pending.splice(0));
     if (messages.length) {
       const tag = this.settings.tagChannels || this.channels.size > 1;
-      const line = (m: Pending) => `[${tag ? `${m.channel} · ` : ""}${m.id}${m.text}`;
-      const said = (m: Pending, reaction?: string): PersonMessage => ({ id: m.id, channel: m.channel, text: m.shown, ...(m.choice ? { choice: true } : {}), ...(m.choiceId ? { choiceId: m.choiceId } : {}), ...(m.video ? { video: m.video } : {}), ...(reaction ? { reaction } : {}) });
+      const answeredAt = answeredSentAt(this.history);
+      // Sent before one the agent already answered: it is read now, after that reply, and says so.
+      const late = (m: Pending) => m.sentAt !== undefined && answeredAt !== undefined && m.sentAt < answeredAt;
+      const line = (m: Pending) => `[${tag ? `${m.channel} · ` : ""}${m.id}${m.text}${late(m) ? `\n${SENT_EARLIER}` : ""}`;
+      const said = (m: Pending, reaction?: string): PersonMessage => ({ id: m.id, channel: m.channel, text: m.shown, ...(m.sentAt !== undefined ? { sentAt: m.sentAt } : {}), ...(m.choice ? { choice: true } : {}), ...(m.choiceId ? { choiceId: m.choiceId } : {}), ...(m.video ? { video: m.video } : {}), ...(reaction ? { reaction } : {}) });
       // In order: the messages the agent answers, together in one entry, and each answered with no
       // model call as one of its own, with what was sent back as the agent's (as a text nudge is).
       let group: Pending[] = [];
@@ -2217,7 +2223,7 @@ export class Conversation {
    * before anything was sent back.
    */
   private window(system: string, specs: ToolSpec[]): ChatMessage[] {
-    const all = this.history.map(forModel);
+    const all = inSentOrderSoFar(this.history).map(forModel);
     const from = this.resetFrom();
     let room = this.settings.historyTokens - tokens(system) - tokens(JSON.stringify(specs)) - tokens(EARLIER);
     let start = all.length;
@@ -2643,6 +2649,58 @@ function stored(media: Media): Media {
 }
 
 /** A history entry as the model is sent it: media no longer shown are taken off, and it is told. */
+/** A usable sent time: a finite number of ms. */
+function sentTime(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/**
+ * Items in the order they were sent. Only items that carry a sent time are sorted, among the places
+ * they hold; an item with none keeps its place, and equal times keep arrival order.
+ */
+function sortedBySent<T>(items: T[], at: (item: T) => number | undefined): T[] {
+  const slots = items.flatMap((item, i) => (at(item) === undefined ? [] : [i]));
+  const sorted = slots.map((i) => items[i]).sort((a, b) => at(a)! - at(b)!); // stable
+  const out = [...items];
+  slots.forEach((slot, k) => (out[slot] = sorted[k]));
+  return out;
+}
+
+function inSentOrder(messages: Pending[]): Pending[] {
+  return sortedBySent(messages, (m) => (m.answer ? undefined : m.sentAt));
+}
+
+/** The earliest sent time of the person's messages in a history entry, if any carries one. */
+function entrySentAt(entry: ChatMessage): number | undefined {
+  if (entry.role !== "user" || entry.reset) return undefined;
+  const times = (entry.messages ?? []).flatMap((m) => (sentTime(m.sentAt) ? [m.sentAt] : []));
+  return times.length ? Math.min(...times) : undefined;
+}
+
+/**
+ * The history as the model reads it: the entries after the last reply or tool result (the person's
+ * messages still waiting for an answer) in the order they were sent, so a message that came late
+ * mid-turn goes in its place. The stored history is not changed. Entries with no sent time keep their place.
+ */
+function inSentOrderSoFar(history: ChatMessage[]): ChatMessage[] {
+  let from = history.length;
+  while (from > 0 && history[from - 1].role === "user") from--;
+  if (history.length - from < 2) return history;
+  return [...history.slice(0, from), ...sortedBySent(history.slice(from), entrySentAt)];
+}
+
+/** The latest sent time among the messages the agent had read when it last replied, or undefined. */
+function answeredSentAt(history: ChatMessage[]): number | undefined {
+  let latest: number | undefined;
+  let answered: number | undefined;
+  for (const entry of history) {
+    if (entry.role === "user") {
+      for (const m of entry.messages ?? []) if (sentTime(m.sentAt) && (latest === undefined || m.sentAt > latest)) latest = m.sentAt;
+    } else if (entry.role === "assistant" && entry.toolCalls?.some((c) => c.name.startsWith("send_"))) answered = latest;
+  }
+  return answered;
+}
+
 function forModel(entry: ChatMessage): ChatMessage {
   if (entry.role !== "user") return entry;
   if (!entry.media) return { role: "user", content: entry.content };
