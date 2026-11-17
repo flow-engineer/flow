@@ -11,7 +11,8 @@ Read `flow-framework` (`skill.md`) for project setup, names and layout. For tool
 
 Flow folds double texts into one reply, acknowledges people fast, runs tools in parallel and
 waits for them, moving one to the background only when the person writes again or it passes its
-limit. You write the agent's prompt, skills and tools.
+limit. You write the agent's prompt, skills and tools. If the agent has to collect several facts from a person
+(a booking, order, sign-up, listing), load `flow-framework-collecting-information` before writing its prompt.
 
 Read the relevant section:
 
@@ -188,8 +189,13 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   Nothing is deleted. A long chat is also cut to `history.maxTokens` (default 24,000, or 60% of the
   model's `contextTokens` when less).
 - **Acknowledging first, or not (`showsTools`).** By default, after the person writes, the agent's
-  first message reaches them at once: the answer, or a short "checking that now" sent with its tool
-  calls, plus `share_updates` while tools run. That is right wherever the person sees only messages
+  first message reaches them at once: the answer, or a short line sent with its tool calls, plus
+  `share_updates` while tools run. The line is for the person: short and warm ("Booking that now"),
+  never about the agent's own steps ("checking the catalog", "looking that up"). Every message the agent
+  sends is a message of its own on a chat channel, so text beside each of several tool calls arrives as
+  several messages: text only with the first call, and where the channel has reactions acknowledge with
+  a reaction and send one message after the result. No option limits a turn to one message; the prompt
+  and a scenario do. That is right wherever the person sees only messages
   (WhatsApp, SMS, iMessage, Telegram, `webChat`, a UI that shows only messages): without it they see
   nothing while tools run. A UI that draws every tool call as it runs does not need it, so its
   channel says so: `customUI("app", { ..., info: { showsTools: true } })`. On that channel the agent

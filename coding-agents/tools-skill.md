@@ -10,6 +10,10 @@ in the `flow-framework-tests` skill (`test-skill.md`). For a company with an exi
 the context pack first (the `flow-framework-context` skill, `context-skill.md`) and write the tools from
 it.
 
+**A tool for a flow that collects several facts from a person** (a booking, order, sign-up, listing) is not
+written as "return the next question": read `flow-framework-collecting-information`
+(`collecting-information-skill.md`) first.
+
 ## The tool
 
 ```ts

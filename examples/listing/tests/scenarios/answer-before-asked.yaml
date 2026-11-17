@@ -1,0 +1,26 @@
+id: answer-before-asked
+title: Answer given before it was asked
+about: The person volunteers the postcode with the first answer; it must not be asked for later.
+theme: Collecting
+channels: [whatsapp]
+person:
+  persona: Priya, chatty, adds things nobody asked for.
+  goal: List a guitar. You are done once you have said yes to a summary.
+  knows:
+    - An acoustic guitar, good condition, 150, bought 3 years ago, collect weekends.
+    - Postcode is BS1 5TR, and Priya mentions it in her second message without being asked.
+    - No faults.
+opening:
+  - say: "i'd like to sell my acoustic guitar, im in BS1 5TR by the way"
+tools: { real: [update_listing, publish_listing] }
+world: Nothing special. The listing tools work.
+max_turns: 12
+expect:
+  calls:
+    - { tool: publish_listing }
+  judge:
+    - The summary Sam or Priya says yes to lists an acoustic guitar with postcode BS1 5TR, price 150, good condition.
+    - The agent never asks for the postcode.
+    - Every message from the agent holds at most one question.
+    - The agent never asks for something the person has already told it in this conversation.
+    - Each turn of the agent is a single message to the person, not several in a row.

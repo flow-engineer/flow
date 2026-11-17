@@ -1,0 +1,26 @@
+id: two-fields-one-answer
+title: One answer fills two fields
+about: Answering the condition question also says when it was bought; the agent keeps both.
+theme: Collecting
+channels: [whatsapp]
+person:
+  persona: Priya, friendly, answers in a short phrase and adds extra when it comes to mind.
+  goal: List a camera for sale. You are done once you have said yes to a summary.
+  knows:
+    - The camera is a Fuji X-T30, asking 480, postcode M1 4BT, anyone can collect on Saturdays.
+    - 'When asked about the condition, answers in one message: "good, used it twice, bought it last year".'
+    - No faults.
+opening:
+  - say: "hi, selling a fuji xt30 camera"
+tools: { real: [update_listing, publish_listing] }
+world: Nothing special. The listing tools work.
+max_turns: 12
+expect:
+  calls:
+    - { tool: publish_listing }
+  judge:
+    - The summary Sam or Priya says yes to lists a Fuji X-T30, good condition, price 480, bought about a year ago (around {{now - 365d | date}}), postcode M1 4BT, pickup on Saturdays.
+    - Priya is never asked when she bought it after having said "last year" in the same message as the condition.
+    - Every message from the agent holds at most one question.
+    - The agent never asks for something the person has already told it in this conversation.
+    - Each turn of the agent is a single message to the person, not several in a row.

@@ -1,0 +1,9 @@
+# The real tool runs in the scenarios (tools.real), so this file is only the shape of its answer.
+tool: update_listing
+behaviour: |
+  Keeps the person's draft, merging every fact it is given. Returns the draft, the fields still missing, the one thing to ask next and any problems.
+responses:
+  - when: Facts are saved and something is still missing (usual)
+    latency_ms: 200
+    input: { fields: { item: bicycle } }
+    output: { draft: { item: bicycle }, missing: [condition, price, bought_on, postcode, pickup], ask: its condition, problems: [], ready: false }

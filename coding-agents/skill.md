@@ -10,7 +10,9 @@ Start with the interfaces the owner needs.
 
 ## Read the guide for the task
 
-Read only the relevant guides; do not load every skill upfront.
+Read only the relevant guides; do not load every skill upfront. If the agent must gather more than one
+fact from a person before it acts (booking, order, sign-up, listing, repair visit), load the
+collecting-information skill before you write its tool or prompt: the obvious design is the wrong one.
 
 | Task | Skill | Package file |
 | --- | --- | --- |
@@ -18,6 +20,7 @@ Read only the relevant guides; do not load every skill upfront.
 | Serve MCP tools, configure deferral, build or ship a CLI, or package plugins | `flow-framework-mcp` | `mcp-skill.md` |
 | Choose a CLI's short forms: default commands, positional arguments, short flags | `flow-framework-cli-design` | `cli-design-skill.md` |
 | Rename, remove or reshape an MCP tool once a CLI is published (contracts) | `flow-framework-contracts` | `contracts-skill.md` |
+| Collect several facts from a person in chat: a booking, order, sign-up, listing, application, return or lead | `flow-framework-collecting-information` | `collecting-information-skill.md` |
 | Write or change tools and their test files | `flow-framework-tools` | `tools-skill.md` |
 | Write or change test scenarios | `flow-framework-tests` | `test-skill.md` |
 | Gather the context pack from an existing app, API or database before building tools | `flow-framework-context` | `context-skill.md` |

@@ -84,7 +84,7 @@ MCP server and a CLI. It starts as the café example; replace the café with the
 - Start with \`flow-framework\` in \`.claude/skills/\` for setup, names and layout. Then load only the
   relevant guides: \`flow-framework-build-agent\` for the messaging runtime, playground and deployment;
   \`flow-framework-mcp\` for MCP servers, CLIs and plugins; \`flow-framework-tools\` for tools and their
-  test files; \`flow-framework-tests\` for scenarios; \`flow-framework-context\` to gather the context
+  test files; \`flow-framework-collecting-information\` before building any flow that gathers several facts from a person (booking, order, sign-up, listing); \`flow-framework-tests\` for scenarios; \`flow-framework-context\` to gather the context
   pack from an existing codebase; and \`flow-framework-auth\` for sign-in.
 - \`agent/AGENTS.md\` is the agent's own prompt, not instructions for coding agents.
 - The agent's names live in package.json, and the code reads them from there (src/name.ts):

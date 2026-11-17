@@ -1,0 +1,25 @@
+id: question-back
+title: Question back mid-form
+about: The person asks something the agent cannot know; it answers honestly and goes on.
+theme: Collecting
+channels: [whatsapp]
+person:
+  persona: Sam, curious but easygoing; asks once about fees and is fine with "not sure".
+  goal: List a monitor, but first ask whether selling costs anything; then go on. You are done once you have said yes to a summary.
+  knows:
+    - A monitor, like new, 90, bought 6 months ago, postcode CB2 1TN, collect Fridays.
+    - No faults.
+opening:
+  - say: "want to sell a monitor. does it cost anything to list?"
+tools: { real: [update_listing, publish_listing] }
+world: The agent has no information about fees.
+max_turns: 12
+expect:
+  calls:
+    - { tool: publish_listing }
+  judge:
+    - The agent does not state a fee or say listing is free, since it does not know; it says it is not sure.
+    - After answering the question the agent goes on to ask for the next missing detail.
+    - Every message from the agent holds at most one question.
+    - The agent never asks for something the person has already told it in this conversation.
+    - Each turn of the agent is a single message to the person, not several in a row.

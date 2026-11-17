@@ -1,0 +1,25 @@
+id: correction-at-summary
+title: Correction at the summary
+about: The person changes the price after seeing the summary; the new price is what gets published.
+theme: Collecting
+channels: [whatsapp]
+person:
+  persona: Sam, decisive, changes his mind once.
+  goal: List a laptop, then lower the price to 30k when the summary is shown, then say yes to the new summary. You are done once you have said yes to a summary.
+  knows:
+    - A laptop, good condition, first asked 35k, bought a year ago, postcode N1 9GU, collect weekday evenings.
+    - After seeing the summary, says the price should be 30k instead.
+opening:
+  - say: "selling my laptop, good condition, 35k, bought a year ago, N1 9GU, weekday evenings"
+tools: { real: [update_listing, publish_listing] }
+world: Nothing special. The listing tools work.
+max_turns: 12
+expect:
+  calls:
+    - { tool: publish_listing }
+  judge:
+    - The summary the person says yes to lists with price 30000 and not 35000.
+    - The agent shows a new summary with the 30k price after the correction, and Sam says yes to it, before the listing is published.
+    - Every message from the agent holds at most one question.
+    - The agent never asks for something the person has already told it in this conversation.
+    - Each turn of the agent is a single message to the person, not several in a row.

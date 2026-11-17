@@ -224,6 +224,32 @@ written in scenarios: the dashboard shows it for the whole run (average, p95, mi
 - When a real conversation went wrong, turn it into a scenario: its world is what was true then,
   its opening is what the person sent.
 
+## Scenarios for collecting information
+
+An agent that collects several facts from a person (a booking, an order, a sign-up; the
+`flow-framework-collecting-information` skill) needs scenarios from messy people, judged on the
+outcome. A suite written field by field (the person answers exactly the question asked, in order)
+passes while a real person breaks the agent: it files "1 month" under the wrong field, asks again
+for what it was told, or sends a form. Write one scenario for each:
+
+- everything in the first message;
+- one answer that fills two fields;
+- facts scattered over double texts (`after_ms`), out of order;
+- an answer given before it was asked;
+- a correction at the summary;
+- a vague answer ("a while back");
+- a question back to the agent in the middle;
+- "I'll send that later", and walking away (`never` the irreversible tool).
+
+Checks: `calls` with `args` for the irreversible step, `never` where it must not happen, and `judge`
+sentences: the summary lists the right values, nothing already given is asked again, every message holds
+at most one question, the agent confirms before it submits. Give the person a `goal` that ends when
+they have said yes to the summary, never "have it published": with `tools: { real: [...] }` (the tool's own
+code runs, for a draft the agent keeps) the cloud does not see what the tool changed, and a person
+whose goal needs a visible change drifts. Judge the data by the summary the person said yes to, since
+`outcome` reads the cloud's own view. The test format cannot check "one message per turn" or "one
+question per message" in code: they are `judge` sentences, so read the transcripts of the runs.
+
 ## Running the tests
 
 Tests run in the Flow Framework cloud: your agent stays on your machine with its own model and key and

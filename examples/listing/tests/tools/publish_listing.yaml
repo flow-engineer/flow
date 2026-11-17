@@ -1,0 +1,8 @@
+tool: publish_listing
+behaviour: |
+  Publishes the listing after the person said yes to the latest summary. Refused when the draft changed since the summary.
+responses:
+  - when: The listing is published (usual)
+    latency_ms: 600
+    input: { confirm_token: abc123 }
+    output: { published: true, listing_id: L-4f2a9c }
