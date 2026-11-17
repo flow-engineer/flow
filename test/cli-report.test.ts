@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { loadSuite, parseScenario, parseToolFile } from "../testing/src/suite.ts";
-import { addSplits, finishedOutcome, passRate, timeLines, timeSplit, type Verdict } from "../testing/src/report.ts";
+import { addSplits, coverageLine, finishedOutcome, passRate, timeLines, timeSplit, timingCalls, type Verdict } from "../testing/src/report.ts";
 
 const cli = fileURLToPath(new URL("../testing/src/cli.ts", import.meta.url));
 const run = {
@@ -40,7 +40,7 @@ function agentDir(more: Record<string, string> = {}): string {
 }
 
 /** A cloud that opens session `sessionId` (its open's answer with `answer` added), sends `frames` on the stream, then ends it or holds it open; `opens` has each open's body. */
-function cloud(hold: boolean, frames: unknown[] = [run], sessionId = "s", answer: Record<string, unknown> = {}) {
+function cloud(hold: boolean, frames: unknown[] = [run], sessionId = "s", answer: Record<string, unknown> = {}, records: Record<string, unknown> = {}) {
   let release: (() => void) | undefined;
   const opened = new Promise<void>((done) => { release = done; });
   const opens: Array<{ files: Array<{ path: string }>; runs: number; flaky?: boolean; agentVersion?: string }> = [];
@@ -61,6 +61,9 @@ function cloud(hold: boolean, frames: unknown[] = [run], sessionId = "s", answer
       if (!hold) res.end();
       return;
     }
+    const id = req.url?.match(/\/tests\/runs\/([^/?]+)$/)?.[1];
+    if (id && id in records) return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(records[id]));
+    if (id) return void res.writeHead(404, { "content-type": "application/json" }).end('{"error":{"type":"not_found"}}');
     req.resume();
     res.writeHead(200, { "content-type": "application/json" }).end("{}");
   });
@@ -329,7 +332,7 @@ test("with --json, every exit prints one report on stdout and every other line o
     ],
     invalid: [],
     sessionInvalid: null,
-    limits: null, mode: "thorough", modeAsked: "thorough", timing: null,
+    limits: null, mode: "thorough", modeAsked: "thorough", timing: null, timingCalls: null, concurrency: null,
   });
   // A cloud that sends no limits gets no limits line.
   assert.doesNotMatch(result.stderr, /at once/);
@@ -1009,4 +1012,39 @@ test("a run's time is split by fixed rules into the agent's model, tools (script
     "Time: 1m 30s for the session; 2m 00s of run time over 2 runs.",
     "  the agent's model 50s (42%) · tools, scripted latency 12s (10%) · tools, simulator 8s (7%) · the agent's own code 3s (3%) · the person 20s (17%) · the judge 12s (10%) · waits and other 15s (13%)",
   ]);
+});
+
+test("--timing --json gives each model call (ids, ms, tokens), the runs it covers and why the rest are left out, and the granted concurrency", { timeout: 20_000 }, async () => {
+  const dir = agentDir();
+  const timed = (calls: unknown[]) => ({ startedAt: 1_000, finishedAt: 9_000, turnTiming: [{ turn: 1, modelMs: 3_000, toolsMs: 0, ownMs: 0, calls }] });
+  const callOf = { ms: 3_000, queuedMs: 100, ttftMs: 900, generationMs: 2_000, input: 50, output: 20, cacheRead: null, cacheWrite: 5 };
+  const runs = [
+    runOf({ runId: "trn_1", scenario: "hello" }),
+    runOf({ runId: "trn_2", scenario: "hello", run: 2 }),
+    runOf({ runId: "trn_3", scenario: "hello", run: 3 }),
+    runOf({ runId: "trn_4", scenario: "hello", run: 4 }),
+    runOf({ runId: "", scenario: "hello", run: 5, error: "cloud_error" }),
+  ];
+  const finished = { type: "finished", summary: { sessionId: "s1", suiteHash: "h", testModel: "m", runs, dashboard: "http://dash/s1" } };
+  // trn_1 and trn_2 have records, trn_3 is an old record with no turn timing, trn_4 is gone, the fifth never had an id.
+  const local = await cloud(false, [finished], "s1", { agent: "agt_1", concurrency: 4 }, { trn_1: timed([callOf, callOf]), trn_2: timed([callOf]), trn_3: { startedAt: 1, finishedAt: 2 } });
+  let result;
+  try {
+    result = await cliStreams(["test", "--cloud", local.url, "--json", "--timing"], dir);
+  } finally { local.close(); }
+  const report = JSON.parse(result.stdout);
+  assert.equal(report.concurrency, 4);
+  assert.deepEqual(report.timing.coverage, { runs: 5, read: 2, missing: { notPlayed: 1, unavailable: 1, noTiming: 1, outOfTime: 0 } });
+  assert.match(result.stderr, /\(covers 2 of 5 runs: 1 never played, 1 records the cloud did not return, 1 records without turn timing\)/);
+  assert.equal(report.timingCalls.length, 3);
+  assert.deepEqual(Object.keys(report.timingCalls[0]).sort(), ["cacheRead", "cacheWrite", "channel", "generationMs", "input", "ms", "output", "queuedMs", "run", "runId", "scenario", "ttftMs", "turn"]);
+  assert.equal(report.timingCalls[0].cacheRead, null);
+});
+
+test("timingCalls reads every call of every turn, and coverageLine is silent only when every run is covered", () => {
+  const who = { runId: "r", scenario: "s", channel: "sms", run: 1 };
+  assert.deepEqual(timingCalls({ turnTiming: [{ turn: 1, calls: [{ ms: 5, input: 2, output: 1 }] }, { turn: 2 }] }, who), [{ ...who, turn: 1, ms: 5, queuedMs: null, ttftMs: null, generationMs: null, input: 2, output: 1, cacheRead: null, cacheWrite: null }]);
+  assert.deepEqual(timingCalls({}, who), []);
+  assert.equal(coverageLine({ runs: 3, read: 3, missing: { notPlayed: 0, unavailable: 0, noTiming: 0, outOfTime: 0 } }), null);
+  assert.equal(coverageLine({ runs: 205, read: 85, missing: { notPlayed: 0, unavailable: 0, noTiming: 0, outOfTime: 120 } }), "  (covers 85 of 205 runs: 120 not read before the time allowed ran out)");
 });
