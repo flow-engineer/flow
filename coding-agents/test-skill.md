@@ -422,8 +422,8 @@ done. A cancelled CI job (SIGTERM with no terminal) stops the run.
 What is sent: every file except `node_modules`, `.git`, `.flow` and every `.env*` file other than `tests/.env.test`
 (put the tests' non-secret settings there and commit it). Secrets and the agent's model key come from the agent's
 hosted secrets; with none, a Flow key made for the run pays for the model. Limits: 50 MB of files, 60 minutes a run, 12
-runner-hours a day per workspace; the message at a limit says so, and Flow support raises it on request. A
-workspace hosted in another region still has its tests played by the one test cloud, in the US.
+runner-hours a day per workspace; the message at a limit says so, and Flow support raises it on request. The
+India cell has no runners yet: `--run-in-cloud` there says it is not available in the region yet, and `flow test` without it still plays the tests.
 
 ### When a run fails
 

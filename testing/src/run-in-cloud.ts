@@ -64,7 +64,7 @@ export const RUN_OPTIONS = `Running in the cloud (flow test --run-in-cloud, or F
   nobody is left to attach (exit 143).
   Limits: the folder may hold up to 50 MB, a run lasts up to 60 minutes, and a workspace has 12
   runner-hours a day; past a limit the message says so: ask Flow support to raise it.
-  A workspace hosted in another region still has its tests played by the one test cloud, in the US.`;
+  Not available in the India cell yet: a workspace there (--cloud https://flow.engineer/dashboard/in) is told so.`;
 
 export interface Io {
   out: (text: string) => void;
