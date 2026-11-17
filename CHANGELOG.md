@@ -25,6 +25,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   see the same scenarios, not the same conversations; an agent on another framework compares by `agentUrl` for pass
   rate and judged checks only. See the `flow-framework-tests` skill ("Comparing variants").
 
+- **`flow test` timing covers every run, or says why not.** The report read each run's record within a fixed 30 s,
+  so a large session (about 200 runs) silently covered only part of it. The time to read now grows with the number of
+  runs, and when runs are still left out the summary and `--json` (`timing.coverage`) say how many are covered and why:
+  never played, record not returned, record without turn timing, or not read in time. `--json` also has
+  `concurrency` (the runs played at once, as granted; null from a cloud that does not say) and, with `--timing`,
+  `timingCalls`: each model call with its ms split (queued, first token, generation) and token counts, no text.
+  Additive; no migration.
 - **`flow setup` follows a workspace that lives in another region.** Its trace and test keys are made, and known,
   only by that region's dashboard, so an agent whose keys came from the default one was refused with 401 there.
   Setup now writes `FLOW_FRAMEWORK_TRACES_URL` from the server's answer (replacing a stale value), sends the
