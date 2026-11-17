@@ -170,7 +170,7 @@ test("a tool call lost on a reused socket is logged with that, and sent again on
   assert.match(timedOut[0]!, /^tool call timed out after \d+ ms \(try 1, kept-alive socket reused, no byte received\) in c$/);
 });
 
-test("a tool call the cloud failed, which the agent started and never awaited, is that run's error and the session plays on", { timeout: 10_000 }, async () => {
+for (const [code, said] of [["simulator_failed", /an infrastructure error for this run/], ["run_finished", /already ended this run when the call arrived/]] as const) test(`a tool call the cloud failed (${code}), which the agent started and never awaited, is that run's error and the session plays on`, { timeout: 10_000 }, async () => {
   // An intercept that hands off with `void tool.run(...)` and answers at once: the cloud's
   // simulator_failed for that call used to crash the CLI as an unhandled rejection.
   const unhandled: unknown[] = [];
@@ -183,7 +183,7 @@ test("a tool call the cloud failed, which the agent started and never awaited, i
   const say = (conversationId: string, messageId: string): Command => ({ type: "message", conversationId, messageId, channel: { reactions: false, status: false }, incoming: { text: "HUMAN" } });
   const cloud = await listen(({ url }, res) => {
     if (url === "/api/sessions") return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ sessionId: "s", token: "t", missing: [], dashboard: "d" }));
-    if (url.endsWith("/tool-calls")) return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: false, error: "simulator_failed" }));
+    if (url.endsWith("/tool-calls")) return void res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: false, error: code }));
     if (url.endsWith("/stream")) {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write(frame(say("sms:a", "m1")));
@@ -202,7 +202,7 @@ test("a tool call the cloud failed, which the agent started and never awaited, i
   try {
     await runInCloud({
       cloud: cloud.url, name: "test", files: [],
-      log: (line) => { logs.push(line); if (/simulator_failed/.test(line)) settled(); },
+      log: (line) => { logs.push(line); if (line.includes(code)) settled(); },
       onRun: (r) => seen.push(r.runId),
       tools: [{ name: "handoff", description: "hand off", input: z.object({}), run: async () => null }],
       build: ({ tools }: { tools: Tool[] }) => ({
@@ -221,7 +221,8 @@ test("a tool call the cloud failed, which the agent started and never awaited, i
   assert.deepEqual(unhandled, [], "a call the cloud failed is never an unhandled rejection");
   assert.deepEqual(received, ["sms:a", "sms:b"], "the next run still plays");
   assert.deepEqual(seen, ["r1", "r2"]);
-  assert.match(logs.join("\n"), /sms:a: the cloud failed the tool call handoff \(simulator_failed\)/);
+  assert.match(logs.join("\n"), new RegExp(`sms:a: the cloud failed the tool call handoff \\(${code}\\)`));
+  assert.match(logs.join("\n"), said);
 });
 
 test("on a cloud that does not resume, no bytes for the idle window means the stream is dead, and the run already in is kept",{ timeout: 10_000 }, async () => {
