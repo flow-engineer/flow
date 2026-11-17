@@ -1099,8 +1099,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
    */
   async function orderingItself(): Promise<void> {
     try {
-      const app = await client.get<{ inbound_ordering?: string }>("/v0/app");
-      if (app.inbound_ordering !== "consumer") await client.patch("/v0/app", { inbound_ordering: "consumer" });
+      const app = await client.get<{ settings?: { inbound_ordering?: string } }>("/v0/app");
+      if (app.settings?.inbound_ordering !== "consumer") await client.patch("/v0/app", { settings: { inbound_ordering: "consumer" } });
     } catch (error) {
       log("WARNING", `@flow-engineer/flow/flow-messaging: could not set inbound_ordering to consumer (${error instanceof Error ? error.message : String(error)}); Flow Messaging goes on ordering messages itself, which holds each about 2 s.`);
     }

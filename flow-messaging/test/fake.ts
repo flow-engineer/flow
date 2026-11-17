@@ -37,12 +37,12 @@ export async function fakeFlow() {
   const templates: unknown[] = [];
   const files: Record<string, Buffer> = {};
   let sent = 0;
-  const app: { inbound_ordering?: string } = { inbound_ordering: "flow" };
+  const app = { id: "app_test", settings: { inbound_ordering: "flow" } };
 
   function defaults(r: Recorded): { status: number; body: unknown } {
     const id = r.path.split("/")[3]?.split("?")[0];
-    if (r.path === "/v0/app" && r.method === "GET") return { status: 200, body: { id: "app_test", ...app } };
-    if (r.path === "/v0/app" && r.method === "PATCH") return { status: 200, body: { id: "app_test", ...Object.assign(app, r.body) } };
+    if (r.path === "/v0/app" && r.method === "GET") return { status: 200, body: app };
+    if (r.path === "/v0/app" && r.method === "PATCH") return { status: 200, body: (Object.assign(app.settings, r.body?.settings), app) };
     if (r.method === "GET" && r.path.startsWith("/v0/contacts/")) return contacts[id] ? { status: 200, body: contacts[id] } : notFound();
     if (r.method === "GET" && r.path.startsWith("/v0/messages/")) return messages[id] ? { status: 200, body: messages[id] } : notFound();
     if (r.method === "GET" && r.path.startsWith("/v0/templates")) return { status: 200, body: { data: templates, has_more: false } };

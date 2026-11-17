@@ -288,7 +288,7 @@ test("start() sets the app to consumer ordering once, and an older Flow Messagin
 
   const first = streamAgent(flow);
   t.after(() => first.handle.close());
-  assert.deepEqual((await flow.request((r) => r.method === "PATCH" && r.path === "/v0/app")).body, { inbound_ordering: "consumer" });
+  assert.deepEqual((await flow.request((r) => r.method === "PATCH" && r.path === "/v0/app")).body, { settings: { inbound_ordering: "consumer" } });
 
   // Already consumer: a second start reads it and changes nothing.
   const second = streamAgent(flow);
