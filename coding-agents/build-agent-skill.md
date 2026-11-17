@@ -190,7 +190,7 @@ await agent.message({ channel: "whatsapp", from: "+15550100100", message: "hi" }
   model's `contextTokens` when less).
 - **Acknowledging first, or not (`showsTools`).** By default, after the person writes, the agent's
   first message reaches them at once: the answer, or a short line sent with its tool calls, plus
-  `share_updates` while tools run. The line is for the person: short and warm ("On it", "One sec"),
+  `share_updates` while tools run. The line is for the person: short and warm ("Booking that now"),
   never about the agent's own steps ("checking the catalog", "looking that up"). Every message the agent
   sends is a message of its own on a chat channel, so text beside each of several tool calls arrives as
   several messages: text only with the first call, and where the channel has reactions acknowledge with

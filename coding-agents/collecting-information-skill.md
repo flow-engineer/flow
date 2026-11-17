@@ -119,6 +119,11 @@ can be two messages: the acknowledgement and the answer. Keep it to one:
 - no text beside later tool calls, no "Preparing your summary now", no second message with the question.
 
 There is no option that limits a turn to one message; guard it in the prompt and in a scenario judge sentence.
+The framework's own instruction asks for an acknowledgement before tools, so the agent's prompt must say plainly that it
+overrides that (see `examples/listing/agent/AGENTS.md`).
+
+To test a flow that spans several turns on your machine and keep the draft between restarts, give the agent a file database:
+`createAgent({ database: sqlite("data/flow.db") })`.
 
 ## Scenarios to write
 
