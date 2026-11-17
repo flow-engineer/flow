@@ -13,6 +13,18 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `concurrency` (the runs played at once, as granted; null from a cloud that does not say) and, with `--timing`,
   `timingCalls`: each model call with its ms split (queued, first token, generation) and token counts, no text.
   Additive; no migration.
+- **`flow setup` follows a workspace that lives in another region.** Its trace and test keys are made, and known,
+  only by that region's dashboard, so an agent whose keys came from the default one was refused with 401 there.
+  Setup now writes `FLOW_FRAMEWORK_TRACES_URL` from the server's answer (replacing a stale value), sends the
+  address `.env` holds so the server knows where the keys were made, and, when that is not the answer's address,
+  replaces the cloud and traces keys once with ones made in the right region (the Messaging key, join code,
+  senders and try page are left byte for byte; a rerun changes nothing). `flow link` for such a workspace with no
+  join code says Messaging is not set up there. Needs flow.engineer's matching change (live since 17 Nov 2026); against an
+  older server nothing changes.
+
+### Migration notes
+
+Update the CLI and rerun `npx @flow-engineer/flow setup` in the agent folder, then restart the agent.
 
 ## 0.20.1 (17 Nov 2026)
 

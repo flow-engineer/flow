@@ -1002,7 +1002,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   let observeFailed: { why: string; fix: string | undefined } | undefined;
   try {
     // Every channel: each comes back with its shared sender only while it is open.
-    answer = await setup(url, token, { name, hostname: hostname(), channels: [...CHANNELS], have, ...(workspace !== undefined ? { workspace } : {}), ...(rotate ? { rotate } : {}), ...(rotateNow ? { rotate_now: true as const } : {}) });
+    answer = await setup(url, token, { name, hostname: hostname(), channels: [...CHANNELS], have, ...(before.get(SETUP_ENV.traces_url) ? { traces_url: before.get(SETUP_ENV.traces_url)! } : {}), ...(workspace !== undefined ? { workspace } : {}), ...(rotate ? { rotate } : {}), ...(rotateNow ? { rotate_now: true as const } : {}) });
   } catch (error) {
     // Texting needs only Messaging's part, so link goes on without observe's (traces and the test
     // cloud) and says what is missing; setup alone, whose job is both, still stops.
@@ -1013,7 +1013,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
     } else {
       // The keys minted anyway are not shown again, so whatever the error carries goes into .env first.
       if (error instanceof LoginRefused) {
-      const written = writeEnv(file, lines, before, envEntries(withTryUrl(error.fields)), (n) => options.replace || rotatedEnv.has(n) || chosenPage(n));
+      const written = writeEnv(file, lines, before, envEntries(withTryUrl(error.fields)), (n) => options.replace || rotatedEnv.has(n) || chosenPage(n) || n === SETUP_ENV.traces_url || (typeof error.fields.traces_url === "string" && before.get(SETUP_ENV.traces_url) !== error.fields.traces_url && (n === SETUP_ENV.cloud_key || n === SETUP_ENV.traces_key)));
         if (written.some((w) => w.action === "added" || w.action === "replaced")) say(`Kept in .env before the error: ${written.map((w) => `${w.name} ${w.action}`).join(", ")}.`);
       }
       throw error;
@@ -1023,14 +1023,20 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const warnings = warningsOf(fields);
   const had = new Map(before);
   // --replace takes every new value but a model key: only --rotate key replaces FLOW_KEY.
-  const written = writeEnv(file, lines, before, envEntries(withTryUrl(fields)), (n) => rotatedEnv.has(n) || (options.replace && !MODEL_KEY_NAMES.includes(n)) || chosenPage(n));
+  // An address in the answer that is not the one .env holds says these keys were made in another region than the
+  // ones in .env (a workspace that moved): the old region's cloud and traces keys do not work at the new address, so
+  // the new ones replace them. Once .env holds the address, a rerun keeps its keys as for any other.
+  const otherRegion = typeof answer.traces_url === "string" && before.get(SETUP_ENV.traces_url) !== answer.traces_url;
+  const regionKey = (n: string) => otherRegion && (n === SETUP_ENV.cloud_key || n === SETUP_ENV.traces_key);
+  const written = writeEnv(file, lines, before, envEntries(withTryUrl(fields)), (n) => rotatedEnv.has(n) || (options.replace && !MODEL_KEY_NAMES.includes(n)) || chosenPage(n) || regionKey(n) || n === SETUP_ENV.traces_url);
   // An older flow.engineer ignores the field and sets the agent up in the personal workspace.
   if (workspace !== undefined && !observeFailed && (typeof answer.workspace_id !== "string" || !answer.workspace_id)) {
     const stop = new Stop("workspace_unsupported", "flow.engineer does not support --workspace yet; the agent was set up in your personal workspace.", undefined, EXIT.refused);
     stop.warnings = warnings;
     throw stop;
   }
-  if (typeof answer.join_code !== "string" || !answer.join_code) {
+  // A workspace in another region has no Messaging part here (its answer names its traces address): no phone link.
+  if ((typeof answer.join_code !== "string" || !answer.join_code) && typeof answer.traces_url !== "string") {
     const kept = written.filter((w) => w.action === "added" || w.action === "replaced").map((w) => w.name);
     const stop = new Stop("no_join_code", `flow.engineer gave no join code${kept.length ? ` (the keys it made are in .env: ${kept.join(", ")})` : ""}, so there is no phone link yet.`,
       answer.next?.[0] ?? NEXT.setup, EXIT.refused);
@@ -1369,6 +1375,7 @@ async function link(options: LinkOptions, json: boolean, out: Out, say: Say): Pr
     value = dotenvValue();
   }
   const joinCode = value(SETUP_ENV.join_code);
+  if (!joinCode && value(SETUP_ENV.traces_url)) throw new Stop("messaging_unavailable", `This agent's workspace is in another region (${SETUP_ENV.traces_url} is set), where Messaging is not set up by this command yet, so there is no phone link.`, undefined, EXIT.refused);
   if (!joinCode) throw new Stop("no_join_code", `Setup wrote no ${SETUP_ENV.join_code} into .env.`, NEXT.setup, EXIT.refused);
   // The server's own try_url when setup kept one for this join code and channel, else the same page built here.
   const fromServer = value(SETUP_ENV.try_url);
