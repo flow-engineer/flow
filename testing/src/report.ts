@@ -100,7 +100,11 @@ export interface JsonReport {
   /** The mode the command asked for (--quick, else thorough); differs from `mode` against a cloud that does not know quick. */
   modeAsked: "quick" | "thorough";
   /** Where the runs' time went, added up over the runs whose records could be read, in ms; null when none could (see TimeSplit). */
-  timing: TimeSplit | null;
+  timing: (TimeSplit & { coverage: TimingCoverage }) | null;
+  /** With --timing: each of the agent's model calls in the runs read (ids, ms and token counts only); null without --timing or without any record. */
+  timingCalls: TimingCall[] | null;
+  /** The runs played at once, as the cloud granted; null from a cloud that does not say. */
+  concurrency: number | null;
 }
 
 /** Error codes that mean a model or the workspace's test budget was out of credit. */
@@ -392,4 +396,72 @@ export function timeTable(rows: Array<{ label: string; split: TimeSplit }>): str
   const secs = (ms: number) => (ms / 1000).toFixed(1).padStart(6);
   const head = `${"run".padEnd(44)}${"wall".padStart(7)}${TIME_PARTS.map(([, label]) => label.replace(/^the /, "").replace("tools, ", "tool ").slice(0, 12).padStart(14)).join("")}`;
   return [head, ...rows.map(({ label, split }) => `${label.slice(0, 43).padEnd(44)}${secs(split.wallMs).padStart(7)}${TIME_PARTS.map(([k]) => secs(split[k]).padStart(14)).join("")}`)];
+}
+
+/** How many of the session's runs the timing covers, and why the rest are left out (never a silent partial). */
+export interface TimingCoverage {
+  /** Runs in the session's summary. */
+  runs: number;
+  /** Runs whose record was read and added to the totals. */
+  read: number;
+  missing: {
+    /** Never played (no record exists). */
+    notPlayed: number;
+    /** A record the cloud did not answer for (an error, or a network failure). */
+    unavailable: number;
+    /** A record with no turn timing (an older cloud). */
+    noTiming: number;
+    /** Not asked for before the time allowed for reading them ran out. */
+    outOfTime: number;
+  };
+}
+
+/** One model call of a run: ids, ms and token counts, no message text. */
+export interface TimingCall {
+  runId: string;
+  scenario: string;
+  channel: string;
+  run: number;
+  turn: number;
+  ms: number;
+  queuedMs: number | null;
+  ttftMs: number | null;
+  generationMs: number | null;
+  input: number;
+  output: number;
+  cacheRead: number | null;
+  cacheWrite: number | null;
+}
+
+const numOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+
+/** A run record's model calls, from its turnTiming rows' `calls` (an older record has none). */
+export function timingCalls(record: unknown, who: { runId: string; scenario: string; channel: string; run: number }): TimingCall[] {
+  const rows = (record as { turnTiming?: unknown } | null)?.turnTiming;
+  if (!Array.isArray(rows)) return [];
+  return rows.flatMap((row: Record<string, unknown>) =>
+    (Array.isArray(row.calls) ? (row.calls as Array<Record<string, unknown>>) : []).map((c): TimingCall => ({
+      ...who,
+      turn: num(row.turn),
+      ms: num(c.ms),
+      queuedMs: numOrNull(c.queuedMs),
+      ttftMs: numOrNull(c.ttftMs),
+      generationMs: numOrNull(c.generationMs),
+      input: num(c.input),
+      output: num(c.output),
+      cacheRead: numOrNull(c.cacheRead),
+      cacheWrite: numOrNull(c.cacheWrite),
+    })));
+}
+
+/** The line that says what the timing covers when it is not every run; null when it is all of them. */
+export function coverageLine(c: TimingCoverage): string | null {
+  if (c.read === c.runs) return null;
+  const why = [
+    c.missing.notPlayed ? `${c.missing.notPlayed} never played` : "",
+    c.missing.unavailable ? `${c.missing.unavailable} records the cloud did not return` : "",
+    c.missing.noTiming ? `${c.missing.noTiming} records without turn timing` : "",
+    c.missing.outOfTime ? `${c.missing.outOfTime} not read before the time allowed ran out` : "",
+  ].filter(Boolean);
+  return `  (covers ${c.read} of ${c.runs} runs: ${why.join(", ")})`;
 }
