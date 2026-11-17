@@ -438,6 +438,9 @@ let sendPath: SendPathProblem[] = [];
 /** The pass rate the session needs, in tenths of a percent (report.ts minPassTenths). */
 let minPass = DEFAULT_MIN_PASS * 10;
 
+/** Set only by `flow test compare` (testing/src/compare.ts) for the `flow test` it starts per variant: what that variant changes. */
+const variant = process.env.FLOW_FRAMEWORK_COMPARE_CHILD ? readChildSpec(process.env.FLOW_FRAMEWORK_COMPARE_CHILD) : undefined;
+
 if (command !== undefined && (command !== "test" || rest.length)) invalid(`flow: unknown command "${positionals.join(" ")}".\n\n${USAGE}`);
 
 const envProblem = loadEnv(values.dotenv);
@@ -471,8 +474,6 @@ try {
 }
 
 const dir = process.cwd();
-/** Set only by `flow test compare` (testing/src/compare.ts) for the `flow test` it starts per variant: what that variant changes. */
-const variant = process.env.FLOW_FRAMEWORK_COMPARE_CHILD ? readChildSpec(process.env.FLOW_FRAMEWORK_COMPARE_CHILD) : undefined;
 const testsDir = variant?.testsDir ?? join(dir, "tests");
 const entry = join(dir, variant?.entry ?? "src/agent.ts");
 const agentUrl = values["agent-url"];
