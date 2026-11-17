@@ -134,6 +134,16 @@ test("the manifest lists the files that go: no dependencies, git, .flow or .env 
   assert.match(agent.sha256, /^[0-9a-f]{64}$/);
 });
 
+test("the India cell has no runners yet: one sentence, before anything is packed or sent", async () => {
+  const c = await cloud();
+  const dir = agentFolder();
+  const h = harness();
+  assert.equal(await runDetached(options(c, dir, { cloud: "https://flow.engineer/dashboard/in/" }), h.hooks), 1);
+  assert.match(h.streams.err + h.streams.out, /not available in your region yet; it is coming\. Run flow test without --run-in-cloud/);
+  assert.equal(c.puts.length, 0);
+  assert.equal(c.state.created, null, "nothing was asked of the cloud");
+});
+
 test("the run id is printed first and kept before any upload, and only the files the cloud lacks go up", async () => {
   const c = await cloud();
   const dir = agentFolder();

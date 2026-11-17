@@ -18,7 +18,7 @@ import { dirname, join, relative, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { RESULTS_DIR } from "../../src/names.ts";
-import { cloudCall, failureDocument, NetworkError, type Waits } from "./cloud-call.ts";
+import { CLOUDS, cloudCall, failureDocument, NetworkError, type Waits } from "./cloud-call.ts";
 import { cloudOf, PACK_EXCLUDES, Refused, type Api } from "./deploy.ts";
 import { LAST_SESSION } from "./show.ts";
 
@@ -324,6 +324,8 @@ export async function runDetached(options: CloudRun, hooks: Hooks = {}): Promise
   const s: Session = { dir: options.dir, api: options.api, io, json: options.json, wait: hooks.wait ?? sleep };
   const tty = hooks.tty ?? Boolean(process.stdin.isTTY);
 
+  // The India cell has no runners yet: say so before anything is packed or sent.
+  if (options.cloud.replace(/\/+$/, "") === CLOUDS.in) return fail("not_available", "Running tests in Flow's cloud is not available in your region yet; it is coming. Run flow test without --run-in-cloud: it runs the same tests on your machine.", 1);
   const files = buildManifest(options.dir);
   if (!files.length) return fail("usage", `Nothing to send: ${options.dir} holds no files.`, 1);
   let created: { run: Run; missing: string[]; uploads: Record<string, string> };
