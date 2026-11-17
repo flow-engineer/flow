@@ -384,7 +384,7 @@ export async function whoami(url: string, token: string): Promise<Account> {
   return answer.body as unknown as Account;
 }
 
-export async function setup(url: string, token: string, request: { name: string; hostname: string; channels: string[]; have: string[]; workspace?: string; rotate?: true | string[]; rotate_now?: true }): Promise<SetupAnswer> {
+export async function setup(url: string, token: string, request: { name: string; hostname: string; channels: string[]; have: string[]; traces_url?: string; workspace?: string; rotate?: true | string[]; rotate_now?: true }): Promise<SetupAnswer> {
   const answer = await call(url, "/cli/setup", { token, body: request });
   // A 200 is returned whole even without a join code: the keys it minted are shown only now.
   if (answer.status !== 200) throw refused("/cli/setup", answer, url);
