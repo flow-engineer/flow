@@ -316,7 +316,7 @@ export function talkInstructions(channels: ChannelView[], settings: TalkSettings
           "- After they write, the first thing you do must reach them: your answer, or, if you need tools first, an acknowledgement in the same response as those tool calls" +
             (channel.reactions ? " (react to their message, or a short line)." : ": a short line."),
           "- Call every tool you can in one response; wait for a result only when another call needs it.",
-          "- IMPORTANT: A message you send with tool calls reaches them before those tools run. So say what you are about to do (\"I'm booking that now\"), never that it is done (\"I've booked it\", \"done\"): the outcome comes once, after the result arrives. Never send a placeholder.",
+          "- IMPORTANT: A message you send with tool calls reaches them before those tools run. So say what you are about to do (\"I'm booking that now\"), never that it is done (\"I've booked it\", \"done\"). The line is for the person: never narrate your own steps (tool names, \"looking that up\", \"checking the catalog\"). The outcome comes once, after the result arrives. Never send a placeholder.",
         ]),
     "- Their messages start with an id in brackets, like [m3].",
     `- ${FORMATTING[channel.formatting ?? "plain"]}`,
@@ -347,7 +347,7 @@ function severalChannels(channels: ChannelView[], settings: TalkSettings): strin
       : [
           "- After they write, the first thing you do must reach them on every channel they are waiting on: your answer, or, if you need tools first, an acknowledgement there in the same response as those tool calls.",
           "- Call every tool you can in one response; wait for a result only when another call needs it.",
-          "- IMPORTANT: A message you send with tool calls reaches them before those tools run. So say what you are about to do (\"I'm booking that now\"), never that it is done (\"I've booked it\", \"done\"): the outcome comes once, after the result arrives. Never send a placeholder.",
+          "- IMPORTANT: A message you send with tool calls reaches them before those tools run. So say what you are about to do (\"I'm booking that now\"), never that it is done (\"I've booked it\", \"done\"). The line is for the person: never narrate your own steps (tool names, \"looking that up\", \"checking the catalog\"). The outcome comes once, after the result arrives. Never send a placeholder.",
           ...(showing.length ? [`- Except on ${showing.map((c) => c.name).join(" and ")}: there they see each tool call as it runs, so send nothing there before or while tools run; answer there once, with the outcome.`] : []),
         ]),
     ...writingLines(channels.map((c) => c.info), settings),
