@@ -15,6 +15,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   join code says Messaging is not set up there. Needs flow.engineer's matching change (live since 17 Nov 2026); against an
   older server nothing changes.
 
+- **A cached prompt now reads the conversation from the cache on the first call of each turn.** The system
+  message sent to a model that caches (`anthropic/...`, or `promptCaching: true`) is the stable part alone
+  (instructions, rules); what changes with the turn (the clock, the page, the business's `context`, wake-ups and
+  the person's other channels) follows the conversation as a last message, so a changed line no longer sits in
+  front of the conversation and makes the provider read it all again at full price. The text the model gets is the
+  same; its place and the cache markers are what change.
+
 ### Migration notes
 
 Update the CLI and rerun `npx @flow-engineer/flow setup` in the agent folder, then restart the agent.
