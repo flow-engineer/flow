@@ -33,6 +33,10 @@ export interface ConversationCounts {
   /** Turns where a model call that wrote text and no tool call was followed by another model call in the turn:
    * the answer was written as plain text, which never reaches the person, so the framework asked again. */
   extraCallToSend: number;
+  /** Turns that failed because the model call failed (a model.error event), whatever the reason. */
+  modelErrors: number;
+  /** Of those, the provider's limits and outages (HTTP 429 or 5xx, or a rate-limit code): they say nothing about the variant, so the run is not counted. */
+  capacityErrors: number;
 }
 
 interface Turn {
@@ -60,7 +64,7 @@ export function conversationCounts(events: FlowEvent[]): ConversationCounts[] {
 }
 
 function countConversation(conversationId: string, events: FlowEvent[]): ConversationCounts {
-  const c: ConversationCounts = { conversationId, turns: 0, repliedTurns: 0, messages: 0, multiMessageTurns: 0, modelCalls: 0, modelMs: 0, replyMs: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, costUsd: null, textBesideLaterTools: 0, extraCallToSend: 0 };
+  const c: ConversationCounts = { conversationId, turns: 0, repliedTurns: 0, messages: 0, multiMessageTurns: 0, modelCalls: 0, modelMs: 0, replyMs: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, costUsd: null, textBesideLaterTools: 0, extraCallToSend: 0, modelErrors: 0, capacityErrors: 0 };
   let pendingIn: number | undefined;
   let turn: Turn | undefined;
   const close = () => {
@@ -103,6 +107,9 @@ function countConversation(conversationId: string, events: FlowEvent[]): Convers
       c.outputTokens += usage?.outputTokens ?? 0;
       c.cachedTokens += usage?.cacheReadTokens ?? 0;
       if (typeof usage?.costUsd === "number") c.costUsd = (c.costUsd ?? 0) + usage.costUsd;
+    } else if (e.type === "model.error") {
+      c.modelErrors++;
+      if (typeof e.status === "number" ? e.status === 429 || e.status >= 500 : e.code === "rate_limit_exceeded") c.capacityErrors++;
     } else if (turn && e.type === "tool.start") {
       turn.toolCalls++;
     } else if (turn && e.type === "message.out" && !e.authentication) {

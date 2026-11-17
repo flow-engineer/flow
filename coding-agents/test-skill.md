@@ -266,7 +266,7 @@ npx @flow-engineer/flow test compare --no-customer-data --variants variants.yaml
 ```
 
 The agent as it stands is always the first variant, `current`, the baseline. `--runs` defaults to 5 per scenario;
-`--concurrency` is per variant; `--only` limits the scenarios. Each variant is its own cloud session (ref
+`--concurrency` is per variant (the default shares 12 runs at once among the variants: a provider's rate limit fails runs that have nothing to do with the variant, and the table leaves those out and names them); `--only` limits the scenarios. Each variant is its own cloud session (ref
 `compare/<name>`), so the dashboard keeps them off your main line. A variants file changes more than one thing:
 
 ```yaml
@@ -302,7 +302,7 @@ cannot change model this way: use a `code` variant. An agent on another framewor
    extra model call). They are computed from the agent's events, not by a model. A row clearing the rule among this
    many rows can be chance: confirm one surprising row with more runs before acting on it.
 3. Rows labelled `judged:` come from the cloud's judge model reading the transcripts; they are your own sentence
-   from `judge:`, not a measurement. They never change the pass rate.
+   from `judge:`, not a measurement. They never change the pass rate. A sentence that fails often makes the cloud play those runs again (flaky detection): write it to mostly pass, or add `--no-retry`.
 4. Warnings: an edit that "matched no text" means the variant is the baseline in disguise (a stale `find`);
    unequal counted runs means some runs errored.
 

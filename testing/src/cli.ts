@@ -816,7 +816,7 @@ function saveSession(ended: Ended, received: RunSummary[], link: string, print: 
 /** Exits with the outcome's status, printing the JSON report on stdout first with --json. */
 function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonReport["error"] } = {}): never {
   const exitCode = EXIT[outcome];
-  if (variant) writeChildResult(variant);
+  if (variant) writeChildResult(variant, mergedRuns(options.received ?? []).flatMap((m) => (m.summary ? [{ runId: m.summary.runId, scenario: m.id, channel: m.channel, run: m.run }] : [])));
   if (values.json) {
     const received = options.received ?? [];
     const runs: ReportRun[] = sessionId ? mergedRuns(received).map((m) => ({

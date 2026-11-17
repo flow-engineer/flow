@@ -167,10 +167,14 @@ export function readChildSpec(path: string): ChildSpec {
   return JSON.parse(readFileSync(path, "utf8")) as ChildSpec;
 }
 
-/** The sink that keeps every event of the session in the spec's events file. */
+/** The sink that keeps every event of the session in the spec's events file. One sink per process: `flow test` builds an agent again for each business run, and each must add to the same file. */
+let sink: EventSink | undefined;
 export function eventsSink(spec: ChildSpec): EventSink {
-  writeFileSync(spec.eventsFile, "");
-  return (event) => appendFileSync(spec.eventsFile, `${JSON.stringify(event)}\n`);
+  if (!sink) {
+    writeFileSync(spec.eventsFile, "");
+    sink = (event) => appendFileSync(spec.eventsFile, `${JSON.stringify(event)}\n`);
+  }
+  return sink;
 }
 
 /** Turns the text overrides on in this process (a test run only). */
@@ -178,9 +182,15 @@ export function applyChildOverrides(spec: ChildSpec): void {
   if (spec.instructions || spec.builtIn) useTestOverrides({ ...(spec.instructions ? { instructions: spec.instructions } : {}), ...(spec.builtIn ? { builtIn: spec.builtIn } : {}) });
 }
 
+/** What the child leaves for the parent when it ends: edits that matched nothing, and which conversation each run was (the cloud's scenario id, channel and run number). */
+export interface ChildResult {
+  unmatchedEdits: string[];
+  runs: Array<{ runId: string; scenario: string; channel: string; run: number }>;
+}
+
 /** Written when the child ends. */
-export function writeChildResult(spec: ChildSpec): void {
-  const unmatched = unmatchedEdits().map((e) => e.find);
-  writeFileSync(spec.resultFile, JSON.stringify({ unmatchedEdits: unmatched }));
+export function writeChildResult(spec: ChildSpec, runs: ChildResult["runs"]): void {
+  const result: ChildResult = { unmatchedEdits: unmatchedEdits().map((e) => e.find), runs };
+  writeFileSync(spec.resultFile, JSON.stringify(result));
 }
 

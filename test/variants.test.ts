@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseScenario } from "../testing/src/suite.ts";
-import { childSpec, CURRENT, readVariantsFile, variantModel, variantsFromFlags, withJudge } from "../testing/src/variants.ts";
+import { readFileSync } from "node:fs";
+import { childSpec, CURRENT, eventsSink, readVariantsFile, variantModel, variantsFromFlags, withJudge } from "../testing/src/variants.ts";
 import { hashOf } from "../testing/src/suite.ts";
 
 const dir = () => mkdtempSync(join(tmpdir(), "flow-variants-"));
@@ -65,4 +66,15 @@ test("a variant's model may use any provider key variable, and names one that is
   assert.throws(() => variantModel({ id: "m", baseUrl: "http://localhost:1/v1", apiKeyEnv: "MY_KEY" }, {}), /MY_KEY as its key, and it is not set/);
   const model = variantModel({ id: "m", baseUrl: "http://localhost:1/v1", apiKeyEnv: "MY_KEY", reasoning: "low", promptCaching: false }, { MY_KEY: "k" });
   assert.equal(typeof model!.complete, "function");
+});
+
+test("every build of the agent in a session adds to one events file, since each business run builds it again", () => {
+  const d = dir();
+  const spec = childSpec({ name: "a", spec: {} }, d, [], { eventsFile: join(d, "e.jsonl"), resultFile: join(d, "r.json") });
+  const first = eventsSink(spec);
+  const second = eventsSink(spec);
+  assert.equal(first, second);
+  first({ type: "turn.start", conversationId: "c1", at: 1 });
+  second({ type: "turn.end", conversationId: "c2", at: 2 });
+  assert.equal(readFileSync(spec.eventsFile, "utf8").trim().split("\n").length, 2);
 });

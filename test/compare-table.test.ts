@@ -12,7 +12,7 @@ const run = (i: number, verdict: ReportRun["verdict"], failed: string[] = []): R
   failedChecks: failed.map((text) => ({ kind: "judge", text, reason: "r" })), invalid: null, rerun: null, label: verdict === "flaky" ? "flaky" : null,
 });
 const report = (runs: ReportRun[]): JsonReport => ({ outcome: "passed", exitCode: 0, sessionId: "s", dashboard: "http://d", strict: false, costUsd: { agent: 0.5, test: 0.25 }, runs } as unknown as JsonReport);
-const counts = (id: string, turns: number, messages: number): ConversationCounts => ({ conversationId: id, turns, repliedTurns: turns, messages, multiMessageTurns: 0, modelCalls: turns * 2, modelMs: turns * 2000, replyMs: turns * 3000, toolCalls: turns, inputTokens: 1000, outputTokens: 100, cachedTokens: 500, costUsd: 0.01, textBesideLaterTools: 0, extraCallToSend: 0 });
+const counts = (id: string, turns: number, messages: number): ConversationCounts => ({ conversationId: id, turns, repliedTurns: turns, messages, multiMessageTurns: 0, modelCalls: turns * 2, modelMs: turns * 2000, replyMs: turns * 3000, toolCalls: turns, inputTokens: 1000, outputTokens: 100, cachedTokens: 500, costUsd: 0.01, textBesideLaterTools: 0, extraCallToSend: 0, modelErrors: 0, capacityErrors: 0 });
 const variant = (name: string, passed: number, of: number, extra: Partial<VariantResult> = {}, failedText: string[] = []): VariantResult => ({
   name, spec: {}, exitCode: 0, wallMs: 60_000, unmatchedEdits: [], log: "",
   report: report(Array.from({ length: of }, (_, i) => (i < passed ? run(i, "passed") : run(i, "failed", failedText)))),
@@ -71,4 +71,18 @@ test("an edit that matched nothing, and a variant that never played are warned a
   assert.match(text, /c did not play: no report \(boom\)/);
   assert.equal(c.variants[2]!.ran, false);
   assert.equal(c.seeded, false);
+});
+
+test("a run whose agent met the provider's limits is left out of every row and named, while a model error of its own is counted against the variant", () => {
+  const a = variant("current", 5, 5);
+  // Every conversation of b hit a 429 on the first scenario's first run: that run says nothing about b.
+  const b = variant("b", 4, 5);
+  b.counts = b.counts!.map((c, i) => (i === 0 ? { ...c, modelErrors: 1, capacityErrors: 1 } : i === 1 ? { ...c, modelErrors: 1, capacityErrors: 0 } : c));
+  b.report!.runs[0]!.verdict = "failed";
+  const c = buildComparison([a, b], [], 1);
+  assert.equal(c.variants[1]!.runs.counted, 4);
+  assert.equal(c.variants[1]!.runs.providerLimited, 1);
+  assert.match(c.warnings.join("\n"), /b: 1 run left out because the provider refused model calls/);
+  assert.equal(c.rows[0]!.cells.b!.n, 4, "the pass rate counts the other four runs");
+  assert.equal(c.rows.find((r) => r.id === "model_errors")!.cells.b!.value, 2 / 5, "both errors show in the errors row, over every first play");
 });

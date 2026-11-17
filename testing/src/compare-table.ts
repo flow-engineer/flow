@@ -3,6 +3,7 @@
 // children's reports and events go in, the table and its JSON come out.
 
 import type { JsonReport, ReportRun } from "./report.ts";
+import type { ChildResult } from "./variants.ts";
 import { conversationRun, type ConversationCounts } from "./variant-counts.ts";
 import { conversationsNeeded, difference, proportion, ratio, RUNS_CAP, type Difference, type Estimate } from "./variant-stats.ts";
 import type { VariantSpec } from "./variants.ts";
@@ -18,6 +19,8 @@ export interface VariantResult {
   counts: ConversationCounts[] | null;
   /** Edits of this variant that matched no text: the override did nothing. */
   unmatchedEdits: string[];
+  /** The child's own list of which conversation each run was; absent: a run's file name is taken for the cloud's scenario id. */
+  runKeys?: ChildResult["runs"];
   log: string;
 }
 
@@ -64,7 +67,7 @@ export interface Comparison {
     dashboard: string | null;
     wallSeconds: number;
     costUsd: { agent: number; test: number; total: number } | null;
-    runs: { counted: number; passed: number; failed: number; flaky: number; notCounted: number };
+    runs: { counted: number; passed: number; failed: number; flaky: number; notCounted: number; providerLimited: number };
     conversations: number | null;
     turns: number | null;
     error: string | null;
@@ -107,7 +110,23 @@ export function buildComparison(results: VariantResult[], judge: string[], runsP
   const failOnFlaky = results.some((r) => r.report?.strict);
   const warnings: string[] = [];
 
-  const runsOf = (r: VariantResult) => (r.report?.runs ?? []).map((run) => ({ run, verdict: ownVerdict(run, sentences) })).filter((x) => x.verdict !== null) as Array<{ run: ReportRun; verdict: "passed" | "failed" | "flaky" }>;
+  // A run whose agent met the provider's limits (HTTP 429 or 5xx on a model call) says nothing about the variant: it is left out of every row, by this rule.
+  const limited = new Map<VariantResult, Set<string>>();
+  const limitedRuns = (r: VariantResult): Set<string> => {
+    let ids = limited.get(r);
+    if (ids) return ids;
+    const bad = new Set<string>();
+    for (const c of r.counts ?? []) {
+      const key = c.capacityErrors ? conversationRun(c.conversationId) : null;
+      if (key && !key.rerun) bad.add(`${key.scenario}\n${key.channel}\n${key.run}`);
+    }
+    // The child says which conversation each run was; without it a run's file name is taken for the scenario's id.
+    const keys = r.runKeys?.length ? r.runKeys : (r.report?.runs ?? []).flatMap((run) => (run.runId ? [{ runId: run.runId, scenario: run.scenario, channel: run.channel, run: run.run }] : []));
+    ids = new Set(keys.filter((k) => bad.has(`${k.scenario}\n${k.channel}\n${k.run}`)).map((k) => k.runId));
+    limited.set(r, ids);
+    return ids;
+  };
+  const runsOf = (r: VariantResult) => (r.report?.runs ?? []).filter((run) => !(run.runId && limitedRuns(r).has(run.runId))).map((run) => ({ run, verdict: ownVerdict(run, sentences) })).filter((x) => x.verdict !== null) as Array<{ run: ReportRun; verdict: "passed" | "failed" | "flaky" }>;
   const units = new Set((results[0]!.report?.runs ?? []).map((r) => `${r.scenario}\n${r.channel}`)).size || 1;
 
   const rows: Row[] = [];
@@ -135,11 +154,14 @@ export function buildComparison(results: VariantResult[], judge: string[], runsP
   addRow({ id: "pass_rate", label: "pass rate", unit: "percent", judged: false }, (r) => { const p = rate(r); return r.report ? cell(p.estimate, p.passed) : null; }, (r) => (r.report ? rate(r).estimate : null));
   addRow({ id: "flaky_runs", label: "of which flaky (failed, passed when played again)", unit: "percent", judged: false }, (r) => { const runs = runsOf(r); return r.report ? cell(proportion(runs.filter((x) => x.verdict === "flaky").length, runs.length), runs.filter((x) => x.verdict === "flaky").length) : null; }, (r) => { const runs = runsOf(r); return r.report ? proportion(runs.filter((x) => x.verdict === "flaky").length, runs.length) : null; });
 
-  const conversations = (r: VariantResult) => (r.counts ?? []).filter((c) => !(conversationRun(c.conversationId)?.rerun)).filter((c) => c.turns > 0);
+  const firstPlays = (r: VariantResult) => (r.counts ?? []).filter((c) => !conversationRun(c.conversationId)?.rerun);
+  const conversations = (r: VariantResult) => firstPlays(r).filter((c) => c.turns > 0 && !c.capacityErrors);
   for (const def of COUNT_ROWS) {
     const est = (r: VariantResult): Estimate | null => (r.counts ? ratio(conversations(r).map((c) => ({ y: def.y(c), x: def.x(c) })).filter((u) => u.x > 0), def.unit === "percent" ? 1 : Infinity) : null);
     addRow(def, (r) => { const e = est(r); return e ? cell(e) : null; }, est);
   }
+  const errors = (r: VariantResult): Estimate | null => (r.counts ? ratio(firstPlays(r).map((c) => ({ y: c.modelErrors, x: 1 }))) : null);
+  addRow({ id: "model_errors", label: "turns failed on a model error, per conversation (all runs)", unit: "count", judged: false }, (r) => { const e = errors(r); return e ? cell(e) : null; }, errors);
   const cost = (r: VariantResult): Estimate | null => {
     const priced = conversations(r).filter((c) => c.costUsd !== null);
     return r.counts && priced.length ? ratio(priced.map((c) => ({ y: c.costUsd!, x: 1 }))) : null;
@@ -172,7 +194,7 @@ export function buildComparison(results: VariantResult[], judge: string[], runsP
       dashboard: report?.dashboard ?? null,
       wallSeconds: Math.round(r.wallMs / 100) / 10,
       costUsd: report ? { agent: report.costUsd.agent, test: report.costUsd.test, total: report.costUsd.agent + report.costUsd.test } : null,
-      runs: { counted: runs.length, passed, failed: runs.filter((x) => x.verdict === "failed").length, flaky: runs.filter((x) => x.verdict === "flaky").length, notCounted: (report?.runs.length ?? 0) - runs.length },
+      runs: { counted: runs.length, passed, failed: runs.filter((x) => x.verdict === "failed").length, flaky: runs.filter((x) => x.verdict === "flaky").length, notCounted: (report?.runs.length ?? 0) - runs.length, providerLimited: report ? limitedRuns(r).size : 0 },
       conversations: conv ? conv.length : null,
       turns: conv ? conv.reduce((n, c) => n + c.turns, 0) : null,
       error: report?.error?.message ?? (report ? null : `no report (${r.log || "the process printed nothing"})`),
@@ -181,7 +203,11 @@ export function buildComparison(results: VariantResult[], judge: string[], runsP
 
   for (const v of variants) {
     if (!v.ran) warnings.push(`${v.name} did not play: ${v.error ?? "unknown"}. It is left out of the comparison.`);
-    else if (v.runs.notCounted) warnings.push(`${v.name}: ${v.runs.notCounted} run${v.runs.notCounted === 1 ? "" : "s"} errored, hit the credit limit or never played; they are not counted.`);
+    else {
+      if (v.runs.providerLimited) warnings.push(`${v.name}: ${v.runs.providerLimited} run${v.runs.providerLimited === 1 ? "" : "s"} left out because the provider refused model calls (HTTP 429 or 5xx): that says nothing about the variant. Lower --concurrency (by default 12 runs at once are shared among the variants) or run again.`);
+      const other = v.runs.notCounted - v.runs.providerLimited;
+      if (other > 0) warnings.push(`${v.name}: ${other} run${other === 1 ? "" : "s"} errored, hit the credit limit or never played; they are not counted.`);
+    }
   }
   for (const r of results) if (r.unmatchedEdits.length) warnings.push(`${r.name}: ${r.unmatchedEdits.length === 1 ? "an edit matched" : `${r.unmatchedEdits.length} edits matched`} no text and changed nothing (find: ${r.unmatchedEdits.map((t) => JSON.stringify(t.length > 60 ? `${t.slice(0, 57)}...` : t)).join(", ")}): this variant is the baseline's wording, so its numbers say nothing about it.`);
   const counted = variants.filter((v) => v.ran).map((v) => v.runs.counted);
@@ -244,13 +270,16 @@ export function renderComparison(c: Comparison): string[] {
   table.push(["session time", ...c.variants.map((v) => `${v.wallSeconds.toFixed(0)} s`)]);
   table.push(["cost (agent + test)", ...c.variants.map((v) => (v.costUsd ? `$${v.costUsd.agent.toFixed(3)} + $${v.costUsd.test.toFixed(3)}` : "n/a"))]);
   table.push(["runs counted · conversations · turns", ...c.variants.map((v) => `${v.runs.counted} · ${v.conversations ?? "n/a"} · ${v.turns ?? "n/a"}`)]);
+  const judged = c.rows.filter((r) => r.judged);
   for (const row of c.rows) {
-    table.push([row.label, ...names.map((n, i) => { const t = text(row, n); const d = i === 0 ? "" : row.versus[n]; return d ? `${t} ${MARK[d]}` : t; })]);
+    const label = row.judged ? `judged #${judged.indexOf(row) + 1}` : row.label;
+    table.push([label, ...names.map((n, i) => { const t = text(row, n); const d = i === 0 ? "" : row.versus[n]; return d ? `${t} ${MARK[d]}` : t; })]);
   }
   const widths = head.map((_, i) => Math.max(...table.map((r) => (r[i] ?? "").length)));
   const line = (r: string[]) => r.map((x, i) => x.padEnd(widths[i]!)).join("  ").trimEnd();
   const out = ["", line(table[0]!), widths.map((w) => "-".repeat(w)).join("  ")];
   for (const r of table.slice(1)) out.push(line(r));
+  for (const [i, row] of judged.entries()) out.push(`judged #${i + 1}: ${row.label.slice("judged: ".length)}`);
   out.push("", "↑ higher and ↓ lower than the baseline clear the noise rule; = is within noise; ? has no interval to compare (too few runs). [a–b] and ± are 95% intervals.");
   for (const x of c.conclusions) out.push(x);
   for (const w of c.warnings) out.push(`Warning: ${w}`);

@@ -12,7 +12,7 @@ import { parseArgs } from "node:util";
 import type { FlowEvent } from "../../src/index.ts";
 import { buildComparison, renderComparison, type VariantResult } from "./compare-table.ts";
 import { loadSuite } from "./suite.ts";
-import { childSpec, CURRENT, readVariantsFile, variantsFromFlags, type VariantSpec, type Variants } from "./variants.ts";
+import { childSpec, CURRENT, type ChildResult, readVariantsFile, variantsFromFlags, type VariantSpec, type Variants } from "./variants.ts";
 import { conversationCounts } from "./variant-counts.ts";
 import type { JsonReport } from "./report.ts";
 
@@ -40,7 +40,7 @@ always the first variant, "current" (the baseline); name the others:
   --without-current        Leave the agent as it stands out; name two or more variants yourself
 
 The flags of the three kinds do not mix; a variants file does. Test options, as flow test has them (each
-variant is one session, so --concurrency is per variant): --runs <n> (default 5), --only <ids>,
+variant is one session, so --concurrency is per variant; the default shares 12 runs at once among the variants, since a provider's limits fail runs that have nothing to do with the variant): --runs <n> (default 5), --only <ids>,
 --concurrency <runs>, --cloud <url>, --no-customer-data, --environment <name>, --no-retry,
 --fail-on-flaky, --quick, --dotenv <path>, --agent-timeout <s>, --json. --save-events <folder> keeps each variant's events
 (<name>.events.jsonl), what the counts are computed from, for your own analysis.
@@ -70,8 +70,10 @@ each run of each variant is its own conversation, which is why the table shows t
 How a difference is read: every number has a 95% interval; two variants differ on a row only when their
 intervals do not overlap, else the row says "within noise" and, for pass rate, how many runs per scenario
 would settle the gap seen now. Rows are not corrected for how many there are: one row clearing among many is a
-lead to confirm with more runs. Counts are computed from the agent's events, not by a model; rows labelled
-judged come from the cloud's judge model.
+lead to confirm with more runs. A run the provider refused model calls for (HTTP 429, 5xx) is left out and
+named, not counted as a failure. Counts are computed from the agent's events, not by a model; rows labelled
+judged come from the cloud's judge model; a sentence that fails often makes the cloud play those runs again
+(flaky detection), which costs time and money: write it to mostly pass, or add --no-retry.
 
 Exit status: 0 every variant played; 1 nothing was sent (a wrong flag or file); 2 a session or the cloud failed;
 3 the cloud refused; 130 interrupted.`;
@@ -174,8 +176,8 @@ export async function compareCli(argv: string[]): Promise<number> {
     say(`Comparing ${plan.variants.map((v) => v.name).join(", ")} (${plan.variants[0]!.name} is the baseline): ${values.runs} run${values.runs === "1" ? "" : "s"} of each scenario on each, all at the same time.`);
     const dotenv = values.dotenv ? resolve(projectDir, values.dotenv) : existsSync(join(projectDir, ".env")) ? join(projectDir, ".env") : undefined;
     for (const p of prepared) {
-      const args = [process.argv[1]!, "test", "--json", "--min-pass", "0", "--runs", values.runs, "--ref", `compare/${p.variant.name}`];
-      for (const [flag, value] of [["--cloud", values.cloud], ["--only", values.only], ["--concurrency", values.concurrency], ["--environment", values.environment], ["--agent-timeout", values["agent-timeout"]], ["--dotenv", dotenv], ["--agent-url", p.variant.spec.agentUrl]] as const) if (value) args.push(flag, value);
+      const args = [process.argv[1]!, "test", "--json", "--min-pass", "0", "--runs", values.runs, "--ref", `compare/${p.variant.name}`, "--concurrency", values.concurrency ?? String(Math.max(1, Math.floor(12 / plan.variants.length)))];
+      for (const [flag, value] of [["--cloud", values.cloud], ["--only", values.only], ["--environment", values.environment], ["--agent-timeout", values["agent-timeout"]], ["--dotenv", dotenv], ["--agent-url", p.variant.spec.agentUrl]] as const) if (value) args.push(flag, value);
       for (const [flag, on] of [["--no-retry", values["no-retry"]], ["--fail-on-flaky", values["fail-on-flaky"]], ["--quick", values.quick], ["--no-customer-data", values["no-customer-data"]]] as const) if (on) args.push(flag);
       const proc = spawn(process.execPath, args, { cwd: p.cwd, env: { ...process.env, FLOW_FRAMEWORK_COMPARE_CHILD: p.specFile }, stdio: ["ignore", "pipe", "pipe"] });
       const child: Child = { name: p.variant.name, proc, stdout: "", stderr: "", code: null, startedAt: Date.now(), endedAt: 0, done: Promise.resolve() };
@@ -201,9 +203,9 @@ export async function compareCli(argv: string[]): Promise<number> {
       let report: JsonReport | null = null;
       try { report = JSON.parse(child.stdout) as JsonReport; } catch { /* no report: it did not start */ }
       const events = existsSync(p.files.eventsFile) ? readEvents(p.files.eventsFile) : [];
-      let unmatched: string[] = [];
-      try { unmatched = (JSON.parse(readFileSync(p.files.resultFile, "utf8")) as { unmatchedEdits: string[] }).unmatchedEdits; } catch { /* the child never got to end */ }
-      return { name: p.variant.name, spec: p.variant.spec, report, exitCode: child.code, wallMs: child.endedAt - child.startedAt, counts: p.variant.spec.agentUrl || !events.length ? null : conversationCounts(events), unmatchedEdits: unmatched, log: child.stderr.split("\n").filter(Boolean).slice(-4).join(" | ") };
+      let result: ChildResult = { unmatchedEdits: [], runs: [] };
+      try { result = JSON.parse(readFileSync(p.files.resultFile, "utf8")) as ChildResult; } catch { /* the child never got to end */ }
+      return { name: p.variant.name, spec: p.variant.spec, report, exitCode: child.code, wallMs: child.endedAt - child.startedAt, counts: p.variant.spec.agentUrl || !events.length ? null : conversationCounts(events), unmatchedEdits: result.unmatchedEdits, runKeys: result.runs, log: child.stderr.split("\n").filter(Boolean).slice(-4).join(" | ") };
     });
     if (values["save-events"]) {
       const folder = resolve(projectDir, values["save-events"]);
