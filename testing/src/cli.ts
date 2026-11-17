@@ -64,6 +64,8 @@ import { addSplits, DEFAULT_MIN_PASS, EXIT, timeLines, timeSplit, timeTable, typ
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { agentFingerprint, changedScenarios, deprecatedInSuite, FAKE_COMMAND_REMOVED, FRESH_IGNORED, loadSuite, nextChangeRecord, parseScenario, parseToolFile, suiteHash, type ChangeRecord } from "./suite.ts";
 import { cloudCall, NetworkError } from "./cloud-call.ts";
+import { COMPARE_LINE, compareCli } from "./compare.ts";
+import { applyChildOverrides, eventsSink, readChildSpec, variantModel, withJudge, writeChildResult } from "./variants.ts";
 import type { OpenSession, Opened, RunOutcome, RunSummary } from "./protocol.ts";
 
 const NEW_LINE = `  flow new <name> [--display-name <name>]
@@ -79,7 +81,8 @@ const NEW_LINE = `  flow new <name> [--display-name <name>]
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
                             the tests are in tests/scenarios and tests/tools)
-${PULL_LINE}`;
+${PULL_LINE}
+${COMPARE_LINE}`;
 const CHECK_LINE = `  flow check-endpoint <url> [--token-env NAME] [--json]
                             Check an agent's HTTP endpoint against the contract, for --agent-url
                             (flow check-endpoint --help)`;
@@ -272,6 +275,7 @@ if (process.argv[2] === "conversations") await exitFlushed(await conversationsCl
 if (process.argv[2] === "issues") await exitFlushed(await issuesCli(process.argv.slice(3)));
 if (process.argv[2] === "insights") await exitFlushed(await insightsCli(process.argv.slice(3)));
 if (process.argv[2] === "templates") await exitFlushed(await templatesCli(process.argv.slice(3)));
+if (process.argv[2] === "test" && process.argv[3] === "compare") await exitFlushed(await compareCli(process.argv.slice(4)));
 if (process.argv[2] === "test" && process.argv[3] === "pull") await exitFlushed(await pullCli(process.argv.slice(4)));
 if (process.argv[2] === "test" && process.argv[3] === "fake") await exitFlushed(failed(process.argv.includes("--json"), new Failed(FAKE_COMMAND_REMOVED, "removed")));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) await exitFlushed(await accountCli(process.argv[2]!, process.argv.slice(3)));
@@ -467,6 +471,10 @@ try {
 }
 
 const dir = process.cwd();
+/** Set only by `flow test compare` (testing/src/compare.ts) for the `flow test` it starts per variant: what that variant changes. */
+const variant = process.env.FLOW_FRAMEWORK_COMPARE_CHILD ? readChildSpec(process.env.FLOW_FRAMEWORK_COMPARE_CHILD) : undefined;
+const testsDir = variant?.testsDir ?? join(dir, "tests");
+const entry = join(dir, variant?.entry ?? "src/agent.ts");
 const agentUrl = values["agent-url"];
 if (!agentUrl && values.channel) invalid("--channel goes with --agent-url.");
 // The package name keeps the agent's history together; an agent tested by its URL may have none.
@@ -486,14 +494,15 @@ if (agentUrl) {
   const token = setting("AGENT_TOKEN") || undefined;
   agent = { tools: [], build: ({ events }) => httpAgent({ url: agentUrl, token, channel: values.channel, timeoutMs: timeout * 1000, events }) };
 } else {
-  if (!existsSync(join(dir, "src/agent.ts"))) {
-    invalid(`No src/agent.ts in ${dir}. Run flow test from your agent's folder, where src/agent.ts exports buildAgent({ model, events, tools }) and tools, or pass --agent-url to test an agent on another framework by its HTTP endpoint.`);
+  if (!existsSync(entry)) {
+    invalid(`No ${variant?.entry ?? "src/agent.ts"} in ${dir}. Run flow test from your agent's folder, where src/agent.ts exports buildAgent({ model, events, tools }) and tools, or pass --agent-url to test an agent on another framework by its HTTP endpoint.`);
   }
   // Flow Framework runs the agent here, so its traces are marked as a test's (src/traces.ts).
   process.env.FLOW_FRAMEWORK_RUN_KIND = "test";
+  if (variant) applyChildOverrides(variant);
   let module: Record<string, unknown>;
   try {
-    module = await import(pathToFileURL(join(dir, "src/agent.ts")).href);
+    module = await import(pathToFileURL(entry).href);
   } catch (error) {
     // Said as the run's failure (with --json, in its report), not a stack on stderr and nothing on stdout.
     invalid(`src/agent.ts could not be loaded: ${(error as Error).message.split("\n")[0]}`);
@@ -505,7 +514,9 @@ if (agentUrl) {
   agent = {
     tools: module.tools as ConnectOptions["tools"],
     build: ({ tools, events, channels, testing }) => {
-      const built = (module.buildAgent as (options: Record<string, unknown>) => ReturnType<ConnectOptions["build"]> & { templates?: () => TemplateDefinition[] })({ tools, events, ...(channels ? { channels, testing } : {}) });
+      // A compare variant's own model, and every event kept for its counts.
+      const model = variant ? variantModel(variant.model) : undefined;
+      const built = (module.buildAgent as (options: Record<string, unknown>) => ReturnType<ConnectOptions["build"]> & { templates?: () => TemplateDefinition[] })({ tools, events: variant ? [...events, eventsSink(variant)] : events, ...(model ? { model } : {}), ...(channels ? { channels, testing } : {}) });
       if (!declaredTemplates.length && typeof built?.templates === "function") declaredTemplates = built.templates();
       return built;
     },
@@ -536,7 +547,7 @@ function only(files: ReturnType<typeof loadSuite>, ids: Set<string> | undefined)
 
 const usd = (n: number) => `$${n.toFixed(4)}`;
 const printRun = runPrinter(say);
-const suite = loadSuite(join(dir, "tests"));
+const suite = withJudge(loadSuite(testsDir), variant?.judge ?? []);
 agentNow = agentUrl ? undefined : agentFingerprint(dir);
 try {
   const earlier = lastSessionIn(dir);
@@ -546,7 +557,7 @@ picked = values.failed ? failedLastTime(suite) : values.changed ? changedLastTim
 const chosen = only(suite, picked);
 checkSuite(chosen);
 // What 0.16.1 stopped playing still parses and is dropped; each is named once, as flow check names it.
-for (const line of deprecatedInSuite(join(dir, "tests"))) console.warn(line);
+for (const line of deprecatedInSuite(testsDir)) console.warn(line);
 if (values.fresh) console.warn(FRESH_IGNORED);
 files = forUrl(chosen);
 if (agentUrl) await checkAgentReachable(agentUrl);
@@ -574,7 +585,7 @@ try {
     title,
     ...agent,
     files,
-    testsDir: join(dir, "tests"),
+    testsDir,
     runs: perScenario,
     ...(concurrency !== undefined ? { concurrency } : {}),
     ...(values["stop-failed-runs"] ? { failFastRun: true } : {}),
@@ -654,7 +665,7 @@ for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
 say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
 say(`Mode: ${modeWord()}.`);
-timeTotal = await printTime(summary);
+timeTotal = variant ? null : await printTime(summary);
 if (mergedRuns(summary.runs).some((m) => m.verdict === "not_played")) endedEarly(summary.runs, "the cloud finished the session without playing every run", say);
 sendPath = summary.sendPath ?? [];
 if (sendPath.length) {
@@ -764,7 +775,8 @@ function failedChecks(r?: RunSummary) {
 
 /** Writes the session's results, once it has opened, and prints where. */
 function saveSession(ended: Ended, received: RunSummary[], link: string, print: (line: string) => void): void {
-  if (!sessionId) return;
+  // A compare variant never replaces the folder's own last session (flow test --failed reads it).
+  if (!sessionId || variant) return;
   const last: LastSession = {
     sessionId,
     ...(version ? { agentVersion: version } : {}),
@@ -804,6 +816,7 @@ function saveSession(ended: Ended, received: RunSummary[], link: string, print: 
 /** Exits with the outcome's status, printing the JSON report on stdout first with --json. */
 function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonReport["error"] } = {}): never {
   const exitCode = EXIT[outcome];
+  if (variant) writeChildResult(variant);
   if (values.json) {
     const received = options.received ?? [];
     const runs: ReportRun[] = sessionId ? mergedRuns(received).map((m) => ({

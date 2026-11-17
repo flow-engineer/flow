@@ -2,6 +2,33 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **`flow test compare`: the same scenarios on two or more variants of your agent, one table.** From the agent's
+  folder, `flow test compare --model a --model b`, `--instructions agent/AGENTS.alt.md`, `--code-ref <git ref>` or
+  `--variants variants.yaml` plays each variant (the agent as it stands is always the first, the baseline) in a
+  `flow test` session of its own at the same time, with the same `--runs`, `--only` and `--concurrency` (per variant),
+  and prints per variant the pass rate with its interval and flaky runs, messages per turn, turns with more than one
+  message, model calls, model time and time to first reply per turn, tool calls, tokens (input, output, cached) and
+  cost, turns where text went out beside a later round of tool calls, and turns where the answer needed an extra model
+  call. Counts are computed from the agent's events, never by a model. A variants file also sets a model's reasoning,
+  temperature, prompt caching, base URL and key variable (any provider the agent can already use), another entry
+  file, and `judge:` sentences added as judged checks to every scenario (labelled judged, never part of the pass
+  rate). A difference from the baseline is marked only when the two 95% intervals do not overlap; otherwise the row
+  says "within noise", and for pass rate how many runs per scenario would settle the gap. `--json` prints the whole
+  comparison; `--save-events <folder>` keeps each variant's events. The cloud's sessions are labelled `compare/<name>`.
+  For work on Flow Framework itself, a variant's `builtIn: { edits }` changes the framework's own lines to the model for
+  that session only (internal, test-only: it refuses to turn on outside a `flow test compare` child, and an edit that
+  matches nothing is reported). The simulated people are not seeded (the cloud does not support it yet), so variants
+  see the same scenarios, not the same conversations; an agent on another framework compares by `agentUrl` for pass
+  rate and judged checks only. See the `flow-framework-tests` skill ("Comparing variants").
+
+### Migration notes
+
+None. Nothing existing changes: `flow test` behaves as before, and no `--json` field or wire field is added.
+
 ## 0.20.1 (17 Nov 2026)
 
 ### Changes
