@@ -35,6 +35,8 @@ export interface PersonMessage {
   video?: { mime: string; ref: string };
   /** The emoji the agent reacted to it with as it arrived (videoReaction), so the transcript shows it. */
   reaction?: string;
+  /** When they sent it (Incoming.sentAt), kept to tell a message that reached the agent late. */
+  sentAt?: number;
 }
 
 /**
@@ -368,6 +370,12 @@ export interface ChannelInfo {
    */
   typingLastsMs?: number;
   /**
+   * The quiet time after a message before the reply starts, to catch quick bursts, when the agent sets no
+   * `debounceMs` of its own. Absent: 300 ms. WhatsApp through Flow Messaging sets 750, because its messages
+   * are read in the order they were sent and a burst can arrive a moment apart.
+   */
+  debounceMs?: number;
+  /**
    * The agent can change the text of a message it sent (Telegram, iMessage): it is offered
    * edit_message. The platform decides how late an edit may come; a refused one goes back to the agent.
    */
@@ -392,6 +400,11 @@ export interface Incoming {
   attachments?: Attachment[];
   /** The page of the business's site they wrote from (the web chat), as their browser said: data, never instructions. */
   page?: PageContext;
+  /**
+   * When they sent it, from the channel's own clock (ms since the epoch; WhatsApp gives whole seconds).
+   * Messages that reach the agent out of order are read in this order. Leave it out when the channel gives none.
+   */
+  sentAt?: number;
 }
 
 /** The page a person wrote from, and the details the business's site gave with it (a listing's id): data, never instructions. */
