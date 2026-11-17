@@ -71,7 +71,7 @@ What follows from it:
 - **Inbound, per conversation.** A conversation runs one turn at a time; double texts fold into
   the turn in progress. The agent reads the person's messages in the order they were *sent* (the
   channel's own clock, `sentAt`), not the order they arrived:
-  - Messages that arrive within the debounce window (`debounceMs`, 750 ms by default) are sorted
+  - Messages that arrive within the debounce window (`debounceMs`; by default 750 ms on WhatsApp through Flow Messaging and 300 ms on every other channel) are sorted
     by sent time into one turn.
   - A message that arrives while the model is working is folded in the same way, in its place
     among the messages still waiting for an answer (one more model call).

@@ -144,7 +144,7 @@ export interface AgentOptions {
   deadlineMs?: number;
   /** When one tool of a response is done and the others are still running this long after, the finished results go back to the agent. Default 5,000 ms. */
   partialAfterMs?: number;
-  /** Quiet time after a message before the reply starts, to catch quick bursts. Default 750 ms. */
+  /** Quiet time after a message before the reply starts, to catch quick bursts. Default: the channel's own (750 ms on WhatsApp through Flow Messaging, 300 ms on every other channel). */
   debounceMs?: number;
   maxSteps?: number;
   /**
@@ -541,7 +541,7 @@ export class Agent {
       contextSinks: sinks.filter((sink) => sink.context === true),
       deadlineMs: options.deadlineMs ?? 60_000,
       partialAfterMs: options.partialAfterMs ?? 5_000,
-      debounceMs: options.debounceMs ?? 750,
+      debounceMs: options.debounceMs,
       turnSlot: (name) => {
         const channel = channels.get(name);
         return channel?.turnSlot ? () => channel.turnSlot!() : undefined;

@@ -179,6 +179,8 @@ const IMESSAGE_LINE_WINDOW_MS = 5 * 60_000;
 const LINE_WINDOW_KEPT_MS = 60 * 60_000;
 /** WhatsApp's most reply buttons in one message; more choices go as a list. */
 const WHATSAPP_REPLY_BUTTONS = 3;
+/** Messages on WhatsApp are read in sent order, so the wait for a burst is longer than the agent default (300 ms). */
+const WHATSAPP_DEBOUNCE_MS = 750;
 /** The label of the button that opens a list made of more than 3 buttons (Flow Messaging's own, before V0). */
 const LIST_BUTTON = "Choose";
 const MAX_BODY_BYTES = 1_000_000;
@@ -627,7 +629,7 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     const route = register("whatsapp", o);
     const channel = whatsappChannel({ ...provider(route), features: { videos: true } }, { name: route.name, disable: o.disable, instructions: o.instructions });
     // Flow Messaging sends every reply button's own id and gives it back on the tap.
-    return { ...channel, info: { ...channel.info, ...(channel.info.buttons ? { buttonIds: true } : {}) }, file: fileAgain };
+    return { ...channel, info: { ...channel.info, debounceMs: WHATSAPP_DEBOUNCE_MS, ...(channel.info.buttons ? { buttonIds: true } : {}) }, file: fileAgain };
   }
 
   /** US SMS from a Flow number: plain text; STOP, START and HELP are Flow's. */

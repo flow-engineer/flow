@@ -1,4 +1,4 @@
-// covers: src/conversation.ts src/events.ts src/types.ts
+// covers: src/conversation.ts src/events.ts src/types.ts src/agent.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -155,4 +155,35 @@ test("a message sent earlier that arrives after the reply to a later one is the 
   assert.deepEqual(roles, ["user", "assistant", "tool", "user"]);
   assert.equal(users(next.request.messages)[0], "[m1] second");
   assert.match(users(next.request.messages)[1], /^\[m2] first\n\[Chinwag] The message above was sent earlier than one you already answered\.$/);
+});
+
+/** An agent with no debounceMs of its own, timers faked: how many model calls have started after `ms` of quiet. */
+async function startedAfter(t: import("node:test").TestContext, channel: import("../src/index.ts").ChannelInfo, ms: number, own?: number) {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const dir = mkdtempSync(join(tmpdir(), "flow-"));
+  writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
+  const scripted = scriptedModel();
+  const agent = createAgent({ dir, model: scripted.model, scheduleCheckMs: 0, ...(own !== undefined ? { debounceMs: own } : {}) });
+  agent.receive("d1", "hi", () => undefined, { channel });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  await settle();
+  t.mock.timers.tick(ms - 1);
+  await settle();
+  const before = scripted.calls.length;
+  t.mock.timers.tick(1);
+  await settle();
+  await settle();
+  return { before, after: scripted.calls.length };
+}
+
+test("the reply starts 300 ms after a message on a channel that sets no wait", async (t) => {
+  assert.deepEqual(await startedAfter(t, WEB, 300), { before: 0, after: 1 });
+});
+
+test("a channel's own wait (WhatsApp through Flow Messaging: 750 ms) is the default on that channel", async (t) => {
+  assert.deepEqual(await startedAfter(t, { ...WEB, debounceMs: 750 }, 750), { before: 0, after: 1 });
+});
+
+test("the agent's own debounceMs wins on every channel", async (t) => {
+  assert.deepEqual(await startedAfter(t, { ...WEB, debounceMs: 750 }, 100, 100), { before: 0, after: 1 });
 });

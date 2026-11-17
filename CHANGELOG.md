@@ -24,15 +24,18 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   not reordered. `start()` of the Flow Messaging channel sets the app's `inbound_ordering` to `consumer`
   (read first, changed only when different; a failure is logged once and ignored), so Flow Messaging stops holding
   each message for 2 s to order it. Against a Flow Messaging that lacks the setting, nothing changes.
-- **`debounceMs` defaults to 750 ms (was 300).** The wait after a message before the reply starts, now that the
-  agent, not Flow Messaging, puts quick bursts in order.
+- **WhatsApp through Flow Messaging waits 750 ms before it replies (was 300); every other channel stays at 300.**
+  The wait after a message before the reply starts, now that the agent, not Flow Messaging, puts quick bursts in
+  order. A channel can set its own default with `ChannelInfo.debounceMs`; `debounceMs` in `createAgent` still wins
+  on every channel.
 
 ### Migration notes
 
 Update the CLI and rerun `npx @flow-engineer/flow setup` in the agent folder, then restart the agent.
 
-The default `debounceMs` is 750 ms: every reply starts up to 450 ms later than before when a message
-has no follow-up. To keep the old wait, set `debounceMs: 300` in `createAgent`.
+On WhatsApp through Flow Messaging the default wait is 750 ms: a reply starts up to 450 ms later than before
+when a message has no follow-up. Other channels keep 300 ms. To keep 300 ms on WhatsApp too, set
+`debounceMs: 300` in `createAgent`.
 
 ## 0.20.1 (17 Nov 2026)
 

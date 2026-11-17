@@ -370,6 +370,12 @@ export interface ChannelInfo {
    */
   typingLastsMs?: number;
   /**
+   * The quiet time after a message before the reply starts, to catch quick bursts, when the agent sets no
+   * `debounceMs` of its own. Absent: 300 ms. WhatsApp through Flow Messaging sets 750, because its messages
+   * are read in the order they were sent and a burst can arrive a moment apart.
+   */
+  debounceMs?: number;
+  /**
    * The agent can change the text of a message it sent (Telegram, iMessage): it is offered
    * edit_message. The platform decides how late an edit may come; a refused one goes back to the agent.
    */

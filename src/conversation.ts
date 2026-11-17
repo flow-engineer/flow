@@ -93,7 +93,8 @@ export interface ConversationSettings {
   deadlineMs: number;
   /** When one tool of a response is done and others still run this long after, the finished results go back. */
   partialAfterMs: number;
-  debounceMs: number;
+  /** The agent's own setting; absent, each channel's `ChannelInfo.debounceMs`, else DEFAULT_DEBOUNCE_MS. */
+  debounceMs?: number;
   /** The channel's wait for a turn slot (Channel.turnSlot), when it caps its turns at once. */
   turnSlot?: (channel: string) => (() => Promise<() => void>) | undefined;
   maxSteps: number;
@@ -142,6 +143,9 @@ export interface ConversationSettings {
   /** Another runner holds the conversation, or held it since this copy was read: the agent drops this copy, and reads it again (`again`) when this runner holds it now. */
   away(conversation: Conversation, again: boolean): void;
 }
+
+/** The quiet time after a message before the reply starts, when neither the agent nor the channel sets one. */
+const DEFAULT_DEBOUNCE_MS = 300;
 
 /** One message of the person's other conversations a turn is shown: on which channel, when, and who wrote it. */
 export interface Elsewhere {
@@ -771,7 +775,7 @@ export class Conversation {
       this.wakeTools?.();
       return;
     }
-    this.schedule(this.settings.debounceMs);
+    this.schedule(this.settings.debounceMs ?? this.channels.get(channel)?.info.debounceMs ?? DEFAULT_DEBOUNCE_MS);
   }
 
   /**
