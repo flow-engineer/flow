@@ -1013,7 +1013,7 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
     } else {
       // The keys minted anyway are not shown again, so whatever the error carries goes into .env first.
       if (error instanceof LoginRefused) {
-      const written = writeEnv(file, lines, before, envEntries(withTryUrl(error.fields)), (n) => options.replace || rotatedEnv.has(n) || chosenPage(n));
+      const written = writeEnv(file, lines, before, envEntries(withTryUrl(error.fields)), (n) => options.replace || rotatedEnv.has(n) || chosenPage(n) || n === SETUP_ENV.traces_url);
         if (written.some((w) => w.action === "added" || w.action === "replaced")) say(`Kept in .env before the error: ${written.map((w) => `${w.name} ${w.action}`).join(", ")}.`);
       }
       throw error;
@@ -1023,14 +1023,15 @@ async function setupEnv(options: SetupOptions, json: boolean, out: Out, say: Say
   const warnings = warningsOf(fields);
   const had = new Map(before);
   // --replace takes every new value but a model key: only --rotate key replaces FLOW_KEY.
-  const written = writeEnv(file, lines, before, envEntries(withTryUrl(fields)), (n) => rotatedEnv.has(n) || (options.replace && !MODEL_KEY_NAMES.includes(n)) || chosenPage(n));
+  const written = writeEnv(file, lines, before, envEntries(withTryUrl(fields)), (n) => rotatedEnv.has(n) || (options.replace && !MODEL_KEY_NAMES.includes(n)) || chosenPage(n) || n === SETUP_ENV.traces_url);
   // An older flow.engineer ignores the field and sets the agent up in the personal workspace.
   if (workspace !== undefined && !observeFailed && (typeof answer.workspace_id !== "string" || !answer.workspace_id)) {
     const stop = new Stop("workspace_unsupported", "flow.engineer does not support --workspace yet; the agent was set up in your personal workspace.", undefined, EXIT.refused);
     stop.warnings = warnings;
     throw stop;
   }
-  if (typeof answer.join_code !== "string" || !answer.join_code) {
+  // A workspace in another region has no Messaging part here (its answer names its traces address): no phone link.
+  if ((typeof answer.join_code !== "string" || !answer.join_code) && typeof answer.traces_url !== "string") {
     const kept = written.filter((w) => w.action === "added" || w.action === "replaced").map((w) => w.name);
     const stop = new Stop("no_join_code", `flow.engineer gave no join code${kept.length ? ` (the keys it made are in .env: ${kept.join(", ")})` : ""}, so there is no phone link yet.`,
       answer.next?.[0] ?? NEXT.setup, EXIT.refused);

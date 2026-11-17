@@ -319,6 +319,20 @@ test("setup merges the keys into .env, keeps the owner's lines and values, print
   assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_MESSAGING_TELEGRAM_SENDER=snd_tg$/m);
 });
 
+test("setup for a workspace in another region writes the address its keys work at, replaces a stale one, and needs no join code", async (t) => {
+  const region = "https://dash.example/in";
+  const flow = await flowServer([], 200, { setup: { traces_url: region, join_code: undefined, telegram_sender: undefined, app_id: undefined } });
+  t.after(flow.close);
+  const config = temp();
+  const cwd = temp();
+  writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "cafe" }));
+  writeFileSync(join(cwd, ".env"), "FLOW_FRAMEWORK_TRACES_URL=https://old.example/observe\n");
+  const done = await run(["setup", "--json"], { url: flow.url, config, cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(done.code, 0, done.err);
+  assert.match(readFileSync(join(cwd, ".env"), "utf8"), new RegExp(`^FLOW_FRAMEWORK_TRACES_URL=${region}$`, "m"));
+  assert.doesNotMatch(readFileSync(join(cwd, ".env"), "utf8"), /old\.example/);
+});
+
 test("link in a folder not set up signs in, resuming a code already waiting, runs setup for the channel, checks the try page and prints the link", async (t) => {
   let approved = false;
   const flow = await flowServer(() => (approved ? { access_token: TOKEN } : { error: "authorization_pending" }));
