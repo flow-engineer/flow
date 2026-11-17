@@ -420,7 +420,9 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       call.catch((error: unknown) => {
         if (stopped || (error instanceof ToolFailed && !CLOUD_TOOL_ERRORS.has(error.message))) return;
         const why = error instanceof PostError && error.code ? error.code : error instanceof Error ? error.message : String(error);
-        log(`${context.conversationId}: the cloud failed the tool call ${t.name} (${why}): an infrastructure error for this run, not the agent's; the session plays on.`);
+        // run_finished: the cloud had already ended the run (it waited on the agent) when the call arrived, so the call came late; it is not a failure of the cloud.
+        const cause = why === "run_finished" ? "the cloud had already ended this run when the call arrived, so the run ends there" : "an infrastructure error for this run, not the agent's";
+        log(`${context.conversationId}: the cloud failed the tool call ${t.name} (${why}): ${cause}; the session plays on.`);
       });
       return call;
     },
