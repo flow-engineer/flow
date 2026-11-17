@@ -1,6 +1,6 @@
 ---
 name: flow-framework-tests
-description: Write or change tests for a Flow Framework agent (tests/scenarios/*.yaml). Load when adding a test scenario, deciding what a Flow Framework agent should be checked on, or turning a bad conversation into a test.
+description: Write or change tests for a Flow Framework agent (tests/scenarios/*.yaml), and compare variants of the agent (which prompt is better, should I switch models, is a setting cheaper or faster) with flow test compare. Load when adding a test scenario, deciding what a Flow Framework agent should be checked on, turning a bad conversation into a test, or answering whether one instruction wording, model or setting beats another.
 ---
 
 # Writing tests for a Flow Framework agent
@@ -249,6 +249,72 @@ code runs, for a draft the agent keeps) the cloud does not see what the tool cha
 whose goal needs a visible change drifts. Judge the data by the summary the person said yes to, since
 `outcome` reads the cloud's own view. The test format cannot check "one message per turn" or "one
 question per message" in code: they are `judge` sentences, so read the transcripts of the runs.
+
+## Comparing variants: which prompt is better, should I switch models
+
+When the question is "is this wording better", "should we move to another model", "does turning prompt caching
+off cost less", or "did my change help", do not run `flow test` twice by hand and compare two pass rates: one run of
+each says nothing, because every run is its own conversation with a simulated person. Run
+`flow test compare`: the same scenarios on every variant at the same time, one table, and each difference marked
+"within noise" unless it clears a rule.
+
+```bash
+npx @flow-engineer/flow test compare --no-customer-data --instructions agent/AGENTS.short.md      # your instructions against another file
+npx @flow-engineer/flow test compare --no-customer-data --model anthropic/claude-sonnet-5 --model openai/gpt-6-luna   # models against the agent's own
+npx @flow-engineer/flow test compare --no-customer-data --code-ref main                          # your working tree against another git ref
+npx @flow-engineer/flow test compare --no-customer-data --variants variants.yaml --runs 8        # anything else, repeatable
+```
+
+The agent as it stands is always the first variant, `current`, the baseline. `--runs` defaults to 5 per scenario;
+`--concurrency` is per variant (the default shares 12 runs at once among the variants: a provider's rate limit fails runs that have nothing to do with the variant, and the table leaves those out and names them); `--only` limits the scenarios. Each variant is its own cloud session (ref
+`compare/<name>`), so the dashboard keeps them off your main line. A variants file changes more than one thing:
+
+```yaml
+judge:                                    # judged checks added to every scenario of every variant
+  - The acknowledgement does not narrate internal steps.
+variants:
+  shorter-prompt:
+    instructions: { file: agent/AGENTS.short.md }           # or edits: [{ find: "text", replace: "text" }]
+  sonnet-low:
+    model: { id: anthropic/claude-sonnet-5, reasoning: low }
+  own-provider:
+    model: { id: gpt-6-luna, baseUrl: https://api.openai.com/v1, apiKeyEnv: OPENAI_API_KEY }
+  no-caching:
+    model: { promptCaching: false }                         # also temperature, maxTokens
+  last-release:
+    code: { ref: v0.19.0 }                                  # or entry: src/agent-b.ts
+```
+
+A `model` variant gives the agent's `buildAgent` that model (`buildAgent({ model })`), through the same provider
+keys the agent has (`openAICompatible`); an agent that builds its model another way, or ignores `options.model`,
+cannot change model this way: use a `code` variant. An agent on another framework is compared with
+`agentUrl: <endpoint>` per variant (its own model calls are not visible, so only pass rate and judged checks show).
+
+**Read the table in this order.**
+
+1. The pass rate row, with its interval and `flaky`. `↑` or `↓` beside a variant means its interval does not overlap
+   the baseline's: that difference is more than run-to-run luck. `=` means **within noise**: say "no difference
+   shown", never "B is slightly better". The conclusion lines under the table say the same and, for an inconclusive
+   pass rate, how many runs per scenario would settle a gap of the size seen (`--runs <n>`). If that number is
+   large, the variants are close, and picking on other grounds (cost, time) is fine.
+2. The cost and time rows, and the counts below them (messages per turn, model calls per turn, time to first
+   reply, tokens, turns where text went out beside a later round of tool calls, turns where the answer needed an
+   extra model call). They are computed from the agent's events, not by a model. A row clearing the rule among this
+   many rows can be chance: confirm one surprising row with more runs before acting on it.
+3. Rows labelled `judged:` come from the cloud's judge model reading the transcripts; they are your own sentence
+   from `judge:`, not a measurement. They never change the pass rate. A sentence that fails often makes the cloud play those runs again (flaky detection): write it to mostly pass, or add `--no-retry`.
+4. Warnings: an edit that "matched no text" means the variant is the baseline in disguise (a stale `find`);
+   unequal counted runs means some runs errored.
+
+The simulated people are not seeded, so the variants do not see the same conversations, only the same scenarios;
+that is what the intervals account for. Do not conclude from 1 or 2 runs per scenario, and do not run the suite
+until one variant wins: decide the runs first (`--runs`), read the table once. `--save-events <folder>` keeps each
+variant's events for a closer look. Only the files under `tests/` and the variants you named differ between
+variants; `--json` prints the whole comparison (rows, intervals, `versus` the baseline, `runsNeeded`).
+
+Working on Flow Framework itself: a variant's `builtIn: { edits: [...] }` changes Flow Framework's own lines to the
+model (`src/talk.ts`, the notes in `src/conversation.ts`) for that session only, with no source edit. It is internal,
+not public API: it works only inside `flow test compare` and refuses to turn on anywhere else.
 
 ## Running the tests
 

@@ -24,6 +24,7 @@ import { sqlite, type Database } from "./db.ts";
 import { emitter, log, type EventSink } from "./events.ts";
 import { indexDeclared, recordsOf, type RecordCollection, type Records } from "./records.ts";
 import { addWakeUp, businessSchedule, claimDue, summary, wakeUpsOf, type WakeUp, type WakeUpInput, type WakeUpResult } from "./schedules.ts";
+import { overrideInstructions } from "./variant.ts";
 import { loadInstructions, loadSkills, readAgentFolder, skillTool, type AgentFiles } from "./skills.ts";
 import { Store, type ConversationRow, type EventStateStore, type IdentityRow, type NudgeRow, type QuietHours, type StoreApi, type TimeZoneSource, type Via } from "./store.ts";
 import { clock, quietUntil, validZone } from "./time.ts";
@@ -516,7 +517,7 @@ export class Agent {
     });
     const emit = emitter(sinks, this.runner);
     if ((options.dir === undefined) === (options.files === undefined)) throw new Error("flow: give an agent exactly one of dir or files");
-    const files = options.files ?? readAgentFolder(options.dir!, { prompt: true });
+    const files = overrideInstructions(options.files ?? readAgentFolder(options.dir!, { prompt: true }));
     const skills = loadSkills(files);
     // The test cloud's stand-in for get_user_profile counts only for an agent with a profile.
     const tools = (options.tools ?? []).filter((t) => options.profile || !(t as { [STAND_IN]?: boolean })[STAND_IN]);

@@ -60,10 +60,12 @@ import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
-import { addSplits, DEFAULT_MIN_PASS, EXIT, timeLines, timeSplit, timeTable, type TimeSplit, finishedOutcome, minPassTenths, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
+import { addSplits, DEFAULT_MIN_PASS, EXIT, timeLines, timeSplit, timeTable, type TimeSplit, type TimingCall, type TimingCoverage, timingCalls, coverageLine, finishedOutcome, minPassTenths, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { agentFingerprint, changedScenarios, deprecatedInSuite, FAKE_COMMAND_REMOVED, FRESH_IGNORED, loadSuite, nextChangeRecord, parseScenario, parseToolFile, suiteHash, type ChangeRecord } from "./suite.ts";
 import { cloudCall, NetworkError } from "./cloud-call.ts";
+import { COMPARE_LINE, compareCli } from "./compare.ts";
+import { applyChildOverrides, eventsSink, readChildSpec, variantModel, withJudge, writeChildResult } from "./variants.ts";
 import type { OpenSession, Opened, RunOutcome, RunSummary } from "./protocol.ts";
 
 const NEW_LINE = `  flow new <name> [--display-name <name>]
@@ -79,7 +81,8 @@ const NEW_LINE = `  flow new <name> [--display-name <name>]
 const TEST_LINE = `  flow test [options]       Run the agent's tests in a test cloud, from the agent's folder
                             (src/agent.ts exports buildAgent({ model, events, tools }) and tools;
                             the tests are in tests/scenarios and tests/tools)
-${PULL_LINE}`;
+${PULL_LINE}
+${COMPARE_LINE}`;
 const CHECK_LINE = `  flow check-endpoint <url> [--token-env NAME] [--json]
                             Check an agent's HTTP endpoint against the contract, for --agent-url
                             (flow check-endpoint --help)`;
@@ -272,6 +275,7 @@ if (process.argv[2] === "conversations") await exitFlushed(await conversationsCl
 if (process.argv[2] === "issues") await exitFlushed(await issuesCli(process.argv.slice(3)));
 if (process.argv[2] === "insights") await exitFlushed(await insightsCli(process.argv.slice(3)));
 if (process.argv[2] === "templates") await exitFlushed(await templatesCli(process.argv.slice(3)));
+if (process.argv[2] === "test" && process.argv[3] === "compare") await exitFlushed(await compareCli(process.argv.slice(4)));
 if (process.argv[2] === "test" && process.argv[3] === "pull") await exitFlushed(await pullCli(process.argv.slice(4)));
 if (process.argv[2] === "test" && process.argv[3] === "fake") await exitFlushed(failed(process.argv.includes("--json"), new Failed(FAKE_COMMAND_REMOVED, "removed")));
 if (ACCOUNT_COMMANDS.has(process.argv[2] ?? "")) await exitFlushed(await accountCli(process.argv[2]!, process.argv.slice(3)));
@@ -426,13 +430,19 @@ const startedAt = Date.now();
 let previousLast: LastSession | undefined;
 let agentNow: ReturnType<typeof agentFingerprint> | undefined;
 /** Where the session's time went, once it is known (the summary, --json). */
-let timeTotal: TimeSplit | null = null;
+let timeTotal: (TimeSplit & { coverage: TimingCoverage }) | null = null;
+let timeCalls: TimingCall[] | null = null;
+/** The runs played at once, as the cloud granted. */
+let grantedConcurrency: number | null = null;
 /** Set when the cloud ended the whole session scenario_invalid. */
 let endedInvalid: SessionInvalid | null = null;
 /** Conversations whose messages did not all go through the agent's send (client.ts sendPathCheck). */
 let sendPath: SendPathProblem[] = [];
 /** The pass rate the session needs, in tenths of a percent (report.ts minPassTenths). */
 let minPass = DEFAULT_MIN_PASS * 10;
+
+/** Set only by `flow test compare` (testing/src/compare.ts) for the `flow test` it starts per variant: what that variant changes. */
+const variant = process.env.FLOW_FRAMEWORK_COMPARE_CHILD ? readChildSpec(process.env.FLOW_FRAMEWORK_COMPARE_CHILD) : undefined;
 
 if (command !== undefined && (command !== "test" || rest.length)) invalid(`flow: unknown command "${positionals.join(" ")}".\n\n${USAGE}`);
 
@@ -467,6 +477,8 @@ try {
 }
 
 const dir = process.cwd();
+const testsDir = variant?.testsDir ?? join(dir, "tests");
+const entry = join(dir, variant?.entry ?? "src/agent.ts");
 const agentUrl = values["agent-url"];
 if (!agentUrl && values.channel) invalid("--channel goes with --agent-url.");
 // The package name keeps the agent's history together; an agent tested by its URL may have none.
@@ -486,14 +498,15 @@ if (agentUrl) {
   const token = setting("AGENT_TOKEN") || undefined;
   agent = { tools: [], build: ({ events }) => httpAgent({ url: agentUrl, token, channel: values.channel, timeoutMs: timeout * 1000, events }) };
 } else {
-  if (!existsSync(join(dir, "src/agent.ts"))) {
-    invalid(`No src/agent.ts in ${dir}. Run flow test from your agent's folder, where src/agent.ts exports buildAgent({ model, events, tools }) and tools, or pass --agent-url to test an agent on another framework by its HTTP endpoint.`);
+  if (!existsSync(entry)) {
+    invalid(`No ${variant?.entry ?? "src/agent.ts"} in ${dir}. Run flow test from your agent's folder, where src/agent.ts exports buildAgent({ model, events, tools }) and tools, or pass --agent-url to test an agent on another framework by its HTTP endpoint.`);
   }
   // Flow Framework runs the agent here, so its traces are marked as a test's (src/traces.ts).
   process.env.FLOW_FRAMEWORK_RUN_KIND = "test";
+  if (variant) applyChildOverrides(variant);
   let module: Record<string, unknown>;
   try {
-    module = await import(pathToFileURL(join(dir, "src/agent.ts")).href);
+    module = await import(pathToFileURL(entry).href);
   } catch (error) {
     // Said as the run's failure (with --json, in its report), not a stack on stderr and nothing on stdout.
     invalid(`src/agent.ts could not be loaded: ${(error as Error).message.split("\n")[0]}`);
@@ -505,7 +518,9 @@ if (agentUrl) {
   agent = {
     tools: module.tools as ConnectOptions["tools"],
     build: ({ tools, events, channels, testing }) => {
-      const built = (module.buildAgent as (options: Record<string, unknown>) => ReturnType<ConnectOptions["build"]> & { templates?: () => TemplateDefinition[] })({ tools, events, ...(channels ? { channels, testing } : {}) });
+      // A compare variant's own model, and every event kept for its counts.
+      const model = variant ? variantModel(variant.model) : undefined;
+      const built = (module.buildAgent as (options: Record<string, unknown>) => ReturnType<ConnectOptions["build"]> & { templates?: () => TemplateDefinition[] })({ tools, events: variant ? [...events, eventsSink(variant)] : events, ...(model ? { model } : {}), ...(channels ? { channels, testing } : {}) });
       if (!declaredTemplates.length && typeof built?.templates === "function") declaredTemplates = built.templates();
       return built;
     },
@@ -536,7 +551,7 @@ function only(files: ReturnType<typeof loadSuite>, ids: Set<string> | undefined)
 
 const usd = (n: number) => `$${n.toFixed(4)}`;
 const printRun = runPrinter(say);
-const suite = loadSuite(join(dir, "tests"));
+const suite = withJudge(loadSuite(testsDir), variant?.judge ?? []);
 agentNow = agentUrl ? undefined : agentFingerprint(dir);
 try {
   const earlier = lastSessionIn(dir);
@@ -546,7 +561,7 @@ picked = values.failed ? failedLastTime(suite) : values.changed ? changedLastTim
 const chosen = only(suite, picked);
 checkSuite(chosen);
 // What 0.16.1 stopped playing still parses and is dropped; each is named once, as flow check names it.
-for (const line of deprecatedInSuite(join(dir, "tests"))) console.warn(line);
+for (const line of deprecatedInSuite(testsDir)) console.warn(line);
 if (values.fresh) console.warn(FRESH_IGNORED);
 files = forUrl(chosen);
 if (agentUrl) await checkAgentReachable(agentUrl);
@@ -574,7 +589,7 @@ try {
     title,
     ...agent,
     files,
-    testsDir: join(dir, "tests"),
+    testsDir,
     runs: perScenario,
     ...(concurrency !== undefined ? { concurrency } : {}),
     ...(values["stop-failed-runs"] ? { failFastRun: true } : {}),
@@ -585,7 +600,7 @@ try {
     onRun: (run) => { seen.push(run); printRun(run); },
     onLimits: (sent) => { limits = sent; },
     openExtras: { mode: asked, ...(values.quick ? QUICK_OPEN : {}) },
-    onOpened: (opened) => { kept = opened.mode; for (const line of modeLines(opened)) say(line); },
+    onOpened: (opened) => { kept = opened.mode; grantedConcurrency = opened.concurrency ?? null; for (const line of modeLines(opened)) say(line); },
     onDashboard: (url, id, cloudAgent) => { dashboard = url; sessionId = id; agentId = cloudAgent ?? agentId; process.env.FLOW_FRAMEWORK_TEST_SESSION = id; },
   });
 } catch (error) {
@@ -654,7 +669,7 @@ for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
 say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
 say(`Mode: ${modeWord()}.`);
-timeTotal = await printTime(summary);
+if (!variant) ({ total: timeTotal, calls: timeCalls } = await printTime(summary));
 if (mergedRuns(summary.runs).some((m) => m.verdict === "not_played")) endedEarly(summary.runs, "the cloud finished the session without playing every run", say);
 sendPath = summary.sendPath ?? [];
 if (sendPath.length) {
@@ -764,7 +779,8 @@ function failedChecks(r?: RunSummary) {
 
 /** Writes the session's results, once it has opened, and prints where. */
 function saveSession(ended: Ended, received: RunSummary[], link: string, print: (line: string) => void): void {
-  if (!sessionId) return;
+  // A compare variant never replaces the folder's own last session (flow test --failed reads it).
+  if (!sessionId || variant) return;
   const last: LastSession = {
     sessionId,
     ...(version ? { agentVersion: version } : {}),
@@ -804,6 +820,7 @@ function saveSession(ended: Ended, received: RunSummary[], link: string, print: 
 /** Exits with the outcome's status, printing the JSON report on stdout first with --json. */
 function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonReport["error"] } = {}): never {
   const exitCode = EXIT[outcome];
+  if (variant) writeChildResult(variant, mergedRuns(options.received ?? []).flatMap((m) => (m.summary ? [{ runId: m.summary.runId, scenario: m.id, channel: m.channel, run: m.run }] : [])));
   if (values.json) {
     const received = options.received ?? [];
     const runs: ReportRun[] = sessionId ? mergedRuns(received).map((m) => ({
@@ -853,6 +870,8 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       mode: kept ?? "thorough",
       modeAsked: asked,
       timing: timeTotal,
+      timingCalls: timeCalls,
+      concurrency: grantedConcurrency,
     };
     writeAll(`${JSON.stringify(report)}\n`);
   }
@@ -1031,13 +1050,18 @@ function changedLastTime(suite: ReturnType<typeof loadSuite>): Set<string> | und
   return new Set(plan.run.map((p) => p.slice("scenarios/".length, -".yaml".length)));
 }
 
-/** Where the session's time went, from each run's record on the cloud: a few lines, and with --timing a row per run. Never fails the session: without the records it says so. */
-async function printTime(summary: { runs: RunSummary[] }): Promise<TimeSplit | null> {
+/** Where the session's time went, from each run's record on the cloud: a few lines, and with --timing a row per run. Never fails the session: without the records it says so, and says how many runs it covers and why the rest are left out. */
+async function printTime(summary: { runs: RunSummary[] }): Promise<{ total: (TimeSplit & { coverage: TimingCoverage }) | null; calls: TimingCall[] | null }> {
+  const none = { total: null, calls: null };
   const key = ciKey;
-  const ids = summary.runs.map((r) => ({ id: r.runId, label: `${r.scenario} ${r.channel} #${r.run}${r.rerunOf ? " (again)" : ""}` })).filter((r) => r.id);
-  if (!agentId || !ids.length || (!key && !/^https?:\/\/(localhost|127\.|\[::1\])/.test(cloud))) return null;
+  const all = summary.runs.map((r) => ({ id: r.runId, scenario: r.scenario, channel: r.channel, run: r.run, label: `${r.scenario} ${r.channel} #${r.run}${r.rerunOf ? " (again)" : ""}` }));
+  const ids = all.filter((r) => r.id);
+  if (!agentId || !ids.length || (!key && !/^https?:\/\/(localhost|127\.|\[::1\])/.test(cloud))) return none;
   const rows: Array<{ label: string; split: TimeSplit }> = [];
-  const deadline = Date.now() + 30_000;
+  const calls: TimingCall[] = [];
+  const missing = { notPlayed: all.length - ids.length, unavailable: 0, noTiming: 0, outOfTime: 0 };
+  // Time to read every record: 8 at a time, a second each at the least, never less than 30 s.
+  const deadline = Date.now() + Math.max(30_000, ids.length * 1_000);
   let next = 0;
   let broke = false;
   const worker = async () => {
@@ -1046,22 +1070,36 @@ async function printTime(summary: { runs: RunSummary[] }): Promise<TimeSplit | n
       try {
         const { status, text } = await cloudCall(`${cloud.replace(/\/+$/, "")}/v1/agents/${agentId}/tests/runs/${run.id}`, { headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), accept: "application/json" }, timeoutMs: 15_000 }, { note: () => {} });
         if (status === 401 || status === 403) broke = true;
-        if (status !== 200) continue;
-        const split = timeSplit(JSON.parse(text));
-        if (split) rows.push({ label: run.label, split });
+        if (status !== 200) {
+          missing.unavailable++;
+          continue;
+        }
+        const record = JSON.parse(text);
+        const split = timeSplit(record);
+        if (!split) {
+          missing.noTiming++;
+          continue;
+        }
+        rows.push({ label: run.label, split });
+        calls.push(...timingCalls(record, { runId: run.id, scenario: run.scenario, channel: run.channel, run: run.run }));
       } catch (error) {
+        missing.unavailable++;
         if (error instanceof NetworkError) broke = true;
       }
     }
   };
   await Promise.all(Array.from({ length: 8 }, worker));
+  // Records never asked for (the time ran out, or a refused key stopped the reading).
+  missing.outOfTime = Math.max(0, ids.length - next);
   if (!rows.length) {
     say("Time: the runs' records were not available, so there is no breakdown (flow show <run> has each run's turnTiming).");
-    return null;
+    return none;
   }
-  const total = addSplits(rows.map((r) => r.split));
+  const coverage: TimingCoverage = { runs: all.length, read: rows.length, missing };
+  const total = { ...addSplits(rows.map((r) => r.split)), coverage };
   for (const line of timeLines(total, rows.length, Date.now() - startedAt)) say(line);
-  if (rows.length < ids.length) say(`  (${rows.length} of ${ids.length} runs read; the rest were not available)`);
+  const note = coverageLine(coverage);
+  if (note) say(note);
   if (values.timing) for (const line of timeTable(rows)) say(line);
-  return total;
+  return { total, calls: values.timing ? calls : null };
 }

@@ -68,6 +68,7 @@ import { ACT_NEXT, EDIT, REACT, UNSEND, UPDATE, cardsOf, editInput, unsendInput,
 import { formatLocal, shortLocal, zoneLabel } from "./time.ts";
 import { activeCall, type QueuedBy, type TurnTrigger } from "./traces.ts";
 import { videoQuestion } from "./model.ts";
+import { overrideBuiltIn } from "./variant.ts";
 import { render, tool, toolContext, toSpec, ToolError, type ChatAuth, type ChatAuthContext, type CredentialProvider, type Tool, type ToolContext } from "./tools.ts";
 import type { Attachment, BeforeSend, CarouselCard, ChannelInfo, ChatMessage, Deliver, DescribeVideo, Incoming, Media, Model, Outbound, OutboundMessage, PageContext, PersonMessage, Photo, ReplyButton, SendContext, SendReceipt, Template, TemplateDefinition, ToolCall, ToolSpec, Transcribe, UndeliveredDetail, Video } from "./types.ts";
 
@@ -1569,7 +1570,7 @@ export class Conversation {
       this.sendTools = new Map(views.map((v) => [sendToolName(v.name), v.name]));
       const page = this.pageNow();
       // What stays the same from call to call comes first, so a model that caches prompts caches up to the clock.
-      const stableSystem = [this.settings.instructions, talkInstructions(views, this.settings.talk), rules, wakeUps, elsewhere].filter(Boolean).join("\n\n");
+      const stableSystem = [this.settings.instructions, overrideBuiltIn(talkInstructions(views, this.settings.talk)), rules, wakeUps, elsewhere].filter(Boolean).join("\n\n");
       const system = [stableSystem, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), page ? pageLine(page) : "", context].filter(Boolean).join("\n\n");
       const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
       // The groups for the channel of the message this turn answers, never another channel the person used;
@@ -1620,7 +1621,7 @@ export class Conversation {
           role: "user",
           content: several
             ? `[Chinwag] They have not heard from you on ${waiting.join(" or ")} yet. In one response, acknowledge them there (react to their message or send a short line) and make your tool calls again.`
-            : ACKNOWLEDGE_FIRST,
+            : overrideBuiltIn(ACKNOWLEDGE_FIRST),
         });
         this.flush();
         continue;
@@ -1656,7 +1657,7 @@ export class Conversation {
         if ((this.resultUnsent === "background" || owedResult) && !this.tasks.size && !reminded) {
           // A result came back and the agent said nothing to them: it may have written the answer as plain text.
           reminded = true;
-          this.history.push({ role: "user", content: `[Chinwag] INTERNAL MESSAGE, not from them: they have not heard from you since the result above, and text outside ${this.sendToolsNow()} never reaches them. If the result is for them, tell them with ${this.sendToolsNow()}, without mentioning this note, any earlier text or any delay.` });
+          this.history.push({ role: "user", content: overrideBuiltIn(`[Chinwag] INTERNAL MESSAGE, not from them: they have not heard from you since the result above, and text outside ${this.sendToolsNow()} never reaches them. If the result is for them, tell them with ${this.sendToolsNow()}, without mentioning this note, any earlier text or any delay.`) });
           this.flush();
           continue;
         }
@@ -1731,8 +1732,8 @@ export class Conversation {
     this.history.push({
       role: "user",
       content: several
-        ? `[Chinwag] INTERNAL MESSAGE, not from them: ${text ? "your text above never reached them" : "they have not heard from you"} on ${owes.join(" or ")}. Reply with ${owes.map((c) => sendToolName(c)).join(" or ")}, without mentioning this note${text ? ", that text" : ""} or any delay.`
-        : `[Chinwag] INTERNAL MESSAGE, not from them: ${text ? "your text above never reached them" : "they have not heard from you"}. Reply with ${sendToolName(owes[0])}, without mentioning this note${text ? ", that text" : ""} or any delay.`,
+        ? overrideBuiltIn(`[Chinwag] INTERNAL MESSAGE, not from them: ${text ? "your text above never reached them" : "they have not heard from you"} on ${owes.join(" or ")}. Reply with ${owes.map((c) => sendToolName(c)).join(" or ")}, without mentioning this note${text ? ", that text" : ""} or any delay.`)
+        : overrideBuiltIn(`[Chinwag] INTERNAL MESSAGE, not from them: ${text ? "your text above never reached them" : "they have not heard from you"}. Reply with ${sendToolName(owes[0])}, without mentioning this note${text ? ", that text" : ""} or any delay.`),
     });
     this.flush();
     return true;
