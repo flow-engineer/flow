@@ -335,6 +335,30 @@ Work in this loop, and never finish on a partial run:
 3. `npx @flow-engineer/flow test --no-customer-data --failed`, again until every run in it passes (exit 0).
 4. `npx @flow-engineer/flow test --no-customer-data`: the whole suite once more, since a fix can break another scenario.
 
+### Run the tests in Flow's cloud (`--run-in-cloud`)
+
+`npx @flow-engineer/flow test --no-customer-data --run-in-cloud [--runs 3] [--only a,b | --failed | --changed]`
+runs the whole session on Flow's cloud instead of this machine. Use it when the run is long, when your
+command has a short timeout, or when a CI job should not hold the agent's process; for the quick inner
+loop on your own machine, plain `flow test --quick` is faster. It does not work with `--agent-url`.
+
+1. The folder is listed and the cloud says which files it lacks; only those are uploaded (a one-line change
+   sends one file). The run id is printed first and kept in `.flow/runs/`.
+2. The run starts and its output is followed. The exit status is the run's, and its result lands in
+   `.flow/last-session.json`, so `--failed`, `--changed` and `flow show` work as after a local run.
+3. A run goes on without you: Ctrl-C stops following only (exit 130). `flow test attach [<run-id>]` prints what
+   it printed so far and follows it (no id: the last run); `flow test stop [<run-id>]` ends it.
+
+If your command runner kills commands after a few minutes, start with `--no-follow` (it returns once the run has
+started), then call `flow test attach` again until it ends; each call exits with the run's status when the run is
+done. A cancelled CI job (SIGTERM with no terminal) stops the run.
+
+What is sent: every file except `node_modules`, `.git`, `.flow` and every `.env*` file other than `tests/.env.test`
+(put the tests' non-secret settings there and commit it). Secrets and the agent's model key come from the agent's
+hosted secrets; with none, a Flow key made for the run pays for the model. Limits: 50 MB of files, 60 minutes a run, 12
+runner-hours a day per workspace; the message at a limit says so, and Flow support raises it on request. A
+workspace in the India cell runs its tests in Flow's US cloud.
+
 ### When a run fails
 
 1. `npx @flow-engineer/flow test --no-customer-data --json > report.json`, and read the runs whose `verdict` is not

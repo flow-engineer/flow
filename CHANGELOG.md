@@ -6,6 +6,13 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Changes
 
+- **`flow test --run-in-cloud` runs the tests on Flow's cloud, detached from your machine.** The run id is printed
+  first and kept in `.flow/runs/`; only the files Flow's cloud does not already hold are uploaded; the output is
+  followed and the exit status is the run's, with the result in `.flow/last-session.json` (so `--failed` and
+  `--changed` work). Ctrl-C stops following only (exit 130); `flow test attach [<run-id>]` follows it again,
+  `flow test stop [<run-id>]` ends it, `--no-follow` returns once it has started, and a terminated process with no
+  terminal stops the run. Not with `--agent-url`. Limits: 50 MB of files, 60 minutes a run, 12 runner-hours a day
+  per workspace. Needs Flow's test-run service; `FLOW_TEST_RUN_IN_CLOUD=1` turns it on for every `flow test`.
 - **`flow setup` follows a workspace that lives in another region.** Its trace and test keys are made, and known,
   only by that region's dashboard, so an agent whose keys came from the default one was refused with 401 there.
   Setup now writes `FLOW_FRAMEWORK_TRACES_URL` from the server's answer (replacing a stale value), sends the
@@ -18,6 +25,8 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 ### Migration notes
 
 Update the CLI and rerun `npx @flow-engineer/flow setup` in the agent folder, then restart the agent.
+
+None for `--run-in-cloud`: it is new and changes nothing that exists.
 
 ## 0.20.1 (17 Nov 2026)
 
