@@ -319,6 +319,57 @@ test("setup merges the keys into .env, keeps the owner's lines and values, print
   assert.match(readFileSync(join(cwd, ".env"), "utf8"), /^FLOW_MESSAGING_TELEGRAM_SENDER=snd_tg$/m);
 });
 
+test("setup for a workspace in another region writes the address its keys work at, replaces a stale one, and needs no join code", async (t) => {
+  const region = "https://dash.example/in";
+  const flow = await flowServer([], 200, { setup: { traces_url: region, join_code: undefined, telegram_sender: undefined, app_id: undefined } });
+  t.after(flow.close);
+  const config = temp();
+  const cwd = temp();
+  writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "cafe" }));
+  writeFileSync(join(cwd, ".env"), "FLOW_FRAMEWORK_TRACES_URL=https://old.example/observe\n");
+  const done = await run(["setup", "--json"], { url: flow.url, config, cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(done.code, 0, done.err);
+  assert.match(readFileSync(join(cwd, ".env"), "utf8"), new RegExp(`^FLOW_FRAMEWORK_TRACES_URL=${region}$`, "m"));
+  assert.doesNotMatch(readFileSync(join(cwd, ".env"), "utf8"), /old\.example/);
+});
+
+test("setup for a moved workspace replaces the old region's keys once, keeps its Messaging lines untouched, tells the server the address it holds, and is idempotent", async (t) => {
+  const region = "https://dash.example/in";
+  const flow = await flowServer([], 200, { setup: { traces_url: region, join_code: undefined, telegram_sender: undefined, app_id: undefined, messaging_key: undefined, try_url: undefined, telegram_link: undefined, cloud_key: "oci_newregioncloud0001", traces_key: "otk_test_newregiontraces01", minted: ["cloud_key", "traces_key"] } });
+  t.after(flow.close);
+  const config = temp();
+  const cwd = temp();
+  writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "cafe" }));
+  const messaging = "FLOW_MESSAGING_KEY=fk_test_oldmessaging9999\nFLOW_MESSAGING_TELEGRAM_SENDER=snd_tg\nFLOW_MESSAGING_WHATSAPP_SENDER=snd_wa\nFLOW_FRAMEWORK_JOIN_CODE=brave-otter-1\nFLOW_FRAMEWORK_TRY_URL=https://x.example/try/brave-otter-1?c=telegram\n";
+  writeFileSync(join(cwd, ".env"), `FLOW_FRAMEWORK_CLOUD_KEY=oci_oldregioncloud0001\nFLOW_FRAMEWORK_TRACES_KEY=otk_test_oldregiontraces01\n${messaging}`);
+  const first = await run(["setup", "--json"], { url: flow.url, config, cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(first.code, 0, first.err);
+  let dotenv = readFileSync(join(cwd, ".env"), "utf8");
+  assert.match(dotenv, /^FLOW_FRAMEWORK_CLOUD_KEY=oci_newregioncloud0001$/m);
+  assert.match(dotenv, /^FLOW_FRAMEWORK_TRACES_KEY=otk_test_newregiontraces01$/m);
+  assert.match(dotenv, new RegExp(`^FLOW_FRAMEWORK_TRACES_URL=${region}$`, "m"));
+  assert.ok(dotenv.includes(messaging), "the Messaging lines, the join code and the senders are byte for byte as they were");
+  assert.equal((setupCall(flow).body as { traces_url?: string }).traces_url, undefined, "no address held yet: none sent");
+  // The rerun: .env holds the region's address, so it is sent, and a server that makes no new key leaves .env unchanged.
+  const second = await run(["setup", "--json"], { url: flow.url, config, cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.equal(second.code, 0, second.err);
+  assert.equal((setupCall(flow).body as { traces_url?: string }).traces_url, region);
+  assert.equal(readFileSync(join(cwd, ".env"), "utf8").includes(messaging), true);
+  dotenv = readFileSync(join(cwd, ".env"), "utf8");
+  assert.match(dotenv, /^FLOW_FRAMEWORK_TRACES_KEY=otk_test_newregiontraces01$/m, "the region's keys are kept once .env holds its address");
+});
+
+test("link for a workspace in another region without a join code says Messaging is not set up there, not that setup wrote nothing", async (t) => {
+  const flow = await flowServer([], 200, { setup: { traces_url: "https://dash.example/in", join_code: undefined, telegram_sender: undefined, app_id: undefined, messaging_key: undefined, try_url: undefined, telegram_link: undefined } });
+  t.after(flow.close);
+  const config = temp();
+  const cwd = temp();
+  writeFileSync(join(cwd, "package.json"), JSON.stringify({ name: "cafe" }));
+  const done = await run(["link", "--json", "--no-browser"], { url: flow.url, config, cwd, env: { FLOW_FRAMEWORK_TOKEN: TOKEN } });
+  assert.notEqual(done.code, 0);
+  assert.match(done.out + done.err, /another region/);
+});
+
 test("link in a folder not set up signs in, resuming a code already waiting, runs setup for the channel, checks the try page and prints the link", async (t) => {
   let approved = false;
   const flow = await flowServer(() => (approved ? { access_token: TOKEN } : { error: "authorization_pending" }));

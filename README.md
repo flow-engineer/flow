@@ -15,6 +15,8 @@ own assistant, the same product capabilities should be available to them.
 
 [Documentation](https://flow.engineer/docs/framework) · [Quickstart](https://flow.engineer/docs/framework/quickstart) · [For coding agents](https://flow.engineer/docs/agents) · [Website](https://flow.engineer)
 
+<p align="center"><img src="docs/images/one-codebase.webp" alt="The café example's tools used three ways: Claude calling get_menu over MCP, the same menu in a terminal through the CLI, and a WhatsApp agent taking an oat latte order with reply buttons."></p>
+
 ## One codebase, every interface
 
 | Build | Reach |
@@ -68,6 +70,8 @@ sign-in and other capabilities as a host does, without requiring a CLI configura
 These tool calls need no model key. To reach Claude or ChatGPT remotely, host the MCP server over
 HTTPS and connect it in the host. [MCP and sign-in](https://flow.engineer/docs/framework/mcp) · [Plugin packages](https://flow.engineer/docs/plugins)
 
+<p align="center"><img src="docs/images/mcp-claude.webp" alt="Claude desktop calling the starter's get_menu tool, showing the request, the JSON response and its answer about which drinks come with oat milk." width="720"></p>
+
 ### Messaging and the playground
 
 ```sh
@@ -80,6 +84,8 @@ npm start
 to try the agent locally, then text it from your phone while it runs. You can also use your own
 model key and messaging provider. [Full setup and trial details](https://flow.engineer/docs/framework/quickstart)
 
+<p align="center"><img src="docs/images/whatsapp.webp" alt="The café agent on WhatsApp: an order confirmed with reply buttons, and a list for picking one of four drinks." width="640"></p>
+
 ## Build with your coding agent
 
 `flow new` includes coding-agent skills and an `AGENTS.md` pointing to them. Give Claude Code,
@@ -87,6 +93,8 @@ Codex or another coding agent your product's codebase and tell it which interfac
 Replace the café tools with calls to your APIs and teach your workflows through skills.
 
 Read the [coding-agent guide](https://flow.engineer/docs/agents), or explore the [café example](examples/cafe).
+
+<p align="center"><img src="docs/images/claude-code.webp" alt="Claude Code in a terminal loading the generated plugin's allergens skill and calling get_menu to answer a question." width="720"></p>
 
 ## Test, host and observe
 
@@ -101,6 +109,8 @@ graded wrong, `flow conversations show <id>` prints one with each grade's rule a
 annoyed, so a coding agent can fix them.
 
 [Deployment](https://flow.engineer/docs/hosting) · [Self-hosting](https://flow.engineer/docs/self-hosting) · [Testing](https://flow.engineer/docs/testing) · [Traces](https://flow.engineer/docs/traces)
+
+<p align="center"><img src="docs/images/conversation-trace.webp" alt="Flow's dashboard showing a WhatsApp conversation with the café agent and the selected reply's trace: model calls, two tool calls, timings and cost."></p>
 
 ## Documentation
 
