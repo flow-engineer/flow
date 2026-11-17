@@ -60,7 +60,7 @@ import { CLI_RELEASE_LINE, cliReleaseCli, DEPLOY_LINE, deployCli, logsCli } from
 import { httpAgent } from "./http-agent.ts";
 import { createInterface } from "node:readline/promises";
 import { checkName, displayNameOf, folderName, initHere, newStandalone, packageRoot } from "./new.ts";
-import { addSplits, DEFAULT_MIN_PASS, EXIT, timeLines, timeSplit, timeTable, type TimeSplit, finishedOutcome, minPassTenths, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
+import { addSplits, DEFAULT_MIN_PASS, EXIT, timeLines, timeSplit, timeTable, type TimeSplit, type TimingCall, type TimingCoverage, timingCalls, coverageLine, finishedOutcome, minPassTenths, passRate, invalidLines, creditReason, runOutcome, scenarioRates, invalidScenarios, loadEnv, networkCode, reportError, runVerdict, sessionInvalid, sessionInvalidLines, stoppedOutcome, type JsonReport, type Outcome, type ReportRun, type SessionInvalid, type Verdict } from "./report.ts";
 import { LAST_SESSION, lastSessionIn, SHOW_LINE, showCli, type LastSession } from "./show.ts";
 import { agentFingerprint, changedScenarios, deprecatedInSuite, FAKE_COMMAND_REMOVED, FRESH_IGNORED, loadSuite, nextChangeRecord, parseScenario, parseToolFile, suiteHash, type ChangeRecord } from "./suite.ts";
 import { cloudCall, NetworkError } from "./cloud-call.ts";
@@ -426,7 +426,10 @@ const startedAt = Date.now();
 let previousLast: LastSession | undefined;
 let agentNow: ReturnType<typeof agentFingerprint> | undefined;
 /** Where the session's time went, once it is known (the summary, --json). */
-let timeTotal: TimeSplit | null = null;
+let timeTotal: (TimeSplit & { coverage: TimingCoverage }) | null = null;
+let timeCalls: TimingCall[] | null = null;
+/** The runs played at once, as the cloud granted. */
+let grantedConcurrency: number | null = null;
 /** Set when the cloud ended the whole session scenario_invalid. */
 let endedInvalid: SessionInvalid | null = null;
 /** Conversations whose messages did not all go through the agent's send (client.ts sendPathCheck). */
@@ -585,7 +588,7 @@ try {
     onRun: (run) => { seen.push(run); printRun(run); },
     onLimits: (sent) => { limits = sent; },
     openExtras: { mode: asked, ...(values.quick ? QUICK_OPEN : {}) },
-    onOpened: (opened) => { kept = opened.mode; for (const line of modeLines(opened)) say(line); },
+    onOpened: (opened) => { kept = opened.mode; grantedConcurrency = opened.concurrency ?? null; for (const line of modeLines(opened)) say(line); },
     onDashboard: (url, id, cloudAgent) => { dashboard = url; sessionId = id; agentId = cloudAgent ?? agentId; process.env.FLOW_FRAMEWORK_TEST_SESSION = id; },
   });
 } catch (error) {
@@ -654,7 +657,7 @@ for (const line of invalidLines(invalidScenarios(mergedRuns(summary.runs).map((m
 if (summary.lost) say(`The cloud lost session ${summary.lost.sessionId} part way; a second session played its unfinished runs. The first: ${summary.lost.dashboard}`);
 say(`Cost: ${usd(total((r) => r.agentUsage.costUsd))} agent (${tokens(total((r) => r.agentUsage.input))} in, ${tokens(total((r) => r.agentUsage.output))} out) + ${usd(total((r) => r.testUsage.costUsd))} test models.\n${summary.dashboard}`);
 say(`Mode: ${modeWord()}.`);
-timeTotal = await printTime(summary);
+({ total: timeTotal, calls: timeCalls } = await printTime(summary));
 if (mergedRuns(summary.runs).some((m) => m.verdict === "not_played")) endedEarly(summary.runs, "the cloud finished the session without playing every run", say);
 sendPath = summary.sendPath ?? [];
 if (sendPath.length) {
@@ -853,6 +856,8 @@ function end(outcome: Outcome, options: { received?: RunSummary[]; error?: JsonR
       mode: kept ?? "thorough",
       modeAsked: asked,
       timing: timeTotal,
+      timingCalls: timeCalls,
+      concurrency: grantedConcurrency,
     };
     writeAll(`${JSON.stringify(report)}\n`);
   }
@@ -1031,13 +1036,18 @@ function changedLastTime(suite: ReturnType<typeof loadSuite>): Set<string> | und
   return new Set(plan.run.map((p) => p.slice("scenarios/".length, -".yaml".length)));
 }
 
-/** Where the session's time went, from each run's record on the cloud: a few lines, and with --timing a row per run. Never fails the session: without the records it says so. */
-async function printTime(summary: { runs: RunSummary[] }): Promise<TimeSplit | null> {
+/** Where the session's time went, from each run's record on the cloud: a few lines, and with --timing a row per run. Never fails the session: without the records it says so, and says how many runs it covers and why the rest are left out. */
+async function printTime(summary: { runs: RunSummary[] }): Promise<{ total: (TimeSplit & { coverage: TimingCoverage }) | null; calls: TimingCall[] | null }> {
+  const none = { total: null, calls: null };
   const key = ciKey;
-  const ids = summary.runs.map((r) => ({ id: r.runId, label: `${r.scenario} ${r.channel} #${r.run}${r.rerunOf ? " (again)" : ""}` })).filter((r) => r.id);
-  if (!agentId || !ids.length || (!key && !/^https?:\/\/(localhost|127\.|\[::1\])/.test(cloud))) return null;
+  const all = summary.runs.map((r) => ({ id: r.runId, scenario: r.scenario, channel: r.channel, run: r.run, label: `${r.scenario} ${r.channel} #${r.run}${r.rerunOf ? " (again)" : ""}` }));
+  const ids = all.filter((r) => r.id);
+  if (!agentId || !ids.length || (!key && !/^https?:\/\/(localhost|127\.|\[::1\])/.test(cloud))) return none;
   const rows: Array<{ label: string; split: TimeSplit }> = [];
-  const deadline = Date.now() + 30_000;
+  const calls: TimingCall[] = [];
+  const missing = { notPlayed: all.length - ids.length, unavailable: 0, noTiming: 0, outOfTime: 0 };
+  // Time to read every record: 8 at a time, a second each at the least, never less than 30 s.
+  const deadline = Date.now() + Math.max(30_000, ids.length * 1_000);
   let next = 0;
   let broke = false;
   const worker = async () => {
@@ -1046,22 +1056,36 @@ async function printTime(summary: { runs: RunSummary[] }): Promise<TimeSplit | n
       try {
         const { status, text } = await cloudCall(`${cloud.replace(/\/+$/, "")}/v1/agents/${agentId}/tests/runs/${run.id}`, { headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), accept: "application/json" }, timeoutMs: 15_000 }, { note: () => {} });
         if (status === 401 || status === 403) broke = true;
-        if (status !== 200) continue;
-        const split = timeSplit(JSON.parse(text));
-        if (split) rows.push({ label: run.label, split });
+        if (status !== 200) {
+          missing.unavailable++;
+          continue;
+        }
+        const record = JSON.parse(text);
+        const split = timeSplit(record);
+        if (!split) {
+          missing.noTiming++;
+          continue;
+        }
+        rows.push({ label: run.label, split });
+        calls.push(...timingCalls(record, { runId: run.id, scenario: run.scenario, channel: run.channel, run: run.run }));
       } catch (error) {
+        missing.unavailable++;
         if (error instanceof NetworkError) broke = true;
       }
     }
   };
   await Promise.all(Array.from({ length: 8 }, worker));
+  // Records never asked for (the time ran out, or a refused key stopped the reading).
+  missing.outOfTime = Math.max(0, ids.length - next);
   if (!rows.length) {
     say("Time: the runs' records were not available, so there is no breakdown (flow show <run> has each run's turnTiming).");
-    return null;
+    return none;
   }
-  const total = addSplits(rows.map((r) => r.split));
+  const coverage: TimingCoverage = { runs: all.length, read: rows.length, missing };
+  const total = { ...addSplits(rows.map((r) => r.split)), coverage };
   for (const line of timeLines(total, rows.length, Date.now() - startedAt)) say(line);
-  if (rows.length < ids.length) say(`  (${rows.length} of ${ids.length} runs read; the rest were not available)`);
+  const note = coverageLine(coverage);
+  if (note) say(note);
   if (values.timing) for (const line of timeTable(rows)) say(line);
-  return total;
+  return { total, calls: values.timing ? calls : null };
 }

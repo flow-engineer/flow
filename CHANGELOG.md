@@ -2,6 +2,18 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **`flow test` timing covers every run, or says why not.** The report read each run's record within a fixed 30 s,
+  so a large session (about 200 runs) silently covered only part of it. The time to read now grows with the number of
+  runs, and when runs are still left out the summary and `--json` (`timing.coverage`) say how many are covered and why:
+  never played, record not returned, record without turn timing, or not read in time. `--json` also has
+  `concurrency` (the runs played at once, as granted; null from a cloud that does not say) and, with `--timing`,
+  `timingCalls`: each model call with its ms split (queued, first token, generation) and token counts, no text.
+  Additive; no migration.
+
 ## 0.20.1 (17 Nov 2026)
 
 ### Changes
