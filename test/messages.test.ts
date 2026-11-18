@@ -1,9 +1,10 @@
-// covers: src/conversation.ts src/talk.ts src/agent.ts src/store.ts
+// covers: src/conversation.ts src/talk.ts src/agent.ts src/store.ts src/model.ts
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { format } from "node:util";
 import { z } from "zod";
 import { defaultHistoryTokens } from "../src/agent.ts";
+import { withCacheMarkers } from "../src/model.ts";
 import { tool } from "../src/index.ts";
 import { SMS, WEB, WHATSAPP, call, harness, last, multi, respond, say, users } from "./helpers.ts";
 
@@ -247,4 +248,34 @@ test("a reset kept in the store holds after a restart, and the person's messages
 
 test("the default history budget is 24,000 tokens, or 60% of the model's window when that is less", () => {
   assert.deepEqual([defaultHistoryTokens(), defaultHistoryTokens(200_000), defaultHistoryTokens(32_000)], [24_000, 24_000, 19_200]);
+});
+
+test("a cached prompt is a stable prefix: the clock comes after the conversation, so the next turn's first call reads the earlier conversation from the cache", async () => {
+  const clock = { now: Date.UTC(2026, 10, 17, 14, 2) };
+  const h = multi({ channels: { sms: { info: SMS, phone: true } }, now: () => clock.now, timeZone: "America/New_York" });
+  const wire = (r: Awaited<ReturnType<typeof h.nextCall>>["request"]) => {
+    const marked = withCacheMarkers(r.system, r.stableSystem, r.messages.map((m) => ({ role: m.role, content: "content" in m ? m.content : "" }) as never));
+    // As the provider's cache sees it: the markers are not part of the key, and the call's own tail is what it adds last.
+    const plain = (JSON.parse(JSON.stringify(marked).replaceAll(',"cache_control":{"type":"ephemeral"}', "")) as Array<{ role: string; content: unknown }>).map((m, i) =>
+      i > 0 && Array.isArray(m.content) && m.content.length === 1 ? { ...m, content: (m.content[0] as { text: string }).text } : m);
+    return { plain, marks: JSON.stringify(marked).split("cache_control").length - 1 };
+  };
+  const { conversationId } = (await h.message("sms", "+15550100100", "hi"))!;
+  const first = await h.nextCall(0);
+  first.answer(respond(call("send_sms", { text: "Hello!" })));
+  await h.agent.conversation(conversationId)!.whenIdle();
+  clock.now += 5 * 60_000;
+  await h.message("sms", "+15550100100", "and later");
+  const later = await h.callWith(1, (c) => c.request.messages.some((m) => m.role === "user" && String(m.content).includes("and later")));
+  const before = wire(first.request).plain;
+  const after = wire(later.call.request).plain;
+  const stable = (before[0].content as Array<{ text: string }>)[0].text;
+  assert.ok(first.request.stableSystem && stable === first.request.stableSystem, "the system message is the stable part alone");
+  assert.equal(stable, later.call.request.stableSystem, "the same at the next turn, whatever the clock says");
+  assert.ok(!stable.includes("It is now"), "no clock in the stable part");
+  assert.deepEqual(after.slice(0, before.length - 1), before.slice(0, -1), "everything the first call sent before its own tail is the start of the later call");
+  const tail = after.at(-1)!;
+  assert.equal(tail.role, "user");
+  assert.match(tail.content as string, /^\[Chinwag\] It is now .*09:07 /, "the clock, five minutes on, is in the tail");
+  assert.equal(wire(later.call.request).marks, 2, "the stable system text and the last message of the conversation are marked");
 });

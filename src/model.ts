@@ -281,23 +281,27 @@ async function collect(stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>, b
 }
 
 /**
- * The messages as sent when the prompt is cached: the system message in two blocks when the stable
- * part is known (a cache entry ends after it, so the clock after it cannot spoil the entry), and the
- * conversation's last message marked, so the next call of a turn reads everything up to it. The
- * text is the same; only `cache_control: ephemeral` is added. Tools come before the system message
- * in the provider's cache order, so the first mark covers them too.
+ * The messages as sent when the prompt is cached. The system message is the stable part alone, marked
+ * so a cache entry ends after it, and what changes from call to call (the clock, the page, the
+ * business's context: the rest of `system`) goes after the conversation as a last message of its own,
+ * never before it: a provider's cache is a prefix, so a changed line in front of the conversation
+ * would make the whole conversation read at full price on the first call of every turn. The
+ * conversation's last message is marked too, so the next call reads everything up to it. The text is
+ * the same; only the place of that rest and `cache_control: ephemeral` change. Tools come before the
+ * system message in the provider's cache order, so the first mark covers them too.
  */
-function withCacheMarkers(system: string, stable: string | undefined, messages: OpenAI.Chat.ChatCompletionMessageParam[]): OpenAI.Chat.ChatCompletionMessageParam[] {
+export function withCacheMarkers(system: string, stable: string | undefined, messages: OpenAI.Chat.ChatCompletionMessageParam[]): OpenAI.Chat.ChatCompletionMessageParam[] {
   const ephemeral = { cache_control: { type: "ephemeral" } };
-  const head = stable && system.startsWith(stable) ? stable + (system.startsWith("\n\n", stable.length) ? "\n\n" : "") : system;
-  const blocks = [{ type: "text", text: head, ...(head ? ephemeral : {}) }, ...(system.length > head.length ? [{ type: "text", text: system.slice(head.length) }] : [])];
-  const out = [{ role: "system", content: system ? blocks : system } as unknown as OpenAI.Chat.ChatCompletionMessageParam, ...messages];
+  const head = stable && system.startsWith(stable) ? stable : system;
+  const rest = system.slice(head.length).replace(/^\n\n/, "");
+  const out = [{ role: "system", content: head ? [{ type: "text", text: head, ...ephemeral }] : head } as unknown as OpenAI.Chat.ChatCompletionMessageParam, ...messages];
   const last = out.at(-1) as { role: string; content?: unknown };
   if (out.length > 1 && last.role !== "assistant") {
     const content = last.content;
     if (typeof content === "string" && content) last.content = [{ type: "text", text: content, ...ephemeral }];
     else if (Array.isArray(content) && (content.at(-1) as { type?: string; text?: string } | undefined)?.type === "text" && (content.at(-1) as { text?: string }).text) Object.assign(content.at(-1) as object, ephemeral);
   }
+  if (rest) out.push({ role: "user", content: rest });
   return out;
 }
 

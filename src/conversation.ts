@@ -1569,9 +1569,11 @@ export class Conversation {
       const several = views.length > 1;
       this.sendTools = new Map(views.map((v) => [sendToolName(v.name), v.name]));
       const page = this.pageNow();
-      // What stays the same from call to call comes first, so a model that caches prompts caches up to the clock.
-      const stableSystem = [this.settings.instructions, overrideBuiltIn(talkInstructions(views, this.settings.talk)), rules, wakeUps, elsewhere].filter(Boolean).join("\n\n");
-      const system = [stableSystem, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), page ? pageLine(page) : "", context].filter(Boolean).join("\n\n");
+      // What stays the same from turn to turn comes first (a model that caches prompts caches the instructions, the tools
+      // and the conversation up to the last message); what changes with the turn (the wake-ups, the other channels, the
+      // clock, the page, the business's context) follows it in `system`, and the model sends that after the conversation.
+      const stableSystem = [this.settings.instructions, overrideBuiltIn(talkInstructions(views, this.settings.talk)), rules].filter(Boolean).join("\n\n");
+      const system = [stableSystem, wakeUps, elsewhere, nowLine(this.settings.now(), this.timeZone, this.settings.timeZone), page ? pageLine(page) : "", context].filter(Boolean).join("\n\n");
       const ownSpecs = this.settings.auth ? this.settings.specs.map((spec) => ({ ...spec, description: spec.description + ((this.settings.tools.get(spec.name)?.signIn ?? "required") === "required" ? " Requires sign-in." : "") })) : this.settings.specs;
       // The groups for the channel of the message this turn answers, never another channel the person used;
       // read this step (a UI's catalog can grow), and never one named like the agent's own or a built-in.

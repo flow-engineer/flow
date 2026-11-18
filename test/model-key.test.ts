@@ -214,7 +214,7 @@ async function recording(t: { after: (fn: () => void) => void }, answer: (res: S
 
 const ASK = { system: "Be brief.\n\nRules.\n\n[Flow] It is now 14:02.", stableSystem: "Be brief.\n\nRules.", messages: [{ role: "user" as const, content: "hi" }], tools: [], signal: new AbortController().signal };
 
-test("a Claude model's stable system text and last message carry cache_control, the text is unchanged, and the cache numbers the provider reports come back", async (t) => {
+test("a Claude model's stable system text and last message carry cache_control, what changes per call follows them, and the cache numbers the provider reports come back", async (t) => {
   const { base, bodies } = await recording(t, (res) => {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ id: "c", object: "chat.completion", created: 0, model: "m", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 80, cache_write_tokens: 15 } } }));
@@ -222,12 +222,12 @@ test("a Claude model's stable system text and last message carry cache_control, 
   const claude = openAICompatible({ apiKey: "k", baseURL: base, model: "anthropic/claude-haiku-5.5" });
   const answer = await claude.complete({ ...ASK, messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "", toolCalls: [{ id: "t1", name: "look", arguments: "{}" }] }, { role: "tool", toolCallId: "t1", content: "found" }] });
   assert.deepEqual(answer.usage, { inputTokens: 100, outputTokens: 2, cacheReadTokens: 80, cacheWriteTokens: 15 });
-  const [system, user, assistant, tool] = bodies[0].messages;
-  assert.deepEqual(system.content, [{ type: "text", text: "Be brief.\n\nRules.\n\n", cache_control: { type: "ephemeral" } }, { type: "text", text: "[Flow] It is now 14:02." }]);
-  assert.equal(system.content.map((b: { text: string }) => b.text).join(""), ASK.system, "the system text, whole");
+  const [system, user, assistant, tool, rest] = bodies[0].messages;
+  assert.deepEqual(system.content, [{ type: "text", text: "Be brief.\n\nRules.", cache_control: { type: "ephemeral" } }]);
   assert.equal(user.content, "hi");
   assert.equal(assistant.content, "");
   assert.deepEqual(tool, { role: "tool", tool_call_id: "t1", content: [{ type: "text", text: "found", cache_control: { type: "ephemeral" } }] });
+  assert.deepEqual(rest, { role: "user", content: "[Flow] It is now 14:02." }, "what changes with the call follows the conversation, unmarked, and the text is the same");
 });
 
 test("a model that needs no marker, or with promptCaching off, gets the plain messages; a provider that reports no cache numbers leaves them out", async (t) => {
