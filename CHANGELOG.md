@@ -95,9 +95,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 - **For a caching model, the clock, page, `context`, wake-ups and other-channels lines no longer arrive in the system
   prompt.** They arrive as a user-role message after the conversation. A developer who reads the system prompt (a
   trace, a log, a test that asserts on `ModelRequest.system`) will no longer find those lines there on a caching
-  model; they are in the last message instead. A custom `Model` that reads `system` is unchanged. `ModelRequest.stableSystem`
-  now holds the instructions, talk rules and rules only; an agent that overrides the system prompt keeps its
-  instructions in the same place, and does not need to change anything.
+  model; they are in the last message instead. A custom `Model` that reads `system` is unchanged, and `system` itself has
+  the same text in the same order. `ModelRequest.stableSystem` now holds the instructions, talk rules and rules only
+  (wake-ups and the other-channels section moved out of it). Nothing else needs to change.
 - Update the CLI and rerun `npx @flow-engineer/flow setup` in the agent folder, then restart the agent (for the
   other-region setup change).
 - `flow test compare` and `flow test --run-in-cloud` are new and change nothing that exists: `flow test` behaves as before.
