@@ -60,6 +60,12 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   on the first call of a turn went from 83 to 94% to 97 to 98%; the saving is cost, latency did not change measurably.
   The text the model gets is the same; its place and the cache markers change. Models that do not cache, and a custom
   `Model`, still get `system` whole and unchanged.
+- **Hosted agents log ids per turn and per scheduled send.** On Cloud Run (when `K_SERVICE` is set), each turn logs the
+  conversation id, the turn number, the runner, whether the turn resumed, the latest inbound message id per waiting
+  channel and the run ids owed; each scheduled or nudge send logs the conversation id, runner, channel, run or nudge
+  id and idempotency key. Ids only, never message text or phone numbers. It tells afterwards which copy of an agent
+  handled which message or sent which scheduled message when two overlap (a deploy, a replacement). Local runs print
+  nothing new.
 - **`flow test` timing covers every run, or says why not.** The report read each run's record within a fixed 30 s,
   so a large session (about 200 runs) silently covered only part of it. The time to read now grows with the number of
   runs, and when runs are still left out the summary and `--json` (`timing.coverage`) say how many are covered and why:
