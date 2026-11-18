@@ -504,6 +504,18 @@ npx @flow-engineer/flow deploy secrets --from-env [<file>] [--env staging|produc
   warning) when the folder has uncommitted changes, since what is packed is the folder as it is, else
   `package.json`'s `version`; `--version` names it yourself. Hosting gives it to the agent as
   `AGENT_VERSION`, so its traces carry it.
+- **Staging sleeps when idle.** On Flow's hosting, a staging environment runs no instance while
+  nobody uses it and is billed only while a request is open; production is unchanged (one
+  instance always up, events on the stream). Flow Messaging events reach a sleeping staging
+  environment by webhook, which hosting registers with the environment's own Messaging app at each
+  deploy, so a message wakes it; the first reply after a long idle waits for a cold start (a few
+  seconds). Due nudges, reminders and wake-ups on a sleeping staging environment are run by
+  hosting waking it (within about 20 seconds of their time, plus the cold start). Default: sleeping.
+  To keep a staging environment always on, set the secret `FLOW_STAGING_ALWAYS_ON=1` for it
+  (`npx @flow-engineer/flow deploy secret FLOW_STAGING_ALWAYS_ON --env staging`, then deploy or
+  `deploy restart`); `deploy secret --unset FLOW_STAGING_ALWAYS_ON` and deploy again to sleep.
+  If you set your own `FLOW_MESSAGING_WEBHOOK_SECRET` staging also sleeps, and the webhook you
+  registered is the one used.
 - `promote` moves staging's live version to production, with no new build. Production keeps its
   own secrets: promote sends the `.env`'s new or changed values there first (`--no-secrets` sends none).
 - `status` shows, per environment (both unless `--env`), the deploy serving it (`status`, `version`,
