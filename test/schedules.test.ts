@@ -402,3 +402,22 @@ for (const { name, db } of engines) {
     assert.deepEqual((await store.schedules("c1")).map((s) => [s.id, s.key]), [["w5", "remind:Q7"]]);
   });
 }
+
+test("a turn and a scheduled send are logged with ids and the runner, never text", async () => {
+  const h = await withSam();
+  const lines: string[] = [];
+  const info = console.info;
+  console.info = (...a: unknown[]) => void lines.push(a.join(" "));
+  process.env.K_SERVICE = "agent";
+  try {
+    await h.store.addSchedule({ id: "s1", conversationId: h.conversationId, channel: "sms", instruction: "check in", fixedText: true, mode: "message", rule: { repeat: "once", at: NOON_NY }, timeZone: "America/New_York", nextRunAt: NOON_NY, maxRuns: null, endsOn: null, origin: "api" });
+    assert.equal(await h.agent.runDue(), 1);
+    await h.conversation.whenIdle();
+  } finally {
+    console.info = info;
+    delete process.env.K_SERVICE;
+  }
+  const sent = lines.map((l) => JSON.parse(l)).find((l) => l.message?.startsWith("flow: sent a scheduled message"));
+  assert.ok(sent?.conversationId && sent.runner && sent.idempotencyKey, "ids and the runner");
+  assert.equal(lines.some((l) => l.includes("check in")), false, "no text in the log");
+});

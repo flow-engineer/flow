@@ -1522,6 +1522,9 @@ export class Conversation {
     this.persist(() => store.updateConversation(this.id, { turnOpen: true, turns }));
     this.turnFrom = this.history.length;
     this.absorb();
+    // Hosted only (a local run prints nothing). Ids only, never text: which runner worked on which of their messages, to check an overlap of two copies afterwards.
+    const inbound = [...this.unanswered].map((c) => this.lastMessageId(c)).filter((id): id is string => id !== undefined);
+    if (process.env.K_SERVICE) logFields("INFO", { conversationId: this.id, turn: turns, runner: this.settings.runner, resumed, ...(inbound.length ? { inbound } : {}), ...(this.owed.some((o) => o.run) ? { runs: this.owed.flatMap((o) => (o.run ? [o.run] : [])) } : {}) }, "flow: turn %d in conversation %s on runner %s", turns, this.id, this.settings.runner);
     // A turn the person started (as against a background result, a scheduled message or a nudge).
     const theirs = this.unanswered.size > 0;
     this.businessTurn = !theirs;
@@ -2206,6 +2209,7 @@ export class Conversation {
       this.history.push({ role: "tool", toolCallId: callId, content: JSON.stringify({ delivered: true, channel: d.channel, ...this.ownId(d.channel, result.receipt) }) });
     }
     this.settings.emit(this.id, "message.out", { ...outDetail(sent, this.settings.templates), channel: d.channel, direct: true, trigger: d.trigger, ...(d.queuedBy ? { queuedBy: [d.queuedBy] } : {}), ...idDetail(result.receipt) });
+    if (process.env.K_SERVICE) logFields("INFO", { conversationId: this.id, runner: this.settings.runner, channel: d.channel, idempotencyKey, ...(d.run ? { run: d.run } : {}), ...(d.nudge ? { nudge: d.nudge } : {}) }, "flow: sent a scheduled message in conversation %s on runner %s", this.id, this.settings.runner);
     settle("sent", undefined, result.receipt?.messageId);
   }
 
