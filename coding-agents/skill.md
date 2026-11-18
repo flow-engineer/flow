@@ -22,7 +22,7 @@ collecting-information skill before you write its tool or prompt: the obvious de
 | Rename, remove or reshape an MCP tool once a CLI is published (contracts) | `flow-framework-contracts` | `contracts-skill.md` |
 | Collect several facts from a person in chat: a booking, order, sign-up, listing, application, return or lead | `flow-framework-collecting-information` | `collecting-information-skill.md` |
 | Write or change tools and their test files | `flow-framework-tools` | `tools-skill.md` |
-| Write or change test scenarios | `flow-framework-tests` | `test-skill.md` |
+| Write or change test scenarios, or compare prompts, models and settings (`flow test compare`) | `flow-framework-tests` | `test-skill.md` |
 | Gather the context pack from an existing app, API or database before building tools | `flow-framework-context` | `context-skill.md` |
 | Set up verified identity and backend credentials | `flow-framework-auth` | `auth-skill.md` |
 

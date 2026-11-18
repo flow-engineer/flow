@@ -229,6 +229,8 @@ export class Refused extends Error {
   readonly status: number | undefined;
   /** What to do next, when the CLI knows. */
   next?: string;
+  /** The cloud's JSON answer (a 409 not_uploaded names what is missing). */
+  body?: Record<string, unknown>;
   constructor(message: string, code: string, missing = false, status?: number) {
     super(message);
     this.code = code;
@@ -443,8 +445,10 @@ export function cloudApi(cloud: string, key: FoundKey | undefined, waits?: Waits
       const again = res.status === 429 && res.retryAfter !== undefined ? `; try again in ${res.retryAfter} s` : "";
       const missing = (res.status === 404 || res.status === 405) && typeof answer.error?.code !== "string";
       const code = answer.error?.code ?? (res.status === 429 ? "rate_limited" : "refused");
-      const keyLines = key && keyRefused(res.status, answer.error?.code) ? `\n${keyHelp(`flow ${path.startsWith("/v1/hosting/logs") ? "logs" : "deploy"}`, key, { status: res.status, code: answer.error?.code })}` : "";
-      throw new Refused(`${answer.error?.hint ? `${why} (${answer.error.hint})` : why}${again}${keyLines}`, code, missing, res.status);
+      const keyLines = key && keyRefused(res.status, answer.error?.code) ? `\n${keyHelp(`flow ${path.startsWith("/v1/hosting/logs") ? "logs" : path.startsWith("/v1/hosting/test-runs") ? "test" : "deploy"}`, key, { status: res.status, code: answer.error?.code })}` : "";
+      const refused = new Refused(`${answer.error?.hint ? `${why} (${answer.error.hint})` : why}${again}${keyLines}`, code, missing, res.status);
+      refused.body = answer;
+      throw refused;
     }
     return answer as T;
   };

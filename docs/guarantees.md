@@ -68,9 +68,24 @@ What follows from it:
   in the order it wrote them, and each goes only once the one before it was accepted. Messages the
   framework sends itself (an acknowledgement, a scheduled text, a nudge) wait for the turn in
   progress and follow the same rule.
-- **Inbound, per conversation.** A conversation runs one turn at a time and takes the person's
-  messages in the order the channel gave them; double texts fold into the turn in progress.
-  Flow Messaging delivers events in order per conversation (stream and webhook alike).
+- **Inbound, per conversation.** A conversation runs one turn at a time; double texts fold into
+  the turn in progress. The agent reads the person's messages in the order they were *sent* (the
+  channel's own clock, `sentAt`), not the order they arrived:
+  - Messages that arrive within the debounce window (`debounceMs`; by default 750 ms on WhatsApp through Flow Messaging and 300 ms on every other channel) are sorted
+    by sent time into one turn.
+  - A message that arrives while the model is working is folded in the same way, in its place
+    among the messages still waiting for an answer (one more model call).
+  - A message sent earlier than one the agent has already replied to is not slotted into the past:
+    the history is not rewritten. It becomes the next turn, marked as sent earlier than one already answered.
+  - Only messages that carry a sent time are sorted, among the places they hold; a message with
+    none (a channel that gives no time) stays where it arrived, and equal times keep arrival order.
+  - Two messages sent in the same second cannot be told apart: WhatsApp gives whole seconds, so
+    their order is the order they arrived.
+
+  With `@flow-engineer/flow/flow-messaging`, `start()` sets the app's `inbound_ordering` to
+  `consumer`, so Flow Messaging delivers each message at once, in arrival order, and the agent
+  orders them as above. An app left in `flow` mode (or an older Flow Messaging without the setting)
+  has Flow Messaging order and deliver events in order per conversation, holding each for about 2 s.
 - **Across conversations, nothing is ordered.** Different people's conversations run side by side.
 - **Across channels of one person,** each channel is ordered on its own; the agent is told which
   channel each message came on.

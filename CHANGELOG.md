@@ -2,10 +2,62 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
-## Unreleased
+## 0.21.0 (18 Nov 2026)
 
-### Changes
+### New
 
+- **`flow test --run-in-cloud` runs the tests on Flow's cloud, detached from your machine.** The run id is printed
+  first and kept in `.flow/runs/`; only the files Flow's cloud does not already hold are uploaded; the output is
+  followed and the exit status is the run's, with the result in `.flow/last-session.json` (so `--failed` and
+  `--changed` work). Ctrl-C stops following only (exit 130); `flow test attach [<run-id>]` follows it again,
+  `flow test stop [<run-id>]` ends it, `--no-follow` returns once it has started, and a terminated process with no
+  terminal stops the run. Not with `--agent-url`. Limits: 50 MB of files, 60 minutes a run, 12 runner-hours a day
+  per workspace. Needs Flow's test-run service; `FLOW_TEST_RUN_IN_CLOUD=1` turns it on for every `flow test`.
+- **`flow test compare`: the same scenarios on two or more variants of your agent, one table.** From the agent's
+  folder, `flow test compare --model a --model b`, `--instructions agent/AGENTS.alt.md`, `--code-ref <git ref>` or
+  `--variants variants.yaml` plays each variant (the agent as it stands is always the first, the baseline) in a
+  `flow test` session of its own at the same time, with the same `--runs`, `--only` and `--concurrency` (per variant),
+  and prints per variant the pass rate with its interval and flaky runs, messages per turn, turns with more than one
+  message, model calls, model time and time to first reply per turn, tool calls, tokens (input, output, cached) and
+  cost, turns where text went out beside a later round of tool calls, and turns where the answer needed an extra model
+  call. Counts are computed from the agent's events, never by a model. A variants file also sets a model's reasoning,
+  temperature, prompt caching, base URL and key variable (any provider the agent can already use), another entry
+  file, and `judge:` sentences added as judged checks to every scenario (labelled judged, never part of the pass
+  rate). A difference from the baseline is marked only when the two 95% intervals do not overlap; otherwise the row
+  says "within noise", and for pass rate how many runs per scenario would settle the gap. `--json` prints the whole
+  comparison; `--save-events <folder>` keeps each variant's events. The cloud's sessions are labelled `compare/<name>`.
+  For work on Flow Framework itself, a variant's `builtIn: { edits }` changes the framework's own lines to the model for
+  that session only (internal, test-only: it refuses to turn on outside a `flow test compare` child, and an edit that
+  matches nothing is reported). The simulated people are not seeded (the cloud does not support it yet), so variants
+  see the same scenarios, not the same conversations; an agent on another framework compares by `agentUrl` for pass
+  rate and judged checks only. See the `flow-framework-tests` skill ("Comparing variants").
+- **A skill and example for collecting information from a person in chat.** `coding-agents/collecting-information-skill.md`
+  teaches a coding agent to gather several facts over a conversation (split one reply across fields, ask one
+  summary question at the end), and `examples/listing` is a working agent that does it. Documentation and an
+  example only; no change to the library.
+- **Messages that arrive out of order are read in the order they were sent.** `Incoming` has a new `sentAt`
+  (ms; the channel's own clock, whole seconds on WhatsApp), which `@flow-engineer/flow/flow-messaging` fills from
+  the event's `message.sent_at`. The agent sorts the person's waiting messages by it when a turn starts and
+  when one arrives mid-turn (the model call is run again, as for any double text); a message with no sent
+  time keeps its arrival place. A message sent earlier than one the agent has already replied to becomes the next
+  turn, marked `[Chinwag] The message above was sent earlier than one you already answered.`; the history is
+  not reordered. `start()` of the Flow Messaging channel sets the app's `inbound_ordering` to `consumer`
+  (read first, changed only when different; a failure is logged once and ignored), so Flow Messaging stops holding
+  each message for 2 s to order it. Against a Flow Messaging that lacks the setting, nothing changes.
+
+### Changed
+
+- **WhatsApp through Flow Messaging waits 750 ms before it replies (was 300); every other channel stays at 300.**
+  The wait after a message before the reply starts, now that the agent, not Flow Messaging, puts quick bursts in
+  order. A channel can set its own default with `ChannelInfo.debounceMs`; `debounceMs` in `createAgent` still wins
+  on every channel.
+- **`flow test` timing covers every run, or says why not.** The report read each run's record within a fixed 30 s,
+  so a large session (about 200 runs) silently covered only part of it. The time to read now grows with the number of
+  runs, and when runs are still left out the summary and `--json` (`timing.coverage`) say how many are covered and why:
+  never played, record not returned, record without turn timing, or not read in time. `--json` also has
+  `concurrency` (the runs played at once, as granted; null from a cloud that does not say) and, with `--timing`,
+  `timingCalls`: each model call with its ms split (queued, first token, generation) and token counts, no text.
+  Additive.
 - **`flow setup` follows a workspace that lives in another region.** Its trace and test keys are made, and known,
   only by that region's dashboard, so an agent whose keys came from the default one was refused with 401 there.
   Setup now writes `FLOW_FRAMEWORK_TRACES_URL` from the server's answer (replacing a stale value), sends the
@@ -15,16 +67,25 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   join code says Messaging is not set up there. Needs flow.engineer's matching change (live since 17 Nov 2026); against an
   older server nothing changes.
 
-- **A cached prompt now reads the conversation from the cache on the first call of each turn.** The system
-  message sent to a model that caches (`anthropic/...`, or `promptCaching: true`) is the stable part alone
-  (instructions, rules); what changes with the turn (the clock, the page, the business's `context`, wake-ups and
-  the person's other channels) follows the conversation as a last message, so a changed line no longer sits in
-  front of the conversation and makes the provider read it all again at full price. The text the model gets is the
-  same; its place and the cache markers are what change.
+### Fixed
+
+- **A tool call that reaches the test cloud after it ended the run is no longer blamed on the cloud.** The client
+  logged the cloud's `run_finished` answer as "an infrastructure error for this run, not the agent's", though the call
+  had simply come late (typically after the agent or its network stalled longer than the cloud waits). It now says
+  the cloud had already ended the run when the call arrived. Log wording only.
 
 ### Migration notes
 
-Update the CLI and rerun `npx @flow-engineer/flow setup` in the agent folder, then restart the agent.
+- **WhatsApp through Flow Messaging now waits 750 ms (was 300 ms) before it replies.** A reply starts up to 450 ms
+  later than before when a message has no follow-up. Other channels keep 300 ms. To keep 300 ms on WhatsApp, set
+  `debounceMs: 300` in `createAgent`; an explicit `debounceMs` always wins.
+- **Inbound messages are read in the order they were sent, and the Flow Messaging channel's `start()` changes the app's
+  `inbound_ordering` setting to `consumer`** (once, only when different). Messaging then stops holding each
+  message for 2 s, so the agent now does the ordering. An agent that relied on arrival order must read `Incoming.sentAt`
+  if it needs the old behaviour.
+- Update the CLI and rerun `npx @flow-engineer/flow setup` in the agent folder, then restart the agent (for the
+  other-region setup change).
+- `flow test compare` and `flow test --run-in-cloud` are new and change nothing that exists: `flow test` behaves as before.
 
 ## 0.20.1 (17 Nov 2026)
 
