@@ -357,6 +357,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
 
   // The session's address is known once it opens; tools and events only use it after that.
   let session = "";
+  const jar = new CookieJar();
   let auth: Record<string, string> = {};
   const controller = new AbortController();
   let stream: IncomingMessage | undefined;
@@ -390,7 +391,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   const outlast = <T>(what: string, attempt: () => Promise<T>): Promise<T> =>
     reopenable ? outlastElsewhere(attempt, { windowMs: ELSEWHERE_WINDOW_MS, now, signal: controller.signal, log, what }) : attempt();
   const tunnelPost = <T>(url: string, body: unknown, timeoutMs: number, options: PostOptions): Promise<T> =>
-    outlast(options.what, () => postRetry<T>(url, body, auth, controller.signal, log, timeoutMs, options));
+    outlast(options.what, () => postRetry<T>(url, body, auth, controller.signal, log, timeoutMs, options, jar));
 
   // Tools: same name, description and input; running one asks the cloud, which holds the request
   // until its simulator has answered and the chosen latency has passed.
@@ -526,7 +527,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
     ...(options.openExtras ?? {}),
     ...(only ? { only } : {}),
   };
-  const opened = await openOnce(`${base}/api/sessions`, open, options.openHeaders, controller.signal, postTimeoutMs, openRetryCapMs, log);
+  const opened = await openOnce(`${base}/api/sessions`, open, options.openHeaders, controller.signal, postTimeoutMs, openRetryCapMs, log, jar);
   options.onOpened?.(opened);
   idempotent = opened.idempotency === true;
   openedId = opened.sessionId;
@@ -582,7 +583,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
   if (failure) throw failure;
   startFlush();
   const streamUrl = `${session}/stream`;
-  stream = await outlast("the stream", () => openStream(streamUrl, auth, controller.signal));
+  stream = await outlast("the stream", () => openStream(streamUrl, auth, controller.signal, undefined, jar));
   if (failure) throw failure;
   // A cloud that resumes numbers its commands: a lost stream is opened again after the last one
   // handled, and a command the cloud sends again is skipped.
@@ -739,7 +740,7 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
       await pause(wait, controller.signal);
       if (failure) throw failure;
       try {
-        return await openStream(streamUrl, { ...auth, "last-event-id": String(lastId) }, controller.signal, Math.max(1, Math.min(postTimeoutMs, deadline - now())));
+        return await openStream(streamUrl, { ...auth, "last-event-id": String(lastId) }, controller.signal, Math.max(1, Math.min(postTimeoutMs, deadline - now())), jar);
       } catch (error) {
         if (failure) throw failure;
         const cause = error instanceof Error && error.cause instanceof PostError ? error.cause : error;
@@ -832,10 +833,11 @@ async function playSession(options: ConnectOptions, only?: RunKey[]): Promise<Cl
  * HTTPS a request behind another open one on it waits until that one finishes: a tool call the
  * cloud has not answered held every later event and reply, and the run ended agent_quiet.
  * A refusal's status and JSON code are its cause, a PostError. A resume waits at most `timeoutMs` for the answer. */
-function openStream(url: string, headers: Record<string, string>, signal: AbortSignal, timeoutMs?: number): Promise<IncomingMessage> {
+function openStream(url: string, headers: Record<string, string>, signal: AbortSignal, timeoutMs?: number, jar?: CookieJar): Promise<IncomingMessage> {
   const request = url.startsWith("https:") ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
-    const req = request(url, { headers, agent: false, signal }, (response) => {
+    const req = request(url, { headers: withCookies(headers, url, jar), agent: false, signal }, (response) => {
+      jar?.store(url, response.headers["set-cookie"]);
       if (timer) clearTimeout(timer);
       if (response.statusCode === 200) return resolve(response);
       const status = response.statusCode ?? 0;
@@ -851,6 +853,48 @@ function openStream(url: string, headers: Record<string, string>, signal: AbortS
     const timer = timeoutMs === undefined ? undefined : setTimeout(() => req.destroy(new TimeoutError()), timeoutMs);
     req.on("error", (error) => { if (timer) clearTimeout(timer); reject(error); }).end();
   });
+}
+
+/**
+ * The cookies one session's cloud sets, kept per origin and sent back on later calls to that origin only:
+ * a hosted tunnel's front pins a session to one instance with a cookie that Node's http never returns.
+ * Name and value only; Path, Domain and the like are ignored, and Max-Age=0, a negative Max-Age or a
+ * past Expires deletes the cookie.
+ */
+export class CookieJar {
+  private readonly byOrigin = new Map<string, Map<string, string>>();
+
+  store(url: string, setCookie: string | string[] | undefined, now = Date.now()): void {
+    if (!setCookie) return;
+    const origin = new URL(url).origin;
+    for (const line of Array.isArray(setCookie) ? setCookie : [setCookie]) {
+      const [pair = "", ...attributes] = line.split(";").map((part) => part.trim());
+      const eq = pair.indexOf("=");
+      if (eq <= 0) continue;
+      const name = pair.slice(0, eq);
+      let expired = false;
+      for (const attribute of attributes) {
+        const [key = "", value = ""] = attribute.split("=").map((part) => part.trim());
+        if (/^max-age$/i.test(key) && Number(value) <= 0) expired = true;
+        if (/^expires$/i.test(key) && Date.parse(value) <= now) expired = true;
+      }
+      const cookies = this.byOrigin.get(origin) ?? new Map<string, string>();
+      if (expired) cookies.delete(name);
+      else cookies.set(name, pair.slice(eq + 1));
+      this.byOrigin.set(origin, cookies);
+    }
+  }
+
+  /** The Cookie header for a call to `url`, or undefined when the jar holds none for its origin. */
+  header(url: string): string | undefined {
+    const cookies = this.byOrigin.get(new URL(url).origin);
+    return cookies?.size ? [...cookies].map(([name, value]) => `${name}=${value}`).join("; ") : undefined;
+  }
+}
+
+function withCookies(headers: Record<string, string>, url: string, jar?: CookieJar): Record<string, string> {
+  const cookie = jar?.header(url);
+  return cookie ? { ...headers, cookie } : headers;
 }
 
 /** The cloud answered a call with a status that is not 2xx. `code` is a JSON `error` string (the tunnel's
@@ -876,9 +920,9 @@ const OPEN_RETRY_CAP_MS = 60_000;
 
 /** The open, sent once more when the cloud is busy (a 429 that is not the spend cap, or a 503 capacity)
  * and its Retry-After is at most `capMs`. */
-async function openOnce(url: string, body: OpenSession, headers: Record<string, string> | undefined, signal: AbortSignal, timeoutMs: number, capMs: number, log: (line: string) => void): Promise<OpenAnswer> {
+async function openOnce(url: string, body: OpenSession, headers: Record<string, string> | undefined, signal: AbortSignal, timeoutMs: number, capMs: number, log: (line: string) => void, jar?: CookieJar): Promise<OpenAnswer> {
   try {
-    return await post<OpenAnswer>(url, body, headers, signal, undefined, timeoutMs);
+    return await post<OpenAnswer>(url, body, headers, signal, undefined, timeoutMs, false, jar);
   } catch (error) {
     if (!(error instanceof PostError) || error.retryAfterMs === undefined || error.retryAfterMs > capMs) throw error;
     const why = error.type ?? error.code;
@@ -886,7 +930,7 @@ async function openOnce(url: string, body: OpenSession, headers: Record<string, 
     if (!busy) throw error;
     log(`The cloud is busy (${error.status}${why ? ` ${why}` : ""}); trying once more in ${Math.ceil(error.retryAfterMs / 1000)} s.`);
     await pause(error.retryAfterMs, signal);
-    return await post<OpenAnswer>(url, body, headers, signal, undefined, timeoutMs);
+    return await post<OpenAnswer>(url, body, headers, signal, undefined, timeoutMs, false, jar);
   }
 }
 
@@ -1008,7 +1052,7 @@ function retryWaitMs(attempt: number, error: unknown): number {
 
 /** One call, sent again when that is safe, until the budget has passed since its first failure.
  * The same Idempotency-Key goes on every try. */
-async function postRetry<T>(url: string, body: unknown, headers: Record<string, string>, signal: AbortSignal | undefined, log: (line: string) => void, timeoutMs: number, options: PostOptions): Promise<T> {
+async function postRetry<T>(url: string, body: unknown, headers: Record<string, string>, signal: AbortSignal | undefined, log: (line: string) => void, timeoutMs: number, options: PostOptions, jar?: CookieJar): Promise<T> {
   let firstFailure: number | undefined;
   let attempt = 0;
   // A try that failed on a kept-alive socket is sent again on a new connection: the socket may be one the other end dropped without a word.
@@ -1016,7 +1060,7 @@ async function postRetry<T>(url: string, body: unknown, headers: Record<string, 
   const headersWithKey = { ...headers, "idempotency-key": options.key };
   for (;;) {
     try {
-      return await post<T>(url, body, headersWithKey, signal, options.serialized, timeoutMs, fresh);
+      return await post<T>(url, body, headersWithKey, signal, options.serialized, timeoutMs, fresh, jar);
     } catch (error) {
       if (error instanceof TimeoutError && error.detail) {
         const d = error.detail;
@@ -1050,7 +1094,7 @@ const httpsPosts = new HttpsAgent({ keepAlive: true, timeout: IDLE_SOCKET_MS });
 const httpFresh = new HttpAgent({ keepAlive: false });
 const httpsFresh = new HttpsAgent({ keepAlive: false });
 
-function requestOnce(url: string, payload: string, headers: Record<string, string>, signal: AbortSignal | undefined, timeoutMs: number, fresh = false): Promise<{ status: number; text: string; headers: Record<string, string> }> {
+function requestOnce(url: string, payload: string, headers: Record<string, string>, signal: AbortSignal | undefined, timeoutMs: number, fresh = false, jar?: CookieJar): Promise<{ status: number; text: string; headers: Record<string, string> }> {
   const secure = url.startsWith("https:");
   const request = secure ? httpsRequest : httpRequest;
   return new Promise((resolve, reject) => {
@@ -1069,10 +1113,11 @@ function requestOnce(url: string, payload: string, headers: Record<string, strin
     };
     const req = request(url, {
       method: "POST",
-      headers: { "content-type": "application/json", ...headers, "content-length": Buffer.byteLength(payload) },
+      headers: { "content-type": "application/json", ...withCookies(headers, url, jar), "content-length": Buffer.byteLength(payload) },
       agent: secure ? (fresh ? httpsFresh : httpsPosts) : (fresh ? httpFresh : httpPosts),
     }, (response) => {
       firstByteMs = Date.now() - began;
+      jar?.store(url, response.headers["set-cookie"]);
       const chunks: Buffer[] = [];
       response.on("error", finish);
       response.on("aborted", () => finish(new Error("The request was aborted")));
@@ -1113,9 +1158,9 @@ function retryAfterOf(headers: Record<string, string>): number | undefined {
   return Math.max(0, date - Date.now());
 }
 
-async function post<T = unknown>(url: string, body: unknown, headers: Record<string, string> = {}, signal?: AbortSignal, serialized?: string, timeoutMs = POST_TIMEOUT_MS, fresh = false): Promise<T> {
+async function post<T = unknown>(url: string, body: unknown, headers: Record<string, string> = {}, signal?: AbortSignal, serialized?: string, timeoutMs = POST_TIMEOUT_MS, fresh = false, jar?: CookieJar): Promise<T> {
   const payload = serialized ?? JSON.stringify(body ?? {});
-  const { status, text, headers: responseHeaders } = await requestOnce(url, payload, headers, signal, postBudgetMs(timeoutMs, Buffer.byteLength(payload)), fresh);
+  const { status, text, headers: responseHeaders } = await requestOnce(url, payload, headers, signal, postBudgetMs(timeoutMs, Buffer.byteLength(payload)), fresh, jar);
   if (status < 200 || status >= 300) {
     throw new PostError(url, status, text, retryAfterOf(responseHeaders));
   }
