@@ -51,6 +51,15 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   The wait after a message before the reply starts, now that the agent, not Flow Messaging, puts quick bursts in
   order. A channel can set its own default with `ChannelInfo.debounceMs`; `debounceMs` in `createAgent` still wins
   on every channel.
+- **A prompt-caching model reads the conversation from the cache on the first call of each turn.** For a model that
+  caches (`anthropic/...`, or `promptCaching: true`), the system message is now the stable part alone (the
+  instructions, the talk rules and the rules), marked as a cache entry. What changes with the turn (the clock, the
+  page, the business's `context`, wake-ups and the person's other channels) follows the conversation as a last
+  message, so a changed line no longer sits in front of the conversation and makes the provider read all of it at full
+  price. Measured on a real loop (about 9k tokens, a per-turn `context` line), the share of the prompt read from cache
+  on the first call of a turn went from 83 to 94% to 97 to 98%; the saving is cost, latency did not change measurably.
+  The text the model gets is the same; its place and the cache markers change. Models that do not cache, and a custom
+  `Model`, still get `system` whole and unchanged.
 - **`flow test` timing covers every run, or says why not.** The report read each run's record within a fixed 30 s,
   so a large session (about 200 runs) silently covered only part of it. The time to read now grows with the number of
   runs, and when runs are still left out the summary and `--json` (`timing.coverage`) say how many are covered and why:
@@ -83,6 +92,12 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
   `inbound_ordering` setting to `consumer`** (once, only when different). Messaging then stops holding each
   message for 2 s, so the agent now does the ordering. An agent that relied on arrival order must read `Incoming.sentAt`
   if it needs the old behaviour.
+- **For a caching model, the clock, page, `context`, wake-ups and other-channels lines no longer arrive in the system
+  prompt.** They arrive as a user-role message after the conversation. A developer who reads the system prompt (a
+  trace, a log, a test that asserts on `ModelRequest.system`) will no longer find those lines there on a caching
+  model; they are in the last message instead. A custom `Model` that reads `system` is unchanged, and `system` itself has
+  the same text in the same order. `ModelRequest.stableSystem` now holds the instructions, talk rules and rules only
+  (wake-ups and the other-channels section moved out of it). Nothing else needs to change.
 - Update the CLI and rerun `npx @flow-engineer/flow setup` in the agent folder, then restart the agent (for the
   other-region setup change).
 - `flow test compare` and `flow test --run-in-cloud` are new and change nothing that exists: `flow test` behaves as before.
