@@ -78,6 +78,9 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Fixed
 
+- **`flow test` returns the cookies the test cloud sets.** A hosted cloud's front pins a session to one instance with a cookie that
+  Node's HTTP client never sent back, so calls could land elsewhere (`session_elsewhere`). The client now keeps each
+  session's cookies and sends them only to the origin that set them.
 - **A tool call that reaches the test cloud after it ended the run is no longer blamed on the cloud.** The client
   logged the cloud's `run_finished` answer as "an infrastructure error for this run, not the agent's", though the call
   had simply come late (typically after the agent or its network stalled longer than the cloud waits). It now says

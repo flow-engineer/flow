@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { z, type Tool } from "../src/index.ts";
-import { CLOUD_MODEL_BUDGET_MS, postBudgetMs, RETRY_BUDGET_MS, runInCloud, SessionStopped, TimeoutError, toolTimeoutMs } from "../testing/src/client.ts";
+import { CLOUD_MODEL_BUDGET_MS, CookieJar, postBudgetMs, RETRY_BUDGET_MS, runInCloud, SessionStopped, TimeoutError, toolTimeoutMs } from "../testing/src/client.ts";
 import type { Command } from "../testing/src/protocol.ts";
 import { rollFault, startFaultProxy } from "./fault-proxy.ts";
 import { unavailableRecords } from "../src/records.ts";
