@@ -625,7 +625,7 @@ export class Agent {
    */
   async message(input: { channel: string; from: string; message: string | Incoming; messageId?: string; key?: string; phone?: string }): Promise<{ conversationId: string; messageId: string } | null> {
     const { key, phone, ...rest } = input;
-    if (phone !== undefined && !/^\+[1-9]\d{6,14}$/.test(phone)) throw new Error(`flow: phone is a verified number in E.164 ("+919876543210"), not "${phone}"`);
+    if (phone !== undefined && !E164.test(phone)) throw new Error(`flow: phone is a verified number in E.164 ("+919876543210"), not "${phone}"`);
     return this.released(await this.take(this.channelOf(input.channel), { ...rest, via: "provider", ...(key ? { verifiedKey: key } : {}), ...(phone ? { verifiedPhone: phone } : {}) }));
   }
 
@@ -1846,6 +1846,9 @@ function keywordIn(keywords: Keywords | undefined, message: string | Incoming): 
   if (typeof message !== "string" && (message.attachments?.length || message.choice)) return null;
   return keywordOf(keywords, typeof message === "string" ? message : message.text);
 }
+
+/** A phone number in E.164 ("+919876543210"). */
+export const E164 = /^\+[1-9]\d{6,14}$/;
 
 /**
  * A phone number as one string however the channel gave it, in E.164: formatting dropped, a 00

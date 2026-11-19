@@ -32,8 +32,8 @@ UI whose `info` declares them), worded for what it has.
 ## One person on several channels
 
 Who a person is comes from what a channel verified, never from what they or the model say. Their
-identities with the same key are one person in **one conversation**: the same number on WhatsApp,
-SMS and iMessage (`phone:+919876543210`), or the key your `resolve` gives (`key:<your id>`), and a
+identities with the same key are one person in **one conversation**: the same number on WhatsApp
+and SMS (`phone:+919876543210`), or the key your `resolve` gives (`key:<your id>`), and a
 signed-in web chat visitor's `sub`.
 
 A person can also have **several conversations under different keys** that share a verified phone
@@ -51,6 +51,11 @@ in on: the agent has no send tool for the other conversation's channels.
   own, a contact the person shared whose user id is the sender's). Flow Messaging's channels pass
   none beyond the phone channels' own. Never a number someone types: an anonymous web visitor stays
   apart whatever they write.
+- **iMessage.** An iMessage handle is a phone number or an email address. When it is an E.164 number
+  (`+919876543210`), Flow Messaging's iMessage channel gives your `resolve` that number as `phone`,
+  as WhatsApp's is, so a phone-login agent knows the person; the number is not their person key, so
+  they are still not joined with their WhatsApp or SMS conversation. An email handle reaches `resolve`
+  as `address` only, with no `phone`.
 - **One agent only.** Conversations are linked within one agent's store, never across agents or
   businesses, also when several agents share a database.
 - **Forgetting is everywhere.** `agent.forgetPerson` deletes the person's conversation and every
