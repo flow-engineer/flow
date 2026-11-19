@@ -101,7 +101,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
       finally { if (clearStatus) io.writeError("\r\u001b[2K"); }
       if (!response) return fail(`Could not reach the agent at ${endpoint}. Is it running?`, 5);
       // The server answered, so it is running; it has no chat route (a playground, an MCP server without the agent).
-      if (response.status === 404 || response.status === 405 || (response.status === 403 && !token)) return fail(`This server does not serve terminal chat (${endpoint}).`, 5);
+      if (response.status === 404 || response.status === 405 || (response.status === 403 && !token)) return fail("This server has no chat agent.", 5);
       if (response.status === 401 || response.status === 403) return fail(`Sign in first: ${signInCommand(config)}${token ? "" : ` (or set ${tokenEnvOf(config)})`}.`, 3);
       if (response.status === 409 && conversationId && !retried && (await response.json().catch(() => null) as { error?: unknown } | null)?.error === "conversation_mismatch") { forget(); continue; }
       if (!response.ok) return fail(`The agent could not finish (${response.status}).`, 1);
