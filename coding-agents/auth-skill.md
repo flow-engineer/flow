@@ -130,6 +130,13 @@ For playground connections pass `via: "playground"`; replies stay in the simulat
 completion events and retry queueing after restart instead of relying on the browser staying open.
 `linkIdentity` and `recordNudge` remain available for custom completion behavior.
 
+To carry context over from the anonymous chat, pass `note` (a short string you wrote, such as what the
+visitor was trying to do) to `signInCompleted` or `linkIdentity`. It is trimmed, cut to 4000 characters
+(ending in `…`), and recorded in the verified account's conversation as an internal line, "Context carried
+over from the anonymous <channel> chat: <note>", that the agent reads on its next turn. It is not a user
+message and does not wake the agent by itself; a repeated link or retried completion records it once.
+Without `note` nothing changes, and the anonymous history is never merged.
+
 ## Exercise sign-in in the playground
 
 Pass `authentication` to `simulators` to add **New user · signed out** to the person picker. Existing declared test people retain their current identities. The hook receives the `channel` and an opaque `visitor` issued by the playground server, and returns `{ key?, address?, label?, signInUrl? }`. Resolve that visitor's connection with the application's normal auth adapter and return the canonical account `key` only after authentication. A phone-primary brand can resolve a simulated provider-verified phone immediately; other interfaces can return the application's OAuth connection URL. Never take the key or verified phone proof from request bodies, and keep credentials out of the result.

@@ -19,7 +19,7 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { ATTACH_EVENTS, NUDGE_TRIGGER, type FlowEvents } from "./business-events/engine.ts";
 import { checkTemplate, declaredTemplate, fillTemplate, keywordOf, summarize, type Channel, type ChannelSummary, type Keywords } from "./channels.ts";
-import { Conversation, PROFILE_TOOL, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Elsewhere, type Profile, type TranscriptEntry } from "./conversation.ts";
+import { Conversation, PROFILE_TOOL, linkNoteLine, profileTool, resetLine, signInNotice, transcriptOf, windowClosed, type ChannelLink, type ConversationSettings, type Elsewhere, type Profile, type TranscriptEntry } from "./conversation.ts";
 import { sqlite, type Database } from "./db.ts";
 import { emitter, log, type EventSink } from "./events.ts";
 import { indexDeclared, recordsOf, type RecordCollection, type Records } from "./records.ts";
@@ -691,8 +691,11 @@ export class Agent {
    * A completed server-verified login. Bind its channel address to the account before sending a
    * confirmation with recordNudge/nudge. Never take key from a browser body or model input.
    * Anonymous history stays separate; an identity belonging to another account is refused.
+   * `note` carries context over explicitly: trimmed, cut to LINK_NOTE_MAX characters, and recorded
+   * in the account conversation as an internal line the agent reads on its next turn (once, however
+   * often the link is repeated). Nothing else of the anonymous chat moves.
    */
-  async linkIdentity(input: { channel: string; address: string; key: string; via?: "provider" | "playground" }): Promise<{ conversationId: string }> {
+  async linkIdentity(input: { channel: string; address: string; key: string; via?: "provider" | "playground"; note?: string }): Promise<{ conversationId: string }> {
     if (!input.address || !input.key) throw new Error("chinwag: linking needs a verified account and channel address");
     const adapter = this.channelOf(input.channel);
     const lock = viaKey(input.channel, input.address);
@@ -712,15 +715,25 @@ export class Agent {
       this.via.set(lock, via);
       if (via === "playground") this.playgroundVisitors.set(lock, { key: input.key });
       this.rows.set(row.id, row);
-      this.open(row.id).link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, ...fileOf(adapter), address: input.address, deliver: this.deliverer(adapter, input.address, row.id), lastMessageAt: identity.lastMessageAt });
+      const conversation = this.open(row.id);
+      conversation.link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, ...fileOf(adapter), address: input.address, deliver: this.deliverer(adapter, input.address, row.id), lastMessageAt: identity.lastMessageAt });
+      const line = linkNoteLine(input.channel, input.note);
+      if (line && !await this.noteKept(row.id, line)) await conversation.carryOver(line);
       return { conversationId: row.id };
     });
     this.arriving.set(lock, work.catch(() => undefined));
     return work;
   }
 
+  /** Whether the account conversation already holds this internal line, in its history or waiting in its inbox. */
+  private async noteKept(conversationId: string, line: string): Promise<boolean> {
+    await this.conversations.get(conversationId)?.stored();
+    if ((await this.store.historyWithTimes(conversationId)).some(({ entry }) => entry.role === "user" && entry.content === line)) return true;
+    return (await this.store.openInbox(conversationId)).some((r) => r.kind === "note" && r.payload.text === line);
+  }
+
   /** Wake the agent after verified sign-in; a repeated completion queues one internal event. */
-  async signInCompleted(input: { channel: string; address: string; key: string; idempotencyKey: string; conversationId?: string; via?: "provider" | "playground" }): Promise<NudgeState> {
+  async signInCompleted(input: { channel: string; address: string; key: string; idempotencyKey: string; conversationId?: string; via?: "provider" | "playground"; note?: string }): Promise<NudgeState> {
     await this.settings.ready;
     if (!input.idempotencyKey) throw new Error("chinwag: sign-in completion needs an idempotency key");
     const earlier = await this.store.nudgeByKey(input.idempotencyKey);

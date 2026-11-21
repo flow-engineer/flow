@@ -2,6 +2,16 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### New
+
+- **`linkIdentity` and `signInCompleted` take an optional `note` to carry anonymous-chat context into the verified
+  account.** It is recorded in the account's conversation as an internal event the agent reads on its next turn
+  ("Context carried over from the anonymous <channel> chat: ..."), trimmed and cut to 4000 characters, once per
+  note however often the link is repeated. Anonymous history stays separate and nothing changes without a `note`
+  (#260).
+
 ## 0.21.0 (18 Nov 2026)
 
 ### New
