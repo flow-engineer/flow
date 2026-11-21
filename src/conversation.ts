@@ -188,6 +188,16 @@ const RESET = "[Chinwag] The conversation starts again here: earlier messages ar
 export function resetLine(note?: string): string {
   return note?.trim() ? `${RESET}\nBefore this: ${note.trim()}` : RESET;
 }
+/** The longest note linkIdentity carries over; a longer one is cut to it, ending in "…". */
+export const LINK_NOTE_MAX = 4000;
+
+/** The internal line for context an app carries over at sign-in, or null for none. */
+export function linkNoteLine(channel: string, note?: string): string | null {
+  const text = note?.trim();
+  if (!text) return null;
+  const kept = text.length > LINK_NOTE_MAX ? `${text.slice(0, LINK_NOTE_MAX - 1)}…` : text;
+  return `[Chinwag] Context carried over from the anonymous ${channel} chat: ${kept}`;
+}
 const NOT_SHOWN = "[Chinwag] You are no longer shown the photos, videos or documents in these messages; ask them to send one again if you need it.";
 /** A message reacted to on arrival (videoReaction): the agent does not react to it with that emoji again. */
 const reactedLine = (id: string, emoji: string) => `[Chinwag] ${id} already has your ${emoji} reaction; don't react ${emoji} to it again.`;
@@ -980,6 +990,11 @@ export class Conversation {
   reacted(emoji: string, toText: string): void {
     this.settings.emit(this.id, "reaction.in", { emoji, toText });
     this.note(`[They reacted ${emoji} to your message: "${clip(toText)}"]`, true);
+  }
+
+  /** Context carried over at sign-in: read on the next turn, which it does not start. */
+  carryOver(text: string): Promise<void> {
+    return this.note(text, true);
   }
 
   /** agent.resetHistory: the model is sent only what comes after this, from the next turn on. */
