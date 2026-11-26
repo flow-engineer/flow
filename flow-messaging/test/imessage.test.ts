@@ -1,4 +1,4 @@
-// covers: flow-messaging/src/index.ts
+// covers: flow-messaging/src/index.ts src/agent.ts src/store.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -6,8 +6,8 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgent, fitMessage, sqlite, type ChatMessage, type Database, type FlowEvent } from "../../src/index.ts";
-import { call, respond, scriptedModel, users } from "./helpers.ts";
+import { createAgent, fitMessage, sqlite, Store, tool, z, type AgentOptions, type ChatMessage, type FlowEvent } from "../../src/index.ts";
+import { call, gate, respond, scriptedModel, users } from "./helpers.ts";
 import { fakeFlow, sign, SECRET, type Recorded } from "./fake.ts";
 import { flowMessaging, IMESSAGE } from "../src/index.ts";
 
@@ -15,7 +15,7 @@ const IM = { id: "conv_im", channel: "imessage", sender: "snd_IM", contact: "ct_
 const post = (path: string) => (r: Recorded) => r.method === "POST" && r.path === path;
 
 /** An agent on Flow's iMessage line (its sender from FLOW_MESSAGING_IMESSAGE_SENDER) and Telegram, its webhook served. */
-async function imessageAgent(flow: { url: string }, options: { database?: Database; resolve?: (who: { channel: string; address: string; phone?: string }) => string | null } = {}) {
+async function imessageAgent(flow: { url: string }, options: Pick<AgentOptions, "auth" | "database" | "resolve" | "tools"> = {}) {
   const dir = mkdtempSync(join(tmpdir(), "flow-fm-im-"));
   writeFileSync(join(dir, "AGENTS.md"), "You are a test agent.");
   const scripted = scriptedModel();
@@ -26,7 +26,7 @@ async function imessageAgent(flow: { url: string }, options: { database?: Databa
   const channels = [fm.telegram({ sender: "snd_TG" }), fm.imessage(), fm.whatsapp({ sender: "snd_WA" })];
   if (saved === undefined) delete process.env.FLOW_MESSAGING_IMESSAGE_SENDER;
   else process.env.FLOW_MESSAGING_IMESSAGE_SENDER = saved;
-  const agent = createAgent({ dir, model: scripted.model, channels, database: options.database, resolve: options.resolve, debounceMs: 0, deadlineMs: 50, scheduleCheckMs: 0, events: [(e) => events.push(e)] });
+  const agent = createAgent({ dir, model: scripted.model, channels, ...options, debounceMs: 0, deadlineMs: 50, scheduleCheckMs: 0, events: [(e) => events.push(e)] });
   if (options.database) await agent.resume();
   const server = createServer(fm.webhook(agent));
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -269,4 +269,80 @@ test("resolve gets an iMessage handle that is an E.164 number as the verified ph
     { channel: "imessage", address: "sam@example.com" },
     { channel: "whatsapp", address: "+15550100200", phone: "+15550100200" },
   ]);
+});
+
+test("a returning iMessage sender signs in from stored anonymous data with or without a backfilled phone", async (t) => {
+  const flow = await fakeFlow();
+  t.after(() => flow.close());
+  const phone = "+15550100100";
+  flow.contacts.ct_im = { id: "ct_im", channel: "imessage", address: { handle: phone } };
+
+  for (const backfilled of [false, true]) {
+    const database = sqlite(join(mkdtempSync(join(tmpdir(), "flow-fm-upgrade-")), "agent.db"));
+    const store = new Store(database, "default");
+    await store.migrate();
+    await store.createConversation("p_guest", `imessage:${phone}`);
+    await store.addIdentity("p_guest", "imessage", phone, "channel", backfilled ? phone : undefined);
+    await store.addMessage("p_guest", { text: "An anonymous request" }, { channel: "imessage", messageId: "msg_old" });
+    // This message was handled before the upgrade.
+    await store.appendHistory("p_guest", 0, [{ role: "user", content: "An anonymous request" }], (await store.openInbox("p_guest")).map(row => row.id));
+    await store.setStop("p_guest", { id: "stop_example", rule: "No proactive outreach" });
+    await store.createConversation("p_account", "key:account-a");
+
+    const seen: Array<string | undefined> = [];
+    const keys: Array<string | null> = [];
+    const live = await imessageAgent(flow, {
+      database,
+      resolve: ({ phone }) => (seen.push(phone), phone ? "account-a" : null),
+      auth: { signIn: () => ({ message: "Please sign in." }) },
+      tools: [tool({ name: "account", description: "Use the signed-in account.", input: z.object({}), signIn: "required", run: (_, { key }) => (keys.push(key), "ok") })],
+    });
+    t.after(live.close);
+    assert.equal(await live.deliver(received("msg_old", "An anonymous request")), 200);
+    assert.deepEqual(seen, [], "replays do not trigger sign-in");
+    assert.equal(await live.deliver(received("msg_new", "Open my account")), 200);
+    assert.equal(await live.agent.conversationOf({ channel: "imessage", address: phone }), "p_account");
+    const next = await live.nextCall(0);
+    assert.ok(!users(next.request.messages).some(text => text.includes("An anonymous request")));
+    next.answer(respond(call("send_imessage", { text: "I’ll check your account." }), call("account")));
+    (await live.nextCall(1)).answer(respond(call("send_imessage", { text: "Signed in." })));
+    await live.agent.conversation("p_account")!.whenIdle();
+    assert.deepEqual(keys, ["account-a"]);
+    assert.deepEqual(await store.historyWithTimes("p_guest").then(rows => rows.map(({ entry }) => entry.content)), ["An anonymous request"]);
+    assert.equal((await store.noContact("p_account", Date.now()))[0]?.hard, true);
+    assert.equal((await store.identity("imessage", phone))?.phone, phone);
+
+    assert.equal(await live.deliver(received("msg_old", "An anonymous request")), 200);
+    assert.equal(await live.deliver(received("msg_new", "Open my account")), 200);
+    assert.deepEqual(live.events.filter(event => event.type === "message.duplicate").map(event => event.conversationId), ["p_guest", "p_account", "p_account"]);
+    assert.deepEqual(seen, [phone]);
+  }
+});
+
+test("two runners keep a returning iMessage identity on the account that linked it first", async (t) => {
+  const flow = await fakeFlow();
+  t.after(() => flow.close());
+  const phone = "+15550100100";
+  flow.contacts.ct_im = { id: "ct_im", channel: "imessage", address: { phone } };
+  const path = join(mkdtempSync(join(tmpdir(), "flow-fm-race-")), "agent.db");
+  const database = sqlite(path);
+  const store = new Store(database, "default");
+  await store.migrate();
+  await store.createConversation("p_guest", `imessage:${phone}`);
+  await store.addIdentity("p_guest", "imessage", phone, "channel");
+
+  const resolving = gate();
+  const owner = gate<string>();
+  const slow = await imessageAgent(flow, { database, resolve: () => { resolving.open(); return owner.promise; } });
+  const fast = await imessageAgent(flow, { database: sqlite(path), resolve: () => "account-a" });
+  t.after(() => { owner.open("account-b"); slow.close(); fast.close(); });
+  const pending = slow.deliver(received("msg_slow", "Hi"));
+  await resolving.promise;
+  assert.equal(await fast.deliver(received("msg_fast", "Hi")), 200);
+  owner.open("account-b");
+  assert.equal(await pending, 500);
+  const account = (await store.conversationByKey("key:account-a"))!;
+  assert.equal((await store.identity("imessage", phone))?.conversationId, account.id);
+  (await fast.nextCall(0)).answer(respond(call("send_imessage", { text: "Welcome." })));
+  await fast.agent.conversation(account.id)!.whenIdle();
 });

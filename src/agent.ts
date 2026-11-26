@@ -909,7 +909,18 @@ export class Agent {
 
   private async arrive(adapter: Channel, input: Arrival) {
     await this.settings.ready;
-    const identity = await this.conversationFor(adapter, input.channel, input.from, input.person, input.verifiedKey, input.verifiedPhone);
+    const { channel, from, messageId, verifiedPhone } = input;
+    const anonymous = !input.verifiedKey && adapter.info.platform === "imessage" && verifiedPhone === from
+      ? await this.store.conversationByKey(`${channel}:${from}`)
+      : null;
+    // Webhook ids are conversation-scoped. Check the anonymous inbox even after the address moves.
+    if (anonymous && messageId !== undefined && await this.store.inboundTaken(anonymous.id, channel, messageId)) {
+      const current = await this.store.identity(channel, from);
+      if (!current) return null;
+      this.settings.emit(current.conversationId, "message.duplicate", { messageId, channel });
+      return { conversationId: current.conversationId, messageId };
+    }
+    const identity = await this.conversationFor(adapter, channel, from, input.person, input.verifiedKey, verifiedPhone, anonymous?.id);
     if (input.via === "playground") {
       const address = viaKey(input.channel, input.from);
       if (input.verifiedKey || input.visitor) this.playgroundVisitors.set(address, { key: input.verifiedKey, visitor: input.visitor });
@@ -924,6 +935,11 @@ export class Agent {
     }
     if (identity.via !== input.via) await this.store.setIdentityVia(input.channel, input.from, input.via);
     this.via.set(viaKey(input.channel, input.from), input.via);
+    if (!this.rows.has(conversationId) && !this.conversations.has(conversationId)) {
+      const row = await this.store.conversation(conversationId);
+      if (!row) throw new Error("flow: could not read the channel identity's conversation");
+      this.rows.set(conversationId, row);
+    }
     const conversation = this.open(conversationId);
     const deliver = this.deliverer(adapter, input.from, conversationId);
     conversation.link({ name: input.channel, info: adapter.info, params: adapter.params, instructions: adapter.instructions, ...fileOf(adapter), address: input.from, deliver, lastMessageAt: null });
@@ -965,13 +981,29 @@ export class Agent {
     return { reply, ...conversation.keyword(kind, text, channel, messageId) };
   }
 
-  /** The identity a message comes from, made (and linked to its person's conversation) the first time it writes. */
-  private async conversationFor(adapter: Channel, channel: string, address: string, testPerson?: TestPerson, verifiedKey?: string, verifiedPhone?: string): Promise<IdentityRow> {
+  /** The stored identity, linked to its account once the sender's address is resolved. */
+  private async conversationFor(adapter: Channel, channel: string, address: string, testPerson?: TestPerson, verifiedKey?: string, verifiedPhone?: string, anonymousId?: string): Promise<IdentityRow> {
     // The number this identity is verified to have: a phone channel's address, else what server code verified.
     const number = adapter.phone ? normalizePhone(address, adapter.kind === "whatsapp" ? undefined : this.countryCode) : verifiedPhone ?? "";
     const known = await this.store.identity(channel, address);
     if (known) {
       if (verifiedKey && (await this.store.conversation(known.conversationId))?.personKey !== `key:${verifiedKey}`) throw new Error("chinwag: channel identity belongs to a different person");
+      if (!verifiedKey && known.conversationId === anonymousId && known.verifiedBy === "channel" && verifiedPhone && this.options.resolve) {
+        const owner = await this.options.resolve({ channel, address, phone: verifiedPhone });
+        if (owner) {
+          const account = await this.conversationRowFor(`key:${owner}`);
+          // The store links the identity and its contact preferences together and refuses a competing account.
+          if (!await this.store.linkIdentity(account.id, channel, address)) throw new Error("chinwag: channel identity belongs to a different person");
+          await this.store.addIdentity(account.id, channel, address, "resolver", verifiedPhone);
+          const linked = await this.store.identity(channel, address);
+          if (linked?.conversationId !== account.id) throw new Error("flow: could not read the linked channel identity");
+          return linked;
+        }
+        // Another runner may have signed them in while this resolver was waiting.
+        const current = await this.store.identity(channel, address);
+        if (!current) throw new Error("flow: could not read the channel identity");
+        if (current.conversationId !== known.conversationId) return current;
+      }
       // Kept from now on: an identity from before numbers were kept, or a signed-in visitor's new number.
       if (number && known.phone !== number) {
         await this.store.addIdentity(known.conversationId, channel, address, known.verifiedBy, number);
@@ -986,9 +1018,15 @@ export class Agent {
       [personKey, verifiedBy] = [await this.testPersonKey(testPerson, adapter), "test person"];
     } else {
       const owner = verifiedKey ?? await this.options.resolve?.({ channel, address, ...(number ? { phone: number } : {}) });
-      // Only a phone channel's number is the person's key; one verified elsewhere links, never joins (linkedConversations).
+      // Without an account, only a phone channel uses the number as its conversation key.
       [personKey, verifiedBy] = owner ? [`key:${owner}`, "resolver"] : adapter.phone && number ? [`phone:${number}`, "phone"] : [`${channel}:${address}`, "channel"];
     }
+    const row = await this.conversationRowFor(personKey);
+    await this.store.addIdentity(row.id, channel, address, verifiedBy, number || undefined);
+    return { channel, address, conversationId: row.id, verifiedBy, lastMessageAt: null, via: "provider", phone: number || null };
+  }
+
+  private async conversationRowFor(personKey: string): Promise<ConversationRow> {
     let row = await this.store.conversationByKey(personKey);
     if (!row) {
       // Two first messages from one person at once (on two channels) both get here; one insert
@@ -996,11 +1034,9 @@ export class Agent {
       await this.store.createConversation(`p_${randomUUID().slice(0, 12)}`, personKey);
       row = await this.store.conversationByKey(personKey);
       if (!row) throw new Error(`flow: could not make a conversation for ${personKey}`);
-      if (!this.conversations.has(row.id)) this.rows.set(row.id, row);
     }
-    const id = row.id;
-    await this.store.addIdentity(id, channel, address, verifiedBy, number || undefined);
-    return { channel, address, conversationId: id, verifiedBy, lastMessageAt: null, via: "provider", phone: number || null };
+    if (!this.conversations.has(row.id)) this.rows.set(row.id, row);
+    return row;
   }
 
   /**
@@ -1090,10 +1126,15 @@ export class Agent {
 
   /** Sends to one identity: to the playground if it last wrote from there, else through the channel's provider. */
   private deliverer(adapter: Channel, address: string, conversationId: string): Deliver {
-    return (outbound) => {
+    return async (outbound) => {
       const reply = this.requestReplies.get(viaKey(adapter.name, address));
       if (reply) return reply(outbound);
       if (this.via.get(viaKey(adapter.name, address)) !== "playground") {
+        // An anonymous conversation can still have a delivery callback after the address signs in.
+        if (adapter.info.platform === "imessage" && E164.test(address) && this.rows.get(conversationId)?.personKey === `${adapter.name}:${address}`
+          && (await this.store.identity(adapter.name, address))?.conversationId !== conversationId) {
+          throw new Error("flow: this iMessage address is no longer linked to the conversation");
+        }
         // The person's latest message here: a provider that finds the conversation from it can send in a process that never saw it.
         const lastMessageId = this.conversations.get(conversationId)?.lastMessageId(adapter.name);
         return adapter.send(address, outbound, lastMessageId ? { lastMessageId } : undefined);

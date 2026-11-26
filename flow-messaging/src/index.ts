@@ -650,9 +650,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   /**
    * An iMessage line connected to Flow (Flow's shared one by default). Flow Framework has no iMessage
-   * kind yet, so it is a custom channel. Its addresses are not marked as phone numbers, since a handle
-   * may be an email address: the person on iMessage is their own, not joined with their WhatsApp or SMS.
-   * A handle that is an E.164 number reaches `resolve` as the verified `phone`, as WhatsApp's does.
+   * kind yet, so it is a custom channel. A handle may be an email address. An E.164 handle reaches
+   * `resolve` as a verified phone and can join the agent's account conversation.
    */
   function imessage(o: FlowChannelOptions = {}): Channel {
     return custom(register("imessage", o), IMESSAGE, o);
@@ -865,6 +864,12 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       if (!message) return;
       const arrived = await agent.message({ channel: route.name, from: address, message, messageId: event.data.message.id, ...(route.kind === "imessage" && E164.test(address) ? { phone: address } : {}) });
       if (arrived) frameworkConversation.set(person, arrived.conversationId);
+      else if (route.kind === "imessage" && E164.test(address)) {
+        // An intercept can answer a message after sign-in, with no conversation id in the result.
+        const conversationId = await agent.conversationOf?.({ channel: route.name, address });
+        if (conversationId) frameworkConversation.set(person, conversationId);
+        else frameworkConversation.delete(person);
+      }
       return;
     }
     // A failed message may be to someone this process has not heard from (a nudge or template to someone new, or after a restart): the agent's store knows them.
