@@ -501,8 +501,12 @@ reference, preserving shared person history. `--json` remains the original respo
 Single-message calls and dumb terminals do not open the full-screen UI. Embedded clients can
 supply `CliIO.chat(session)` to replace it, or keep `CliIO.lines(prompt?)` for basic line input.
 The session exposes `send(text, update, signal)`, `reset()`, `name`, `color`, `accent` and `signal`.
-The terminal endpoint streams when the request accepts `application/x-ndjson`: `activity`, `reply`
-and a final `done` record containing `result`; older servers returning JSON still work. Activity
+The terminal endpoint streams when the request accepts `application/x-ndjson`: a `turn` record with
+its `id`, then `activity`, `reply` and a final `done` record containing `result`, each numbered `seq`
+and kept for a week. A client whose stream was cut asks `GET /agent/terminal?turn=<id>&after=<seq>`
+for the rest, from any instance; one sending `flow-resume: 1` gets `reconnect` (with `turn` and
+`after`) before four minutes instead of a cut, so hosting needs no long request timeout. The CLI
+does both, also for single messages; older servers without `turn` and those returning JSON still work. Activity
 is scoped to the authenticated person's conversation, excluding model context and hidden text.
 `chat.json` is mode 600 and scoped by terminal endpoint. `--new` forgets the terminal's saved
 reference; the agent keeps its one-person history across channels. It does not erase a person's

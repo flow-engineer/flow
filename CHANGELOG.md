@@ -2,6 +2,23 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Fixed
+
+- **Terminal chat picks a turn up again when its stream is cut.** A streamed turn now starts with a `turn` record
+  and numbers every event (`seq`), kept in the agent's store beside the web chat's outbox and pruned with it after a
+  week. `GET /agent/terminal?turn=<id>&after=<seq>` sends the rest, from whichever instance it reaches, and only to
+  the person whose turn it is. A client that sends `flow-resume: 1` gets a `reconnect` record before four minutes
+  instead of being cut by a proxy's request timeout. `<cli> chat` does both, for single messages (which now stream
+  too) as for the full-screen chat, and shows each reply once. Hosting no longer needs a request timeout longer
+  than the CLI's 10-minute wait (#138).
+
+### Migration notes
+
+None. Clients that read the stream see two new record types (`turn`, and `reconnect` only when they ask for it)
+and a `seq` field; the web app's chat ignores them. Older CLIs and servers keep working as before.
+
 ## 0.21.1 (26 Nov 2026)
 
 ### New

@@ -1499,6 +1499,48 @@ test("chat after switching accounts starts the new account's conversation once, 
   assert.equal(saved(), undefined, "signing out forgets the account's conversation reference");
 });
 
+// The tests above get whole streams; a proxy's timeout or the network can cut one while the turn runs on.
+test("a chat whose stream is cut picks its turn up again, shows each reply once, and no one else can read the turn", async () => {
+  const scripted = scriptedModel();
+  let agent!: ReturnType<typeof createAgent>;
+  const terminal = terminalServer({ agent: () => agent, auth: { verify: async token => token === "a" ? { key: "account-a" } : token === "b" ? { key: "account-b" } : null } });
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const hold = tool({ name: "hold", description: "Waits.", input: z.object({}), run: async () => { await held; return "waited"; } });
+  agent = createAgent({ files: { "AGENTS.md": "Test agent" }, model: scripted.model, channels: [terminal.channel], tools: [hold], debounceMs: 0, scheduleCheckMs: 0 });
+  let resumed!: () => void;
+  const reconnected = new Promise<void>(resolve => { resumed = resolve; });
+  let turn = "";
+  const base = await listen(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    if (req.method === "GET") resumed();
+    const result = await terminal.fetch(new Request(`${base}${req.url}`, { method: req.method, headers: req.headers as Record<string, string>, ...(req.method === "POST" ? { body: Buffer.concat(chunks) } : {}) }));
+    res.writeHead(result.status, Object.fromEntries(result.headers));
+    for await (const chunk of result.body ?? []) {
+      const text = Buffer.from(chunk).toString();
+      turn ||= /"type":"turn","id":"([^"]+)"/.exec(text)?.[1] ?? "";
+      // The first reply gets through, then the connection drops, as a proxy's request timeout would.
+      if (req.method === "POST" && text.includes('"type":"reply"')) { res.write(chunk, () => res.destroy()); return; }
+      res.write(chunk);
+    }
+    res.end();
+  });
+  const cli = defineCli({ name: "resume-test", server: `${base}/mcp`, directory: mkdtempSync(join(testDirectory, "resume-")) });
+  const streamed = io(true); streamed.channel.env = { TERM: "xterm" };
+  const replies: string[] = [];
+  streamed.channel.chat = async session => { await session.send("a long one", update => { if (update.type === "reply") replies.push(update.text); }, new AbortController().signal); return 0; };
+  const chat = runCli(cli, ["chat", "--token", "a"], streamed.channel);
+  (await scripted.nextCall(0)).answer(respond(call("send_terminal", { text: "First." }), call("hold", {})));
+  await reconnected;
+  release();
+  (await scripted.nextCall(1)).answer(respond(call("send_terminal", { text: "Second." })));
+  assert.equal(await chat, 0, streamed.err);
+  assert.deepEqual(replies, ["First.", "Second."]);
+  const other = await fetch(`${base}/agent/terminal?turn=${turn}&after=0`, { headers: { authorization: "Bearer b", accept: "application/x-ndjson" } });
+  assert.equal(other.status, 404, "a turn is kept under its person");
+});
+
 // The tests above mount terminalServer by hand; only this shows an agent with authenticated MCP gets
 // chat on the MCP origin with no terminal code, as Flow's hosting serves the server's paths.
 test("mcpServer with auth and the agent serves terminal chat on its origin, signed in only, unless turned off", async (t) => {
