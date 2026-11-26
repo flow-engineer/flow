@@ -2,6 +2,20 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## 0.21.1 (26 Nov 2026)
+
+### New
+
+- **A Flow Messaging channel can send from a line pool.** Give the channel a pool's ID (`sender: "lpl_..."`, or
+  `FLOW_MESSAGING_IMESSAGE_SENDER=lpl_...`): Flow Messaging puts each person on one line of the pool and every
+  first message to them goes from that line, and the conversations of every line of the pool reach the channel
+  (their events carry `conversation.line_pool`). Replies go into the person's own conversation, on its line, as
+  before. Without a pool nothing changes: a conversation on a sender the agent does not use is still passed over.
+
+### Migration notes
+
+None.
+
 ## 0.21.0 (18 Nov 2026)
 
 ### New

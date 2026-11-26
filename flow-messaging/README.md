@@ -125,7 +125,7 @@ On a laptop there is no public URL: use the event stream instead.
 |---|---|
 | `FLOW_MESSAGING_KEY` | Your app's API key, `fk_test_...` or `fk_live_...`. Keep it on your server. |
 | `FLOW_MESSAGING_WEBHOOK_SECRET` | The webhook endpoint's signing secret, `whsec_...`. While you rotate it, give both, comma-separated. Without it, `fm.start` uses the event stream. |
-| `FLOW_MESSAGING_TELEGRAM_SENDER`, `FLOW_MESSAGING_WHATSAPP_SENDER`, `FLOW_MESSAGING_IMESSAGE_SENDER`, `FLOW_MESSAGING_SMS_SENDER` | Each channel's sender, `snd_...`. Needed to start conversations (nudges, templates) and to tell senders apart. Replies to people who wrote first work without it. |
+| `FLOW_MESSAGING_TELEGRAM_SENDER`, `FLOW_MESSAGING_WHATSAPP_SENDER`, `FLOW_MESSAGING_IMESSAGE_SENDER`, `FLOW_MESSAGING_SMS_SENDER` | Each channel's sender, `snd_...`, or for iMessage a line pool, `lpl_...` (each person goes on one line of the pool; every line's conversations reach the channel). Needed to start conversations (nudges, templates) and to tell senders apart. Replies to people who wrote first work without it. |
 | `FLOW_MESSAGING_BASE_URL` | Optional. Default `https://api.flow.engineer`. |
 
 Each of these can also be passed in code: `flowMessaging({ apiKey, webhookSecret, baseUrl, waitFor, waitTimeoutMs })`, and

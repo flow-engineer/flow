@@ -58,7 +58,11 @@ export interface FlowMessagingOptions {
 }
 
 export interface FlowChannelOptions {
-  /** The Flow sender (`snd_...`) this channel starts conversations from. Default: FLOW_MESSAGING_<CHANNEL>_SENDER. */
+  /**
+   * The Flow sender (`snd_...`) this channel starts conversations from, or a line pool (`lpl_...`): each
+   * person then gets the pool's line they belong to, and every line of the pool reaches this channel.
+   * Default: FLOW_MESSAGING_<CHANNEL>_SENDER.
+   */
   sender?: string;
   /** The agent's name for the channel. Default: whatsapp, telegram, imessage or sms. */
   name?: string;
@@ -235,7 +239,7 @@ interface FlowMessage {
 interface FlowEvent {
   id: string;
   type: string;
-  conversation?: { id: string; type?: "direct" | "group"; channel: string; sender: string; contact: string; simulated?: boolean };
+  conversation?: { id: string; type?: "direct" | "group"; channel: string; sender: string; contact: string; simulated?: boolean; line_pool?: string };
   data?: { message?: FlowMessage; message_id?: string; emoji?: string; contact?: string };
 }
 
@@ -729,7 +733,11 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
     if (!c) return undefined;
     // A simulated conversation (POST /v0/test/conversations, test keys only) is on the app's simulated
     // sender, never the channel's own: it reaches the channel of its platform, as a real one would.
-    return routes.find((r) => r.sender === c.sender) ?? routes.find((r) => r.kind === c.channel && (!r.sender || c.simulated === true));
+    // A line pool's conversation is on one of its lines and names the pool (`line_pool`).
+    return (
+      routes.find((r) => r.sender === c.sender || (c.line_pool !== undefined && r.sender === c.line_pool)) ??
+      routes.find((r) => r.kind === c.channel && (!r.sender || c.simulated === true))
+    );
   }
 
   async function addressOf(route: { kind: Kind }, contactId: string): Promise<string> {

@@ -243,6 +243,27 @@ test("a simulated conversation, on the app's simulated sender, reaches its platf
   assert.equal(flow.sends("/v0/conversations/conv_other/basic").length, 0);
 });
 
+test("a channel on a line pool gets the conversations of every line of the pool, and answers each on its own line", async (t) => {
+  const flow = await fakeFlow();
+  const live = await liveAgent(flow, { telegramSender: "lpl_pool" });
+  t.after(() => (flow.close(), live.close()));
+  flow.contacts.ct_pool = { address: { telegram_user_id: "990002" } };
+  const on = (id: string, sender: string, pool?: string) => {
+    const e = received({ id, channel: "telegram", contact: "ct_pool" } as unknown as typeof TG, `msg_${id}`, { kind: "basic", text: "Is my demo still on?" });
+    return { ...e, conversation: { ...e.conversation, sender, ...(pool ? { line_pool: pool } : {}) } };
+  };
+  // A line of no pool the agent uses: passed over.
+  await live.deliver(on("conv_other", "snd_other_tg"));
+  // The pool's second line: reaches the channel, and the answer goes into that conversation.
+  await live.deliver(on("conv_line2", "snd_line2", "lpl_pool"));
+  const first = await live.nextCall(0);
+  assert.equal(lastUser(first.request.messages), "[telegram · msg_conv_line2] Is my demo still on?");
+  first.answer(respond(call("send_telegram", { text: "Yes, 3pm tomorrow." })));
+  assert.deepEqual((await flow.request(post("/v0/conversations/conv_line2/basic"))).body.text, "Yes, 3pm tomorrow.");
+  await live.agent.conversation(live.events[0].conversationId)!.whenIdle();
+  assert.equal(flow.sends("/v0/conversations/conv_other/basic").length, 0);
+});
+
 test("a delivery reaches the agent only when Flow signed it, and only once", async (t) => {
   const flow = await fakeFlow();
   const live = await liveAgent(flow);
