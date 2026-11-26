@@ -816,6 +816,16 @@ test("ordinary and hosted playgrounds expose no local CLI runner", async () => {
   }
 });
 
+test("the local CLI runner only suggests built-in commands the CLI enables", async (t) => {
+  const h = multi({ channels: { terminal: { info: WHATSAPP } }, testPeople: [SAM] });
+  const server = await simulators().listen(h.agent, 0, { localCli: { channel: "terminal", config: { name: "runner", chat: false, signIn: false } } });
+  t.after(() => server.close());
+  assert.deepEqual((await (await fetch(`${server.url}/api/platforms`)).json()).localCli, { channel: "terminal", name: "runner", login: null, chat: false });
+  const response = await fetch(`${server.url}/api/cli/input`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "--token example tools" }) });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /Use the installed CLI to pass a token/);
+});
+
 test("a business run: the agent's sends reach a person's thread before they have written", async () => {
   const { connection } = fakeAgent();
   const sims = simulators({ testCloud: true });

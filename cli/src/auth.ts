@@ -16,6 +16,7 @@ import {
   auth,
   discoverOAuthServerInfo,
   refreshAuthorization,
+  type AuthorizationServerMetadata,
   type OAuthClientMetadata,
   type OAuthClientProvider,
   type StoredOAuthClientInformation,
@@ -178,7 +179,10 @@ export function signOut(config: CliConfig, server: string): void {
 
 /** The CLI's own client_id, when the server's authorization server advertises one on its own origin. */
 async function advertisedClient(server: string): Promise<string | undefined> {
-  const { authorizationServerMetadata: metadata } = await discoverOAuthServerInfo(server);
+  return advertisedClientId((await discoverOAuthServerInfo(server)).authorizationServerMetadata);
+}
+
+function advertisedClientId(metadata: AuthorizationServerMetadata | undefined): string | undefined {
   const id = (metadata as Record<string, unknown> | undefined)?.flow_cli_client_id;
   if (typeof id !== "string" || !metadata?.issuer || !URL.canParse(id) || !URL.canParse(metadata.issuer)) return undefined;
   return new URL(id).origin === new URL(metadata.issuer).origin ? id : undefined;
@@ -295,11 +299,11 @@ function sendPage(config: CliConfig, res: ServerResponse, code: number, status: 
 }
 
 /** Sign in: the browser goes to the organization's own login, and comes back to a loopback port. */
-export async function signIn(config: CliConfig, server: string, signal?: AbortSignal, say?: (text: string) => void): Promise<void> {
+export async function signIn(config: CliConfig, server: string, signal?: AbortSignal, say?: (text: string) => void,
+  discovery?: { metadata?: AuthorizationServerMetadata; resourceMetadataUrl?: URL; scope?: string }): Promise<void> {
   signal?.throwIfAborted();
   if (!config.clientId && !config.clientMetadataUrl) {
-    // Discovery that fails here fails again in auth(), which says why.
-    const id = await advertisedClient(server).catch(() => undefined);
+    const id = discovery ? advertisedClientId(discovery.metadata) : await advertisedClient(server).catch(() => undefined);
     const saved = readAll(config)[server];
     // A sign-in made as another client is replaced, not refreshed: its tokens belong to that client.
     if (id && saved?.client?.client_id !== id) {
@@ -343,7 +347,7 @@ export async function signIn(config: CliConfig, server: string, signal?: AbortSi
     });
     // Cancellation may arrive while discovery or the authorization request is still in flight.
     void code.catch(() => {});
-    const first = await auth(provider, { serverUrl: server });
+    const first = await auth(provider, { serverUrl: server, resourceMetadataUrl: discovery?.resourceMetadataUrl, scope: discovery?.scope });
     if (first === "AUTHORIZED") return;
     const answer = await code;
     try {

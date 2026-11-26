@@ -2,6 +2,21 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **MCP-only CLI configuration.** `chat: false` leaves out built-in terminal chat. `signIn: false`
+  leaves out browser sign-in and uses explicit tokens for protected commands. Custom commands and
+  discovered tools can use the freed names. A public MCP server without OAuth explains this when
+  someone runs `login`. Fixes #258.
+
+### Migration notes
+
+Set `chat: false, signIn: false` in `defineCli` for a public MCP-only CLI. For a token-only CLI, add
+`signInFirst: true` if users should supply a token before running commands. Saved OAuth credentials
+stay on disk and become available again if OAuth is re-enabled.
+
 ## 0.21.1 (26 Nov 2026)
 
 ### New

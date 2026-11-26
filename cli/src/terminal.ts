@@ -5,7 +5,7 @@ import { mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs, stripVTControlCharacters } from "node:util";
 import { configDir, isSignedIn, storedAccessToken } from "./auth.ts";
-import { brandOf, HEX, signInCommand, tokenEnvOf, type CliConfig } from "./commands.ts";
+import { brandOf, hasSignIn, HEX, signInCommand, tokenEnvOf, tokenHint, type CliConfig } from "./commands.ts";
 import { colorDepth, colorsAt, painter, severity, type Palette } from "./colors.ts";
 import type { CliIO } from "./run.ts";
 import { codingAgent } from "./welcome.ts";
@@ -43,7 +43,8 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
   const single = flags.positionals.length === 1;
   if (!single && !io.interactive) { io.writeError(`chat needs a terminal; for a single reply use ${config.name} chat "<message>".\n`); return 2; }
   if (!server) { io.writeError(`${paint("error", "Pass --server <url> or configure the MCP server.")}\n`); return 5; }
-  const stored = !token && isSignedIn(config, server);
+  const oauth = hasSignIn(config);
+  const stored = oauth && !token && isSignedIn(config, server);
   try { if (stored) token = await storedAccessToken(config, server, false, io.signal); }
   catch { io.writeError(`${paint("warning", `Sign in again: ${signInCommand(config)}.`)}\n`); return 3; }
   const humanChat = !single && !flags.values.json;
@@ -101,8 +102,10 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
       finally { if (clearStatus) io.writeError("\r\u001b[2K"); }
       if (!response) return fail(`Could not reach the agent at ${endpoint}. Is it running?`, 5);
       // The server answered, so it is running; it has no chat route (a playground, an MCP server without the agent).
-      if (response.status === 404 || response.status === 405 || (response.status === 403 && !token)) return fail(`This server does not serve terminal chat (${endpoint}).`, 5);
-      if (response.status === 401 || response.status === 403) return fail(`Sign in first: ${signInCommand(config)}${token ? "" : ` (or set ${tokenEnvOf(config)})`}.`, 3);
+      if (response.status === 404 || response.status === 405 || (response.status === 403 && !token && !response.headers.has("www-authenticate"))) return fail("This server has no chat agent.", 5);
+      if (response.status === 401 || response.status === 403) return fail(oauth
+        ? `Sign in first: ${signInCommand(config)}${token ? "" : ` (or set ${tokenEnvOf(config)})`}.`
+        : `Authentication required. ${tokenHint(config, Boolean(token))}`, 3);
       if (response.status === 409 && conversationId && !retried && (await response.json().catch(() => null) as { error?: unknown } | null)?.error === "conversation_mismatch") { forget(); continue; }
       if (!response.ok) return fail(`The agent could not finish (${response.status}).`, 1);
       let mismatch = false;

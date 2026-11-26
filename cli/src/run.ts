@@ -14,7 +14,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as delay } from "node:timers/promises";
-import { Client, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider, type Tool as McpTool } from "@modelcontextprotocol/client";
+import { Client, discoverOAuthServerInfo, extractWWWAuthenticateParams, InsufficientScopeError, ProtocolError, ProtocolErrorCode, SdkHttpError, StreamableHTTPClientTransport, UnauthorizedError, type AuthProvider, type OAuthClientProvider, type Tool as McpTool } from "@modelcontextprotocol/client";
 import { buildApplication, buildCommand, buildRouteMap, ExitCode, numberParser, run as runStricli, text_en, type Command as StricliCommand, type RouteMap } from "@stricli/core";
 import { configDir, isSignedIn, revokeStored, signedInAsOtherClient, signIn, signOut, storedAccessToken, storedProvider } from "./auth.ts";
 import { colorsAt, painter, severity, type Paint } from "./colors.ts";
@@ -28,6 +28,9 @@ import {
   BUILT_IN,
   commandEntries,
   feedbackUsage,
+  hasChat,
+  hasSignIn,
+  hasTerminalChat,
   commandTable,
   flagKind,
   flagName,
@@ -35,13 +38,17 @@ import {
   findCommand,
   withDefaults,
   isCustom,
+  OLD_AUTH,
   oldAuth,
+  ownsCommandRoot,
   OWN_FLAGS,
   serverEnvOf,
   signInCommand,
+  signInOwn,
   signInWords,
   skillFile,
   tokenEnvOf,
+  tokenHint,
   typeHint,
   updatesItself,
   type CliConfig,
@@ -218,7 +225,7 @@ export async function connectCli(config: CliConfig, options: { server?: string; 
   const token = options.token ?? env[tokenEnvOf(config)];
   let client: Client;
   try { client = await connect(config, server, token, options.signal, local); }
-  catch (error) { throw error instanceof CliExit ? error : explain(config, server, error); }
+  catch (error) { throw error instanceof CliExit ? error : explain(config, server, error, Boolean(token)); }
   return {
     async call(tool, input, settings = {}) {
       let result;
@@ -226,7 +233,7 @@ export async function connectCli(config: CliConfig, options: { server?: string; 
         result = await client.callTool({ name: tool, arguments: input, _meta: callMeta(config, settings.command ?? "custom") });
       } catch (error) {
         if (error instanceof ProtocolError && error.code === ProtocolErrorCode.InvalidParams) throw new CliExit(EXIT.usage, short(error.message.replace(/^MCP error -?\d+:\s*/, "")));
-        throw upgradeRequired(config, server, error) ?? explain(config, server, error);
+        throw upgradeRequired(config, server, error) ?? explain(config, server, error, Boolean(token));
       }
       return valueOf(result);
     },
@@ -248,11 +255,21 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
   if (rest.length && config.defaultCommands?.[rest.join(" ")] !== undefined) rest.push("--help");
   const { server, named, local } = serverOf(config, given, env);
   const token = givenToken ?? env[tokenEnvOf(config)];
-  const signedIn = local ? "local" as const : token ? "env" as const : server && isSignedIn(config, server) ? "login" as const : null;
+  const oauth = hasSignIn(config);
+  const signedIn = local ? "local" as const : token ? "env" as const : oauth && server && isSignedIn(config, server) ? "login" as const : null;
   const bare = rest.length === 0;
   const welcome = bare && config.welcome !== false && person(io);
-  // A bare run without a person is a request for the help, which needs no sign-in.
-  if (server && !signedIn && waitsForSignIn(config, rest) && (!bare || person(io))) {
+  const first = rest[0] ?? "";
+  const disabled = ownsCommandRoot(config, first) ? undefined
+    : !hasChat(config) && first === "chat" ? NO_CHAT
+    : !oauth && (first === "login" || first === "logout" || OLD_AUTH.includes(rest.slice(0, 2).join(" "))) ? NO_SIGN_IN
+    : undefined;
+  const waiting = server && !signedIn && waitsForSignIn(config, rest);
+  const requireSignIn = async (server: string): Promise<number | undefined> => {
+    if (!oauth) {
+      io.writeError(`${signInQuestion(config)} ${tokenHint(config)}\n`);
+      return EXIT.signIn;
+    }
     const login = signInCommand(config);
     if (!person(io)) {
       io.writeError(`${signInQuestion(config)} Run \`${login}\` (or set ${tokenEnvOf(config)}), then run this again.\n`);
@@ -266,6 +283,11 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     catch (error) { const problem = error instanceof CliExit ? error : explain(config, server, error); io.writeError(`${paint(severity(problem.code), problem.message)}\n`); return problem.code; }
     forgetChat(config, server);
     io.writeError(`Signed in to ${server}.\n`);
+  };
+  // A bare non-interactive run prints help, and a token-only welcome can explain how to supply a token.
+  if (waiting && !disabled && (!bare || (oauth && person(io)))) {
+    const status = await requireSignIn(server);
+    if (status !== undefined) return status;
     if (bare) { if (config.welcome !== false) io.write(`\n${tips(config, painter(colorsAt(config, io)))}\n\n`); else rest.push("--help"); }
     else io.writeError("\n");
     if (welcome) return EXIT.ok;
@@ -273,12 +295,12 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     io.write(welcomeScreen(config, { server, signedIn, tokenEnv: tokenEnvOf(config) }, io));
     return EXIT.ok;
   }
-  if (rest[0] === "chat" && !config.commands?.[rest[0]]) return runTerminal(config, named, token, rest, io);
+  if (first === "chat" && hasTerminalChat(config)) return runTerminal(config, named, token, rest, io);
   const table = commandTable(config, []);
   const found = findCommand(table, withDefaults(config, table, rest));
   const custom = Boolean(found?.command.config && isCustom(found.command.config));
   const prefix = rest.filter(w => w !== "--help" && w !== "-h").join(" ");
-  const children = commandEntries(config).filter(([words]) => words.startsWith(`${prefix} `));
+  const children = commandEntries(config).filter(([words]) => words.trim().split(/\s+/).join(" ").startsWith(`${prefix} `));
   const localOnly = custom || (rest[0] === "update" && updatesItself(config)) || Boolean(prefix && children.length && children.every(([, command]) => isCustom(command)));
   const asksHelp = rest.length === 0 || rest[0] === "-h" || rest[0] === "--help";
 
@@ -294,7 +316,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     if (client) return client;
     connecting ??= connect(config, server, token, io.signal, local).then(connected => client = connected).catch(error => {
       connecting = undefined;
-      throw explain(config, server, error);
+      throw explain(config, server, error, Boolean(token));
     });
     return connecting;
   };
@@ -320,11 +342,18 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
       io.signal?.throwIfAborted();
     } catch (error) {
       await client?.close(); client = undefined; connecting = undefined;
-      problem = error instanceof CliExit ? error : explain(config, server, error);
+      problem = error instanceof CliExit ? error : explain(config, server, error, Boolean(token));
     }
   }
   if (io.signal?.aborted) { await client?.close(); return EXIT.failed; }
-  if (problem && !asksHelp) { io.writeError(`${paint(severity(problem.code), problem.message)}\n`); return problem.code; }
+  if (problem && !asksHelp) {
+    if (disabled && problem.code === EXIT.signIn && !wordsKnown([first], config, tools).length) {
+      io.writeError(`${disabled}${oauth ? "" : ` ${tokenHint(config, Boolean(token))}`}\n`);
+      return EXIT.usage;
+    }
+    io.writeError(`${paint(severity(problem.code), problem.message)}\n`);
+    return problem.code;
+  }
 
   // A connected server's version is available without another tools/list. Refresh before a
   // generated call if it changed, then rebuild its parser and approval flags before sending it.
@@ -340,6 +369,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
     } catch (error) {
       const upgrade = upgradeRequired(config, server!, error);
       if (upgrade) throw upgrade;
+      if (needsSignIn(error)) throw explain(config, server!, error, Boolean(token));
       // A tool request has already been sent. Refresh the help, but never replay a call:
       // third-party servers and custom commands can have side effects before reporting errors.
       if (!recoveredCall && error instanceof ProtocolError && error.code === ProtocolErrorCode.InvalidParams) {
@@ -353,6 +383,13 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
   io.signal?.addEventListener("abort", disconnect, { once: true });
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
+      if (waiting && disabled && commandTable(config, tools).some(command => command.words[0] === first)) {
+        // Discovery found a real command with this name. It uses the ordinary signInFirst policy.
+        const status = await requireSignIn(server);
+        if (status !== undefined) return status;
+        await client?.close(); client = undefined;
+        return runOnce(config, argv, io);
+      }
       let out = "", err = "", executing = false, reparse = false;
       const output: CliIO = { ...io,
         write: text => { if (executing && !reparse) io.write(text); else out += text; },
@@ -394,6 +431,10 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
       if (attempt === 0 && (reparse || (cached && parseFailure && !custom))) {
         try { if (reparse || await discover()) continue; } catch {}
       }
+      if (code === ExitCode.UnknownCommand && disabled && !wordsKnown([first], config, tools).length) {
+        io.writeError(`${disabled}\n`);
+        return EXIT.usage;
+      }
       // The top-level overview lists every command; Stricli's flat list after it would repeat them.
       // (Its routes stay visible to Stricli, which suggests only visible ones for a typo.)
       // Its usage lines, one per command, are replaced by one.
@@ -407,7 +448,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
       if (problem) io.writeError(`\n${paint(severity(problem.code), problem.message)}\n`);
       if (code < 0) {
         const words = rest.filter(w => !w.startsWith("-"));
-        if (code === ExitCode.UnknownCommand && named && !token && await signedInAsOtherClient(config, named)) io.writeError(`${RENEW(config)}\n`);
+        if (code === ExitCode.UnknownCommand && oauth && named && !token && await signedInAsOtherClient(config, named)) io.writeError(`${RENEW(config)}\n`);
         io.writeError(`Run \`${[config.name, ...wordsKnown(words, config, tools)].join(" ")} --help\` to see how to use it.\n`);
         return EXIT.usage;
       }
@@ -426,7 +467,7 @@ async function runOnce(config: CliConfig, argv: string[], io: CliIO): Promise<nu
 /** The words of the command line that name a group or command, for the help hint. */
 function wordsKnown(words: string[], config: CliConfig, tools: ToolInfo[]): string[] {
   const commands = commandTable(config, tools).map((c) => c.words.join(" "));
-  const paths = [...commands, ...BUILT_IN, ...Object.values(signInWords(config)), ...oldAuth(config, commands)];
+  const paths = [...commands, ...BUILT_IN, ...signInOwn(config), ...oldAuth(config, commands)];
   const known: string[] = [];
   for (const w of words) {
     const next = [...known, w].join(" ");
@@ -445,7 +486,8 @@ async function connect(config: CliConfig, server: string, token: string | undefi
     // A handle in this process is called through its own entry, never the network, with no sign-in.
     const entry = local && (local as unknown as Record<symbol, { path: string; fetch(request: Request): Promise<Response> } | undefined>)[IN_PROCESS];
     if (local && !entry) throw new Error(`${config.name}: server is not an mcpServer handle (give a URL, or mcpServer(...)'s handle)`);
-    const provider: AuthProvider | OAuthClientProvider | undefined = entry ? undefined : token ? { token: async () => token } : isSignedIn(config, server) ? storedProvider(config, server, undefined, signal) : undefined;
+    const provider: AuthProvider | OAuthClientProvider | undefined = entry ? undefined : token ? { token: async () => token }
+      : hasSignIn(config) && isSignedIn(config, server) ? storedProvider(config, server, undefined, signal) : undefined;
     const transport = entry
       ? new StreamableHTTPClientTransport(new URL(`http://in-process.invalid${entry.path}`), { fetch: (url, init) => entry.fetch(new Request(url, init)) })
       : new StreamableHTTPClientTransport(new URL(server), provider ? { authProvider: provider } : {});
@@ -500,9 +542,9 @@ function serverVersion(client: Client): Discovery["server"] {
  */
 async function discoveryFile(config: CliConfig, server: string, token: string | undefined): Promise<string | undefined> {
   if (config.discoveryCache === false) return undefined;
-  const provider = storedProvider(config, server);
-  const credentials = token ? { token } : await provider.tokens();
-  const client = token ? null : (await provider.clientInformation())?.client_id ?? null;
+  const provider = !token && hasSignIn(config) ? storedProvider(config, server) : undefined;
+  const credentials = token ? { token } : await provider?.tokens();
+  const client = (await provider?.clientInformation())?.client_id ?? null;
   const key = createHash("sha256").update(JSON.stringify([server, config.name, config.version ?? "1", config.clientId, config.clientMetadataUrl, credentials ?? null, client])).digest("hex");
   return join(configDir(config), "discovery", `${key}.json`);
 }
@@ -577,7 +619,7 @@ function backgroundDiscovery(config: CliConfig, server: string, token: string | 
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), REFRESH_ARG], { detached: true, stdio: ["pipe", "ignore", "ignore"] });
     child.on("error", release);
     child.stdin.on("error", () => {});
-    child.stdin.end(JSON.stringify({ config: { name: config.name, version: config.version, directory: configDir(config), clientId: config.clientId, clientMetadataUrl: config.clientMetadataUrl }, server, token, file }));
+    child.stdin.end(JSON.stringify({ config: { name: config.name, version: config.version, directory: configDir(config), clientId: config.clientId, clientMetadataUrl: config.clientMetadataUrl, ...(hasSignIn(config) ? {} : { signIn: false }) }, server, token, file }));
     child.unref();
   } catch { release(); }
 }
@@ -605,17 +647,38 @@ if (refreshWorker) {
 /** Signs in to `server`; a server out of reach is said as any command says it (explain: exit 5), never as a crash. */
 async function signInHere(config: CliConfig, server: string, io: CliIO): Promise<void> {
   try {
-    await signIn(config, server, io.signal, (text) => io.writeError(text));
+    const fetchFn: typeof fetch = (url, init) => fetch(url, { ...init, signal: io.signal ?? init?.signal });
+    let info = await discoverOAuthServerInfo(server, { fetchFn });
+    let challenge: ReturnType<typeof extractWWWAuthenticateParams> | undefined;
+    if (!info.resourceMetadata?.authorization_servers?.length && !info.authorizationServerMetadata) {
+      const probe = new Client({ name: `${config.name}-cli`, version: config.version ?? "1" });
+      try {
+        await probe.connect(new StreamableHTTPClientTransport(new URL(server), { fetch: async (url, init) => {
+          const response = await fetchFn(url, init);
+          if (response.status === 401 || response.status === 403) challenge = extractWWWAuthenticateParams(response);
+          return response;
+        } }), { signal: io.signal });
+      } catch (error) {
+        // A server can advertise OAuth only in its challenge.
+        if (!needsSignIn(error)) throw error;
+        if (!challenge?.resourceMetadataUrl) throw new CliExit(EXIT.usage, `This server requires authentication without advertising OAuth. ${tokenHint(config)}`);
+      } finally { await probe.close(); }
+      if (!challenge?.resourceMetadataUrl) throw new CliExit(EXIT.usage, NO_SIGN_IN);
+      info = await discoverOAuthServerInfo(server, { resourceMetadataUrl: challenge.resourceMetadataUrl, fetchFn });
+    }
+    await signIn(config, server, io.signal, (text) => io.writeError(text), { metadata: info.authorizationServerMetadata, ...challenge });
   } catch (error) {
     throw error instanceof CliExit ? error : explain(config, server, error);
   }
 }
 
 /** Why the server could not be used, as one line and an exit code. */
-function explain(config: CliConfig, server: string, error: unknown): CliExit {
+function explain(config: CliConfig, server: string, error: unknown, hasToken = false): CliExit {
   const upgrade = upgradeRequired(config, server, error);
   if (upgrade) return upgrade;
-  if (needsSignIn(error)) return new CliExit(EXIT.signIn, `Sign in first: ${signInCommand(config)} (or set ${tokenEnvOf(config)}).`);
+  if (needsSignIn(error)) return new CliExit(EXIT.signIn, hasSignIn(config)
+    ? `Sign in first: ${signInCommand(config)} (or set ${tokenEnvOf(config)}).`
+    : `Authentication required. ${tokenHint(config, hasToken)}`);
   const status = error instanceof SdkHttpError ? (error.data as { status?: number } | undefined)?.status : undefined;
   const why = short((error as Error).message);
   return new CliExit(EXIT.unreachable, status ? `${server} answered ${status}, not as an MCP server: is this its /mcp address? (${why})` : `Could not reach ${server}: ${why}`);
@@ -686,7 +749,7 @@ function routes(config: CliConfig, server: string | undefined, named: string | u
   const table = commandTable(config, tools);
   for (const c of table) place(c.words, { command: c.config && isCustom(c.config) ? c.config.command : toolCommand(config, c, prepare, call, io, feedback) });
   const signing = signInRoutes(config, named, io);
-  for (const [key, words] of Object.entries(signInWords(config)) as Array<["login" | "logout", string]>) {
+  for (const [key, words] of (hasSignIn(config) ? Object.entries(signInWords(config)) : []) as Array<["login" | "logout", string]>) {
     const at = place(words.split(" "), {});
     if (at.command || at.children.size) throw new Error(`${config.name}: "${words}" is the CLI's ${key} command (signIn.${key}); name yours something else, or move ${key} with signIn.${key}.`);
     Object.assign(at, { command: signing[key], own: true });
@@ -722,10 +785,11 @@ function routes(config: CliConfig, server: string | undefined, named: string | u
   // chat and help are the CLI's, unless the CLI file has its own.
   const own: Record<string, Target> = { tools: toolsCommand(tools, io), skill: skillCommand(config, tools, call, io, server ? refresh : undefined), ...signInTop };
   if (updatesItself(config)) own.update = updateCommand(config, io);
-  const signInLeaves = Object.fromEntries(Object.entries(signInWords(config)).map(([key, words]) => [words, signing[key as "login" | "logout"]]));
+  const signInLeaves = Object.fromEntries((hasSignIn(config) ? Object.entries(signInWords(config)) : []).map(([key, words]) => [words, signing[key as "login" | "logout"]]));
   if (!top.help) own.help = helpCommand(config, tools, top, { ...own, ...signInLeaves }, io);
-  const everything = { chat: top.chat ?? buildCommand({ docs: { brief: CHAT_BRIEF }, parameters: {}, func() {} }), ...top, ...own };
-  const theirs = Object.keys(top).filter((word) => word !== "chat" && !hidden(root.children.get(word)!));
+  const terminalChat = hasTerminalChat(config);
+  const everything = { ...(terminalChat ? { chat: buildCommand({ docs: { brief: CHAT_BRIEF }, parameters: {}, func() {} }) } : {}), ...top, ...own };
+  const theirs = Object.keys(top).filter((word) => !hidden(root.children.get(word)!));
   return buildRouteMap({
     routes: everything,
     docs: { brief: config.description ?? config.name, hideRoute: hide(root), fullDescription: `${overview(config, everything, theirs, Object.keys(own), paint)}${feedback ? `\n\n${paint("bold", "FEEDBACK")}\n  Something failed, missing or confusing? ${paint("accent", feedback)}` : ""}\n\n${paint("muted", `${notice}\n--server <url>, --token <token> and --refresh-tools (bypass discovery cache) work on every command; ${config.name} --version prints the version.`)}` },
@@ -739,6 +803,8 @@ function defaultArgs(config: CliConfig, words: string): string {
   return args.length ? args.map((a) => ` <${a}>`).join("") : " ...";
 }
 
+const NO_CHAT = "This server has no chat agent.";
+const NO_SIGN_IN = "This server has no sign-in.";
 const CHAT_BRIEF = "Ask for anything in plain words, and the agent gets it done";
 
 /** The top-level help: the description, chat first, the team's commands (in its sections), then the CLI's own. */
@@ -755,9 +821,9 @@ function overview(config: CliConfig, all: Record<string, Target>, theirs: string
   if (rest.length) blocks.push([placed.size ? "OTHER" : "COMMANDS", rest.map(line)]);
   blocks.push(["THIS CLI", own.filter((word) => !placed.has(word)).map((word) => (word === "help" ? [`help <words>`, all.help!.brief] : line(word)))]);
   // chat's lines are long; the sections share their own column.
-  const chat: Array<[string, string]> = all.chat!.brief === CHAT_BRIEF
+  const chat: Array<[string, string]> = hasTerminalChat(config)
     ? [[`${config.name} chat "<request>"`, CHAT_BRIEF], [`${config.name} chat`, "A conversation, until /exit (chat --help)"]]
-    : [["chat", all.chat!.brief]];
+    : [];
   const rows = (list: Array<[string, string]>, name: (text: string) => string) => {
     const width = Math.max(...list.map(([n]) => n.length));
     return list.map(([n, brief]) => `  ${name(n)}${" ".repeat(width - n.length)}  ${brief}`);
@@ -766,7 +832,7 @@ function overview(config: CliConfig, all: Record<string, Target>, theirs: string
   const pad = (list: Array<[string, string]>) => list.map(([n, brief]): [string, string] => [n.padEnd(width), brief]);
   return [
     config.description ?? config.name,
-    [paint(["bold", "accent"], "ASK ANYTHING"), ...rows(chat, (n) => paint(["bold", "accent"], n))].join("\n"),
+    ...(chat.length ? [[paint(["bold", "accent"], "ASK ANYTHING"), ...rows(chat, (n) => paint(["bold", "accent"], n))].join("\n")] : []),
     ...blocks.map(([heading, list]) => [paint("bold", heading), ...rows(pad(list), (n) => paint("accent", n))].join("\n")),
   ].join("\n\n");
 }
@@ -787,7 +853,7 @@ function helpCommand(config: CliConfig, tools: ToolInfo[], top: Record<string, T
         const text = [c.words.join(" "), summary, c.tool?.description ?? "", group].join(" ").toLowerCase();
         if (wanted.every((w) => text.includes(w))) rows.push([c.words.join(" "), summary]);
       }
-      for (const [word, target] of Object.entries({ ...own, ...(top.chat ? {} : { chat: { brief: CHAT_BRIEF } }) })) {
+      for (const [word, target] of Object.entries({ ...own, ...(hasTerminalChat(config) ? { chat: { brief: CHAT_BRIEF } } : {}) })) {
         if (wanted.every((w) => `${word} ${target.brief}`.toLowerCase().includes(w))) rows.push([word, target.brief]);
       }
       if (!rows.length) return void io.write(`No command matches "${words.join(" ")}". ${config.name} --help lists them all.\n`);
@@ -871,7 +937,7 @@ function toolCommand(config: CliConfig, c: Command, prepare: (tool: ToolInfo) =>
         if (!(await io.confirm(`${usage} may delete or overwrite. Go ahead?`))) throw new CliExit(EXIT.approval, "Stopped; nothing was sent.");
       }
       const result = await call(tool.name, input, c.words.join(" ")).catch((error: unknown) => {
-        throw needsSignIn(error) ? explain(config, "", error) : (badArguments(config, c.words, error, (field) => (args.includes(field) ? `<${field}>` : `--${specs.find((f) => f.field === field)?.flag ?? flagName(field)}`)) ?? error);
+        throw badArguments(config, c.words, error, (field) => args.includes(field) ? `<${field}>` : `--${specs.find(f => f.field === field)?.flag ?? flagName(field)}`) ?? error;
       });
       if (result.isError) {
         // Agents read stderr: a failure says where to report it, unless it is feedback's own.
@@ -1135,7 +1201,7 @@ const RENEW = (config: CliConfig) => `Some commands need a new sign-in: run \`${
 
 /** Whether the words run a sign-in command (or its old auth words), which needs no tools. */
 function signingIn(config: CliConfig, words: string[]): boolean {
-  const paths = [...Object.values(signInWords(config)), ...oldAuth(config, commandEntries(config).map(([w]) => w))];
+  const paths = [...signInOwn(config), ...oldAuth(config, commandEntries(config).map(([w]) => w))];
   return paths.some((p) => p.split(" ").every((w, i) => words[i] === w));
 }
 
@@ -1155,8 +1221,9 @@ function signInRoutes(config: CliConfig, server: string | undefined, io: CliIO) 
     let warned = false;
     const signedIn = isSignedIn(config, s);
     const warn = (error: unknown) => { warned = true; io.writeError(`${painter(colorsAt(config, io))("warning", error instanceof Error ? error.message : String(error))}\n`); };
-    if (config.signIn?.beforeLogout && signedIn) {
-      try { await config.signIn.beforeLogout({ server: s, token: await storedAccessToken(config, s, false, io.signal) }); }
+    const beforeLogout = config.signIn ? config.signIn.beforeLogout : undefined;
+    if (beforeLogout && signedIn) {
+      try { await beforeLogout({ server: s, token: await storedAccessToken(config, s, false, io.signal) }); }
       catch (error) { warn(error); }
     }
     // The server's own session ends too, where its authorization server takes revocations (the OAuth bridge does).
