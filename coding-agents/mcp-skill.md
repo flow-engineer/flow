@@ -239,8 +239,12 @@ if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.me
   says which), and freed when moved. `signIn.beforeLogout: async ({ server, token }) => { ... }` runs
   the team's own step first, such as revoking the server's session with the stored token; if it
   throws, its message is shown and the person is still signed out on this computer.
+  Set `chat: false, signIn: false` for a public MCP-only CLI. Help lists its tools and leaves out terminal
+  chat and browser sign-in. Custom commands and discovered tools can use the freed names. With
+  `signIn: false`, protected tools accept `--token` or the token environment variable. Add `signInFirst: true`
+  if commands should require a token up front. Saved OAuth sessions stay on disk while sign-in is disabled.
   `tools` and `skill` stay the CLI's. The words before 0.14 (`auth login`, `auth logout`, `auth
-  status`) still work for a release, hidden from help, each saying what replaces it, unless the
+  status`) still work while OAuth is enabled, hidden from help, each saying what replaces it, unless the
   team's own commands use them.
 - `exclude: ["api_keys_reveal"]` gives those tools no command of their own: not in help, completion
   or the CLI's skill. Use it when a command of the team's own wraps a tool (one that copies a key
