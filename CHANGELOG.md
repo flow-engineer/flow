@@ -2,6 +2,25 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Fixed
+
+- **Terminal chat picks a turn up again when its stream is cut.** A client sending `flow-resume: 1` gets a
+  `turn` record and numbered events (`seq`). `GET /agent/terminal?turn=<id>&after=<seq>` continues the
+  same turn from any instance for the same account or guest. `<cli> chat` opts in for both single messages
+  and interactive chat. It retries temporary 503 responses on resume and shows each reply once.
+  Retained turns expire after a week and are removed when `forgetPerson()` deletes their conversation.
+  The live stream asks the CLI to reconnect at four minutes (#138).
+
+### Migration notes
+
+- **Store migration 13** adds `terminal_turns` and `terminal_events`. Hosted stores must run the migration
+  before agents use this release. Custom `StoreApi` forwarders need `startTerminalTurn`, `appendTerminalEvent`,
+  `terminalEvents`, and `pruneTerminalTurns`, and must use the updated `forgetPerson` implementation.
+- Clients opt in to the new `turn`, `seq`, and `reconnect` fields through `flow-resume: 1` on an NDJSON request.
+  Confirm reconnect through the hosted request path before lowering the hosting timeout.
+
 ## 0.21.1 (26 Nov 2026)
 
 ### New

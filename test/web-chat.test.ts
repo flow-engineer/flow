@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { after } from "node:test";
 import { createAgent, postgres, sqlite, Store, tool, webChat, webChatIdentity, z, type Channel, type Database, type Outbound, type PostgresPool, type StoreApi, type WebChatOptions } from "../src/index.ts";
-import { call, respond, scriptedModel, WHATSAPP } from "./helpers.ts";
+import { call, gate, respond, scriptedModel, WHATSAPP } from "./helpers.ts";
 
 const SESSION_KEY = "s".repeat(40);
 const IDENTITY_KEY = "i".repeat(40);
@@ -350,6 +350,46 @@ const stores: Array<{ name: string; store(id: string): StoreApi }> = [];
     stores.push({ name: "postgres", store: (id) => new Store(db, id) });
   }
 }
+
+for (const backend of stores) {
+  test(`${backend.name}: forgetting a conversation revokes retained terminal turns and late writes`, async () => {
+    const id = `agt_${Math.random().toString(36).slice(2, 10)}`;
+    const writer = backend.store(id), eraser = backend.store(id);
+    await writer.migrate();
+    for (const owner of ["key:account", "guest:example"]) {
+      await writer.createConversation(owner, owner);
+      assert.equal(await writer.startTerminalTurn("terminal", owner, owner, owner, 100), true);
+      assert.equal(await writer.appendTerminalEvent("terminal", owner, { type: "reply" }, 10), 1);
+    }
+    const delayed = gate();
+    const pending = delayed.promise.then(() => writer.appendTerminalEvent("terminal", "key:account", { type: "done" }, 20));
+    await eraser.forgetPerson("key:account");
+    await eraser.createConversation("p_new", "key:account");
+    delayed.open();
+    assert.equal(await pending, null);
+    assert.equal(await writer.startTerminalTurn("terminal", "key:account", "key:account", "key:account", 100), false);
+    assert.equal(await writer.terminalEvents("terminal", "key:account", "key:account", 0, 20, 100), null);
+    assert.equal((await writer.terminalEvents("terminal", "guest:example", "guest:example", 0, 20, 100))?.last, 1);
+    await eraser.forgetPerson("guest:example");
+    assert.equal(await writer.terminalEvents("terminal", "guest:example", "guest:example", 0, 20, 100), null);
+  });
+}
+
+test("a restarted runner prunes expired terminal turns even if another runner claimed message-id upkeep", async () => {
+  const db = sqlite(), store = new Store(db, "default");
+  await store.migrate();
+  await store.createConversation("p_owner", "key:account");
+  await store.startTerminalTurn("terminal", "turn", "key:account", "p_owner", 100);
+  await store.appendTerminalEvent("terminal", "turn", { type: "reply" }, 10);
+  await store.appendWebEvent("web", "visitor", { type: "message" }, null, 10);
+  assert.equal((await store.terminalEvents("terminal", "turn", "key:account", 0, 100, 100))?.expired, true);
+  assert.equal(await store.claimUpkeep("prune_message_ids", 100, 200), true);
+  const runner = createAgent({ files: { "AGENTS.md": "Test agent" }, model: scriptedModel().model, database: db, now: () => 100, scheduleCheckMs: 0 });
+  await runner.runDue();
+  assert.deepEqual(await db.query("SELECT turn_id FROM terminal_turns"), []);
+  assert.deepEqual(await db.query("SELECT turn_id FROM terminal_events"), []);
+  assert.deepEqual(await store.webHeads("web", ["visitor"]), { visitor: 1 });
+});
 
 for (const backend of stores) {
   test(`${backend.name}: the outbox numbers each visitor's events, keeps a keyed one once, keeps numbering past pruning, and forgets with the person`, async () => {

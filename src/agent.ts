@@ -32,6 +32,9 @@ import { PLAY_GROUPS, STAND_IN, toolGroup, toSpec, type ChatAuth, type Credentia
 import { activeCall, agentVersion, setting, traces, tracesFromEnv, type QueuedBy, type Traces, type TracesOptions, type TurnTrigger } from "./traces.ts";
 import type { BeforeSend, ChannelInfo, Deliver, DescribeVideo, Incoming, Model, Outbound, SendReceipt, Template, TemplateDefinition, Transcribe, UndeliveredDetail } from "./types.ts";
 
+/** @internal Terminal replay records start after the request resolves its conversation. */
+export const START_TERMINAL_TURN = Symbol("startTerminalTurn");
+
 /** What a host supplies to an agent: `createAgent({ ..., host })`. */
 export interface HostOptions {
   files?: AgentFiles;
@@ -435,6 +438,7 @@ function videoReactionOf(option: AgentOptions["videoReaction"]): string | undefi
 /** A channel's way to fetch a file again (Channel.file), for a conversation's link to it. */
 const fileOf = (adapter: Channel): { file?: (ref: string) => Promise<Uint8Array | null> } => (adapter.file ? { file: (ref) => adapter.file!(ref) } : {});
 const HOUR_MS = 3_600_000;
+const TERMINAL_TURN_TTL_MS = 7 * 24 * HOUR_MS;
 /** Provider ids deleted per statement, so each one holds its locks briefly. */
 const PRUNE_BATCH = 1_000;
 
@@ -638,7 +642,7 @@ export class Agent {
    * Without a key, `guest` (an id the client chose and keeps) is a signed-out person on this
    * channel only: never joined to an account, and tools that need sign-in ask for it.
    */
-  async request(input: { channel: string; key?: string; guest?: string; text: string; conversationId?: string; credentials?: CredentialProvider; onReply?: (reply: Outbound) => void; onActivity?: EventSink }): Promise<{ conversationId: string; replies: Outbound[] }> {
+  async request(input: { channel: string; key?: string; guest?: string; text: string; conversationId?: string; credentials?: CredentialProvider; [START_TERMINAL_TURN]?: (conversationId: string) => Promise<void>; onReply?: (reply: Outbound) => void; onActivity?: EventSink }): Promise<{ conversationId: string; replies: Outbound[] }> {
     await this.settings.ready;
     const adapter = this.channelOf(input.channel);
     if (adapter.kind !== "custom") throw new Error("chinwag: request needs a custom UI channel");
@@ -646,6 +650,7 @@ export class Agent {
     const from = input.key ?? `guest:${input.guest}`;
     const identity = await this.conversationFor(adapter, input.channel, from, undefined, input.key);
     if (input.conversationId && input.conversationId !== identity.conversationId) throw Object.assign(new Error("chinwag: conversation does not belong to this person"), { code: "conversation_mismatch" });
+    if (input[START_TERMINAL_TURN]) await input[START_TERMINAL_TURN](identity.conversationId);
     const replies: Outbound[] = [];
     const address = viaKey(input.channel, from);
     if (input.credentials) this.requestCredentials.set(address, input.credentials);
@@ -1416,6 +1421,21 @@ export class Agent {
     };
   }
 
+  /** @internal Replay storage shared by the terminal server and the agent's store. */
+  turnLog(channel: string) {
+    return {
+      start: async (turn: string, owner: string, conversationId: string) => {
+        await this.settings.ready;
+        return this.store.startTerminalTurn(channel, turn, owner, conversationId, this.now() + TERMINAL_TURN_TTL_MS);
+      },
+      append: (turn: string, event: Record<string, unknown>) => this.store.appendTerminalEvent(channel, turn, event, this.now()),
+      after: async (turn: string, owner: string, after: number, limit: number) => {
+        await this.settings.ready;
+        return this.store.terminalEvents(channel, turn, owner, after, this.now(), limit);
+      },
+    };
+  }
+
   /**
    * Add a channel after the agent is built, such as the terminal chat mcpServer serves with its
    * own auth. Adding the same channel again does nothing; another channel of that name is refused.
@@ -1669,20 +1689,23 @@ export class Agent {
     await this.lookAgain();
     await this.releaseHeld(now);
     if (this.options.onTick) await Promise.resolve().then(() => this.options.onTick!(now)).catch((error) => log("WARNING", "flow: onTick:", error));
-    await this.pruneMessageIds(now).catch((error) => log("WARNING", "flow: pruning message ids:", error));
+    await this.pruneOldData(now);
     return queued.length;
   }
 
-  /** Deletes provider message ids past their keep, in batches, when this runner claims it (at most hourly). */
-  private async pruneMessageIds(now: number): Promise<void> {
+  /** The upkeep jobs are claimed independently so one runner cannot take another job's slot. */
+  private async pruneOldData(now: number): Promise<void> {
     if (now < this.pruneAfter) return;
     this.pruneAfter = now + HOUR_MS;
-    if (!(await this.store.claimUpkeep("prune_message_ids", now, now + HOUR_MS))) return;
+    const prune = async (job: string, batch: () => Promise<number>) => {
+      try {
+        if (await this.store.claimUpkeep(job, now, now + HOUR_MS)) while ((await batch()) === PRUNE_BATCH);
+      } catch (error) { log("WARNING", "flow: upkeep failed for %s:", job, error); }
+    };
     const before = now - (this.options.keepMessageIdsDays ?? 7) * 24 * HOUR_MS;
-    while ((await this.store.pruneInbound(before, PRUNE_BATCH)) === PRUNE_BATCH);
-    // The web chat's outbox keeps a week; a box asking for older reads the history again.
-    if (!this.served.length || !(await this.store.claimUpkeep("prune_web_outbox", now, now + HOUR_MS))) return;
-    while ((await this.store.pruneWebEvents(now - 7 * 24 * HOUR_MS, PRUNE_BATCH)) === PRUNE_BATCH);
+    await prune("prune_message_ids", () => this.store.pruneInbound(before, PRUNE_BATCH));
+    if (this.served.length) await prune("prune_web_outbox", () => this.store.pruneWebEvents(now - 7 * 24 * HOUR_MS, PRUNE_BATCH));
+    await prune("prune_terminal_turns", () => this.store.pruneTerminalTurns(now, PRUNE_BATCH));
   }
 
   /** The agent's channels without their sends: what the simulators and the test cloud play. */
