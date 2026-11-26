@@ -109,6 +109,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
       if (response.status === 409 && conversationId && !retried && (await response.json().catch(() => null) as { error?: unknown } | null)?.error === "conversation_mismatch") { forget(); continue; }
       if (!response.ok) return fail(`The agent could not finish (${response.status}).`, 1);
       let mismatch = false;
+      let resumeAuthFailed = false;
       try {
         if (response.headers.get("content-type")?.includes("application/x-ndjson")) {
           let turn: string | undefined;
@@ -118,31 +119,36 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
             if (!stream.body) throw new Error("Missing stream");
             const chunks = stream.body.pipeThrough(new TextDecoderStream())[Symbol.asyncIterator]();
             let pending = "";
-            for (;;) {
-              let next;
-              try { next = await chunks.next(); } catch (error) { if (requestSignal.aborted) throw error; return "cut"; }
-              if (next.done) return "cut";
-              pending += next.value;
-              if (pending.length > 4_000_000) throw new Error("Reply too large");
-              let end: number;
-              while ((end = pending.indexOf("\n")) >= 0) {
-                const line = pending.slice(0, end); pending = pending.slice(end + 1);
-                if (!line.trim()) continue;
-                const event = JSON.parse(line);
-                // A resumed stream starts after the last event seen; numbers never repeat an event.
-                if (typeof event.seq === "number") { if (event.seq <= seen) continue; seen = event.seq; }
-                if (event.type === "turn" && typeof event.id === "string") turn = event.id;
-                else if (event.type === "reconnect") return "reconnect";
-                else if (event.type === "done") { result = event.result; return "done"; }
-                else if (event.type === "error") { mismatch = event.code === "conversation_mismatch"; throw new Error("Turn failed"); }
-                else if (update && (event.type === "reply" || event.type === "activity")) update(event);
+            try {
+              for (;;) {
+                let next;
+                try { next = await chunks.next(); } catch (error) { if (requestSignal.aborted) throw error; return "cut"; }
+                if (next.done) return "cut";
+                pending += next.value;
+                if (pending.length > 4_000_000) throw new Error("Reply too large");
+                let end: number;
+                while ((end = pending.indexOf("\n")) >= 0) {
+                  const line = pending.slice(0, end); pending = pending.slice(end + 1);
+                  if (!line.trim()) continue;
+                  const event = JSON.parse(line);
+                  // A resumed stream starts after the last event seen; numbers never repeat an event.
+                  if (typeof event.seq === "number") { if (event.seq <= seen) continue; seen = event.seq; }
+                  if (event.type === "turn" && typeof event.id === "string") turn = event.id;
+                  else if (event.type === "reconnect") return "reconnect";
+                  else if (event.type === "done") { result = event.result; return "done"; }
+                  else if (event.type === "error") { mismatch = event.code === "conversation_mismatch"; throw new Error("Turn failed"); }
+                  else if (update && (event.type === "reply" || event.type === "activity")) update(event);
+                }
               }
+            } finally {
+              await chunks.return?.().catch(() => {});
             }
           };
           // A server that names no turn cannot be asked for the rest. Retries after a cut back off and give
           // up after five in a row that brought nothing new.
           // A reconnect the server asked for is no failure: it is asked again at once.
           let ended = await read(response);
+          let refreshed = false;
           for (let tries = 0; ended !== "done"; ) {
             if (!turn || tries >= 5) throw new Error("Incomplete stream");
             if (tries) await delay(500 * 2 ** tries, undefined, { signal: requestSignal });
@@ -153,9 +159,19 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
             let resumed;
             try { resumed = await fetch(url, { headers: headers(), signal: requestSignal }); }
             catch (error) { if (requestSignal.aborted) throw error; tries++; continue; }
-            // A long turn can outlive the access token.
-            if (resumed.status === 401 && stored) { await resumed.body?.cancel(); token = await storedAccessToken(config, server!, true, requestSignal); tries++; continue; }
-            if (!resumed.ok || !resumed.headers.get("content-type")?.includes("application/x-ndjson")) throw new Error("Turn gone");
+            if (!resumed.ok || !resumed.headers.get("content-type")?.includes("application/x-ndjson")) {
+              await resumed.body?.cancel().catch(() => {});
+              if (resumed.status === 503) { tries++; continue; }
+              if (resumed.status === 401 || resumed.status === 403) {
+                resumeAuthFailed = true;
+                if (resumed.status === 401 && stored && !refreshed) {
+                  refreshed = true;
+                  const fresh = await storedAccessToken(config, server!, true, requestSignal);
+                  if (fresh) { token = fresh; resumeAuthFailed = false; continue; }
+                }
+              }
+              throw new Error("Turn gone");
+            }
             ended = await read(resumed);
             tries = ended === "reconnect" || seen > before ? 0 : tries + 1;
           }
@@ -165,6 +181,7 @@ export async function runTerminal(config: CliConfig, server: string | undefined,
         }
       } catch {
         if (mismatch && conversationId && !retried) { forget(); continue; }
+        if (resumeAuthFailed) return fail(`Sign in again: ${signInCommand(config)} (or set ${tokenEnvOf(config)}).`, 3);
         return fail("The agent's reply was interrupted or invalid. Work already accepted may still finish.", 1);
       }
       break;

@@ -6,18 +6,20 @@ Every release's changes, and a **Migration notes** section for each ([docs/relea
 
 ### Fixed
 
-- **Terminal chat picks a turn up again when its stream is cut.** A streamed turn now starts with a `turn` record
-  and numbers every event (`seq`), kept in the agent's store beside the web chat's outbox and pruned with it after a
-  week. `GET /agent/terminal?turn=<id>&after=<seq>` sends the rest, from whichever instance it reaches, and only to
-  the person whose turn it is. A client that sends `flow-resume: 1` gets a `reconnect` record before four minutes
-  instead of being cut by a proxy's request timeout. `<cli> chat` does both, for single messages (which now stream
-  too) as for the full-screen chat, and shows each reply once. Hosting no longer needs a request timeout longer
-  than the CLI's 10-minute wait (#138).
+- **Terminal chat picks a turn up again when its stream is cut.** A client sending `flow-resume: 1` gets a
+  `turn` record and numbered events (`seq`). `GET /agent/terminal?turn=<id>&after=<seq>` continues the
+  same turn from any instance for the same account or guest. `<cli> chat` opts in for both single messages
+  and interactive chat. It retries temporary 503 responses on resume and shows each reply once.
+  Retained turns expire after a week and are removed when `forgetPerson()` deletes their conversation.
+  The live stream asks the CLI to reconnect at four minutes (#138).
 
 ### Migration notes
 
-None. Clients that read the stream see two new record types (`turn`, and `reconnect` only when they ask for it)
-and a `seq` field; the web app's chat ignores them. Older CLIs and servers keep working as before.
+- **Store migration 13** adds `terminal_turns` and `terminal_events`. Hosted stores must run the migration
+  before agents use this release. Custom `StoreApi` forwarders need `startTerminalTurn`, `appendTerminalEvent`,
+  `terminalEvents`, and `pruneTerminalTurns`, and must use the updated `forgetPerson` implementation.
+- Clients opt in to the new `turn`, `seq`, and `reconnect` fields through `flow-resume: 1` on an NDJSON request.
+  Confirm reconnect through the hosted request path before lowering the hosting timeout.
 
 ## 0.21.1 (26 Nov 2026)
 

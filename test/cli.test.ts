@@ -1,4 +1,4 @@
-// covers: cli/src/chat-ui.ts cli/src/colors.ts cli/src/welcome.ts cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/skills.ts src/agent.ts src/channels.ts testing/src/sign-in-page.ts testing/src/flow-tools.ts
+// covers: cli/src/chat-ui.ts cli/src/colors.ts cli/src/welcome.ts cli/src/run.ts cli/src/commands.ts cli/src/auth.ts cli/src/terminal.ts mcp/src/server.ts mcp/src/terminal.ts src/skills.ts src/agent.ts src/channels.ts src/store.ts testing/src/sign-in-page.ts testing/src/flow-tools.ts
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, watch, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -20,8 +20,8 @@ import { isSignedIn, signOut, storedProvider } from "../cli/src/auth.ts";
 import { palette } from "../cli/src/colors.ts";
 import { commandLine, feedbackUsage } from "../cli/src/commands.ts";
 import { terminalServer, mcpServer, type McpServerOptions } from "../mcp/src/index.ts";
-import { scriptedModel, respond, call } from "./helpers.ts";
-import { createAgent, jsonText, jsonTextOf, tool, ToolError } from "../src/index.ts";
+import { scriptedModel, respond, call, gate } from "./helpers.ts";
+import { createAgent, jsonText, jsonTextOf, sqlite, Store, tool, ToolError } from "../src/index.ts";
 import { FLOW_MCP_CLI } from "../testing/src/flow-tools.ts";
 
 // These tests drive chat as a person would; a coding agent running them must not switch chat to plain.
@@ -1500,28 +1500,48 @@ test("chat after switching accounts starts the new account's conversation once, 
 });
 
 // The tests above get whole streams; a proxy's timeout or the network can cut one while the turn runs on.
-test("a chat whose stream is cut picks its turn up again, shows each reply once, and no one else can read the turn", async () => {
+test("a cut stream with a transient resume 503 completes once and can be replayed only by its owner until forgotten", async (t) => {
   const scripted = scriptedModel();
   let agent!: ReturnType<typeof createAgent>;
-  const terminal = terminalServer({ agent: () => agent, auth: { verify: async token => token === "a" ? { key: "account-a" } : token === "b" ? { key: "account-b" } : null } });
+  let otherRunner!: ReturnType<typeof createAgent>;
+  const auth = { verify: async (token: string) => token === "a" ? { key: "account-a" } : token === "b" ? { key: "account-b" } : null };
+  const terminal = terminalServer({ agent: () => agent, auth });
+  const replay = terminalServer({ agent: () => otherRunner, auth });
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
+  t.after(() => release());
   const hold = tool({ name: "hold", description: "Waits.", input: z.object({}), run: async () => { await held; return "waited"; } });
-  agent = createAgent({ files: { "AGENTS.md": "Test agent" }, model: scripted.model, channels: [terminal.channel], tools: [hold], debounceMs: 0, scheduleCheckMs: 0 });
+  const path = join(testDirectory, "terminal-resume.db");
+  const db = sqlite(path);
+  agent = createAgent({ files: { "AGENTS.md": "Test agent" }, model: scripted.model, channels: [terminal.channel], tools: [hold], database: db, debounceMs: 0, scheduleCheckMs: 0 });
+  await agent.resume();
+  otherRunner = createAgent({ files: { "AGENTS.md": "Test reader" }, model: scriptedModel().model, channels: [replay.channel], database: sqlite(path), scheduleCheckMs: 0 });
+  await otherRunner.resume();
   let resumed!: () => void;
   const reconnected = new Promise<void>(resolve => { resumed = resolve; });
   let turn = "";
+  let posts = 0, firstReplySeq = 0;
+  const attempts: URL[] = [];
   const base = await listen(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
-    if (req.method === "GET") resumed();
-    const result = await terminal.fetch(new Request(`${base}${req.url}`, { method: req.method, headers: req.headers as Record<string, string>, ...(req.method === "POST" ? { body: Buffer.concat(chunks) } : {}) }));
+    if (req.method === "POST") posts++;
+    if (req.method === "GET" && req.headers.authorization === "Bearer a") {
+      attempts.push(new URL(`${base}${req.url}`));
+      if (attempts.length === 1) { res.writeHead(503).end("Try again"); return; }
+      resumed();
+    }
+    const result = await (req.method === "POST" ? terminal : replay).fetch(new Request(`${base}${req.url}`, { method: req.method, headers: req.headers as Record<string, string>, ...(req.method === "POST" ? { body: Buffer.concat(chunks) } : {}) }));
     res.writeHead(result.status, Object.fromEntries(result.headers));
     for await (const chunk of result.body ?? []) {
       const text = Buffer.from(chunk).toString();
       turn ||= /"type":"turn","id":"([^"]+)"/.exec(text)?.[1] ?? "";
       // The first reply gets through, then the connection drops, as a proxy's request timeout would.
-      if (req.method === "POST" && text.includes('"type":"reply"')) { res.write(chunk, () => res.destroy()); return; }
+      if (req.method === "POST" && text.includes('"type":"reply"')) {
+        firstReplySeq = JSON.parse(text).seq;
+        res.write(chunk, () => res.destroy());
+        return;
+      }
       res.write(chunk);
     }
     res.end();
@@ -1532,13 +1552,68 @@ test("a chat whose stream is cut picks its turn up again, shows each reply once,
   streamed.channel.chat = async session => { await session.send("a long one", update => { if (update.type === "reply") replies.push(update.text); }, new AbortController().signal); return 0; };
   const chat = runCli(cli, ["chat", "--token", "a"], streamed.channel);
   (await scripted.nextCall(0)).answer(respond(call("send_terminal", { text: "First." }), call("hold", {})));
-  await reconnected;
+  const outcome = await Promise.race([reconnected.then(() => "resumed"), chat.then(() => "exited")]);
   release();
   (await scripted.nextCall(1)).answer(respond(call("send_terminal", { text: "Second." })));
+  assert.equal(outcome, "resumed", streamed.err);
   assert.equal(await chat, 0, streamed.err);
   assert.deepEqual(replies, ["First.", "Second."]);
+  assert.equal(posts, 1);
+  assert.ok(firstReplySeq > 0);
+  assert.deepEqual(attempts.map(url => [url.searchParams.get("turn"), url.searchParams.get("after")]), [[turn, String(firstReplySeq)], [turn, String(firstReplySeq)]]);
   const other = await fetch(`${base}/agent/terminal?turn=${turn}&after=0`, { headers: { authorization: "Bearer b", accept: "application/x-ndjson" } });
   assert.equal(other.status, 404, "a turn is kept under its person");
+  const conversationId = (await agent.conversationOf({ channel: terminal.channel.name, address: "account-a" }))!;
+  await agent.forgetPerson(conversationId);
+  const forgotten = await terminal.fetch(new Request(`${base}/agent/terminal?turn=${turn}&after=0`, { headers: { authorization: "Bearer a" } }));
+  assert.equal(forgotten.status, 404);
+  assert.deepEqual(await db.query("SELECT turn_id FROM terminal_events"), []);
+});
+
+test("resume reports expired sign-in when a saved token cannot refresh", async () => {
+  const credentials: Array<{ token?: string; guest?: string }> = [];
+  const base = await listen((req, res) => {
+    if (req.method === "POST") {
+      res.writeHead(200, { "content-type": "application/x-ndjson" }).end(`${JSON.stringify({ type: "turn", id: "a".repeat(22), seq: 1 })}\n`);
+      return;
+    }
+    credentials.push({ token: req.headers.authorization, guest: req.headers["flow-guest"] as string | undefined });
+    res.writeHead(401).end();
+  });
+  const server = `${base}/mcp`;
+  const cli = defineCli({ name: "resume-auth", server, directory: mkdtempSync(join(testDirectory, "resume-auth-")) });
+  await storedProvider(cli, server).saveTokens({ access_token: "expired", token_type: "Bearer" });
+  const out = io();
+  assert.equal(await runCli(cli, ["chat", "hi", "--json"], { ...out.channel, env: {} }), 3);
+  assert.match(out.err, /Sign in again/);
+  assert.deepEqual(credentials, [{ token: "Bearer expired", guest: undefined }]);
+});
+
+test("a resume reader waits for store readiness and closes when its request is aborted", async (t) => {
+  const db = sqlite();
+  const store = new Store(db, "default");
+  const migrated = gate();
+  const migrate = store.migrate.bind(store);
+  store.migrate = async () => { await migrated.promise; await migrate(); };
+  let agent!: ReturnType<typeof createAgent>;
+  const terminal = terminalServer({ agent: () => agent });
+  agent = createAgent({ files: { "AGENTS.md": "Test agent" }, model: scriptedModel().model, channels: [terminal.channel], store, scheduleCheckMs: 0 });
+  const guest = "guest-test-session-01", turn = "a".repeat(22);
+  const url = `http://localhost/agent/terminal?turn=${turn}`;
+  const request = (signal?: AbortSignal) => new Request(url, { headers: { "flow-guest": guest }, signal });
+  const cold = terminal.fetch(request());
+  migrated.open();
+  assert.equal((await cold).status, 404);
+  await store.createConversation("p_owner", `terminal:guest:${guest}`);
+  assert.equal(await store.startTerminalTurn(terminal.channel.name, turn, `guest:${guest}`, "p_owner", Date.now() + 60_000), true);
+  await store.appendTerminalEvent(terminal.channel.name, turn, { type: "turn", id: turn }, Date.now());
+  const controller = new AbortController();
+  const response = await terminal.fetch(request(controller.signal));
+  const reader = response.body!.getReader();
+  t.after(() => reader.cancel());
+  assert.match(Buffer.from((await reader.read()).value!).toString(), /"seq":1/);
+  controller.abort();
+  assert.equal((await reader.read()).done, true);
 });
 
 // The tests above mount terminalServer by hand; only this shows an agent with authenticated MCP gets

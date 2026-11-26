@@ -150,6 +150,17 @@ const MIGRATIONS: Array<(t: Types) => string> = [
    CREATE INDEX web_outbox_at ON web_outbox (agent_id, at);
    ALTER TABLE identities ADD COLUMN phone TEXT;
    CREATE INDEX identities_phone ON identities (agent_id, phone) WHERE phone IS NOT NULL`,
+  // Replay belongs to one accepted conversation and expires as a turn, including its sequence.
+  (t) => `CREATE TABLE terminal_turns (
+     agent_id TEXT NOT NULL, channel TEXT NOT NULL, turn_id TEXT NOT NULL, owner TEXT NOT NULL,
+     conversation_id TEXT NOT NULL, seq ${t.int} NOT NULL, expires_at ${t.int} NOT NULL,
+     PRIMARY KEY (agent_id, channel, turn_id));
+   CREATE INDEX terminal_turns_conversation ON terminal_turns (agent_id, conversation_id);
+   CREATE INDEX terminal_turns_expiry ON terminal_turns (agent_id, expires_at);
+   CREATE TABLE terminal_events (
+     agent_id TEXT NOT NULL, channel TEXT NOT NULL, turn_id TEXT NOT NULL, seq ${t.int} NOT NULL, event TEXT NOT NULL,
+     PRIMARY KEY (agent_id, channel, turn_id, seq),
+     FOREIGN KEY (agent_id, channel, turn_id) REFERENCES terminal_turns (agent_id, channel, turn_id) ON DELETE CASCADE)`,
 ];
 
 /** One event in a web chat visitor's outbox: its number for that visitor, when it was kept, and what it is. */
@@ -451,7 +462,8 @@ export class Store {
   async forgetPerson(conversationId: string): Promise<void> {
     const scope = [this.agentId, conversationId];
     await this.db.transaction(async (tx) => {
-      const [conversation] = await tx.query("SELECT person_key FROM conversations WHERE agent_id = ? AND id = ?", scope);
+      const lock = tx.dialect === "postgres" ? " FOR UPDATE" : "";
+      const [conversation] = await tx.query(`SELECT person_key FROM conversations WHERE agent_id = ? AND id = ?${lock}`, scope);
       const identities = await tx.query("SELECT channel, address FROM identities WHERE agent_id = ? AND conversation_id = ?", scope);
       const personKey = typeof conversation?.person_key === "string" ? conversation.person_key : null;
       const names = [conversationId, ...(personKey ? [personKey] : []), ...(personKey?.startsWith("phone:") ? [personKey.slice(6)] : []), ...identities.map((i) => `${i.channel}:${i.address}`)];
@@ -462,6 +474,7 @@ export class Store {
       for (const table of ["web_outbox", "web_heads"]) {
         await tx.run(`DELETE FROM ${table} WHERE agent_id = ? AND (channel, address) IN (SELECT channel, address FROM identities WHERE agent_id = ? AND conversation_id = ?)`, [this.agentId, ...scope]);
       }
+      await tx.run("DELETE FROM terminal_turns WHERE agent_id = ? AND conversation_id = ?", scope);
       for (const table of ["schedules", "nudges", "no_contact", "background_tools", "inbox", "messages", "inbound", "identities"]) {
         await tx.run(`DELETE FROM ${table} WHERE agent_id = ? AND conversation_id = ?`, scope);
       }
@@ -615,6 +628,52 @@ export class Store {
          (SELECT channel, address, seq FROM web_outbox WHERE agent_id = ? AND at < ? LIMIT ?)`,
       [this.agentId, this.agentId, before, limit],
     );
+  }
+
+  /** Establish ownership while the accepted conversation still exists. Forget takes the same lock. */
+  async startTerminalTurn(channel: string, turn: string, owner: string, conversationId: string, expiresAt: number): Promise<boolean> {
+    return this.db.transaction(async tx => {
+      const lock = tx.dialect === "postgres" ? " FOR UPDATE" : "";
+      const [conversation] = await tx.query(`SELECT id FROM conversations WHERE agent_id = ? AND id = ?${lock}`, [this.agentId, conversationId]);
+      if (!conversation) return false;
+      return (await tx.run(
+        "INSERT INTO terminal_turns (agent_id, channel, turn_id, owner, conversation_id, seq, expires_at) VALUES (?, ?, ?, ?, ?, 0, ?) ON CONFLICT DO NOTHING",
+        [this.agentId, channel, turn, owner, conversationId, expiresAt],
+      )) > 0;
+    });
+  }
+
+  /** Number and persist an event together. A forgotten or expired turn cannot be recreated here. */
+  async appendTerminalEvent(channel: string, turn: string, event: Record<string, unknown>, now: number): Promise<number | null> {
+    const scope = [this.agentId, channel, turn];
+    return this.db.transaction(async tx => {
+      const [head] = await tx.query("UPDATE terminal_turns SET seq = seq + 1 WHERE agent_id = ? AND channel = ? AND turn_id = ? AND expires_at > ? RETURNING seq", [...scope, now]);
+      if (!head) return null;
+      const seq = Number(head.seq);
+      await tx.run("INSERT INTO terminal_events (agent_id, channel, turn_id, seq, event) VALUES (?, ?, ?, ?, ?)", [...scope, seq, json(event)]);
+      return seq;
+    });
+  }
+
+  /** One snapshot for authorization, expiry, cursor bounds and the events after the cursor. */
+  async terminalEvents(channel: string, turn: string, owner: string, after: number, now: number, limit: number): Promise<{
+    last: number; expired: boolean; events: Array<{ seq: number; event: Record<string, unknown> }>;
+  } | null> {
+    const rows = await this.db.query(`SELECT t.seq AS last, t.expires_at, e.seq, e.event
+      FROM terminal_turns t LEFT JOIN terminal_events e
+        ON e.agent_id = t.agent_id AND e.channel = t.channel AND e.turn_id = t.turn_id AND e.seq > ? AND t.expires_at > ?
+      WHERE t.agent_id = ? AND t.channel = ? AND t.turn_id = ? AND t.owner = ?
+      ORDER BY e.seq LIMIT ?`, [after, now, this.agentId, channel, turn, owner, limit]);
+    if (!rows.length) return null;
+    return {
+      last: Number(rows[0]!.last), expired: Number(rows[0]!.expires_at) <= now,
+      events: rows.flatMap(row => row.seq == null ? [] : [{ seq: Number(row.seq), event: parse<Record<string, unknown>>(row.event, {}) }]),
+    };
+  }
+
+  async pruneTerminalTurns(now: number, limit: number): Promise<number> {
+    return this.db.run(`DELETE FROM terminal_turns WHERE agent_id = ? AND (channel, turn_id) IN
+      (SELECT channel, turn_id FROM terminal_turns WHERE agent_id = ? AND expires_at <= ? LIMIT ?)`, [this.agentId, this.agentId, now, limit]);
   }
 
   // The inbox.
