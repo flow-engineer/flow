@@ -34,6 +34,8 @@ const agent = createAgent({ ...options, resolve });
 
 Return the brand’s account id. MCP’s `auth.verify` returns that same id as `key`, so the terminal, web and phone channels share the person’s history. Without a brand resolver, phone channels still share one `phone:<E.164>` identity; `context.key` is null. Connect other login methods to an existing account only with verified account-linking proof, never a number or email supplied in model input.
 
+Flow Messaging passes `phone` for E.164 iMessage handles. Email handles supply only `address`. A returning anonymous sender with a verified iMessage phone joins the account conversation on the first message for which `resolve` returns a key. Their contact opt-outs carry over. Their earlier anonymous transcript stays separate and can be forgotten by its original conversation ID.
+
 ## Tool code gets backend access
 
 Supply the same `credentials` provider to `createAgent` and `mcpServer`. It runs lazily when tool code requests a named credential or backend client, with the framework’s verified identity. The brand decides how to obtain, refresh, authorize and revoke that access. This callback can support an API token, an authenticated client, a grant reference or the brand’s own authentication mechanism.

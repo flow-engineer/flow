@@ -2,6 +2,19 @@
 
 Every release's changes, and a **Migration notes** section for each ([docs/releasing.md](docs/releasing.md)).
 
+## Unreleased
+
+### Changes
+
+- **iMessage phone handles support verified-phone sign-in.** Flow Messaging passes an E.164 iMessage
+  handle to `resolve` as `phone`. Email handles still reach it as an address only. Fixes #259.
+
+### Migration notes
+
+A previously anonymous iMessage sender signs in on their next message from a verified phone handle
+if `resolve` returns an account key. Future messages go to the account conversation. Contact opt-outs
+carry over and the old anonymous transcript stays in its original conversation.
+
 ## 0.21.1 (26 Nov 2026)
 
 ### New

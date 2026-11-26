@@ -30,6 +30,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname } from "node:path";
 import { carouselMessages, replyButton, sms as smsChannel, whatsapp as whatsappChannel, WHATSAPP_CAROUSELS, type Agent, type Attachment, type Carousel, type Channel, type ChannelInfo, type Incoming, type Message, type Photo, type SendReceipt, type Template, type Video, type WhatsAppFeature } from "../../src/index.ts";
+import { E164 } from "../../src/agent.ts";
 import { log } from "../../src/events.ts";
 import { Client, FlowMessagingError, idSegment, verifySignature } from "./client.ts";
 import { imessageStyles, telegramHTML } from "./richtext.ts";
@@ -649,8 +650,8 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
 
   /**
    * An iMessage line connected to Flow (Flow's shared one by default). Flow Framework has no iMessage
-   * kind yet, so it is a custom channel. Its addresses are not marked as phone numbers, since a handle
-   * may be an email address: the person on iMessage is their own, not joined with their WhatsApp or SMS.
+   * kind yet, so it is a custom channel. A handle may be an email address. An E.164 handle reaches
+   * `resolve` as a verified phone and can join the agent's account conversation.
    */
   function imessage(o: FlowChannelOptions = {}): Channel {
     return custom(register("imessage", o), IMESSAGE, o);
@@ -861,8 +862,14 @@ export function flowMessaging(options: FlowMessagingOptions = {}) {
       flowConversation.set(person, event.conversation.id);
       const message = await incoming(event.data.message);
       if (!message) return;
-      const arrived = await agent.message({ channel: route.name, from: address, message, messageId: event.data.message.id });
+      const arrived = await agent.message({ channel: route.name, from: address, message, messageId: event.data.message.id, ...(route.kind === "imessage" && E164.test(address) ? { phone: address } : {}) });
       if (arrived) frameworkConversation.set(person, arrived.conversationId);
+      else if (route.kind === "imessage" && E164.test(address)) {
+        // An intercept can answer a message after sign-in, with no conversation id in the result.
+        const conversationId = await agent.conversationOf?.({ channel: route.name, address });
+        if (conversationId) frameworkConversation.set(person, conversationId);
+        else frameworkConversation.delete(person);
+      }
       return;
     }
     // A failed message may be to someone this process has not heard from (a nudge or template to someone new, or after a restart): the agent's store knows them.
