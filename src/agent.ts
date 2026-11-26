@@ -477,6 +477,8 @@ export class Agent {
   private readonly played = new WeakMap<Tool, Tool>();
   /** The HTTP the channels serve themselves (`Channel.serve`), by path. */
   private readonly served: Array<{ path: string; handle(request: Request): Promise<Response> }> = [];
+  /** Terminal chat keeps its turns' events (turnLog), so the outbox is pruned without a served channel too. */
+  private keepsTurns = false;
 
   constructor(options: AgentOptions) {
     options = withHost(options);
@@ -1417,6 +1419,18 @@ export class Agent {
   }
 
   /**
+   * Where terminal chat (mcp/src/terminal.ts) keeps each turn's events, so a CLI whose stream was cut
+   * picks the turn up again from any instance. They sit beside the web chat's outbox and are pruned with it.
+   */
+  turnLog(channel: string): { append(address: string, event: Record<string, unknown>): Promise<{ seq: number }>; after(address: string, after: number, limit: number): Promise<{ events: Array<{ seq: number; event: Record<string, unknown> }>; first: number | null; last: number }> } {
+    this.keepsTurns = true;
+    return {
+      append: (address, event) => this.store.appendWebEvent(channel, address, event, null, this.now()),
+      after: (address, after, limit) => this.store.webEvents(channel, address, after, limit),
+    };
+  }
+
+  /**
    * Add a channel after the agent is built, such as the terminal chat mcpServer serves with its
    * own auth. Adding the same channel again does nothing; another channel of that name is refused.
    */
@@ -1680,8 +1694,8 @@ export class Agent {
     if (!(await this.store.claimUpkeep("prune_message_ids", now, now + HOUR_MS))) return;
     const before = now - (this.options.keepMessageIdsDays ?? 7) * 24 * HOUR_MS;
     while ((await this.store.pruneInbound(before, PRUNE_BATCH)) === PRUNE_BATCH);
-    // The web chat's outbox keeps a week; a box asking for older reads the history again.
-    if (!this.served.length || !(await this.store.claimUpkeep("prune_web_outbox", now, now + HOUR_MS))) return;
+    // The web chat's outbox (and terminal chat's turns) keeps a week; a box asking for older reads the history again.
+    if ((!this.served.length && !this.keepsTurns) || !(await this.store.claimUpkeep("prune_web_outbox", now, now + HOUR_MS))) return;
     while ((await this.store.pruneWebEvents(now - 7 * 24 * HOUR_MS, PRUNE_BATCH)) === PRUNE_BATCH);
   }
 
